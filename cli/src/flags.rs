@@ -88,6 +88,7 @@ pub struct Config {
     pub color_scheme: Option<String>,
     pub download_path: Option<String>,
     pub content_boundaries: Option<bool>,
+    pub snapshot_after_action: Option<bool>,
     pub max_output: Option<usize>,
     pub allowed_domains: Option<Vec<String>>,
     pub action_policy: Option<String>,
@@ -158,6 +159,7 @@ impl Config {
             color_scheme: other.color_scheme.or(self.color_scheme),
             download_path: other.download_path.or(self.download_path),
             content_boundaries: other.content_boundaries.or(self.content_boundaries),
+            snapshot_after_action: other.snapshot_after_action.or(self.snapshot_after_action),
             max_output: other.max_output.or(self.max_output),
             allowed_domains: other.allowed_domains.or(self.allowed_domains),
             action_policy: other.action_policy.or(self.action_policy),
@@ -361,6 +363,8 @@ pub struct Flags {
     pub color_scheme: Option<String>,
     pub download_path: Option<String>,
     pub content_boundaries: bool,
+    /// Capture a ref refresh and snapshot diff after page-changing actions.
+    pub snapshot_after_action: bool,
     pub max_output: Option<usize>,
     pub allowed_domains: Option<Vec<String>>,
     pub action_policy: Option<String>,
@@ -548,6 +552,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .or(config.download_path),
         content_boundaries: env_var_is_truthy("AGENT_BROWSER_CONTENT_BOUNDARIES")
             || config.content_boundaries.unwrap_or(false),
+        snapshot_after_action: env_var_is_truthy("AGENT_BROWSER_SNAPSHOT_AFTER_ACTION")
+            || config.snapshot_after_action.unwrap_or(false),
         max_output: env::var("AGENT_BROWSER_MAX_OUTPUT")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -893,6 +899,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--snapshot-after-action" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.snapshot_after_action = val;
+                if consumed {
+                    i += 1;
+                }
+            }
             "--max-output" => {
                 if let Some(s) = args.get(i + 1) {
                     if let Ok(n) = s.parse::<usize>() {
@@ -1023,6 +1036,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--auto-connect",
         "--annotate",
         "--content-boundaries",
+        "--snapshot-after-action",
         "--confirm-interactive",
         "--no-auto-dialog",
         "-v",
@@ -1153,6 +1167,30 @@ mod tests {
     #[test]
     fn test_parse_idle_timeout_hours() {
         assert_eq!(parse_idle_timeout("1h").unwrap(), "3600000");
+    }
+
+    #[test]
+    fn test_snapshot_after_action_flag_accepts_explicit_boolean() {
+        let enabled = parse_flags(&args("--snapshot-after-action open example.com"));
+        assert!(enabled.snapshot_after_action);
+
+        let disabled = parse_flags(&args("--snapshot-after-action false open example.com"));
+        assert!(!disabled.snapshot_after_action);
+    }
+
+    #[test]
+    fn test_snapshot_after_action_env() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SNAPSHOT_AFTER_ACTION"]);
+        guard.set("AGENT_BROWSER_SNAPSHOT_AFTER_ACTION", "1");
+        assert!(parse_flags(&args("open example.com")).snapshot_after_action);
+    }
+
+    #[test]
+    fn test_clean_args_removes_snapshot_after_action() {
+        let cleaned = clean_args(&args(
+            "--snapshot-after-action true click @e1 --snapshot-after-action false",
+        ));
+        assert_eq!(cleaned, args("click @e1"));
     }
 
     #[test]

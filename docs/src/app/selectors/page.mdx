@@ -26,6 +26,19 @@ agent-browser hover @e4                   # Hover the link
 - **Fast** - No DOM re-query needed
 - **AI-friendly** - LLMs can reliably parse and use refs
 
+### Refresh refs after an action
+
+Use `--snapshot-after-action` when an agent should act and receive the resulting accessibility change without a second snapshot command:
+
+```bash
+agent-browser snapshot -i
+agent-browser --snapshot-after-action click @e2
+```
+
+The response contains the accessibility diff plus the complete current ref map. Always replace previously held refs with this refreshed map, including when the diff itself is small. Without an earlier snapshot baseline, the first post-action observation contains a full compact interactive snapshot.
+
+This feature does not change ref identity semantics. Stable node-backed refs remain the scope of [PR #1444](https://github.com/vercel-labs/agent-browser/pull/1444) by [@iddogino](https://github.com/iddogino); the post-action path delegates to the canonical snapshot handler so it can inherit that work when it lands.
+
 ## CSS selectors
 
 ```bash

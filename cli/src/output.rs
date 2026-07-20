@@ -304,6 +304,33 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         return;
     }
 
+    // Keep the normal action output, then append the opt-in observation. The
+    // daemon nests it in `data.observation` so JSON consumers retain a stable,
+    // structured response while human and skill-driven CLI users receive the
+    // diff and ref refresh in the same command turn.
+    if resp.success {
+        if let Some(data) = resp.data.as_ref() {
+            if let Some(observation) = data.get("observation") {
+                let mut primary_data = data.clone();
+                if let Some(obj) = primary_data.as_object_mut() {
+                    obj.remove("observation");
+                }
+                let primary = Response {
+                    success: true,
+                    data: Some(primary_data),
+                    error: None,
+                    warning: resp.warning.clone(),
+                };
+                print_response_with_opts(&primary, action, opts);
+
+                let rendered = format_post_action_observation(observation);
+                let origin = observation.get("origin").and_then(|v| v.as_str());
+                print_with_boundaries(&rendered, origin, opts);
+                return;
+            }
+        }
+    }
+
     if !resp.success {
         eprintln!(
             "{} {}",
@@ -1197,6 +1224,74 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
     }
 
     print_warning(resp);
+}
+
+/// Format the structured `data.observation` payload shared by CLI and MCP
+/// output. Diff mode includes a full ref-only refresh when the page changed;
+/// full mode already carries refs inline in the snapshot text.
+pub(crate) fn format_post_action_observation(observation: &serde_json::Value) -> String {
+    match observation.get("mode").and_then(|v| v.as_str()) {
+        Some("error") => format!(
+            "Post-action observation unavailable: {}",
+            observation
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error")
+        ),
+        Some("full") => {
+            let snapshot = observation
+                .get("snapshot")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(empty page)");
+            format!(
+                "Post-action observation (full; no prior snapshot):\n{}",
+                snapshot
+            )
+        }
+        Some("diff") => {
+            let additions = observation
+                .get("additions")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let removals = observation
+                .get("removals")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let changed = observation
+                .get("changed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !changed {
+                return "Post-action observation: no accessibility changes".to_string();
+            }
+
+            let diff = observation
+                .get("diff")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let mut rendered = format!(
+                "Post-action observation diff (+{}, -{}):\n{}",
+                additions,
+                removals,
+                diff.trim_end()
+            );
+
+            if let Some(refs) = observation.get("refs").and_then(|v| v.as_object()) {
+                rendered.push_str("\nCurrent refs:");
+                for (ref_id, entry) in refs {
+                    let role = entry.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                    let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    if name.is_empty() {
+                        rendered.push_str(&format!("\n  @{} {}", ref_id, role));
+                    } else {
+                        rendered.push_str(&format!("\n  @{} {} {:?}", ref_id, role, name));
+                    }
+                }
+            }
+            rendered
+        }
+        _ => "Post-action observation unavailable: malformed response".to_string(),
+    }
 }
 
 fn print_lifecycle_note(data: &serde_json::Value) {
@@ -3485,6 +3580,13 @@ Snapshot Options:
   -d, --depth <n>            Limit tree depth
   -s, --selector <sel>       Scope to CSS selector
 
+Post-action Observation:
+  --snapshot-after-action    After page-changing commands, return a snapshot diff
+                             and current refs in the same response
+  Example:
+    agent-browser snapshot -i
+    agent-browser click @e1 --snapshot-after-action
+
 Authentication:
   --profile <name|path>      Chrome profile name (e.g., Default) to reuse login state,
                              or a directory path for a persistent custom profile
@@ -3538,6 +3640,7 @@ Options:
   --color-scheme <scheme>    Color scheme: dark, light, no-preference (or AGENT_BROWSER_COLOR_SCHEME)
   --download-path <path>     Default download directory (or AGENT_BROWSER_DOWNLOAD_PATH)
   --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
+  --snapshot-after-action    Return post-action snapshot diffs and current refs (or AGENT_BROWSER_SNAPSHOT_AFTER_ACTION)
   --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
   --allowed-domains <list>   Restrict network domains; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
@@ -3614,6 +3717,7 @@ Environment:
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
   AGENT_BROWSER_CONTENT_BOUNDARIES Wrap page output in boundary markers
+  AGENT_BROWSER_SNAPSHOT_AFTER_ACTION Return post-action snapshot diffs and current refs
   AGENT_BROWSER_MAX_OUTPUT       Max characters for page output
   AGENT_BROWSER_ALLOWED_DOMAINS  Comma-separated allowed domain patterns; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins
   AGENT_BROWSER_ACTION_POLICY    Path to action policy JSON file
@@ -3763,8 +3867,8 @@ pub fn print_version() {
 #[cfg(test)]
 mod tests {
     use super::{
-        boundary_origin, format_storage_text, format_vitals_text, format_with_boundaries,
-        OutputOptions,
+        boundary_origin, format_post_action_observation, format_storage_text, format_vitals_text,
+        format_with_boundaries, OutputOptions,
     };
     use serde_json::json;
 
@@ -3935,6 +4039,61 @@ hydration: -  phases: 0  hydratedComponents: 0"
         assert_eq!(
             boundary_origin(&json!({ "url": "https://example.com/source" })),
             Some("https://example.com/source")
+        );
+    }
+
+    #[test]
+    fn test_format_post_action_observation_diff_includes_ref_refresh() {
+        let rendered = format_post_action_observation(&json!({
+            "mode": "diff",
+            "changed": true,
+            "additions": 1,
+            "removals": 0,
+            "diff": "@@ -1 +1,2 @@\n button [ref=e1]\n+button \"New\" [ref=e2]\n",
+            "refs": {
+                "e1": { "role": "button", "name": "Existing" },
+                "e2": { "role": "button", "name": "New" }
+            }
+        }));
+
+        assert!(rendered.contains("Post-action observation diff (+1, -0)"));
+        assert!(rendered.contains("Current refs:"));
+        assert!(rendered.contains("@e2 button \"New\""));
+    }
+
+    #[test]
+    fn test_format_post_action_observation_unchanged_stays_lightweight() {
+        let rendered = format_post_action_observation(&json!({
+            "mode": "diff",
+            "changed": false,
+            "additions": 0,
+            "removals": 0,
+            "diff": "",
+            "refs": { "e1": { "role": "button", "name": "Existing" } }
+        }));
+
+        assert_eq!(
+            rendered,
+            "Post-action observation: no accessibility changes"
+        );
+        assert!(!rendered.contains("Current refs"));
+    }
+
+    #[test]
+    fn test_format_post_action_observation_full_and_error_modes() {
+        assert_eq!(
+            format_post_action_observation(&json!({
+                "mode": "full",
+                "snapshot": "button \"Submit\" [ref=e1]"
+            })),
+            "Post-action observation (full; no prior snapshot):\nbutton \"Submit\" [ref=e1]"
+        );
+        assert_eq!(
+            format_post_action_observation(&json!({
+                "mode": "error",
+                "error": "dialog blocked the page"
+            })),
+            "Post-action observation unavailable: dialog blocked the page"
         );
     }
 }

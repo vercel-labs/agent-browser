@@ -526,6 +526,19 @@ agent-browser removeinitscript <identifier>       # Remove a previously register
 
 See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime scripts, built-in React DevTools, and extensions.
 
+## Post-action observations
+
+Add `--snapshot-after-action` to a navigation, interaction, or wait command to receive a lightweight observation in the same response:
+
+```bash
+agent-browser snapshot -i
+agent-browser --snapshot-after-action click @e2
+```
+
+The first explicit snapshot establishes a baseline. Each successful supported action then returns a unified accessibility-tree diff and the complete current ref map; if no baseline exists, the first action returns a full compact interactive snapshot. JSON callers receive this under `data.observation`, and supported MCP tools expose the equivalent `snapshotAfter: true` input.
+
+This removes a separate agent round trip, but it still uses the canonical snapshot engine after each action. It does not make refs stable across snapshots: use the refreshed refs from every observation. Stable node identity remains the scope of [PR #1444](https://github.com/vercel-labs/agent-browser/pull/1444) by [@iddogino](https://github.com/iddogino), which this path is designed to compose with rather than replace.
+
 ## Global options
 
 ```bash
@@ -561,6 +574,7 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime 
 --color-scheme <scheme>  # Color scheme: dark, light, no-preference
 --download-path <path>   # Default download directory
 --content-boundaries     # Wrap page output in boundary markers for LLM safety
+--snapshot-after-action  # Return an observation diff and current refs after supported actions
 --max-output <chars>     # Truncate page output to N characters
 --allowed-domains <list> # Allowed domains; rejects restore/state replay, profile/session startup args, and direct-page providers
 --action-policy <path>   # Path to action policy JSON file

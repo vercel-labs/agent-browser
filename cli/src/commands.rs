@@ -320,9 +320,104 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
                 result["timeout"] = json!(t);
             }
         }
+        if flags.snapshot_after_action && supports_snapshot_after_command(&result) {
+            result["snapshotAfter"] = json!(true);
+        }
     }
 
     Ok(result)
+}
+
+/// Whether a successful command can use `--snapshot-after-action` to return
+/// a page observation. Read-only and lifecycle commands are intentionally
+/// excluded so a persistent config setting does not add snapshot overhead to
+/// unrelated commands.
+pub fn supports_snapshot_after_action(action: &str) -> bool {
+    matches!(
+        action,
+        "navigate"
+            | "evaluate"
+            | "back"
+            | "forward"
+            | "reload"
+            | "click"
+            | "dblclick"
+            | "fill"
+            | "type"
+            | "press"
+            | "keydown"
+            | "keyup"
+            | "keyboard"
+            | "hover"
+            | "focus"
+            | "check"
+            | "uncheck"
+            | "select"
+            | "drag"
+            | "upload"
+            | "scroll"
+            | "wheel"
+            | "mousemove"
+            | "mousedown"
+            | "mouseup"
+            | "scrollintoview"
+            | "wait"
+            | "waitforurl"
+            | "waitforloadstate"
+            | "waitforfunction"
+            | "setcontent"
+            | "setvalue"
+            | "dispatch"
+            | "viewport"
+            | "device"
+            | "geolocation"
+            | "permissions"
+            | "emulatemedia"
+            | "offline"
+            | "pushstate"
+            | "addscript"
+            | "addstyle"
+            | "tap"
+            | "swipe"
+            | "dialog"
+            | "tab_new"
+            | "tab_switch"
+            | "tab_close"
+            | "window_new"
+            | "frame"
+            | "mainframe"
+            | "clipboard"
+            | "getbyrole"
+            | "getbytext"
+            | "getbylabel"
+            | "getbyplaceholder"
+            | "getbyalttext"
+            | "getbytitle"
+            | "getbytestid"
+            | "nth"
+    )
+}
+
+/// Command-level eligibility for post-action observations. Some daemon
+/// actions combine mutating and read-only subcommands, so the action name
+/// alone is not sufficient when a persistent config setting is enabled.
+pub fn supports_snapshot_after_command(command: &Value) -> bool {
+    let Some(action) = command.get("action").and_then(|value| value.as_str()) else {
+        return false;
+    };
+    if !supports_snapshot_after_action(action) {
+        return false;
+    }
+
+    match action {
+        "dialog" => command.get("response").and_then(|value| value.as_str()) != Some("status"),
+        "clipboard" => command.get("operation").and_then(|value| value.as_str()) == Some("paste"),
+        "getbyrole" | "getbytext" | "getbylabel" | "getbyplaceholder" | "getbyalttext"
+        | "getbytitle" | "getbytestid" | "nth" => {
+            command.get("subaction").and_then(|value| value.as_str()) != Some("text")
+        }
+        _ => true,
+    }
 }
 
 fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
@@ -3139,6 +3234,7 @@ mod tests {
             color_scheme: None,
             download_path: None,
             content_boundaries: false,
+            snapshot_after_action: false,
             max_output: None,
             allowed_domains: None,
             action_policy: None,
@@ -4902,6 +4998,89 @@ mod tests {
         let mut f = default_flags();
         f.default_timeout = Some(ms);
         f
+    }
+
+    #[test]
+    fn test_snapshot_after_action_is_injected_for_page_changes() {
+        let mut flags = default_flags();
+        flags.snapshot_after_action = true;
+
+        let click = parse_command(&args("click @e1"), &flags).unwrap();
+        assert_eq!(click["snapshotAfter"], true);
+
+        let navigate = parse_command(&args("open example.com"), &flags).unwrap();
+        assert_eq!(navigate["snapshotAfter"], true);
+
+        let evaluate = parse_command(&args("eval document.body.dataset.ready=1"), &flags).unwrap();
+        assert_eq!(evaluate["snapshotAfter"], true);
+
+        let tab = parse_command(&args("tab new"), &flags).unwrap();
+        assert_eq!(tab["snapshotAfter"], true);
+    }
+
+    #[test]
+    fn test_snapshot_after_action_skips_read_only_and_snapshot_commands() {
+        let mut flags = default_flags();
+        flags.snapshot_after_action = true;
+
+        let snapshot = parse_command(&args("snapshot -i"), &flags).unwrap();
+        assert!(snapshot.get("snapshotAfter").is_none());
+
+        let title = parse_command(&args("get title"), &flags).unwrap();
+        assert!(title.get("snapshotAfter").is_none());
+
+        let dialog_status = parse_command(&args("dialog status"), &flags).unwrap();
+        assert!(dialog_status.get("snapshotAfter").is_none());
+
+        let find_text = parse_command(&args("find role button text"), &flags).unwrap();
+        assert!(find_text.get("snapshotAfter").is_none());
+
+        let clipboard_read = parse_command(&args("clipboard read"), &flags).unwrap();
+        assert!(clipboard_read.get("snapshotAfter").is_none());
+
+        let clipboard_paste = parse_command(&args("clipboard paste"), &flags).unwrap();
+        assert_eq!(clipboard_paste["snapshotAfter"], true);
+    }
+
+    #[test]
+    fn test_snapshot_after_action_supports_semantic_locator_actions() {
+        let mut flags = default_flags();
+        flags.snapshot_after_action = true;
+
+        let find_click = parse_command(&args("find role button click"), &flags).unwrap();
+        assert_eq!(find_click["action"], "getbyrole");
+        assert_eq!(find_click["snapshotAfter"], true);
+
+        let dialog_accept = parse_command(&args("dialog accept"), &flags).unwrap();
+        assert_eq!(dialog_accept["snapshotAfter"], true);
+    }
+
+    #[test]
+    fn test_snapshot_after_action_supported_action_contract() {
+        for action in [
+            "navigate",
+            "evaluate",
+            "click",
+            "fill",
+            "select",
+            "press",
+            "wait",
+            "wheel",
+            "viewport",
+            "tab_switch",
+            "frame",
+            "getbyrole",
+        ] {
+            assert!(supports_snapshot_after_action(action), "{action}");
+        }
+        for action in ["snapshot", "title", "screenshot", "close", "launch"] {
+            assert!(!supports_snapshot_after_action(action), "{action}");
+        }
+
+        let clipboard_read = json!({ "action": "clipboard", "operation": "read" });
+        let clipboard_paste = json!({ "action": "clipboard", "operation": "paste" });
+        assert!(!supports_snapshot_after_command(&clipboard_read));
+        assert!(supports_snapshot_after_command(&clipboard_paste));
     }
 
     #[test]

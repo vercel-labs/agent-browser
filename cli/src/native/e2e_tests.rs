@@ -634,6 +634,241 @@ async fn e2e_snapshot_and_click_ref() {
 }
 
 // ---------------------------------------------------------------------------
+// Opt-in post-action observation and ref refresh (#1351)
+// ---------------------------------------------------------------------------
+
+fn post_action_observation_url() -> String {
+    let html = r#"<!doctype html><html><body>
+        <button id="add" onclick="const b=document.createElement('button');b.textContent='New';document.body.appendChild(b)">Add</button>
+    </body></html>"#;
+    format!("data:text/html;base64,{}", STANDARD.encode(html))
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_after_action_returns_diff_and_current_refs() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": post_action_observation_url() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "snapshot",
+            "interactive": true,
+            "compact": true
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(get_data(&resp)["snapshot"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("button \"Add\" [ref=e1]"));
+
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "click",
+            "selector": "@e1",
+            "snapshotAfter": true
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let observation = &get_data(&resp)["observation"];
+    assert_eq!(observation["mode"], "diff");
+    assert_eq!(observation["changed"], true);
+    assert!(observation["additions"].as_u64().unwrap_or(0) > 0);
+    assert!(observation["diff"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("New"));
+    assert!(observation["refs"]
+        .as_object()
+        .unwrap()
+        .values()
+        .any(|entry| entry["name"] == "New"));
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_after_action_without_baseline_returns_full_observation() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": post_action_observation_url() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "click",
+            "selector": "#add",
+            "snapshotAfter": true
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let observation = &get_data(&resp)["observation"];
+    assert_eq!(observation["mode"], "full");
+    let snapshot = observation["snapshot"].as_str().unwrap_or_default();
+    assert!(snapshot.contains("button \"Add\""), "{snapshot}");
+    assert!(snapshot.contains("button \"New\""), "{snapshot}");
+    assert!(observation["refs"]
+        .as_object()
+        .is_some_and(|refs| refs.len() == 2));
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_after_action_discards_unusable_and_cross_context_baselines() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let html = r#"<!doctype html><html><body>
+        <button id="remove" onclick="this.remove()">Remove</button>
+        <button id="keep">Keep</button>
+    </body></html>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": url }),
+            &mut state,
+        )
+        .await,
+    );
+
+    // A failed explicit snapshot must discard the previous successful
+    // baseline rather than diffing a later action against hidden old state.
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let failed = execute_command(
+        &json!({ "id": "4", "action": "snapshot", "selector": "[" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(failed["success"], false, "invalid selector must fail");
+
+    let recovered = execute_command(
+        &json!({
+            "id": "5",
+            "action": "click",
+            "selector": "#keep",
+            "snapshotAfter": true
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&recovered);
+    assert_eq!(get_data(&recovered)["observation"]["mode"], "full");
+
+    // If the optional post-action capture fails after the action succeeded,
+    // preserve action success, report the observation error, and make the
+    // following observation start from a fresh full baseline.
+    assert_success(
+        &execute_command(
+            &json!({ "id": "6", "action": "snapshot", "selector": "#remove" }),
+            &mut state,
+        )
+        .await,
+    );
+    let removed = execute_command(
+        &json!({
+            "id": "7",
+            "action": "click",
+            "selector": "#remove",
+            "snapshotAfter": true
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&removed);
+    assert_eq!(get_data(&removed)["observation"]["mode"], "error");
+
+    let after_capture_error = execute_command(
+        &json!({
+            "id": "8",
+            "action": "click",
+            "selector": "#keep",
+            "snapshotAfter": true
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&after_capture_error);
+    assert_eq!(
+        get_data(&after_capture_error)["observation"]["mode"],
+        "full"
+    );
+
+    // Switching browsing contexts invalidates the old document baseline. The
+    // context-changing command itself can request the first full observation.
+    let new_tab = execute_command(
+        &json!({
+            "id": "9",
+            "action": "tab_new",
+            "url": "data:text/html,<button>Other tab</button>",
+            "snapshotAfter": true
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&new_tab);
+    assert_eq!(get_data(&new_tab)["observation"]["mode"], "full");
+    assert!(get_data(&new_tab)["observation"]["snapshot"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("Other tab"));
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+// ---------------------------------------------------------------------------
 // Screenshot
 // ---------------------------------------------------------------------------
 

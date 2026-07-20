@@ -95,6 +95,30 @@ agent-browser snapshot -i
 # @e1 [h1] "Page 2"  ← Different element now!
 ```
 
+## One-turn Post-action Observation
+
+Use `--snapshot-after-action` when an action is likely to change the page and you need updated refs immediately:
+
+```bash
+agent-browser snapshot -i
+# @e1 [button] "Open menu"
+
+agent-browser click @e1 --snapshot-after-action
+# ✓ Done
+# Post-action observation diff (+3, -0):
+# ...
+# Current refs:
+#   @e1 [button] "Open menu"
+#   @e2 [menuitem] "Profile"
+#   @e3 [menuitem] "Sign out"
+```
+
+An explicit snapshot establishes the baseline and its filtering options are reused. Each successful post-action observation becomes the next baseline. When no baseline exists, the first action returns a full compact interactive observation. When the page changed, the response includes the complete current ref map so the next interaction does not require another snapshot turn.
+
+The flag applies to page-changing navigation, interaction, and wait commands. Set `snapshotAfterAction: true` in `agent-browser.json` or `AGENT_BROWSER_SNAPSHOT_AFTER_ACTION=1` for persistent behavior. Pass `--snapshot-after-action false` for an individual command that should skip it. In MCP, pass `snapshotAfter: true` to a page-changing tool.
+
+Snapshot collection still uses the normal snapshot engine. The lightweight part is the returned diff and ref refresh, not the browser-side collection cost. This feature does not change ref identity or stale-ref safety; that work is separately covered by upstream PR #1444 from @iddogino.
+
 ## Best Practices
 
 ### 1. Always Snapshot Before Interacting

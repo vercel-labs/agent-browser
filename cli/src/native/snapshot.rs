@@ -74,7 +74,7 @@ const INVISIBLE_CHARS: &[char] = &[
     '\u{00A0}', // Non-Breaking Space (&nbsp;)
 ];
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SnapshotOptions {
     pub selector: Option<String>,
     pub interactive: bool,
