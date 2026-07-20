@@ -46,6 +46,15 @@ pub struct CdpClient {
 }
 
 impl CdpClient {
+    /// Number of CDP commands issued over this connection.
+    ///
+    /// This is a monotonic diagnostic counter used by performance regression
+    /// tests. It intentionally includes fire-and-forget commands because they
+    /// still consume a CDP request and browser-side dispatch.
+    pub fn command_count(&self) -> u64 {
+        self.next_id.load(Ordering::Relaxed).saturating_sub(1)
+    }
+
     pub async fn connect(url: &str) -> Result<Self, String> {
         Self::connect_with_headers(url, None).await
     }

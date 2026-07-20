@@ -23,7 +23,7 @@ use super::cdp::types::{
 };
 use super::cookies;
 use super::diff;
-use super::element::RefMap;
+use super::element::{resolve_ax_session, RefMap};
 use super::inspect_server::InspectServer;
 use super::interaction;
 use super::network::{self, DomainFilter, EventTracker};
@@ -230,6 +230,306 @@ struct DrainedEvents {
     /// while HAR recording; bodies are fetched for these in
     /// `apply_drained_events` before Chrome evicts them (e.g. on navigation).
     har_finished_requests: Vec<(String, Option<String>)>,
+    /// An event changed, or may have changed, the active accessibility/DOM
+    /// snapshot. This is conservative: false negatives would make cached
+    /// element refs unsafe, while an occasional false positive only costs a
+    /// fresh snapshot.
+    snapshot_changed: bool,
+    /// The isolated world that owns the mutation observer was destroyed or
+    /// its observed document navigated.
+    snapshot_observer_context_changed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SnapshotCacheKey {
+    session_id: String,
+    active_frame_id: Option<String>,
+    iframe_sessions: Vec<(String, String)>,
+    selector: Option<String>,
+    interactive: bool,
+    compact: bool,
+    depth: Option<usize>,
+    urls: bool,
+}
+
+impl SnapshotCacheKey {
+    fn new(
+        session_id: String,
+        active_frame_id: Option<String>,
+        iframe_sessions: &HashMap<String, String>,
+        options: &SnapshotOptions,
+    ) -> Self {
+        let mut iframe_sessions = iframe_sessions
+            .iter()
+            .map(|(frame, session)| (frame.clone(), session.clone()))
+            .collect::<Vec<_>>();
+        iframe_sessions.sort_unstable();
+
+        Self {
+            session_id,
+            active_frame_id,
+            iframe_sessions,
+            selector: options.selector.clone(),
+            interactive: options.interactive,
+            compact: options.compact,
+            depth: options.depth,
+            urls: options.urls,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CachedSnapshot {
+    key: SnapshotCacheKey,
+    tree: String,
+    ref_map: RefMap,
+    mutation_index: SnapshotMutationIndex,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SnapshotMutationIndex {
+    document_id: String,
+    revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SnapshotObserverContextKey {
+    session_id: String,
+    active_frame_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SnapshotObserverContext {
+    key: SnapshotObserverContextKey,
+    frame_id: String,
+    execution_context_id: i64,
+}
+
+/// The DOM/AX event stream is deliberately still used as a conservative
+/// invalidation source, but Chrome does not guarantee that every mutation is
+/// reported after `DOM.enable` unless the affected subtree was requested.
+/// Keep a document-local revision as the authoritative cache reuse check.
+/// The private snapshot marker is ignored because snapshot capture adds and
+/// removes it solely to batch-resolve backend node IDs.
+const SNAPSHOT_MUTATION_INDEX_EXPRESSION: &str = r#"(() => {
+    const key = Symbol.for('agent-browser.snapshot-mutation-index');
+    let state = globalThis[key];
+    if (!state || state.document !== document || !Number.isSafeInteger(state.revision)) {
+        state = {
+            document,
+            documentId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+            revision: 0
+        };
+        Object.defineProperty(globalThis, key, { value: state, configurable: true });
+        new MutationObserver(records => {
+            const changed = records.some(record =>
+                record.type !== 'attributes' || record.attributeName !== 'data-__ab-ci'
+            );
+            if (changed) {
+                state.revision = (state.revision + 1) % Number.MAX_SAFE_INTEGER;
+            }
+        }).observe(document, {
+            subtree: true,
+            childList: true,
+            characterData: true,
+            attributes: true
+        });
+    }
+    return { documentId: state.documentId, revision: state.revision };
+})()"#;
+
+/// Bound the resident duplicate of snapshot text. Large pages still receive
+/// their full result, but pathological trees do not remain pinned in daemon
+/// memory between commands.
+const MAX_CACHED_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
+
+fn snapshot_event_invalidates_cache(method: &str, params: &Value) -> bool {
+    match method {
+        // Accessibility events are an additional conservative signal that a
+        // node from the previously requested full AX tree changed.
+        "Accessibility.loadComplete" | "Accessibility.nodesUpdated" => true,
+        // DOM events cover snapshot decorations that are not represented in
+        // the AX tree, such as hrefs and custom cursor-interactive elements.
+        "DOM.documentUpdated"
+        | "DOM.characterDataModified"
+        | "DOM.childNodeCountUpdated"
+        | "DOM.childNodeInserted"
+        | "DOM.childNodeRemoved"
+        | "DOM.distributedNodesUpdated"
+        | "DOM.inlineStyleInvalidated"
+        | "DOM.pseudoElementAdded"
+        | "DOM.pseudoElementRemoved"
+        | "DOM.scrollableFlagUpdated"
+        | "DOM.shadowRootPopped"
+        | "DOM.shadowRootPushed"
+        | "DOM.topLayerElementsUpdated" => true,
+        "DOM.attributeModified" | "DOM.attributeRemoved" => params
+            .get("name")
+            .and_then(Value::as_str)
+            // Snapshot cursor discovery temporarily adds this private marker.
+            // Treating it as page churn would invalidate every fresh capture.
+            .is_none_or(|name| name != "data-__ab-ci"),
+        // A new document or frame invalidates backend node IDs even when its
+        // URL is unchanged (reload, bfcache restore, iframe navigation).
+        "Page.frameAttached"
+        | "Page.frameDetached"
+        | "Page.frameNavigated"
+        | "Page.navigatedWithinDocument"
+        | "Page.documentOpened"
+        | "Runtime.executionContextsCleared" => true,
+        // CSSOM edits can change computed cursor interactivity without a DOM
+        // mutation. These fire when the CSS domain is active (for example via
+        // DevTools/inspect); command-side addstyle invalidation covers it too.
+        "CSS.styleSheetAdded" | "CSS.styleSheetChanged" | "CSS.styleSheetRemoved" => true,
+        _ => false,
+    }
+}
+
+fn action_invalidates_snapshot_cache(action: &str) -> bool {
+    matches!(
+        action,
+        "launch"
+            | "navigate"
+            | "close"
+            | "evaluate"
+            | "click"
+            | "dblclick"
+            | "fill"
+            | "type"
+            | "press"
+            | "hover"
+            | "scroll"
+            | "select"
+            | "check"
+            | "uncheck"
+            | "wait"
+            | "back"
+            | "forward"
+            | "reload"
+            | "cookies_set"
+            | "cookies_clear"
+            | "storage_set"
+            | "storage_clear"
+            | "setcontent"
+            | "state_load"
+            | "recording_start"
+            | "recording_restart"
+            | "tab_new"
+            | "tab_switch"
+            | "tab_close"
+            | "window_new"
+            | "viewport"
+            | "useragent"
+            | "user_agent"
+            | "set_media"
+            | "emulatemedia"
+            | "mouse"
+            | "keyboard"
+            | "focus"
+            | "clear"
+            | "selectall"
+            | "scrollintoview"
+            | "dispatch"
+            | "highlight"
+            | "tap"
+            | "setvalue"
+            | "bringtofront"
+            | "timezone"
+            | "locale"
+            | "geolocation"
+            | "permissions"
+            | "dialog"
+            | "upload"
+            | "addscript"
+            | "addinitscript"
+            | "removeinitscript"
+            | "addstyle"
+            | "pushstate"
+            | "clipboard"
+            | "wheel"
+            | "device"
+            | "download"
+            | "vitals"
+            | "waitforurl"
+            | "waitforloadstate"
+            | "waitforfunction"
+            | "frame"
+            | "mainframe"
+            | "getbyrole"
+            | "getbytext"
+            | "getbylabel"
+            | "getbyplaceholder"
+            | "getbyalttext"
+            | "getbytitle"
+            | "getbytestid"
+            | "nth"
+            | "evalhandle"
+            | "drag"
+            | "expose"
+            | "pause"
+            | "multiselect"
+            | "waitfordownload"
+            | "video_start"
+            | "route"
+            | "unroute"
+            | "credentials"
+            | "auth_login"
+            | "swipe"
+            | "input_mouse"
+            | "input_keyboard"
+            | "input_touch"
+            | "keydown"
+            | "keyup"
+            | "inserttext"
+            | "mousemove"
+            | "mousedown"
+            | "mouseup"
+    )
+}
+
+fn action_invalidates_snapshot_observer_context(action: &str) -> bool {
+    matches!(
+        action,
+        "launch"
+            | "navigate"
+            | "close"
+            | "back"
+            | "forward"
+            | "reload"
+            | "state_load"
+            | "tab_new"
+            | "tab_switch"
+            | "tab_close"
+            | "window_new"
+    )
+}
+
+fn snapshot_event_invalidates_observer_context(
+    method: &str,
+    params: &Value,
+    session_id: Option<&str>,
+    context: Option<&SnapshotObserverContext>,
+) -> bool {
+    let Some(context) = context else {
+        return false;
+    };
+    if session_id != Some(context.key.session_id.as_str()) {
+        return false;
+    }
+
+    match method {
+        "Runtime.executionContextDestroyed" => params
+            .get("executionContextId")
+            .and_then(Value::as_i64)
+            .is_some_and(|id| id == context.execution_context_id),
+        "Runtime.executionContextsCleared" => true,
+        "Page.frameDetached" | "Page.frameNavigated" | "Page.documentOpened" => params
+            .get("frameId")
+            .and_then(Value::as_str)
+            .or_else(|| params.pointer("/frame/id").and_then(Value::as_str))
+            .is_some_and(|frame_id| frame_id == context.frame_id),
+        _ => false,
+    }
 }
 
 /// Compute a hash of the [`LaunchOptions`] fields that require a browser
@@ -318,6 +618,17 @@ pub struct DaemonState {
     pub webdriver_backend: Option<super::webdriver::backend::WebDriverBackend>,
     pub backend_type: BackendType,
     pub ref_map: RefMap,
+    /// Last fully rendered snapshot and its exact browser/options identity.
+    /// Cached refs are restored with the text so `@eN` never resolves against
+    /// a different snapshot generation.
+    snapshot_cache: Option<CachedSnapshot>,
+    /// Incremented on every conservative cache invalidation. Snapshot capture
+    /// uses this to avoid storing a result if the page changed mid-capture.
+    snapshot_epoch: u64,
+    /// Isolated execution world that owns the page-side mutation observer.
+    /// Its identity is cached so an unchanged snapshot still needs only one
+    /// renderer barrier, while page scripts cannot tamper with its globals.
+    snapshot_observer_context: Option<SnapshotObserverContext>,
     pub domain_filter: Arc<RwLock<Option<DomainFilter>>>,
     pub event_tracker: EventTracker,
     pub session_name: Option<String>,
@@ -417,6 +728,9 @@ impl DaemonState {
             webdriver_backend: None,
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
+            snapshot_cache: None,
+            snapshot_epoch: 0,
+            snapshot_observer_context: None,
             domain_filter: Arc::new(RwLock::new(
                 env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
                     .ok()
@@ -496,6 +810,29 @@ impl DaemonState {
         cmd.get("timeout")
             .and_then(|v| v.as_u64())
             .unwrap_or(self.default_timeout_ms)
+    }
+
+    fn invalidate_snapshot_cache(&mut self) {
+        self.snapshot_cache = None;
+        self.snapshot_epoch = self.snapshot_epoch.wrapping_add(1);
+    }
+
+    fn invalidate_snapshot_observer_context(&mut self) {
+        self.snapshot_observer_context = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot_observer_context_identity(
+        &self,
+    ) -> Option<(String, Option<String>, String, i64)> {
+        self.snapshot_observer_context.as_ref().map(|context| {
+            (
+                context.key.session_id.clone(),
+                context.key.active_frame_id.clone(),
+                context.frame_id.clone(),
+                context.execution_context_id,
+            )
+        })
     }
 
     fn reset_input_state(&mut self) {
@@ -825,6 +1162,13 @@ impl DaemonState {
     }
 
     async fn apply_drained_events(&mut self, drained: DrainedEvents) -> Result<(), String> {
+        if drained.snapshot_changed {
+            self.invalidate_snapshot_cache();
+        }
+        if drained.snapshot_observer_context_changed {
+            self.invalidate_snapshot_observer_context();
+        }
+
         // ACK screencast frames
         if !drained.pending_acks.is_empty() {
             if let Some(ref browser) = self.browser {
@@ -1178,13 +1522,40 @@ impl DaemonState {
         let mut attached_other_sessions: Vec<String> = Vec::new();
         let mut detached_iframe_sessions: Vec<String> = Vec::new();
         let mut har_finished_requests: Vec<(String, Option<String>)> = Vec::new();
+        let mut snapshot_changed = false;
+        let mut snapshot_observer_context_changed = false;
 
         loop {
             match rx.try_recv() {
                 Ok(event) => {
+                    if snapshot_event_invalidates_observer_context(
+                        &event.method,
+                        &event.params,
+                        event.session_id.as_deref(),
+                        self.snapshot_observer_context.as_ref(),
+                    ) {
+                        snapshot_observer_context_changed = true;
+                    }
+                    let active_session = self
+                        .browser
+                        .as_ref()
+                        .and_then(|browser| browser.active_session_id().ok());
+                    let snapshot_session_matches = event.session_id.as_deref() == active_session
+                        || event.session_id.as_ref().is_some_and(|sid| {
+                            self.iframe_sessions
+                                .values()
+                                .any(|iframe_sid| iframe_sid == sid)
+                        });
+                    if snapshot_session_matches
+                        && snapshot_event_invalidates_cache(&event.method, &event.params)
+                    {
+                        snapshot_changed = true;
+                    }
+
                     // Target events are not session-scoped; handle them first
                     match event.method.as_str() {
                         "Target.targetCreated" => {
+                            snapshot_changed = true;
                             if let Ok(te) =
                                 serde_json::from_value::<TargetCreatedEvent>(event.params.clone())
                             {
@@ -1202,6 +1573,7 @@ impl DaemonState {
                             continue;
                         }
                         "Target.targetInfoChanged" => {
+                            snapshot_changed = true;
                             if let Ok(te) = serde_json::from_value::<TargetInfoChangedEvent>(
                                 event.params.clone(),
                             ) {
@@ -1229,6 +1601,7 @@ impl DaemonState {
                             continue;
                         }
                         "Target.targetDestroyed" => {
+                            snapshot_changed = true;
                             if let Ok(te) =
                                 serde_json::from_value::<TargetDestroyedEvent>(event.params.clone())
                             {
@@ -1237,6 +1610,7 @@ impl DaemonState {
                             continue;
                         }
                         "Target.attachedToTarget" => {
+                            snapshot_changed = true;
                             if let (Some(sid), Some(target_info_value)) = (
                                 event.params.get("sessionId").and_then(|v| v.as_str()),
                                 event.params.get("targetInfo"),
@@ -1267,6 +1641,7 @@ impl DaemonState {
                             continue;
                         }
                         "Target.detachedFromTarget" => {
+                            snapshot_changed = true;
                             if let Some(sid) =
                                 event.params.get("sessionId").and_then(|v| v.as_str())
                             {
@@ -1607,10 +1982,12 @@ impl DaemonState {
                 }
                 Err(broadcast::error::TryRecvError::Empty) => break,
                 Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                    snapshot_changed = true;
                     eprintln!("[agent-browser] Warning: CDP event buffer overflowed, {} events dropped. Network requests may be missing from HAR output.", n);
                     continue;
                 }
                 Err(broadcast::error::TryRecvError::Closed) => {
+                    snapshot_changed = true;
                     self.event_rx = None;
                     break;
                 }
@@ -1632,6 +2009,8 @@ impl DaemonState {
             attached_other_sessions,
             detached_iframe_sessions,
             har_finished_requests,
+            snapshot_changed,
+            snapshot_observer_context_changed,
         }
     }
 }
@@ -2228,6 +2607,17 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 ),
             );
         }
+    }
+
+    // Commands that can change DOM, accessibility state, computed
+    // interactivity, the selected browsing context, or backend node identity
+    // invalidate before execution. We do this even when a command later fails:
+    // a timed-out click or script may still have changed the page.
+    if action_invalidates_snapshot_cache(action) {
+        state.invalidate_snapshot_cache();
+    }
+    if action_invalidates_snapshot_observer_context(action) {
+        state.invalidate_snapshot_observer_context();
     }
 
     let result = match action {
@@ -4422,9 +4812,6 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
 // ---------------------------------------------------------------------------
 
 async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
-
     let options = SnapshotOptions {
         selector: cmd
             .get("selector")
@@ -4445,9 +4832,55 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         urls: cmd.get("urls").and_then(|v| v.as_bool()).unwrap_or(false),
     };
 
+    // A cheap renderer round trip is both a protocol barrier for CDP events
+    // and an authoritative read of the document-local mutation index. DOM
+    // events alone can miss changes in subtrees Chrome has not materialized.
+    let capture_start_index = synchronize_snapshot_events(state).await?;
+
+    if state
+        .snapshot_cache
+        .as_ref()
+        .is_some_and(|cached| cached.mutation_index != capture_start_index)
+    {
+        state.invalidate_snapshot_cache();
+    }
+
+    let (client, session_id) = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        (
+            Arc::clone(&mgr.client),
+            mgr.active_session_id()?.to_string(),
+        )
+    };
+    let cache_key = SnapshotCacheKey::new(
+        session_id.clone(),
+        state.active_frame_id.clone(),
+        &state.iframe_sessions,
+        &options,
+    );
+
+    if let Some(cached) = state
+        .snapshot_cache
+        .as_ref()
+        .filter(|cached| cached.key == cache_key)
+        .cloned()
+    {
+        state.ref_map = cached.ref_map;
+        let url = state
+            .browser
+            .as_ref()
+            .ok_or("Browser not launched")?
+            .get_url()
+            .await
+            .unwrap_or_default();
+        let refs = snapshot_refs_json(&state.ref_map);
+        return Ok(json!({ "snapshot": cached.tree, "origin": url, "refs": refs }));
+    }
+
+    let capture_epoch = state.snapshot_epoch;
     state.ref_map.clear();
     let tree = snapshot::take_snapshot(
-        &mgr.client,
+        &client,
         &session_id,
         &options,
         &mut state.ref_map,
@@ -4456,10 +4889,167 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     )
     .await?;
 
-    let url = mgr.get_url().await.unwrap_or_default();
+    // Flush events emitted while the full AX/DOM capture was in flight. If
+    // the epoch advances, the caller still gets this point-in-time result but
+    // it is not retained for a later command.
+    let capture_end_index = synchronize_snapshot_events(state).await?;
 
-    let refs: serde_json::Map<String, Value> = state
-        .ref_map
+    let url = state
+        .browser
+        .as_ref()
+        .ok_or("Browser not launched")?
+        .get_url()
+        .await
+        .unwrap_or_default();
+    let refs = snapshot_refs_json(&state.ref_map);
+
+    // If a target/frame event was synchronously applied while capturing, do
+    // not retain a potentially mixed-generation result. The current caller
+    // still receives the full snapshot it requested.
+    if state.snapshot_epoch == capture_epoch
+        && capture_start_index == capture_end_index
+        && tree.len() <= MAX_CACHED_SNAPSHOT_BYTES
+    {
+        state.snapshot_cache = Some(CachedSnapshot {
+            key: cache_key,
+            tree: tree.clone(),
+            ref_map: state.ref_map.clone(),
+            mutation_index: capture_end_index,
+        });
+    }
+
+    Ok(json!({ "snapshot": tree, "origin": url, "refs": refs }))
+}
+
+async fn synchronize_snapshot_events(
+    state: &mut DaemonState,
+) -> Result<SnapshotMutationIndex, String> {
+    let (client, session_id) = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        (
+            Arc::clone(&mgr.client),
+            mgr.active_session_id()?.to_string(),
+        )
+    };
+
+    let context = ensure_snapshot_observer_context(state, &client, &session_id).await?;
+    let mutation_index = match read_snapshot_mutation_index(&client, &context).await {
+        Ok(index) => index,
+        Err(_) => {
+            // A navigation can destroy the world before its CDP event reaches
+            // the daemon. Recreate once; observer setup is idempotent and has
+            // no page-visible side effects.
+            state.invalidate_snapshot_observer_context();
+            let recreated = ensure_snapshot_observer_context(state, &client, &session_id).await?;
+            read_snapshot_mutation_index(&client, &recreated).await?
+        }
+    };
+    state.drain_cdp_events_background().await?;
+    Ok(mutation_index)
+}
+
+async fn ensure_snapshot_observer_context(
+    state: &mut DaemonState,
+    client: &Arc<CdpClient>,
+    session_id: &str,
+) -> Result<SnapshotObserverContext, String> {
+    let (_, effective_session_id) = resolve_ax_session(
+        state.active_frame_id.as_deref(),
+        session_id,
+        &state.iframe_sessions,
+    );
+    let effective_session_id = effective_session_id.to_string();
+    let key = SnapshotObserverContextKey {
+        session_id: effective_session_id.clone(),
+        active_frame_id: state.active_frame_id.clone(),
+    };
+
+    if let Some(context) = state
+        .snapshot_observer_context
+        .as_ref()
+        .filter(|context| context.key == key)
+    {
+        return Ok(context.clone());
+    }
+
+    let frame_id = if let Some(frame_id) = state.active_frame_id.as_ref() {
+        frame_id.clone()
+    } else {
+        let frame_tree = client
+            .send_command("Page.getFrameTree", None, Some(&effective_session_id))
+            .await?;
+        frame_tree
+            .pointer("/frameTree/frame/id")
+            .and_then(Value::as_str)
+            .ok_or("Page.getFrameTree did not return a root frame id")?
+            .to_string()
+    };
+
+    let world = client
+        .send_command(
+            "Page.createIsolatedWorld",
+            Some(json!({
+                "frameId": frame_id,
+                "worldName": "__agent_browser_snapshot_cache"
+            })),
+            Some(&effective_session_id),
+        )
+        .await?;
+    let context = SnapshotObserverContext {
+        key,
+        frame_id,
+        execution_context_id: world
+            .get("executionContextId")
+            .and_then(Value::as_i64)
+            .ok_or("Page.createIsolatedWorld did not return an executionContextId")?,
+    };
+    state.snapshot_observer_context = Some(context.clone());
+    Ok(context)
+}
+
+async fn read_snapshot_mutation_index(
+    client: &CdpClient,
+    context: &SnapshotObserverContext,
+) -> Result<SnapshotMutationIndex, String> {
+    let params = json!({
+        "expression": SNAPSHOT_MUTATION_INDEX_EXPRESSION,
+        "returnByValue": true,
+        "silent": true,
+        "contextId": context.execution_context_id
+    });
+
+    let result = client
+        .send_command(
+            "Runtime.evaluate",
+            Some(params),
+            Some(&context.key.session_id),
+        )
+        .await?;
+    parse_snapshot_mutation_index(&result)
+}
+
+fn parse_snapshot_mutation_index(result: &Value) -> Result<SnapshotMutationIndex, String> {
+    let value = result
+        .get("result")
+        .and_then(|result| result.get("value"))
+        .ok_or("Snapshot mutation index evaluation returned no value")?;
+    let document_id = value
+        .get("documentId")
+        .and_then(Value::as_str)
+        .filter(|document_id| !document_id.is_empty())
+        .ok_or("Snapshot mutation index evaluation returned no documentId")?;
+    let revision = value
+        .get("revision")
+        .and_then(Value::as_u64)
+        .ok_or("Snapshot mutation index evaluation returned no revision")?;
+    Ok(SnapshotMutationIndex {
+        document_id: document_id.to_string(),
+        revision,
+    })
+}
+
+fn snapshot_refs_json(ref_map: &RefMap) -> serde_json::Map<String, Value> {
+    ref_map
         .entries_sorted()
         .into_iter()
         .map(|(ref_id, entry)| {
@@ -4468,9 +5058,7 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             obj.insert("name".into(), Value::String(entry.name));
             (ref_id, Value::Object(obj))
         })
-        .collect();
-
-    Ok(json!({ "snapshot": tree, "origin": url, "refs": refs }))
+        .collect()
 }
 
 async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -10655,6 +11243,284 @@ mod tests {
             "agent-browser-{label}-{}-{nanos}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn test_snapshot_cache_key_covers_context_and_options() {
+        let mut frames_a = HashMap::new();
+        frames_a.insert("frame-b".to_string(), "session-b".to_string());
+        frames_a.insert("frame-a".to_string(), "session-a".to_string());
+        let mut frames_b = HashMap::new();
+        frames_b.insert("frame-a".to_string(), "session-a".to_string());
+        frames_b.insert("frame-b".to_string(), "session-b".to_string());
+
+        let options = SnapshotOptions {
+            selector: Some("#main".to_string()),
+            interactive: true,
+            compact: true,
+            depth: Some(4),
+            urls: true,
+        };
+        let key = SnapshotCacheKey::new(
+            "session-main".to_string(),
+            Some("frame-a".to_string()),
+            &frames_a,
+            &options,
+        );
+        assert_eq!(
+            key,
+            SnapshotCacheKey::new(
+                "session-main".to_string(),
+                Some("frame-a".to_string()),
+                &frames_b,
+                &options,
+            ),
+            "iframe map insertion order must not affect cache identity"
+        );
+
+        let interactive_changed = SnapshotOptions {
+            interactive: false,
+            ..options
+        };
+        assert_ne!(
+            key,
+            SnapshotCacheKey::new(
+                "session-main".to_string(),
+                Some("frame-a".to_string()),
+                &frames_b,
+                &interactive_changed,
+            )
+        );
+        assert_ne!(
+            key,
+            SnapshotCacheKey::new(
+                "session-other".to_string(),
+                Some("frame-a".to_string()),
+                &frames_b,
+                &SnapshotOptions {
+                    selector: Some("#main".to_string()),
+                    interactive: true,
+                    compact: true,
+                    depth: Some(4),
+                    urls: true,
+                },
+            )
+        );
+    }
+
+    #[test]
+    fn test_snapshot_events_invalidate_conservatively() {
+        for method in [
+            "Accessibility.nodesUpdated",
+            "Accessibility.loadComplete",
+            "DOM.documentUpdated",
+            "DOM.childNodeInserted",
+            "DOM.characterDataModified",
+            "Page.frameNavigated",
+            "Page.navigatedWithinDocument",
+            "Runtime.executionContextsCleared",
+            "CSS.styleSheetChanged",
+        ] {
+            assert!(
+                snapshot_event_invalidates_cache(method, &Value::Null),
+                "{method} must invalidate the snapshot cache"
+            );
+        }
+        assert!(!snapshot_event_invalidates_cache(
+            "Network.requestWillBeSent",
+            &Value::Null
+        ));
+    }
+
+    #[test]
+    fn test_snapshot_internal_marker_events_do_not_self_invalidate() {
+        assert!(!snapshot_event_invalidates_cache(
+            "DOM.attributeModified",
+            &json!({ "name": "data-__ab-ci" })
+        ));
+        assert!(!snapshot_event_invalidates_cache(
+            "DOM.attributeRemoved",
+            &json!({ "name": "data-__ab-ci" })
+        ));
+        assert!(snapshot_event_invalidates_cache(
+            "DOM.attributeModified",
+            &json!({ "name": "aria-label" })
+        ));
+    }
+
+    #[test]
+    fn test_snapshot_mutation_index_parses_document_and_revision() {
+        let parsed = parse_snapshot_mutation_index(&json!({
+            "result": {
+                "type": "object",
+                "value": { "documentId": "doc-7", "revision": 11 }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            parsed,
+            SnapshotMutationIndex {
+                document_id: "doc-7".to_string(),
+                revision: 11,
+            }
+        );
+        assert!(parse_snapshot_mutation_index(&json!({
+            "result": { "value": { "documentId": "", "revision": 11 } }
+        }))
+        .is_err());
+        assert!(parse_snapshot_mutation_index(&json!({
+            "result": { "value": { "documentId": "doc-7" } }
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn test_snapshot_mutation_index_observes_page_changes_but_not_private_markers() {
+        assert!(SNAPSHOT_MUTATION_INDEX_EXPRESSION.contains("new MutationObserver"));
+        assert!(SNAPSHOT_MUTATION_INDEX_EXPRESSION.contains("characterData: true"));
+        assert!(SNAPSHOT_MUTATION_INDEX_EXPRESSION.contains("childList: true"));
+        assert!(SNAPSHOT_MUTATION_INDEX_EXPRESSION.contains("attributes: true"));
+        assert!(SNAPSHOT_MUTATION_INDEX_EXPRESSION.contains("data-__ab-ci"));
+        assert!(SNAPSHOT_MUTATION_INDEX_EXPRESSION.contains("state.document !== document"));
+    }
+
+    #[test]
+    fn test_snapshot_observer_context_identity_includes_session_and_frame() {
+        let context = SnapshotObserverContext {
+            key: SnapshotObserverContextKey {
+                session_id: "session-main".to_string(),
+                active_frame_id: Some("frame-child".to_string()),
+            },
+            frame_id: "frame-child".to_string(),
+            execution_context_id: 17,
+        };
+        assert_eq!(context.key.session_id, "session-main");
+        assert_eq!(context.key.active_frame_id.as_deref(), Some("frame-child"));
+        assert_ne!(
+            context.key,
+            SnapshotObserverContextKey {
+                session_id: "session-oopif".to_string(),
+                active_frame_id: Some("frame-child".to_string()),
+            }
+        );
+        assert_ne!(
+            context.key,
+            SnapshotObserverContextKey {
+                session_id: "session-main".to_string(),
+                active_frame_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_snapshot_observer_context_recreation_events_match_exact_identity() {
+        let context = SnapshotObserverContext {
+            key: SnapshotObserverContextKey {
+                session_id: "session-main".to_string(),
+                active_frame_id: None,
+            },
+            frame_id: "frame-main".to_string(),
+            execution_context_id: 17,
+        };
+        assert!(snapshot_event_invalidates_observer_context(
+            "Runtime.executionContextDestroyed",
+            &json!({ "executionContextId": 17 }),
+            Some("session-main"),
+            Some(&context),
+        ));
+        assert!(!snapshot_event_invalidates_observer_context(
+            "Runtime.executionContextDestroyed",
+            &json!({ "executionContextId": 18 }),
+            Some("session-main"),
+            Some(&context),
+        ));
+        assert!(!snapshot_event_invalidates_observer_context(
+            "Runtime.executionContextDestroyed",
+            &json!({ "executionContextId": 17 }),
+            Some("session-other"),
+            Some(&context),
+        ));
+        assert!(snapshot_event_invalidates_observer_context(
+            "Page.frameNavigated",
+            &json!({ "frame": { "id": "frame-main" } }),
+            Some("session-main"),
+            Some(&context),
+        ));
+        assert!(!snapshot_event_invalidates_observer_context(
+            "Page.frameNavigated",
+            &json!({ "frame": { "id": "frame-child" } }),
+            Some("session-main"),
+            Some(&context),
+        ));
+        assert!(snapshot_event_invalidates_observer_context(
+            "Runtime.executionContextsCleared",
+            &Value::Null,
+            Some("session-main"),
+            Some(&context),
+        ));
+    }
+
+    #[test]
+    fn test_snapshot_mutating_actions_cover_navigation_frames_and_input() {
+        for action in [
+            "navigate",
+            "reload",
+            "tab_switch",
+            "frame",
+            "mainframe",
+            "evaluate",
+            "click",
+            "input_keyboard",
+            "addstyle",
+            "set_media",
+        ] {
+            assert!(
+                action_invalidates_snapshot_cache(action),
+                "{action} must invalidate cached snapshots"
+            );
+        }
+        for action in ["snapshot", "url", "title", "gettext", "tab_list"] {
+            assert!(
+                !action_invalidates_snapshot_cache(action),
+                "{action} should preserve an unchanged snapshot cache"
+            );
+        }
+        for action in ["navigate", "reload", "tab_switch", "close"] {
+            assert!(
+                action_invalidates_snapshot_observer_context(action),
+                "{action} must recreate the isolated observer context"
+            );
+        }
+        for action in ["snapshot", "url", "evaluate", "click", "setcontent"] {
+            assert!(
+                !action_invalidates_snapshot_observer_context(action),
+                "{action} must preserve the current document's observer context"
+            );
+        }
+    }
+
+    #[test]
+    fn test_snapshot_cache_invalidation_clears_refs_generation() {
+        let mut state = DaemonState::new();
+        let key = SnapshotCacheKey::new(
+            "session-main".to_string(),
+            None,
+            &HashMap::new(),
+            &SnapshotOptions::default(),
+        );
+        state.snapshot_cache = Some(CachedSnapshot {
+            key,
+            tree: "- button \"Go\" [ref=e1]".to_string(),
+            ref_map: RefMap::new(),
+            mutation_index: SnapshotMutationIndex {
+                document_id: "doc-1".to_string(),
+                revision: 0,
+            },
+        });
+        let epoch = state.snapshot_epoch;
+        state.invalidate_snapshot_cache();
+        assert!(state.snapshot_cache.is_none());
+        assert_eq!(state.snapshot_epoch, epoch.wrapping_add(1));
     }
 
     #[test]

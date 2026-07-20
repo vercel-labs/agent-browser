@@ -633,6 +633,242 @@ async fn e2e_snapshot_and_click_ref() {
     assert_success(&resp);
 }
 
+/// Repeated snapshots of an unchanged large document should avoid rebuilding
+/// the full AX tree. Page-driven churn must invalidate that fast path even
+/// when no agent-browser command caused the mutation.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_cache_large_dom_and_page_driven_churn() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let mut html = String::from("<!doctype html><main><h1>Large catalog</h1><ul>");
+    for index in 0..1_500 {
+        html.push_str(&format!(
+            "<li><h2>Product {index}</h2><p>Description {index}</p><button>Choose {index}</button></li>"
+        ));
+    }
+    html.push_str("</ul></main>");
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "setcontent", "html": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let client = state.browser.as_ref().unwrap().client.clone();
+    let poisoned = client
+        .send_command(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": "(() => { const originalFor = Symbol.for.bind(Symbol); const key = originalFor('agent-browser.snapshot-mutation-index'); globalThis[key] = { document, documentId: 'forged-main-world', revision: 0 }; Symbol.for = () => key; globalThis.MutationObserver = class { observe() {} }; Object.defineProperty = () => {}; return globalThis[key].documentId; })()",
+                "returnByValue": true
+            })),
+            Some(state.browser.as_ref().unwrap().active_session_id().unwrap()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        poisoned.pointer("/result/value").and_then(Value::as_str),
+        Some("forged-main-world"),
+        "the main world must be poisoned before installing the observer"
+    );
+
+    let before_first = client.command_count();
+    let first = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    let first_round_trips = client.command_count() - before_first;
+    assert_success(&first);
+    assert!(get_data(&first)["snapshot"]
+        .as_str()
+        .unwrap()
+        .contains("Product 1499"));
+
+    // The first repeat may conservatively consume setup events emitted by the
+    // initial Accessibility.enable/getFullAXTree. The next stable repeat must
+    // take the steady-state path.
+    let before_second = client.command_count();
+    let second = execute_command(&json!({ "id": "4", "action": "snapshot" }), &mut state).await;
+    let second_round_trips = client.command_count() - before_second;
+    assert_success(&second);
+    let before_third = client.command_count();
+    let third = execute_command(&json!({ "id": "5", "action": "snapshot" }), &mut state).await;
+    let third_round_trips = client.command_count() - before_third;
+    assert_success(&third);
+    let stable_observer_context = state
+        .snapshot_observer_context_identity()
+        .expect("snapshot must install its isolated observer world");
+
+    assert_eq!(get_data(&first)["snapshot"], get_data(&third)["snapshot"]);
+    assert_eq!(get_data(&first)["refs"], get_data(&third)["refs"]);
+    assert!(
+        third_round_trips <= 3,
+        "steady-state snapshot used {third_round_trips} CDP commands; expected liveness + barrier + URL only"
+    );
+    assert!(
+        first_round_trips >= third_round_trips + 2,
+        "fresh={first_round_trips}, second={second_round_trips}, cached={third_round_trips}"
+    );
+
+    // Disable the mutation-related CDP domains, then mutate from inside the
+    // page without going through execute_command. Cache correctness must come
+    // from the page-side mutation index, not best-effort DOM/AX events or only
+    // command classification.
+    let session_id = state
+        .browser
+        .as_ref()
+        .unwrap()
+        .active_session_id()
+        .unwrap()
+        .to_string();
+    client
+        .send_command_no_params("DOM.disable", Some(&session_id))
+        .await
+        .unwrap();
+    client
+        .send_command_no_params("Accessibility.disable", Some(&session_id))
+        .await
+        .unwrap();
+    let mutation = client
+        .send_command(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": "new Promise(resolve => setTimeout(() => { const heading = document.querySelector('h2'); heading.textContent = 'Product updated by timer'; resolve(heading.textContent); }, 25))",
+                "returnByValue": true,
+                "awaitPromise": true
+            })),
+            Some(&session_id),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        mutation.pointer("/result/value").and_then(Value::as_str),
+        Some("Product updated by timer"),
+        "the page-driven timer must complete before snapshotting"
+    );
+
+    let before_changed = client.command_count();
+    let changed = execute_command(&json!({ "id": "6", "action": "snapshot" }), &mut state).await;
+    let changed_round_trips = client.command_count() - before_changed;
+    assert_success(&changed);
+    assert!(get_data(&changed)["snapshot"]
+        .as_str()
+        .unwrap()
+        .contains("Product updated by timer"));
+    assert!(
+        changed_round_trips >= third_round_trips + 2,
+        "page churn must force a fresh AX capture: changed={changed_round_trips}, cached={third_round_trips}"
+    );
+    assert_eq!(
+        state.snapshot_observer_context_identity().as_ref(),
+        Some(&stable_observer_context),
+        "same-document captures must reuse the isolated execution context"
+    );
+
+    let navigated = execute_command(
+        &json!({
+            "id": "7",
+            "action": "navigate",
+            "url": "data:text/html,<main><h1>Replacement document</h1></main>"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&navigated);
+    assert!(
+        state.snapshot_observer_context_identity().is_none(),
+        "navigation must discard the previous document's execution context"
+    );
+    let replacement =
+        execute_command(&json!({ "id": "8", "action": "snapshot" }), &mut state).await;
+    assert_success(&replacement);
+    assert!(get_data(&replacement)["snapshot"]
+        .as_str()
+        .unwrap()
+        .contains("Replacement document"));
+    assert_ne!(
+        state.snapshot_observer_context_identity().as_ref(),
+        Some(&stable_observer_context),
+        "the replacement document must receive a new isolated execution context"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Snapshot caches are isolated by formatting options and frame selection.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_cache_options_and_frame_context_are_isolated() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({
+                "id": "2",
+                "action": "setcontent",
+                "html": "<main><h1>Main document</h1><p>Main body copy</p><button>Main action</button><iframe id='child' name='child' srcdoc='<h2>Child document</h2><button>Child action</button>'></iframe></main>"
+            }),
+            &mut state,
+        )
+        .await,
+    );
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let full = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&full);
+    assert!(get_data(&full)["snapshot"]
+        .as_str()
+        .unwrap()
+        .contains("Main document"));
+
+    let interactive = execute_command(
+        &json!({ "id": "4", "action": "snapshot", "interactive": true, "compact": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&interactive);
+    let interactive_text = get_data(&interactive)["snapshot"].as_str().unwrap();
+    assert!(interactive_text.contains("Main action"));
+    assert!(!interactive_text.contains("Main body copy"));
+
+    assert_success(
+        &execute_command(
+            &json!({ "id": "5", "action": "frame", "selector": "#child" }),
+            &mut state,
+        )
+        .await,
+    );
+    let child = execute_command(&json!({ "id": "6", "action": "snapshot" }), &mut state).await;
+    assert_success(&child);
+    let child_text = get_data(&child)["snapshot"].as_str().unwrap();
+    assert!(child_text.contains("Child document"));
+    assert!(!child_text.contains("Main document"));
+
+    assert_success(
+        &execute_command(&json!({ "id": "7", "action": "mainframe" }), &mut state).await,
+    );
+    let main_again = execute_command(&json!({ "id": "8", "action": "snapshot" }), &mut state).await;
+    assert_success(&main_again);
+    assert!(get_data(&main_again)["snapshot"]
+        .as_str()
+        .unwrap()
+        .contains("Main document"));
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
 // ---------------------------------------------------------------------------
 // Screenshot
 // ---------------------------------------------------------------------------
