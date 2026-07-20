@@ -753,6 +753,121 @@ async fn e2e_snapshot_after_action_without_baseline_returns_full_observation() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_after_action_discards_unusable_and_cross_context_baselines() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let html = r#"<!doctype html><html><body>
+        <button id="remove" onclick="this.remove()">Remove</button>
+        <button id="keep">Keep</button>
+    </body></html>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": url }),
+            &mut state,
+        )
+        .await,
+    );
+
+    // A failed explicit snapshot must discard the previous successful
+    // baseline rather than diffing a later action against hidden old state.
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let failed = execute_command(
+        &json!({ "id": "4", "action": "snapshot", "selector": "[" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(failed["success"], false, "invalid selector must fail");
+
+    let recovered = execute_command(
+        &json!({
+            "id": "5",
+            "action": "click",
+            "selector": "#keep",
+            "snapshotAfter": true
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&recovered);
+    assert_eq!(get_data(&recovered)["observation"]["mode"], "full");
+
+    // If the optional post-action capture fails after the action succeeded,
+    // preserve action success, report the observation error, and make the
+    // following observation start from a fresh full baseline.
+    assert_success(
+        &execute_command(
+            &json!({ "id": "6", "action": "snapshot", "selector": "#remove" }),
+            &mut state,
+        )
+        .await,
+    );
+    let removed = execute_command(
+        &json!({
+            "id": "7",
+            "action": "click",
+            "selector": "#remove",
+            "snapshotAfter": true
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&removed);
+    assert_eq!(get_data(&removed)["observation"]["mode"], "error");
+
+    let after_capture_error = execute_command(
+        &json!({
+            "id": "8",
+            "action": "click",
+            "selector": "#keep",
+            "snapshotAfter": true
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&after_capture_error);
+    assert_eq!(
+        get_data(&after_capture_error)["observation"]["mode"],
+        "full"
+    );
+
+    // Switching browsing contexts invalidates the old document baseline. The
+    // context-changing command itself can request the first full observation.
+    let new_tab = execute_command(
+        &json!({
+            "id": "9",
+            "action": "tab_new",
+            "url": "data:text/html,<button>Other tab</button>",
+            "snapshotAfter": true
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&new_tab);
+    assert_eq!(get_data(&new_tab)["observation"]["mode"], "full");
+    assert!(get_data(&new_tab)["observation"]["snapshot"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("Other tab"));
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
 // ---------------------------------------------------------------------------
 // Screenshot
 // ---------------------------------------------------------------------------

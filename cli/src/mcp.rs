@@ -1930,6 +1930,7 @@ fn supports_snapshot_after_tool(name: &str) -> bool {
     matches!(
         name,
         TOOL_OPEN
+            | TOOL_EVAL
             | TOOL_CLICK
             | TOOL_BACK
             | TOOL_FORWARD
@@ -1951,6 +1952,15 @@ fn supports_snapshot_after_tool(name: &str) -> bool {
             | TOOL_UPLOAD
             | TOOL_SCROLL
             | TOOL_SCROLL_INTO_VIEW
+            | TOOL_MOUSE_MOVE
+            | TOOL_MOUSE_DOWN
+            | TOOL_MOUSE_UP
+            | TOOL_MOUSE_WHEEL
+            | TOOL_SET_VIEWPORT
+            | TOOL_SET_DEVICE
+            | TOOL_SET_GEO
+            | TOOL_SET_OFFLINE
+            | TOOL_SET_MEDIA
             | TOOL_WAIT_MS
             | TOOL_WAIT_FOR_SELECTOR
             | TOOL_WAIT_FOR_TEXT
@@ -1959,6 +1969,13 @@ fn supports_snapshot_after_tool(name: &str) -> bool {
             | TOOL_WAIT_FOR_FUNCTION
             | TOOL_DIALOG_ACCEPT
             | TOOL_DIALOG_DISMISS
+            | TOOL_TAB_NEW
+            | TOOL_TAB_SWITCH
+            | TOOL_TAB_CLOSE
+            | TOOL_WINDOW_NEW
+            | TOOL_FRAME_SWITCH
+            | TOOL_FRAME_MAIN
+            | TOOL_CLIPBOARD_PASTE
             | TOOL_TAP
             | TOOL_SWIPE
             | TOOL_FIND
@@ -3828,19 +3845,28 @@ mod tests {
     #[test]
     fn mutating_tools_expose_snapshot_after_without_adding_it_to_snapshot() {
         let tools = tools();
-        let click = tools
-            .iter()
-            .find(|tool| tool["name"] == TOOL_CLICK)
-            .unwrap();
         let snapshot = tools
             .iter()
             .find(|tool| tool["name"] == TOOL_SNAPSHOT)
             .unwrap();
 
-        assert_eq!(
-            click["inputSchema"]["properties"]["snapshotAfter"]["type"],
-            "boolean"
-        );
+        for name in [
+            TOOL_CLICK,
+            TOOL_EVAL,
+            TOOL_MOUSE_WHEEL,
+            TOOL_SET_VIEWPORT,
+            TOOL_TAB_SWITCH,
+            TOOL_FRAME_SWITCH,
+        ] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("missing MCP tool {name}"));
+            assert_eq!(
+                tool["inputSchema"]["properties"]["snapshotAfter"]["type"], "boolean",
+                "{name} must expose the post-action observation option"
+            );
+        }
         assert!(snapshot["inputSchema"]["properties"]
             .get("snapshotAfter")
             .is_none());

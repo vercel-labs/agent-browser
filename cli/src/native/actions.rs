@@ -211,7 +211,6 @@ pub struct MouseState {
 /// Snapshot text and options used as the baseline for an opt-in post-action
 /// observation. Keeping this in daemon state lets separate CLI and MCP calls
 /// receive a lightweight diff instead of requesting another full snapshot.
-#[derive(Clone)]
 struct ObservationBaseline {
     snapshot: String,
     options: SnapshotOptions,
@@ -4602,7 +4601,7 @@ fn snapshot_command_from_options(options: &SnapshotOptions) -> Value {
 /// turn. If there is no baseline, the first observation contains the full
 /// compact interactive snapshot and becomes the baseline for the next action.
 async fn capture_post_action_observation(state: &mut DaemonState) -> Result<Value, String> {
-    let baseline = state.last_observation.clone();
+    let baseline = state.last_observation.take();
     let options = baseline
         .as_ref()
         .map(|baseline| baseline.options.clone())
@@ -4616,23 +4615,23 @@ async fn capture_post_action_observation(state: &mut DaemonState) -> Result<Valu
     // subtly different snapshot paths, this composes with stable-ref work in
     // upstream PR #1444 without copying or superseding that contribution.
     let snapshot_cmd = snapshot_command_from_options(&options);
-    let captured = handle_snapshot(&snapshot_cmd, state).await?;
-    let current = captured
-        .get("snapshot")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let origin = captured.get("origin").cloned().unwrap_or(Value::Null);
-    let refs = captured.get("refs").cloned().unwrap_or_else(|| json!({}));
+    let mut captured = handle_snapshot(&snapshot_cmd, state).await?;
+    let captured = captured
+        .as_object_mut()
+        .ok_or("Snapshot handler returned a non-object response")?;
+    let current = match captured.remove("snapshot") {
+        Some(Value::String(snapshot)) => snapshot,
+        _ => return Err("Snapshot handler returned no snapshot text".to_string()),
+    };
+    let origin = captured.remove("origin").unwrap_or(Value::Null);
+    let refs = match captured.remove("refs") {
+        Some(Value::Object(refs)) => Value::Object(refs),
+        _ => return Err("Snapshot handler returned no current ref map".to_string()),
+    };
 
-    state.last_observation = Some(ObservationBaseline {
-        snapshot: current.clone(),
-        options,
-    });
-
-    if let Some(baseline) = baseline {
+    let observation = if let Some(baseline) = baseline {
         let result = diff::diff_snapshots(&baseline.snapshot, &current);
-        Ok(json!({
+        json!({
             "mode": "diff",
             "origin": origin,
             "diff": result.diff,
@@ -4641,16 +4640,22 @@ async fn capture_post_action_observation(state: &mut DaemonState) -> Result<Valu
             "removals": result.removals,
             "unchanged": result.unchanged,
             "refs": refs,
-        }))
+        })
     } else {
-        Ok(json!({
+        json!({
             "mode": "full",
             "origin": origin,
-            "snapshot": current,
+            "snapshot": current.clone(),
             "changed": true,
             "refs": refs,
-        }))
-    }
+        })
+    };
+
+    state.last_observation = Some(ObservationBaseline {
+        snapshot: current,
+        options,
+    });
+    Ok(observation)
 }
 
 async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {

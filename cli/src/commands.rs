@@ -336,6 +336,7 @@ pub fn supports_snapshot_after_action(action: &str) -> bool {
     matches!(
         action,
         "navigate"
+            | "evaluate"
             | "back"
             | "forward"
             | "reload"
@@ -355,6 +356,10 @@ pub fn supports_snapshot_after_action(action: &str) -> bool {
             | "drag"
             | "upload"
             | "scroll"
+            | "wheel"
+            | "mousemove"
+            | "mousedown"
+            | "mouseup"
             | "scrollintoview"
             | "wait"
             | "waitforurl"
@@ -363,9 +368,25 @@ pub fn supports_snapshot_after_action(action: &str) -> bool {
             | "setcontent"
             | "setvalue"
             | "dispatch"
+            | "viewport"
+            | "device"
+            | "geolocation"
+            | "permissions"
+            | "emulatemedia"
+            | "offline"
+            | "pushstate"
+            | "addscript"
+            | "addstyle"
             | "tap"
             | "swipe"
             | "dialog"
+            | "tab_new"
+            | "tab_switch"
+            | "tab_close"
+            | "window_new"
+            | "frame"
+            | "mainframe"
+            | "clipboard"
             | "getbyrole"
             | "getbytext"
             | "getbylabel"
@@ -390,6 +411,7 @@ pub fn supports_snapshot_after_command(command: &Value) -> bool {
 
     match action {
         "dialog" => command.get("response").and_then(|value| value.as_str()) != Some("status"),
+        "clipboard" => command.get("operation").and_then(|value| value.as_str()) == Some("paste"),
         "getbyrole" | "getbytext" | "getbylabel" | "getbyplaceholder" | "getbyalttext"
         | "getbytitle" | "getbytestid" | "nth" => {
             command.get("subaction").and_then(|value| value.as_str()) != Some("text")
@@ -4988,6 +5010,12 @@ mod tests {
 
         let navigate = parse_command(&args("open example.com"), &flags).unwrap();
         assert_eq!(navigate["snapshotAfter"], true);
+
+        let evaluate = parse_command(&args("eval document.body.dataset.ready=1"), &flags).unwrap();
+        assert_eq!(evaluate["snapshotAfter"], true);
+
+        let tab = parse_command(&args("tab new"), &flags).unwrap();
+        assert_eq!(tab["snapshotAfter"], true);
     }
 
     #[test]
@@ -5006,6 +5034,12 @@ mod tests {
 
         let find_text = parse_command(&args("find role button text"), &flags).unwrap();
         assert!(find_text.get("snapshotAfter").is_none());
+
+        let clipboard_read = parse_command(&args("clipboard read"), &flags).unwrap();
+        assert!(clipboard_read.get("snapshotAfter").is_none());
+
+        let clipboard_paste = parse_command(&args("clipboard paste"), &flags).unwrap();
+        assert_eq!(clipboard_paste["snapshotAfter"], true);
     }
 
     #[test]
@@ -5025,11 +5059,16 @@ mod tests {
     fn test_snapshot_after_action_supported_action_contract() {
         for action in [
             "navigate",
+            "evaluate",
             "click",
             "fill",
             "select",
             "press",
             "wait",
+            "wheel",
+            "viewport",
+            "tab_switch",
+            "frame",
             "getbyrole",
         ] {
             assert!(supports_snapshot_after_action(action), "{action}");
@@ -5037,6 +5076,11 @@ mod tests {
         for action in ["snapshot", "title", "screenshot", "close", "launch"] {
             assert!(!supports_snapshot_after_action(action), "{action}");
         }
+
+        let clipboard_read = json!({ "action": "clipboard", "operation": "read" });
+        let clipboard_paste = json!({ "action": "clipboard", "operation": "paste" });
+        assert!(!supports_snapshot_after_command(&clipboard_read));
+        assert!(supports_snapshot_after_command(&clipboard_paste));
     }
 
     #[test]
