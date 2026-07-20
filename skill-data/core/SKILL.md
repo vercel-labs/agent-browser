@@ -236,6 +236,8 @@ agent-browser --session "$SESSION" --restore open https://app.example.com
 
 `--restore` with no value uses the current `--session` as the persistence key. Agent skills should prefer this over hand-built state file paths. Use `--restore-save auto` by default so a failed restore does not overwrite the previous known-good state. State is saved on close and also periodically while the browser is open (at most once per `AGENT_BROWSER_AUTOSAVE_INTERVAL_MS`, default 30000), so state survives even if the user closes the browser window by hand.
 
+Abandoned daemons shut down after four idle hours by default. A queued or running command holds an activity lease, so its execution time does not consume the idle window. Use `--idle-timeout <time>` to choose another window, or `--idle-timeout 0` only when the integration deliberately manages an indefinite daemon lifecycle.
+
 ```bash
 agent-browser --session "$SESSION" --restore --restore-check-text Dashboard open https://app.example.com
 agent-browser --session "$SESSION" session info --json

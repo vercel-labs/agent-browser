@@ -3,13 +3,14 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::signal;
-use tokio::sync::{mpsc, Notify, RwLock};
+use tokio::sync::{Notify, RwLock};
 
 use super::actions::{
     auto_save_restore_state, close_current_browser, execute_command, maybe_autosave_restore_state,
@@ -19,6 +20,145 @@ use super::cdp::client::CdpClient;
 use super::state;
 use super::stream::StreamServer;
 use crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION;
+
+/// Safety-net timeout for abandoned daemons. Four hours is long enough for
+/// interactive and CI pauses while still reclaiming sessions that outlive
+/// their caller. Set AGENT_BROWSER_IDLE_TIMEOUT_MS=0 to disable it.
+const DEFAULT_IDLE_TIMEOUT_MS: u64 = 4 * 60 * 60 * 1000;
+
+#[derive(Clone, Copy)]
+struct IdleActivitySnapshot {
+    active_leases: usize,
+    epoch: u64,
+    shutdown_claimed: bool,
+}
+
+struct IdleActivityState {
+    active_leases: usize,
+    epoch: u64,
+    shutdown_claimed: bool,
+}
+
+/// Coordinates command leases with the idle deadline. The mutex is held only
+/// for short, synchronous state transitions and is never held across an await.
+/// A generation check prevents an old deadline from closing a session after a
+/// command completed while the timeout branch was waiting for daemon state.
+struct IdleActivity {
+    state: Mutex<IdleActivityState>,
+    notify: Notify,
+}
+
+impl IdleActivity {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(IdleActivityState {
+                active_leases: 0,
+                epoch: 0,
+                shutdown_claimed: false,
+            }),
+            notify: Notify::new(),
+        }
+    }
+
+    fn snapshot(&self) -> IdleActivitySnapshot {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        IdleActivitySnapshot {
+            active_leases: state.active_leases,
+            epoch: state.epoch,
+            shutdown_claimed: state.shutdown_claimed,
+        }
+    }
+
+    /// Atomically claims shutdown only if no activity occurred since the
+    /// deadline was armed. Once claimed, late commands are rejected by
+    /// `CommandLease::acquire` and retry against the freshly spawned daemon.
+    fn try_claim_shutdown(&self, deadline_epoch: u64) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.shutdown_claimed || state.active_leases > 0 || state.epoch != deadline_epoch {
+            return false;
+        }
+        state.shutdown_claimed = true;
+        true
+    }
+}
+
+/// Keeps the idle timer paused for the complete lifetime of a command,
+/// including time spent queued behind another command and writing its reply.
+struct CommandLease {
+    activity: Option<Arc<IdleActivity>>,
+}
+
+impl CommandLease {
+    fn acquire(activity: Option<&Arc<IdleActivity>>) -> Option<Self> {
+        if let Some(activity) = activity {
+            let mut state = activity
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.shutdown_claimed {
+                return None;
+            }
+            state.active_leases = state
+                .active_leases
+                .checked_add(1)
+                .expect("idle command lease count overflow");
+            state.epoch = state.epoch.wrapping_add(1);
+            drop(state);
+            activity.notify.notify_one();
+        }
+        Some(Self {
+            activity: activity.cloned(),
+        })
+    }
+}
+
+impl Drop for CommandLease {
+    fn drop(&mut self) {
+        if let Some(ref activity) = self.activity {
+            let mut state = activity
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            debug_assert!(state.active_leases > 0);
+            state.active_leases -= 1;
+            state.epoch = state.epoch.wrapping_add(1);
+            drop(state);
+            activity.notify.notify_one();
+        }
+    }
+}
+
+type IdleSleep = Pin<Box<tokio::time::Sleep>>;
+
+fn reset_idle_deadline(
+    idle_timeout_ms: Option<u64>,
+    activity: Option<&Arc<IdleActivity>>,
+    idle_sleep: &mut Option<IdleSleep>,
+    deadline_epoch: &mut Option<u64>,
+) {
+    let (Some(timeout_ms), Some(activity)) = (idle_timeout_ms, activity) else {
+        *idle_sleep = None;
+        *deadline_epoch = None;
+        return;
+    };
+
+    let snapshot = activity.snapshot();
+    if snapshot.active_leases == 0 && !snapshot.shutdown_claimed {
+        *idle_sleep = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
+            timeout_ms,
+        ))));
+        *deadline_epoch = Some(snapshot.epoch);
+    } else {
+        *idle_sleep = None;
+        *deadline_epoch = None;
+    }
+}
 
 pub async fn run_daemon(session: &str) {
     let socket_dir = get_daemon_socket_dir();
@@ -116,12 +256,9 @@ pub async fn run_daemon(session: &str) {
         }
     }
 
-    // Auto-shutdown the daemon after this many ms of inactivity (no commands received).
-    // Disabled when unset or 0.
-    let idle_timeout_ms = env::var("AGENT_BROWSER_IDLE_TIMEOUT_MS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .filter(|&ms| ms > 0);
+    // Auto-shutdown abandoned daemons after four hours by default. Explicit 0
+    // preserves indefinitely-lived sessions for integrations that need them.
+    let idle_timeout_ms = idle_timeout_ms_from_env();
 
     let autosave_interval_ms = autosave_interval_ms_from_env();
 
@@ -165,6 +302,26 @@ fn autosave_interval_ms_from_env() -> u64 {
         .unwrap_or(30_000)
 }
 
+fn idle_timeout_ms_from_env() -> Option<u64> {
+    match env::var("AGENT_BROWSER_IDLE_TIMEOUT_MS") {
+        Ok(value) => match value.parse::<u64>() {
+            Ok(0) => None,
+            Ok(ms) => Some(ms),
+            Err(_) => Some(DEFAULT_IDLE_TIMEOUT_MS),
+        },
+        Err(_) => Some(DEFAULT_IDLE_TIMEOUT_MS),
+    }
+}
+
+/// Preserve restorable session state before releasing browser resources.
+/// Idle expiry and process signals share this path so the default timeout does
+/// not silently discard cookies or authentication state. A failed save does
+/// not prevent resource reclamation.
+pub(crate) async fn save_and_close_for_shutdown(state: &mut DaemonState) {
+    let _ = auto_save_restore_state(state).await;
+    let _ = close_current_browser(state).await;
+}
+
 #[cfg(unix)]
 async fn run_socket_server(
     socket_path: &PathBuf,
@@ -190,8 +347,7 @@ async fn run_socket_server(
         tokio::sync::Mutex::new(DaemonState::new_with_stream(stream_client, stream_server)),
     );
 
-    let (reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
-    let reset_tx = idle_timeout_ms.map(|_| Arc::new(reset_tx));
+    let idle_activity = idle_timeout_ms.map(|_| Arc::new(IdleActivity::new()));
 
     // Notifier used by handle_connection to signal the daemon loop to exit
     // after a "close" command, instead of calling process::exit() which skips
@@ -201,20 +357,47 @@ async fn run_socket_server(
     let mut drain_interval = tokio::time::interval(Duration::from_millis(100));
     drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    let idle_sleep = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
-    let mut idle_sleep_pin = idle_sleep.map(Box::pin);
+    let mut idle_sleep_pin = None;
+    let mut idle_deadline_epoch = None;
+    reset_idle_deadline(
+        idle_timeout_ms,
+        idle_activity.as_ref(),
+        &mut idle_sleep_pin,
+        &mut idle_deadline_epoch,
+    );
 
     loop {
         tokio::select! {
+            biased;
+            _ = async {
+                match idle_activity {
+                    Some(ref activity) => activity.notify.notified().await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if idle_timeout_ms.is_some() => {
+                reset_idle_deadline(
+                    idle_timeout_ms,
+                    idle_activity.as_ref(),
+                    &mut idle_sleep_pin,
+                    &mut idle_deadline_epoch,
+                );
+                continue;
+            }
             accept_result = listener.accept() => {
                 match accept_result {
                     Ok((stream, _)) => {
                         let state = state.clone();
-                        let reset_tx = reset_tx.clone();
+                        let idle_activity = idle_activity.clone();
                         let sf = stream_file.clone();
                         let cn = close_notify.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, reset_tx, sf, cn).await;
+                            handle_connection(
+                                stream,
+                                state,
+                                idle_activity,
+                                sf,
+                                cn,
+                            ).await;
                         });
                     }
                     Err(e) => {
@@ -249,15 +432,24 @@ async fn run_socket_server(
                     None => std::future::pending::<()>().await,
                 }
             }, if idle_timeout_ms.is_some() => {
+                let Some(deadline_epoch) = idle_deadline_epoch else {
+                    continue;
+                };
+                let Some(ref activity) = idle_activity else {
+                    continue;
+                };
+                if !activity.try_claim_shutdown(deadline_epoch) {
+                    reset_idle_deadline(
+                        idle_timeout_ms,
+                        idle_activity.as_ref(),
+                        &mut idle_sleep_pin,
+                        &mut idle_deadline_epoch,
+                    );
+                    continue;
+                }
                 let mut s = state.lock().await;
-                let _ = auto_save_restore_state(&mut s).await;
-                let _ = close_current_browser(&mut s).await;
+                save_and_close_for_shutdown(&mut s).await;
                 break;
-            }
-            _ = reset_rx.recv(), if idle_timeout_ms.is_some() => {
-                idle_sleep_pin = idle_timeout_ms
-                    .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
-                continue;
             }
             _ = close_notify.notified() => {
                 // "close" command was handled; browser already closed by
@@ -267,8 +459,7 @@ async fn run_socket_server(
             }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
-                let _ = auto_save_restore_state(&mut s).await;
-                let _ = close_current_browser(&mut s).await;
+                save_and_close_for_shutdown(&mut s).await;
                 break;
             }
         }
@@ -316,13 +507,18 @@ async fn run_socket_server(
         tokio::sync::Mutex::new(DaemonState::new_with_stream(stream_client, stream_server)),
     );
 
-    let (reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
-    let reset_tx = idle_timeout_ms.map(|_| Arc::new(reset_tx));
+    let idle_activity = idle_timeout_ms.map(|_| Arc::new(IdleActivity::new()));
 
     let close_notify = Arc::new(Notify::new());
 
-    let idle_sleep = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
-    let mut idle_sleep_pin = idle_sleep.map(Box::pin);
+    let mut idle_sleep_pin = None;
+    let mut idle_deadline_epoch = None;
+    reset_idle_deadline(
+        idle_timeout_ms,
+        idle_activity.as_ref(),
+        &mut idle_sleep_pin,
+        &mut idle_deadline_epoch,
+    );
 
     // Mirror the unix loop's background tick: reap a browser the user closed
     // by hand, and drain CDP events (dialog state in particular) before
@@ -332,15 +528,36 @@ async fn run_socket_server(
 
     loop {
         tokio::select! {
+            biased;
+            _ = async {
+                match idle_activity {
+                    Some(ref activity) => activity.notify.notified().await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if idle_timeout_ms.is_some() => {
+                reset_idle_deadline(
+                    idle_timeout_ms,
+                    idle_activity.as_ref(),
+                    &mut idle_sleep_pin,
+                    &mut idle_deadline_epoch,
+                );
+                continue;
+            }
             accept_result = listener.accept() => {
                 match accept_result {
                     Ok((stream, _)) => {
                         let state = state.clone();
-                        let reset_tx = reset_tx.clone();
+                        let idle_activity = idle_activity.clone();
                         let sf = stream_file.clone();
                         let cn = close_notify.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, reset_tx, sf, cn).await;
+                            handle_connection(
+                                stream,
+                                state,
+                                idle_activity,
+                                sf,
+                                cn,
+                            ).await;
                         });
                     }
                     Err(e) => {
@@ -368,16 +585,25 @@ async fn run_socket_server(
                     None => std::future::pending::<()>().await,
                 }
             }, if idle_timeout_ms.is_some() => {
+                let Some(deadline_epoch) = idle_deadline_epoch else {
+                    continue;
+                };
+                let Some(ref activity) = idle_activity else {
+                    continue;
+                };
+                if !activity.try_claim_shutdown(deadline_epoch) {
+                    reset_idle_deadline(
+                        idle_timeout_ms,
+                        idle_activity.as_ref(),
+                        &mut idle_sleep_pin,
+                        &mut idle_deadline_epoch,
+                    );
+                    continue;
+                }
                 let mut s = state.lock().await;
-                let _ = auto_save_restore_state(&mut s).await;
-                let _ = close_current_browser(&mut s).await;
+                save_and_close_for_shutdown(&mut s).await;
                 let _ = fs::remove_file(&port_path);
                 break;
-            }
-            _ = reset_rx.recv(), if idle_timeout_ms.is_some() => {
-                idle_sleep_pin = idle_timeout_ms
-                    .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
-                continue;
             }
             _ = close_notify.notified() => {
                 let _ = fs::remove_file(&port_path);
@@ -385,8 +611,7 @@ async fn run_socket_server(
             }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
-                let _ = auto_save_restore_state(&mut s).await;
-                let _ = close_current_browser(&mut s).await;
+                save_and_close_for_shutdown(&mut s).await;
                 let _ = fs::remove_file(&port_path);
                 break;
             }
@@ -399,7 +624,7 @@ async fn run_socket_server(
 async fn handle_connection<S>(
     stream: S,
     state: std::sync::Arc<tokio::sync::Mutex<DaemonState>>,
-    idle_reset_tx: Option<Arc<mpsc::Sender<()>>>,
+    idle_activity: Option<Arc<IdleActivity>>,
     stream_file_cleanup: Option<PathBuf>,
     close_notify: Arc<Notify>,
 ) where
@@ -437,9 +662,11 @@ async fn handle_connection<S>(
                     }
                 };
 
-                if let Some(ref tx) = idle_reset_tx {
-                    let _ = tx.try_send(());
-                }
+                let Some(command_lease) = CommandLease::acquire(idle_activity.as_ref()) else {
+                    // The idle deadline already claimed shutdown. Closing the
+                    // stream makes the client retry after cleanup completes.
+                    break;
+                };
 
                 let action = cmd
                     .get("action")
@@ -454,7 +681,9 @@ async fn handle_connection<S>(
 
                 let mut resp = serde_json::to_string(&response).unwrap_or_default();
                 resp.push('\n');
-                if writer.write_all(resp.as_bytes()).await.is_err() {
+                let write_failed = writer.write_all(resp.as_bytes()).await.is_err();
+                drop(command_lease);
+                if write_failed {
                     break;
                 }
 
@@ -569,6 +798,179 @@ fn get_port_for_session(session: &str) -> u16 {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+
+    #[test]
+    fn test_idle_timeout_defaults_to_four_hours_and_zero_disables() {
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_IDLE_TIMEOUT_MS"]);
+
+        guard.remove("AGENT_BROWSER_IDLE_TIMEOUT_MS");
+        assert_eq!(idle_timeout_ms_from_env(), Some(DEFAULT_IDLE_TIMEOUT_MS));
+
+        guard.set("AGENT_BROWSER_IDLE_TIMEOUT_MS", "0");
+        assert_eq!(idle_timeout_ms_from_env(), None);
+
+        guard.set("AGENT_BROWSER_IDLE_TIMEOUT_MS", "2500");
+        assert_eq!(idle_timeout_ms_from_env(), Some(2500));
+
+        // A malformed direct daemon environment must not silently disable the
+        // safety net. The CLI parser still reports invalid user input.
+        guard.set("AGENT_BROWSER_IDLE_TIMEOUT_MS", "invalid");
+        assert_eq!(idle_timeout_ms_from_env(), Some(DEFAULT_IDLE_TIMEOUT_MS));
+    }
+
+    #[tokio::test]
+    async fn test_command_lease_tracks_complete_command_lifetime() {
+        let activity = Arc::new(IdleActivity::new());
+
+        let lease = CommandLease::acquire(Some(&activity)).expect("lease should be acquired");
+        activity.notify.notified().await;
+        let active = activity.snapshot();
+        assert_eq!(active.active_leases, 1);
+        assert_eq!(active.epoch, 1);
+
+        drop(lease);
+        activity.notify.notified().await;
+        let completed = activity.snapshot();
+        assert_eq!(completed.active_leases, 0);
+        assert_eq!(completed.epoch, 2);
+    }
+
+    #[tokio::test]
+    async fn test_handle_connection_holds_lease_through_queue_and_response_write() {
+        use tokio::io::AsyncReadExt;
+
+        // A one-byte transport buffer lets the test observe the handler after
+        // response writing starts but before write_all can complete.
+        let (mut client, server) = tokio::io::duplex(1);
+        let state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
+        let queued_state_guard = state.lock().await;
+        let activity = Arc::new(IdleActivity::new());
+        let close_notify = Arc::new(Notify::new());
+
+        let handler = tokio::spawn(handle_connection(
+            server,
+            state.clone(),
+            Some(activity.clone()),
+            None,
+            close_notify,
+        ));
+
+        client
+            .write_all(b"{\"id\":\"lease-test\",\"action\":\"session_info\"}\n")
+            .await
+            .expect("command should reach the daemon");
+        tokio::time::timeout(Duration::from_secs(1), activity.notify.notified())
+            .await
+            .expect("command should acquire a lease");
+        assert_eq!(
+            activity.snapshot().active_leases,
+            1,
+            "a command queued on daemon state must remain active"
+        );
+
+        drop(queued_state_guard);
+
+        let mut first_response_byte = [0_u8; 1];
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            client.read_exact(&mut first_response_byte),
+        )
+        .await
+        .expect("handler should begin writing its response")
+        .expect("response byte should be readable");
+        assert_eq!(first_response_byte[0], b'{');
+        assert_eq!(
+            activity.snapshot().active_leases,
+            1,
+            "the lease must remain active while response delivery is blocked"
+        );
+
+        let mut response = first_response_byte.to_vec();
+        loop {
+            let byte = tokio::time::timeout(Duration::from_secs(1), client.read_u8())
+                .await
+                .expect("response write should make progress")
+                .expect("response should end with a newline");
+            response.push(byte);
+            if byte == b'\n' {
+                break;
+            }
+        }
+        let response: Value = serde_json::from_slice(&response).expect("valid JSON response");
+        assert_eq!(response["success"], true);
+
+        tokio::time::timeout(Duration::from_secs(1), activity.notify.notified())
+            .await
+            .expect("completed response should release the lease");
+        assert_eq!(activity.snapshot().active_leases, 0);
+
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(1), handler)
+            .await
+            .expect("handler should exit after EOF")
+            .expect("handler task should not panic");
+    }
+
+    #[test]
+    fn test_command_completion_invalidates_an_expired_idle_deadline() {
+        let activity = Arc::new(IdleActivity::new());
+        let expired_deadline_epoch = activity.snapshot().epoch;
+
+        // Model a deadline branch that expired, then waited for daemon state
+        // while a queued command acquired the state lock and completed.
+        let lease = CommandLease::acquire(Some(&activity)).expect("lease should be acquired");
+        drop(lease);
+        assert!(
+            !activity.try_claim_shutdown(expired_deadline_epoch),
+            "activity that completes while shutdown waits must invalidate the old deadline"
+        );
+
+        let refreshed_deadline_epoch = activity.snapshot().epoch;
+        assert_ne!(refreshed_deadline_epoch, expired_deadline_epoch);
+        assert!(activity.try_claim_shutdown(refreshed_deadline_epoch));
+        assert!(
+            CommandLease::acquire(Some(&activity)).is_none(),
+            "commands arriving after shutdown is claimed must retry on a new daemon"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_idle_deadline_starts_after_all_queued_commands_complete() {
+        let activity = Arc::new(IdleActivity::new());
+        let first = CommandLease::acquire(Some(&activity)).expect("first lease");
+        let second = CommandLease::acquire(Some(&activity)).expect("second lease");
+        let mut idle_sleep = None;
+        let mut deadline_epoch = None;
+
+        reset_idle_deadline(
+            Some(1_000),
+            Some(&activity),
+            &mut idle_sleep,
+            &mut deadline_epoch,
+        );
+        assert!(idle_sleep.is_none());
+        assert!(deadline_epoch.is_none());
+
+        drop(first);
+        reset_idle_deadline(
+            Some(1_000),
+            Some(&activity),
+            &mut idle_sleep,
+            &mut deadline_epoch,
+        );
+        assert!(idle_sleep.is_none());
+        assert!(deadline_epoch.is_none());
+
+        drop(second);
+        reset_idle_deadline(
+            Some(1_000),
+            Some(&activity),
+            &mut idle_sleep,
+            &mut deadline_epoch,
+        );
+        assert!(idle_sleep.is_some());
+        assert_eq!(deadline_epoch, Some(activity.snapshot().epoch));
+    }
 
     #[test]
     fn test_daemon_socket_dir_matches_client_namespace() {
@@ -700,44 +1102,68 @@ mod tests {
         }
     }
 
-    /// Regression test for #1101: idle timeout must fire even while the
-    /// drain interval ticks every 500 ms.  The bug was that `sleep_future`
-    /// was created **inside** the loop, so each drain tick dropped the
-    /// in-progress sleep and replaced it with a fresh one – the timer
-    /// could never reach its deadline.
+    /// Regression test for #1101 using the production idle activity and
+    /// deadline helpers. Maintenance ticks must not reset the deadline, while
+    /// completing a command must start a fresh full idle window.
     #[tokio::test]
     async fn test_idle_timeout_fires_despite_drain_interval() {
-        use tokio::sync::mpsc;
-
-        let idle_timeout_ms: u64 = 1000;
-        let mut drain_interval = tokio::time::interval(Duration::from_millis(500));
+        let idle_timeout_ms: u64 = 200;
+        let command_delay = Duration::from_millis(75);
+        let activity = Arc::new(IdleActivity::new());
+        let mut drain_interval = tokio::time::interval(Duration::from_millis(10));
         drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        let (_reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
-
         let start = tokio::time::Instant::now();
+        let mut command_sleep = Box::pin(tokio::time::sleep(command_delay));
+        let mut command_completed = false;
 
-        let exited = tokio::time::timeout(Duration::from_secs(5), async {
-            let mut idle_sleep_pin = Some(Box::pin(tokio::time::sleep(Duration::from_millis(
-                idle_timeout_ms,
-            ))));
+        let mut idle_sleep_pin = None;
+        let mut idle_deadline_epoch = None;
+        reset_idle_deadline(
+            Some(idle_timeout_ms),
+            Some(&activity),
+            &mut idle_sleep_pin,
+            &mut idle_deadline_epoch,
+        );
+        let mut drain_ticks = 0;
 
+        let exited = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 tokio::select! {
-                    _ = drain_interval.tick() => {}
+                    biased;
+                    _ = activity.notify.notified() => {
+                        reset_idle_deadline(
+                            Some(idle_timeout_ms),
+                            Some(&activity),
+                            &mut idle_sleep_pin,
+                            &mut idle_deadline_epoch,
+                        );
+                    }
+                    _ = command_sleep.as_mut(), if !command_completed => {
+                        let lease = CommandLease::acquire(Some(&activity))
+                            .expect("command should acquire a lease");
+                        drop(lease);
+                        command_completed = true;
+                    }
+                    _ = drain_interval.tick() => {
+                        drain_ticks += 1;
+                    }
                     _ = async {
                         match idle_sleep_pin {
                             Some(ref mut s) => s.as_mut().await,
                             None => std::future::pending::<()>().await,
                         }
                     } => {
-                        break;
-                    }
-                    _ = reset_rx.recv() => {
-                        idle_sleep_pin = Some(Box::pin(
-                            tokio::time::sleep(Duration::from_millis(idle_timeout_ms)),
-                        ));
-                        continue;
+                        let deadline_epoch = idle_deadline_epoch
+                            .expect("an armed deadline must have an epoch");
+                        if activity.try_claim_shutdown(deadline_epoch) {
+                            break;
+                        }
+                        reset_idle_deadline(
+                            Some(idle_timeout_ms),
+                            Some(&activity),
+                            &mut idle_sleep_pin,
+                            &mut idle_deadline_epoch,
+                        );
                     }
                 }
             }
@@ -748,11 +1174,21 @@ mod tests {
 
         assert!(
             exited.is_ok(),
-            "idle timeout never fired – loop ran for >5 s (bug #1101)"
+            "idle timeout never fired with periodic maintenance ticks"
+        );
+        assert!(
+            drain_ticks >= 10,
+            "maintenance ticks should run repeatedly without resetting the deadline"
+        );
+        assert!(command_completed, "test command should have completed");
+        assert!(
+            elapsed >= command_delay + Duration::from_millis(idle_timeout_ms - 25),
+            "command completion did not restart the full idle window: {:?}",
+            elapsed
         );
         assert!(
             elapsed < Duration::from_millis(idle_timeout_ms + 500),
-            "idle timeout took too long: {:?} (expected ~{} ms)",
+            "maintenance ticks appear to have delayed the idle timeout: {:?} (timeout {} ms)",
             elapsed,
             idle_timeout_ms,
         );

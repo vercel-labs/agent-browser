@@ -18,6 +18,7 @@ use crate::test_utils::EnvGuard;
 use super::actions::{
     close_current_browser, execute_command, maybe_autosave_restore_state, DaemonState,
 };
+use super::daemon::save_and_close_for_shutdown;
 
 fn assert_success(resp: &Value) {
     assert_eq!(
@@ -6205,6 +6206,113 @@ async fn e2e_restore_loads_during_explicit_launch_before_navigation() {
                 .iter()
                 .map(|c| c["name"].as_str().unwrap_or("?"))
                 .collect::<Vec<_>>()
+        );
+
+        let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+        assert_success(&resp);
+    }
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{}.previous", path));
+}
+
+/// Verify that daemon shutdown, including idle expiry, saves restorable state
+/// before closing the browser. This guards the data-loss concern raised while
+/// reviewing the original idle-timeout implementation in PR #722.
+#[tokio::test]
+#[ignore]
+async fn e2e_idle_shutdown_saves_restore_state_before_close() {
+    let restore_key = format!(
+        "e2e-idle-shutdown-{}",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
+    let env = EnvGuard::new(&[
+        "AGENT_BROWSER_SESSION_NAME",
+        "AGENT_BROWSER_RESTORE_SAVE",
+        "AGENT_BROWSER_STATE",
+        "AGENT_BROWSER_ENCRYPTION_KEY",
+    ]);
+    env.remove("AGENT_BROWSER_SESSION_NAME");
+    env.remove("AGENT_BROWSER_RESTORE_SAVE");
+    env.remove("AGENT_BROWSER_STATE");
+    env.remove("AGENT_BROWSER_ENCRYPTION_KEY");
+
+    {
+        let mut state = DaemonState::new();
+        let resp = execute_command(
+            &json!({
+                "id": "1",
+                "action": "launch",
+                "headless": true,
+                "restoreKey": restore_key
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({
+                "id": "3",
+                "action": "cookies_set",
+                "name": "idle_shutdown_test",
+                "value": "saved_before_close",
+                "domain": ".example.com",
+                "path": "/",
+                "expires": 2000000000
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        save_and_close_for_shutdown(&mut state).await;
+        assert!(state.browser.is_none(), "idle shutdown must close Chrome");
+        assert_eq!(state.restore_save_status, "saved");
+    }
+
+    let path = super::state::find_auto_state_file(&restore_key)
+        .expect("idle shutdown should write restorable session state");
+
+    {
+        let mut state = DaemonState::new();
+        let resp = execute_command(
+            &json!({
+                "id": "10",
+                "action": "launch",
+                "headless": true,
+                "restoreKey": restore_key
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["lifecycle"]["restoreStatus"], "loaded");
+
+        let resp = execute_command(
+            &json!({ "id": "11", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp =
+            execute_command(&json!({ "id": "12", "action": "cookies_get" }), &mut state).await;
+        assert_success(&resp);
+        let cookies = get_data(&resp)["cookies"].as_array().unwrap();
+        assert!(
+            cookies.iter().any(|cookie| {
+                cookie["name"] == "idle_shutdown_test" && cookie["value"] == "saved_before_close"
+            }),
+            "cookie should survive an idle shutdown: {:?}",
+            cookies
         );
 
         let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
