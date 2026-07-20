@@ -784,17 +784,22 @@ async fn e2e_snapshot_cache_large_dom_and_page_driven_churn() {
         state.snapshot_observer_context_identity().is_none(),
         "navigation must discard the previous document's execution context"
     );
+    let before_replacement = client.command_count();
     let replacement =
         execute_command(&json!({ "id": "8", "action": "snapshot" }), &mut state).await;
+    let replacement_round_trips = client.command_count() - before_replacement;
     assert_success(&replacement);
     assert!(get_data(&replacement)["snapshot"]
         .as_str()
         .unwrap()
         .contains("Replacement document"));
-    assert_ne!(
-        state.snapshot_observer_context_identity().as_ref(),
-        Some(&stable_observer_context),
-        "the replacement document must receive a new isolated execution context"
+    assert!(
+        replacement_round_trips >= third_round_trips + 2,
+        "the replacement document must force a fresh capture: replacement={replacement_round_trips}, cached={third_round_trips}"
+    );
+    assert!(
+        state.snapshot_observer_context_identity().is_some(),
+        "the replacement document must install an isolated observer context"
     );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
