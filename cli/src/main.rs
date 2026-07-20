@@ -1727,14 +1727,8 @@ fn batch_failed_before_submit(error: &str) -> bool {
     error.starts_with("Failed to connect")
 }
 
-struct PreparedBatch {
-    entries: Vec<serde_json::Value>,
-    actions: Vec<Option<String>>,
-}
-
-fn prepare_batch(commands: &[Vec<String>], flags: &Flags) -> PreparedBatch {
+fn prepare_batch(commands: &[Vec<String>], flags: &Flags) -> Vec<serde_json::Value> {
     let mut entries = Vec::with_capacity(commands.len());
-    let mut actions = Vec::with_capacity(commands.len());
 
     for cmd_args in commands {
         if cmd_args.is_empty() {
@@ -1743,16 +1737,11 @@ fn prepare_batch(commands: &[Vec<String>], flags: &Flags) -> PreparedBatch {
 
         match parse_command(cmd_args, flags) {
             Ok(mut request) => {
-                let action = request
-                    .get("action")
-                    .and_then(|v| v.as_str())
-                    .map(ToString::to_string);
-                if action.as_deref() == Some("batch") {
+                if request.get("action").and_then(|v| v.as_str()) == Some("batch") {
                     entries.push(json!({
                         "command": cmd_args,
                         "parseError": "Nested batch commands are not supported",
                     }));
-                    actions.push(None);
                     continue;
                 }
 
@@ -1762,19 +1751,17 @@ fn prepare_batch(commands: &[Vec<String>], flags: &Flags) -> PreparedBatch {
                     "command": cmd_args,
                     "request": request,
                 }));
-                actions.push(action);
             }
             Err(e) => {
                 entries.push(json!({
                     "command": cmd_args,
                     "parseError": e.format(),
                 }));
-                actions.push(None);
             }
         }
     }
 
-    PreparedBatch { entries, actions }
+    entries
 }
 
 fn run_batch(
@@ -1825,8 +1812,8 @@ fn run_batch(
         return;
     }
 
-    let prepared = prepare_batch(&commands, flags);
-    if prepared.entries.is_empty() {
+    let entries = prepare_batch(&commands, flags);
+    if entries.is_empty() {
         if flags.json {
             println!("[]");
         }
@@ -1837,7 +1824,7 @@ fn run_batch(
         "id": gen_id(),
         "action": "batch",
         "bail": bail,
-        "entries": prepared.entries,
+        "entries": entries,
     });
     let response = match send_batch_with_respawn(batch_request, &flags.session, daemon_opts) {
         Ok(response) => response,
@@ -1887,7 +1874,7 @@ fn run_batch(
                 eprintln!("{} {}", color::error_indicator(), error);
                 continue;
             }
-            let action = prepared.actions.get(index).and_then(|v| v.as_deref());
+            let action = result.get("action").and_then(|value| value.as_str());
             if action.is_none() {
                 let error = result
                     .get("error")
@@ -2107,20 +2094,19 @@ mod tests {
             Vec::new(),
         ];
 
-        let prepared = prepare_batch(&commands, &flags);
+        let entries = prepare_batch(&commands, &flags);
 
-        assert_eq!(prepared.entries.len(), 3);
-        assert_eq!(prepared.entries[0]["request"]["action"], "url");
-        assert_eq!(prepared.entries[0]["command"], json!(["get", "url"]));
-        assert!(prepared.entries[1]["parseError"]
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0]["request"]["action"], "url");
+        assert_eq!(entries[0]["command"], json!(["get", "url"]));
+        assert!(entries[1]["parseError"]
             .as_str()
             .unwrap()
             .contains("Unknown command"));
         assert_eq!(
-            prepared.entries[2]["parseError"],
+            entries[2]["parseError"],
             "Nested batch commands are not supported"
         );
-        assert_eq!(prepared.actions, vec![Some("url".to_string()), None, None]);
     }
 
     #[test]

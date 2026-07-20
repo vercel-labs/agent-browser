@@ -566,6 +566,7 @@ pub(crate) async fn execute_batch_command(cmd: &Value, state: &mut DaemonState) 
             .unwrap_or(false);
         let mut result = serde_json::json!({
             "command": command,
+            "action": child_action,
             "success": success,
             "result": response.get("data").cloned().unwrap_or(Value::Null),
             "error": response.get("error").cloned().unwrap_or(Value::Null),
@@ -668,13 +669,18 @@ fn close_completed_response(action: &str, response: &Value) -> bool {
         data.get("closed").and_then(|v| v.as_bool()) == Some(true)
     }
 
-    if response.get("success").and_then(|v| v.as_bool()) != Some(true) {
-        return false;
-    }
-
     let Some(data) = response.get("data") else {
         return false;
     };
+    // A batch can report earlier child errors and still complete a later
+    // `close`. The outer response is then unsuccessful, but the daemon must
+    // honor the successful close instead of lingering without a browser.
+    if action == "batch" && data_closed(data) {
+        return true;
+    }
+    if response.get("success").and_then(|v| v.as_bool()) != Some(true) {
+        return false;
+    }
     if data_closed(data) {
         return true;
     }
@@ -962,6 +968,7 @@ mod tests {
                 "id": "batch-close",
                 "action": "batch",
                 "entries": [
+                    { "command": ["bad"], "parseError": "earlier error" },
                     {
                         "command": ["close"],
                         "request": { "id": "close", "action": "close" }
@@ -973,7 +980,8 @@ mod tests {
         )
         .await;
 
-        assert_eq!(response["data"]["results"].as_array().unwrap().len(), 1);
+        assert_eq!(response["data"]["results"].as_array().unwrap().len(), 2);
+        assert_eq!(response["success"], false);
         assert_eq!(response["data"]["stopReason"], "close");
         assert_eq!(response["data"]["closed"], true);
         assert_eq!(response["data"]["finalDrainAttempted"], false);
