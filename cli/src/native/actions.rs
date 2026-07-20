@@ -8357,23 +8357,41 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
         .unwrap_or_default();
 
     let values_json = serde_json::to_string(&values).unwrap_or("[]".to_string());
+    // A locator miss returns a sentinel object rather than throwing, so the miss
+    // is detected structurally in Rust and normalized to the anchored
+    // "No element found: ..." shape the find path emits. Throwing would surface as
+    // "Evaluation error: ...", which is_locator_miss does not classify (no
+    // canonical prefix), so the miss would reach the caller raw. Detecting via a
+    // sentinel (not a substring of the thrown text) also avoids misclassifying an
+    // invalid-selector SyntaxError, whose message echoes the user's selector.
     let js = format!(
         r#"(() => {{
             const select = document.querySelector({sel});
-            if (!select) throw new Error('Select element not found');
+            if (!select) return {{ __ab_miss: true }};
             const vals = {vals};
             for (const opt of select.options) {{
                 opt.selected = vals.includes(opt.value);
             }}
             select.dispatchEvent(new Event('change', {{ bubbles: true }}));
-            return Array.from(select.selectedOptions).map(o => o.value);
+            return {{ selected: Array.from(select.selectedOptions).map(o => o.value) }};
         }})()"#,
         sel = serde_json::to_string(selector).unwrap_or_default(),
         vals = values_json,
     );
 
     let result = mgr.evaluate(&js, None).await?;
-    Ok(json!({ "selected": result }))
+    if result
+        .get("__ab_miss")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Err(format!("No element found: {selector}"));
+    }
+    let selected = result
+        .get("selected")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    Ok(json!({ "selected": selected }))
 }
 
 async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
