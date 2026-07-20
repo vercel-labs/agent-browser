@@ -967,6 +967,12 @@ pub async fn auto_connect_cdp() -> Result<String, String> {
         }
     }
 
+    // WSL fallback: when running in WSL without a display, try to
+    // connect to a Windows-hosted Chrome/Edge via CDP, or launch one.
+    if let Ok(ws_url) = super::wsl::wsl_auto_connect_cdp().await {
+        return Ok(ws_url);
+    }
+
     Err("No running Chrome instance found. Launch Chrome with --remote-debugging-port or use --cdp.".to_string())
 }
 
