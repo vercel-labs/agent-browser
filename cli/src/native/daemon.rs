@@ -369,7 +369,6 @@ async fn run_socket_server(
 
     loop {
         tokio::select! {
-            biased;
             _ = async {
                 match idle_activity {
                     Some(ref activity) => activity.notify.notified().await,
@@ -529,7 +528,6 @@ async fn run_socket_server(
 
     loop {
         tokio::select! {
-            biased;
             _ = async {
                 match idle_activity {
                     Some(ref activity) => activity.notify.notified().await,
@@ -1128,7 +1126,6 @@ mod tests {
         let exited = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 tokio::select! {
-                    biased;
                     _ = activity.notify.notified() => {
                         reset_idle_deadline(
                             Some(idle_timeout_ms),
