@@ -1975,6 +1975,7 @@ fn supports_snapshot_after_tool(name: &str) -> bool {
             | TOOL_WINDOW_NEW
             | TOOL_FRAME_SWITCH
             | TOOL_FRAME_MAIN
+            | TOOL_PUSHSTATE
             | TOOL_CLIPBOARD_PASTE
             | TOOL_TAP
             | TOOL_SWIPE
@@ -3857,6 +3858,7 @@ mod tests {
             TOOL_SET_VIEWPORT,
             TOOL_TAB_SWITCH,
             TOOL_FRAME_SWITCH,
+            TOOL_PUSHSTATE,
         ] {
             let tool = tools
                 .iter()
