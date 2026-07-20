@@ -2415,25 +2415,6 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         validate_restore_if_pending(state).await;
     }
 
-    // An explicit snapshot establishes the baseline for a later opt-in
-    // post-action diff, even when the next command arrives through a separate
-    // CLI process or MCP tool call.
-    if action == "snapshot" {
-        state.last_observation = match &result {
-            Ok(data) => data
-                .get("snapshot")
-                .and_then(|v| v.as_str())
-                .map(|snapshot| ObservationBaseline {
-                    snapshot: snapshot.to_string(),
-                    options: snapshot_options_from_command(cmd),
-                }),
-            // A failed explicit snapshot may have raced a context change. Do
-            // not retain an older baseline that the caller could mistake for
-            // the attempted observation.
-            Err(_) => None,
-        };
-    }
-
     // A baseline is scoped to the active browsing context. Do not diff a
     // later action against a snapshot from a different tab, window, or frame.
     if result.is_ok()
@@ -2477,10 +2458,17 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         );
     }
 
-    // The caller never received this explicit snapshot if final event
-    // processing failed, so it cannot be a valid baseline for a later diff.
-    if action == "snapshot" && resp.get("success").and_then(|value| value.as_bool()) != Some(true) {
-        state.last_observation = None;
+    // Only a snapshot returned successfully after final event processing can
+    // establish a baseline for a later opt-in diff.
+    if action == "snapshot" {
+        state.last_observation = resp
+            .get("data")
+            .and_then(|data| data.get("snapshot"))
+            .and_then(|value| value.as_str())
+            .map(|snapshot| ObservationBaseline {
+                snapshot: snapshot.to_string(),
+                options: snapshot_options_from_command(cmd),
+            });
     }
 
     // Capture only after the action's CDP events have been applied. This
