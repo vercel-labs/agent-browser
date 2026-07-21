@@ -198,6 +198,8 @@ agent-browser network har start --content none # Sizes and headers only
 agent-browser network har stop [output.har]    # Stop and save HAR
 ```
 
+If HAR export fails, the recording and captured requests remain available. Correct the destination and run `network har stop` again rather than repeating the browser flow.
+
 ## Tabs and Windows
 
 ```bash
