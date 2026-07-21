@@ -1374,7 +1374,9 @@ impl BrowserManager {
             .ensure_renderer_alive(&session_id, &target_id, dialog_session)
             .await
         {
-            self.enable_domains(&session_id).await?;
+            // Best-effort: enabling domains on the successor must not turn the
+            // completed close into a reported failure either.
+            let _ = self.enable_domains(&session_id).await;
             // Surface a reload of the newly active tab, mirroring tab switch.
             if matches!(state, RendererState::Revived) {
                 result["activeTabRevived"] = json!(true);
