@@ -2950,7 +2950,25 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         Some("har") => {
             const HAR_VALID: &[&str] = &["start", "stop"];
             match rest.get(1).copied() {
-                Some("start") => Ok(json!({ "id": id, "action": "har_start" })),
+                Some("start") => {
+                    let mut cmd = json!({ "id": id, "action": "har_start" });
+                    if let Some(content_idx) = rest.iter().position(|&s| s == "--content") {
+                        let mode = rest.get(content_idx + 1).ok_or_else(|| {
+                            ParseError::MissingArguments {
+                                context: "network har start --content".to_string(),
+                                usage: "network har start [--content <all|text|none>]",
+                            }
+                        })?;
+                        if !["all", "text", "none"].contains(mode) {
+                            return Err(ParseError::InvalidValue {
+                                message: format!("Invalid --content mode '{}'", mode),
+                                usage: "network har start [--content <all|text|none>]",
+                            });
+                        }
+                        cmd["content"] = json!(mode);
+                    }
+                    Ok(cmd)
+                }
                 Some("stop") => {
                     let mut cmd = json!({ "id": id, "action": "har_stop" });
                     if let Some(path) = rest.get(2) {
@@ -3088,6 +3106,8 @@ mod tests {
             ignore_https_errors: false,
             allow_file_access: false,
             hide_scrollbars: true,
+            webgpu: false,
+            no_xvfb: false,
             device: None,
             auto_connect: false,
             session_name: None,
@@ -3113,6 +3133,7 @@ mod tests {
             cli_annotate: false,
             cli_download_path: false,
             cli_headed: false,
+            cli_webgpu: false,
             cli_restore: false,
             annotate: false,
             color_scheme: None,
@@ -4063,6 +4084,27 @@ mod tests {
     fn test_network_har_start() {
         let cmd = parse_command(&args("network har start"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "har_start");
+        assert!(cmd.get("content").is_none());
+    }
+
+    #[test]
+    fn test_network_har_start_with_content_mode() {
+        let cmd =
+            parse_command(&args("network har start --content all"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "har_start");
+        assert_eq!(cmd["content"], "all");
+    }
+
+    #[test]
+    fn test_network_har_start_rejects_invalid_content_mode() {
+        let result = parse_command(&args("network har start --content huge"), &default_flags());
+        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn test_network_har_start_content_requires_value() {
+        let result = parse_command(&args("network har start --content"), &default_flags());
+        assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
     }
 
     #[test]

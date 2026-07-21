@@ -210,7 +210,9 @@ agent-browser network requests --type xhr,fetch  # Filter by resource type
 agent-browser network requests --method POST   # Filter by HTTP method
 agent-browser network requests --status 2xx    # Filter by status (200, 2xx, 400-499)
 agent-browser network request <requestId>      # View full request/response detail
-agent-browser network har start                # Start HAR recording
+agent-browser network har start                # Start HAR recording (embeds text response bodies)
+agent-browser network har start --content all  # Embed all response bodies (binary as base64)
+agent-browser network har start --content none # Metadata only, no bodies
 agent-browser network har stop [output.har]    # Stop and save HAR (temp path if omitted)
 ```
 
@@ -445,6 +447,7 @@ Diagnose your install, auto-clean stale daemon files, and optionally repair comm
 agent-browser doctor                     # Full diagnosis (env, Chrome, daemons, config, providers, network, launch test)
 agent-browser doctor --offline --quick   # Local-only, fastest
 agent-browser doctor --fix               # Also run destructive repairs (reinstall Chrome, purge old state, ...)
+agent-browser doctor --webgpu            # Also run a live WebGPU render probe (see the WebGPU page)
 agent-browser doctor --json              # Structured JSON output for agents
 ```
 
@@ -552,13 +555,14 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime 
 --screenshot-quality <n>  # JPEG quality 0-100 (or AGENT_BROWSER_SCREENSHOT_QUALITY)
 --screenshot-format <fmt> # Format: png (default), jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)
 --headed                 # Show browser window (not headless)
+--webgpu                 # Enable WebGPU (software Vulkan on Linux, no GPU needed)
 --cdp <port|url>         # Connect via Chrome DevTools Protocol (port or WebSocket URL)
 --auto-connect           # Auto-discover and connect to running Chrome
 --color-scheme <scheme>  # Color scheme: dark, light, no-preference
 --download-path <path>   # Default download directory
 --content-boundaries     # Wrap page output in boundary markers for LLM safety
 --max-output <chars>     # Truncate page output to N characters
---allowed-domains <list> # Comma-separated allowed domain patterns
+--allowed-domains <list> # Allowed domains; rejects restore/state replay, profile/session startup args, and direct-page providers
 --action-policy <path>   # Path to action policy JSON file
 --confirm-actions <list> # Action categories requiring confirmation
 --confirm-interactive    # Interactive confirmation prompts (auto-denies if stdin is not a TTY)
@@ -657,7 +661,7 @@ Common tools include:
 - `agent_browser_eval`
 - `agent_browser_close`
 
-Each tool has typed fields such as `url`, `selector`, `text`, `key`, and `session`, so MCP clients show meaningful approval prompts instead of raw command arrays. Each tool also accepts `extraArgs` for advanced CLI flags and exact CLI parity. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.
+Each tool has typed fields such as `url`, `selector`, `text`, `key`, `session`, and `allowedDomains`, so MCP clients show meaningful approval prompts instead of raw command arrays. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. Each tool also accepts `extraArgs` for advanced CLI flags and exact CLI parity. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.
 
 Tool invocations use the same config files and environment variables as the CLI. Use `session` in the tool arguments, or set `AGENT_BROWSER_SESSION`, to isolate browser state.
 

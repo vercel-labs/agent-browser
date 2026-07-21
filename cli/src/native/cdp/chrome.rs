@@ -12,6 +12,10 @@ pub struct ChromeProcess {
     /// On Unix, the process group ID used to kill the entire Chrome process tree.
     #[cfg(unix)]
     pgid: Option<i32>,
+    /// Private Xvfb server auto-started for headed mode on displayless Linux
+    /// hosts. Dropped (and killed) after the Chrome tree is torn down.
+    #[cfg(target_os = "linux")]
+    xvfb: Option<XvfbServer>,
 }
 
 impl ChromeProcess {
@@ -86,6 +90,205 @@ impl Drop for ChromeProcess {
     }
 }
 
+/// A private Xvfb virtual display owned by one Chrome process.
+///
+/// Headed Chrome on Linux needs an X display, and some workloads need headed
+/// mode on hosts that have none: headless Chrome cannot composite WebGPU
+/// canvas presentation into screenshots (upstream limitation), so WebGPU
+/// capture requires a real or virtual display. When headed mode is requested,
+/// no DISPLAY is set, and Xvfb is installed, launch spawns a private server
+/// instead of failing. Opt out with AGENT_BROWSER_NO_XVFB=1.
+///
+/// The server requires MIT-MAGIC-COOKIE-1 authentication (`-auth`): without
+/// authorization records an X server allows any local user to connect, which
+/// on a shared host would let other accounts observe the browser and inject
+/// input. Only the paired Chrome process receives the cookie via XAUTHORITY.
+#[cfg(target_os = "linux")]
+struct XvfbServer {
+    child: Child,
+    display: String,
+    auth_file: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for XvfbServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.auth_file);
+    }
+}
+
+/// Write an .Xauthority file containing one FamilyWild MIT-MAGIC-COOKIE-1
+/// record with a random cookie, created 0600.
+///
+/// FamilyWild (0xffff, empty address and display number) matches any display,
+/// which sidesteps a chicken-and-egg with `-displayfd`: the display number is
+/// only known after the server starts, but the auth file must exist before.
+/// The server side is unaffected -- X servers compare only the cookie bytes
+/// for MIT-MAGIC-COOKIE-1 -- and client libraries (libXau/libxcb) accept
+/// FamilyWild entries for any display.
+#[cfg(target_os = "linux")]
+fn write_xauth_file(path: &Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // Uuid v4 carries 122 random bits in 16 bytes.
+    let cookie = uuid::Uuid::new_v4();
+    let name = b"MIT-MAGIC-COOKIE-1";
+
+    // .Xauthority records are sequences of big-endian u16-length-prefixed
+    // fields: family, address, display number, auth name, auth data.
+    let mut buf: Vec<u8> = Vec::with_capacity(10 + name.len() + 16);
+    buf.extend_from_slice(&0xffffu16.to_be_bytes()); // FamilyWild
+    buf.extend_from_slice(&0u16.to_be_bytes()); // address: empty
+    buf.extend_from_slice(&0u16.to_be_bytes()); // display number: empty
+    buf.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    buf.extend_from_slice(name);
+    buf.extend_from_slice(&16u16.to_be_bytes());
+    buf.extend_from_slice(cookie.as_bytes());
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(&buf)
+}
+
+#[cfg(target_os = "linux")]
+/// True when the launch will effectively run headed and therefore needs a
+/// display. This must track `build_chrome_args`: extensions suppress
+/// `--headless=new` (content scripts are not injected headless), so a
+/// nominally headless launch with extensions is headed in practice.
+fn xvfb_applicable(options: &LaunchOptions) -> bool {
+    let has_extensions = options
+        .extensions
+        .as_ref()
+        .is_some_and(|exts| !exts.is_empty());
+    !options.headless || has_extensions
+}
+
+#[cfg(target_os = "linux")]
+fn maybe_start_xvfb(options: &LaunchOptions) -> Option<XvfbServer> {
+    if !xvfb_applicable(options) {
+        return None;
+    }
+    if std::env::var("DISPLAY")
+        .map(|d| !d.is_empty())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    if options.no_xvfb {
+        return None;
+    }
+
+    let (w, h) = options.viewport_size.unwrap_or((1280, 720));
+
+    // Private MIT-MAGIC-COOKIE-1 authority file; passed to the server via
+    // -auth and to the paired Chrome via XAUTHORITY. Removed on Drop.
+    let auth_file =
+        std::env::temp_dir().join(format!("agent-browser-xauth-{}", uuid::Uuid::new_v4()));
+    if write_xauth_file(&auth_file).is_err() {
+        return None;
+    }
+    let cleanup_auth = |path: &Path| {
+        let _ = std::fs::remove_file(path);
+    };
+
+    // Let Xvfb allocate the display itself with -displayfd: the server binds
+    // the first free display atomically and writes its number to the given
+    // fd. Probing /tmp/.X11-unix for free numbers is racy -- two concurrent
+    // sessions could adopt the same display, and closing one would kill the
+    // display under the other session's Chrome.
+    use std::io::Read;
+    use std::os::unix::io::FromRawFd;
+
+    let mut fds = [0i32; 2];
+    // SAFETY: plain pipe(2); both ends are wrapped in File below so they are
+    // closed on every path out of this function.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        cleanup_auth(&auth_file);
+        return None;
+    }
+    // SAFETY: fds are fresh from pipe(2) and owned exclusively here.
+    let mut read_end = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+    let write_end = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+
+    let mut child = match Command::new("Xvfb")
+        .args([
+            "-displayfd",
+            &fds[1].to_string(),
+            "-screen",
+            "0",
+            &format!("{}x{}x24", w, h),
+            "-nolisten",
+            "tcp",
+            "-auth",
+            &auth_file.display().to_string(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        // Xvfb not installed (or not executable): headed launch proceeds
+        // without a display and surfaces Chrome's own error.
+        Err(_) => {
+            cleanup_auth(&auth_file);
+            return None;
+        }
+    };
+    // Drop the parent's copy of the write end so the read below sees EOF as
+    // soon as Xvfb exits without reporting a display.
+    drop(write_end);
+
+    // SAFETY: read_end owns fds[0]; make it non-blocking so a wedged Xvfb
+    // cannot stall the launch past the deadline.
+    unsafe {
+        let flags = libc::fcntl(fds[0], libc::F_GETFL);
+        libc::fcntl(fds[0], libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        let mut chunk = [0u8; 16];
+        match read_end.read(&mut chunk) {
+            // EOF: Xvfb exited without binding a display.
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                    match String::from_utf8_lossy(&buf[..pos]).trim().parse::<u32>() {
+                        Ok(num) => {
+                            return Some(XvfbServer {
+                                child,
+                                display: format!(":{}", num),
+                                auth_file,
+                            });
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    cleanup_auth(&auth_file);
+    None
+}
+
 #[derive(Clone)]
 pub struct LaunchOptions {
     pub headless: bool,
@@ -113,6 +316,19 @@ pub struct LaunchOptions {
     /// Chrome uses the real system keychain. Set automatically when launching
     /// with a copied Chrome profile.
     pub use_real_keychain: bool,
+    /// Enable WebGPU in environments where Chrome does not expose it by
+    /// default (headless, GPU-less containers, blocklisted GPUs). On Linux
+    /// this routes WebGPU through SwiftShader's software Vulkan with software
+    /// compositing so it works without a GPU or display.
+    pub webgpu: bool,
+    /// Disable automatic Xvfb for headed launches on displayless Linux
+    /// hosts (AGENT_BROWSER_NO_XVFB). Carried as a launch option so the
+    /// CLI's current environment wins over the env a long-lived daemon was
+    /// spawned with.
+    pub no_xvfb: bool,
+    /// Restrict WebRTC to proxied transports so direct UDP cannot bypass the
+    /// HTTP domain filter. Enabled automatically with `--allowed-domains`.
+    pub restrict_webrtc: bool,
 }
 
 impl Default for LaunchOptions {
@@ -136,6 +352,9 @@ impl Default for LaunchOptions {
             hide_scrollbars: true,
             viewport_size: None,
             use_real_keychain: false,
+            webgpu: false,
+            no_xvfb: false,
+            restrict_webrtc: false,
         }
     }
 }
@@ -147,6 +366,34 @@ struct ChromeArgs {
 }
 
 fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
+    // Chrome only honors the last --enable-features switch on the command
+    // line, so every feature must be collected into a single flag.
+    let mut enable_features: Vec<String> = vec![
+        "NetworkService".to_string(),
+        "NetworkServiceInProcess".to_string(),
+    ];
+    if options.webgpu && cfg!(target_os = "linux") {
+        enable_features.push("Vulkan".to_string());
+    }
+
+    // User-supplied --enable-features values are merged into that single
+    // flag too: appending them as a second switch would silently clobber
+    // the preset's features (e.g. drop the WebGPU preset's Vulkan). To turn
+    // a preset feature off, pass --disable-features=<name>, which Chrome
+    // resolves as disabled.
+    let mut user_args: Vec<String> = Vec::new();
+    for arg in &options.args {
+        if let Some(values) = arg.strip_prefix("--enable-features=") {
+            for feature in values.split(',').map(str::trim).filter(|f| !f.is_empty()) {
+                if !enable_features.iter().any(|f| f == feature) {
+                    enable_features.push(feature.to_string());
+                }
+            }
+        } else {
+            user_args.push(arg.clone());
+        }
+    }
+
     let mut args = vec![
         "--remote-debugging-port=0".to_string(),
         "--no-first-run".to_string(),
@@ -160,9 +407,26 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "--disable-prompt-on-repost".to_string(),
         "--disable-sync".to_string(),
         "--disable-features=Translate".to_string(),
-        "--enable-features=NetworkService,NetworkServiceInProcess".to_string(),
+        format!("--enable-features={}", enable_features.join(",")),
         "--metrics-recording-only".to_string(),
     ];
+
+    if options.webgpu {
+        // WebGPU is not exposed in headless or GPU-blocklisted environments
+        // unless explicitly enabled.
+        args.push("--enable-unsafe-webgpu".to_string());
+        if cfg!(target_os = "linux") {
+            // Route WebGPU through SwiftShader's software Vulkan and disable
+            // Vulkan surface presentation (software compositing). This
+            // combination produces real pixels in GPU-less containers and CI;
+            // hardware-Vulkan users can override via --args (later switches
+            // win). macOS and Windows use the hardware Metal/D3D backends.
+            args.push("--use-angle=vulkan".to_string());
+            args.push("--use-vulkan=swiftshader".to_string());
+            args.push("--use-webgpu-adapter=swiftshader".to_string());
+            args.push("--disable-vulkan-surface".to_string());
+        }
+    }
 
     if !options.use_real_keychain {
         args.push("--password-store=basic".to_string());
@@ -241,7 +505,16 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push(format!("--window-size={},{}", w, h));
     }
 
-    args.extend(options.args.iter().cloned());
+    args.extend(user_args);
+
+    if options.restrict_webrtc {
+        // Append this after user and plugin arguments so an unsafe custom
+        // policy cannot override the containment setting. JavaScript-level
+        // RTCPeerConnection blocking is the primary control; this prevents
+        // direct UDP traffic if page code obtains a native constructor.
+        args.retain(|arg| !arg.starts_with("--force-webrtc-ip-handling-policy="));
+        args.push("--force-webrtc-ip-handling-policy=disable_non_proxied_udp".to_string());
+    }
 
     if should_disable_sandbox(&args) {
         args.push("--no-sandbox".to_string());
@@ -358,11 +631,22 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         }
     };
 
+    #[cfg(target_os = "linux")]
+    let xvfb = maybe_start_xvfb(options);
+
     let mut cmd = Command::new(chrome_path);
     cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+
+    // Scope the virtual display and its auth cookie to the Chrome child;
+    // the daemon's own environment is left untouched.
+    #[cfg(target_os = "linux")]
+    if let Some(ref x) = xvfb {
+        cmd.env("DISPLAY", &x.display);
+        cmd.env("XAUTHORITY", &x.auth_file);
+    }
 
     // Place Chrome in its own process group so we can kill the entire tree
     // (main process + GPU/renderer/utility/crashpad helpers) with a single
@@ -434,6 +718,8 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         temp_user_data_dir,
         #[cfg(unix)]
         pgid,
+        #[cfg(target_os = "linux")]
+        xvfb,
     })
 }
 
@@ -1222,6 +1508,12 @@ fn find_playwright_chromium() -> Option<PathBuf> {
 
 #[cfg(target_os = "linux")]
 fn build_playwright_binary_path(chromium_dir: &Path) -> PathBuf {
+    // Playwright's Linux layout is chrome-linux/chrome; chrome-linux64 is
+    // the Chrome-for-Testing naming kept as a fallback.
+    let standard = chromium_dir.join("chrome-linux/chrome");
+    if standard.exists() {
+        return standard;
+    }
     chromium_dir.join("chrome-linux64/chrome")
 }
 
@@ -1489,6 +1781,162 @@ mod tests {
     }
 
     #[test]
+    fn test_build_args_webgpu_default_off() {
+        let opts = LaunchOptions::default();
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(!result.args.iter().any(|a| a == "--enable-unsafe-webgpu"));
+        assert!(!result.args.iter().any(|a| a.contains("Vulkan")));
+        assert!(!result
+            .args
+            .iter()
+            .any(|a| a.starts_with("--use-webgpu-adapter")));
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_restrict_webrtc_enforces_safe_policy() {
+        let opts = LaunchOptions {
+            restrict_webrtc: true,
+            args: vec!["--force-webrtc-ip-handling-policy=default".to_string()],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        let policies: Vec<&String> = result
+            .args
+            .iter()
+            .filter(|arg| arg.starts_with("--force-webrtc-ip-handling-policy="))
+            .collect();
+        assert_eq!(
+            policies,
+            vec![&"--force-webrtc-ip-handling-policy=disable_non_proxied_udp".to_string()]
+        );
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_webgpu_includes_webgpu_flags() {
+        let opts = LaunchOptions {
+            webgpu: true,
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(result.args.iter().any(|a| a == "--enable-unsafe-webgpu"));
+        if cfg!(target_os = "linux") {
+            assert!(result
+                .args
+                .iter()
+                .any(|a| a == "--enable-features=NetworkService,NetworkServiceInProcess,Vulkan"));
+            assert!(result.args.iter().any(|a| a == "--use-angle=vulkan"));
+            assert!(result.args.iter().any(|a| a == "--use-vulkan=swiftshader"));
+            assert!(result
+                .args
+                .iter()
+                .any(|a| a == "--use-webgpu-adapter=swiftshader"));
+            assert!(result.args.iter().any(|a| a == "--disable-vulkan-surface"));
+        } else {
+            assert!(!result
+                .args
+                .iter()
+                .any(|a| a.starts_with("--use-webgpu-adapter")));
+        }
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_merges_user_enable_features() {
+        let opts = LaunchOptions {
+            webgpu: true,
+            args: vec![
+                "--enable-features=Foo,Bar".to_string(),
+                "--some-other-flag".to_string(),
+                // Duplicate of a preset feature must not repeat.
+                "--enable-features=NetworkService".to_string(),
+            ],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        let flags: Vec<&String> = result
+            .args
+            .iter()
+            .filter(|a| a.starts_with("--enable-features="))
+            .collect();
+        assert_eq!(flags.len(), 1, "user features must merge, not clobber");
+        let features: Vec<&str> = flags[0]
+            .strip_prefix("--enable-features=")
+            .unwrap()
+            .split(',')
+            .collect();
+        assert!(features.contains(&"NetworkService"));
+        assert!(features.contains(&"Foo"));
+        assert!(features.contains(&"Bar"));
+        if cfg!(target_os = "linux") {
+            assert!(
+                features.contains(&"Vulkan"),
+                "user --enable-features must not drop the WebGPU preset's Vulkan"
+            );
+        }
+        assert_eq!(
+            features.iter().filter(|f| **f == "NetworkService").count(),
+            1
+        );
+        assert!(result.args.iter().any(|a| a == "--some-other-flag"));
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_xvfb_applicable_tracks_effective_headed_mode() {
+        // Plain headless: no display needed.
+        assert!(!xvfb_applicable(&LaunchOptions::default()));
+        // Headed: needs a display.
+        assert!(xvfb_applicable(&LaunchOptions {
+            headless: false,
+            ..Default::default()
+        }));
+        // Nominally headless with extensions: build_chrome_args suppresses
+        // --headless, so this runs headed and needs a display too.
+        assert!(xvfb_applicable(&LaunchOptions {
+            headless: true,
+            extensions: Some(vec!["/tmp/ext".to_string()]),
+            ..Default::default()
+        }));
+        // An empty extension list does not force headed mode.
+        assert!(!xvfb_applicable(&LaunchOptions {
+            headless: true,
+            extensions: Some(Vec::new()),
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn test_build_args_single_enable_features_flag() {
+        let opts = LaunchOptions {
+            webgpu: true,
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        // Chrome only honors the last --enable-features switch, so the preset
+        // must never emit more than one.
+        let count = result
+            .args
+            .iter()
+            .filter(|a| a.starts_with("--enable-features="))
+            .count();
+        assert_eq!(count, 1);
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
     fn test_build_args_headless_with_extensions_skips_headless_flag() {
         let opts = LaunchOptions {
             headless: true,
@@ -1587,11 +2035,43 @@ mod tests {
                 temp_user_data_dir: Some(dir.clone()),
                 #[cfg(unix)]
                 pgid: None,
+                #[cfg(target_os = "linux")]
+                xvfb: None,
             };
             // _process dropped here
         }
 
         assert!(!dir.exists(), "Temp dir should be cleaned up on drop");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_write_xauth_file_wildcard_cookie_record() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!("xauth-test-{}", uuid::Uuid::new_v4()));
+        write_xauth_file(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "authority file must be private");
+
+        let bytes = std::fs::read(&path).unwrap();
+        // family=FamilyWild, empty address, empty number
+        assert_eq!(&bytes[..6], &[0xff, 0xff, 0, 0, 0, 0]);
+        // name length + MIT-MAGIC-COOKIE-1
+        assert_eq!(&bytes[6..8], &18u16.to_be_bytes());
+        assert_eq!(&bytes[8..26], b"MIT-MAGIC-COOKIE-1");
+        // 16-byte cookie
+        assert_eq!(&bytes[26..28], &16u16.to_be_bytes());
+        assert_eq!(bytes.len(), 28 + 16);
+
+        // A second write must produce a different cookie.
+        let path2 = std::env::temp_dir().join(format!("xauth-test-{}", uuid::Uuid::new_v4()));
+        write_xauth_file(&path2).unwrap();
+        assert_ne!(std::fs::read(&path2).unwrap()[28..], bytes[28..]);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&path2);
     }
 
     #[test]

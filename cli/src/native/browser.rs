@@ -80,6 +80,9 @@ fn validate_lightpanda_options(options: &LaunchOptions) -> Result<(), String> {
     if !options.headless {
         return Err("Headed mode is not supported with Lightpanda (headless only)".to_string());
     }
+    if options.webgpu {
+        return Err("WebGPU (--webgpu) is not supported with Lightpanda".to_string());
+    }
     if !options.args.is_empty() {
         return Err(
             "Custom Chrome arguments (--args) are not supported with Lightpanda".to_string(),
@@ -315,6 +318,9 @@ pub struct BrowserManager {
     /// Origins visited during this session, used by save_state to collect cross-origin localStorage.
     visited_origins: HashSet<String>,
     next_tab_id: u32,
+    /// True when the CDP WebSocket is already scoped to a page target and
+    /// browser-level Target.* commands are not available.
+    direct_page: bool,
 }
 
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -387,6 +393,7 @@ impl BrowserManager {
                 ignore_https_errors,
                 visited_origins: HashSet::new(),
                 next_tab_id: 1,
+                direct_page: false,
             };
             manager.discover_and_attach_targets().await?;
             manager
@@ -476,6 +483,7 @@ impl BrowserManager {
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
+            direct_page,
         };
 
         if direct_page {
@@ -599,25 +607,49 @@ impl BrowserManager {
         self.enable_domains(session_id).await
     }
 
+    pub async fn prepare_domains_pub(&self, session_id: &str) -> Result<(), String> {
+        self.prepare_domains(session_id).await
+    }
+
+    pub async fn resume_if_waiting_pub(&self, session_id: &str) -> Result<(), String> {
+        self.resume_if_waiting(session_id).await
+    }
+
+    pub async fn enable_browser_auto_attach_pub(&self) -> Result<(), String> {
+        self.client
+            .send_command(
+                "Target.setAutoAttach",
+                Some(json!({
+                    "autoAttach": true,
+                    "waitForDebuggerOnStart": true,
+                    "flatten": true
+                })),
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn enable_domains(&self, session_id: &str) -> Result<(), String> {
+        self.prepare_domains(session_id).await?;
+        self.resume_if_waiting(session_id).await?;
+        Ok(())
+    }
+
+    async fn prepare_domains(&self, session_id: &str) -> Result<(), String> {
         self.client
             .send_command_no_params("Page.enable", Some(session_id))
             .await?;
         self.client
             .send_command_no_params("Runtime.enable", Some(session_id))
             .await?;
-        // Resume the target if it is paused waiting for the debugger.
-        // This is needed for real browser sessions (Chrome 144+) where targets
-        // are paused after attach until explicitly resumed. No-op otherwise.
-        let _ = self
-            .client
-            .send_command_no_params("Runtime.runIfWaitingForDebugger", Some(session_id))
-            .await;
         self.client
             .send_command_no_params("Network.enable", Some(session_id))
             .await?;
         // Enable auto-attach for cross-origin iframe support.
         // flatten: true gives each iframe its own session_id.
+        // waitForDebuggerOnStart keeps child targets paused until the daemon
+        // installs any required network controls and explicitly resumes them.
         // Ignored on engines that don't support it (e.g. Lightpanda).
         let _ = self
             .client
@@ -625,7 +657,7 @@ impl BrowserManager {
                 "Target.setAutoAttach",
                 Some(json!({
                     "autoAttach": true,
-                    "waitForDebuggerOnStart": false,
+                    "waitForDebuggerOnStart": true,
                     "flatten": true
                 })),
                 Some(session_id),
@@ -705,6 +737,16 @@ impl BrowserManager {
                     .to_string(),
             )
         }
+    }
+
+    async fn resume_if_waiting(&self, session_id: &str) -> Result<(), String> {
+        // Needed for real browser sessions (Chrome 144+) where targets are
+        // paused after attach until explicitly resumed. No-op otherwise.
+        let _ = self
+            .client
+            .send_command_no_wait("Runtime.runIfWaitingForDebugger", None, Some(session_id))
+            .await;
+        Ok(())
     }
 
     /// Enable domains on a direct page connection (no session_id needed).
@@ -877,7 +919,45 @@ impl BrowserManager {
         wait_until: WaitUntil,
         session_id: &str,
     ) -> Result<(), String> {
+        // Subscribe before probing so a lifecycle event that fires between
+        // the probe and the wait cannot be missed.
         let mut rx = self.client.subscribe();
+
+        // `wait_for_lifecycle` waits for the NEXT lifecycle event, which is
+        // right mid-navigation but wrong for a standalone `wait --load`: a
+        // page that already finished loading (or navigated client-side,
+        // which fires no new load event) never emits another one, so the
+        // wait would burn its entire timeout. Resolve immediately when the
+        // document is already in the requested state.
+        let already_reached = match wait_until {
+            WaitUntil::Load => Some("document.readyState === 'complete'"),
+            // readyState leaves 'loading' when DOMContentLoaded fires.
+            WaitUntil::DomContentLoaded => Some("document.readyState !== 'loading'"),
+            // Network idle is tracked from live network events; its poller
+            // already treats a quiet stream as idle.
+            WaitUntil::NetworkIdle | WaitUntil::None => None,
+        };
+        if let Some(expression) = already_reached {
+            let probe: Result<EvaluateResult, String> = self
+                .client
+                .send_command_typed(
+                    "Runtime.evaluate",
+                    &EvaluateParams {
+                        expression: expression.to_string(),
+                        return_by_value: Some(true),
+                        await_promise: Some(false),
+                    },
+                    Some(session_id),
+                )
+                .await;
+            // A failed probe is not fatal; fall back to waiting for the event.
+            if let Ok(result) = probe {
+                if result.result.value.as_ref().and_then(|v| v.as_bool()) == Some(true) {
+                    return Ok(());
+                }
+            }
+        }
+
         self.wait_for_lifecycle(wait_until, session_id, &mut rx)
             .await
     }
@@ -964,6 +1044,10 @@ impl BrowserManager {
     /// Returns true if this manager was connected via CDP (as opposed to local launch).
     pub fn is_cdp_connection(&self) -> bool {
         self.browser_process.is_none()
+    }
+
+    pub fn is_direct_page_connection(&self) -> bool {
+        self.direct_page
     }
 
     /// Ensures the browser has at least one page. If `pages` is empty, creates a new
@@ -1721,6 +1805,7 @@ async fn initialize_lightpanda_manager(
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
+            direct_page: false,
         };
 
         match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {
@@ -2127,6 +2212,17 @@ mod tests {
             "Timed out after 10000ms waiting for Lightpanda Target domain to initialize"
         ));
         assert!(err.contains("Target.setDiscoverTargets failed"));
+    }
+
+    #[test]
+    fn test_validate_lightpanda_rejects_webgpu() {
+        let options = LaunchOptions {
+            webgpu: true,
+            ..Default::default()
+        };
+        let err = validate_lightpanda_options(&options).unwrap_err();
+        assert!(err.contains("WebGPU"));
+        assert!(validate_lightpanda_options(&LaunchOptions::default()).is_ok());
     }
 
     #[test]

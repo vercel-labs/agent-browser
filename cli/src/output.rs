@@ -2180,6 +2180,7 @@ Subcommands:
     --status <code>          Filter by status (200, 2xx, 400-499)
   request <requestId>        View full request/response detail (including body)
   har <start|stop> [path]    Record and export a HAR file
+    --content <mode>         Response bodies to embed on start: text (default), all, none
 
 Global Options:
   --json               Output as JSON
@@ -2196,6 +2197,7 @@ Examples:
   agent-browser network requests --clear
   agent-browser network request 1234.5
   agent-browser network har start
+  agent-browser network har start --content all
   agent-browser network har stop ./capture.har
 "##
         }
@@ -2785,6 +2787,12 @@ encryption key) are gated behind --fix.
 Options:
   --offline            Skip network probes
   --quick              Skip the live headless launch test
+  --webgpu             Also run a live WebGPU render probe (renders via a real
+                       WebGPU pass and pixel-checks both an in-page readback
+                       and a decoded screenshot; launches a second Chrome)
+  --headed             Run the WebGPU probe headed to validate the capture
+                       path (auto-Xvfb on displayless Linux)
+  --debug              Verbose diagnostics from the probes' scratch daemons
   --fix                Also run destructive repairs
   --json               JSON output
 
@@ -2795,6 +2803,8 @@ Exit codes:
 Examples:
   agent-browser doctor
   agent-browser doctor --offline --quick
+  agent-browser doctor --webgpu
+  agent-browser doctor --webgpu --headed
   agent-browser doctor --fix
   agent-browser doctor --json
 "##
@@ -3530,12 +3540,13 @@ Options:
   --screenshot-quality <n>   JPEG quality 0-100; ignored for PNG (or AGENT_BROWSER_SCREENSHOT_QUALITY)
   --screenshot-format <fmt>  Screenshot format: png, jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)
   --headed                   Show browser window (not headless) (or AGENT_BROWSER_HEADED env)
+  --webgpu                   Enable WebGPU; uses SwiftShader software Vulkan on Linux, no GPU required (or AGENT_BROWSER_WEBGPU env)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
   --color-scheme <scheme>    Color scheme: dark, light, no-preference (or AGENT_BROWSER_COLOR_SCHEME)
   --download-path <path>     Default download directory (or AGENT_BROWSER_DOWNLOAD_PATH)
   --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
   --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
-  --allowed-domains <list>   Restrict navigation domains (or AGENT_BROWSER_ALLOWED_DOMAINS)
+  --allowed-domains <list>   Restrict network domains; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
   --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
@@ -3589,6 +3600,8 @@ Environment:
   AGENT_BROWSER_INIT_SCRIPTS     Comma-separated paths to page init scripts
   AGENT_BROWSER_ENABLE           Comma-separated built-in init script features (e.g. react-devtools)
   AGENT_BROWSER_HEADED           Show browser window (not headless)
+  AGENT_BROWSER_NO_XVFB          Disable automatic Xvfb for headed mode on displayless Linux hosts
+  AGENT_BROWSER_WEBGPU           Enable WebGPU (SwiftShader software Vulkan on Linux)
   AGENT_BROWSER_JSON             JSON output
   AGENT_BROWSER_ANNOTATE         Annotated screenshot with numbered labels and legend
   AGENT_BROWSER_DEBUG            Debug output
@@ -3609,7 +3622,7 @@ Environment:
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
   AGENT_BROWSER_CONTENT_BOUNDARIES Wrap page output in boundary markers
   AGENT_BROWSER_MAX_OUTPUT       Max characters for page output
-  AGENT_BROWSER_ALLOWED_DOMAINS  Comma-separated allowed domain patterns
+  AGENT_BROWSER_ALLOWED_DOMAINS  Comma-separated allowed domain patterns; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins
   AGENT_BROWSER_ACTION_POLICY    Path to action policy JSON file
   AGENT_BROWSER_CONFIRM_ACTIONS  Action categories requiring confirmation
   AGENT_BROWSER_CONFIRM_INTERACTIVE Enable interactive confirmation prompts

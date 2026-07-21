@@ -749,7 +749,8 @@ fn tools() -> Vec<Value> {
             "Launch the browser and optionally navigate to a URL.",
             json!({
                 "url": { "type": "string", "description": "URL to open. Omit to launch about:blank." },
-                "headed": { "type": "boolean", "default": false, "description": "Show the browser window." }
+                "headed": { "type": "boolean", "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults." },
+                "webgpu": { "type": "boolean", "description": "Enable WebGPU (SwiftShader software Vulkan on Linux; no GPU required). Explicit true/false overrides AGENT_BROWSER_WEBGPU and config; omit to use those defaults." }
             }),
             &[],
         ),
@@ -1150,8 +1151,8 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_NETWORK_HAR_START,
             "HAR start",
-            "Start HAR capture.",
-            json!({}),
+            "Start HAR capture. Embeds text response bodies by default; content controls which bodies are embedded.",
+            json!({ "content": { "type": "string", "enum": ["all", "text", "none"] } }),
             &[],
         ),
         tool(
@@ -1719,7 +1720,7 @@ fn parity_tools() -> Vec<Value> {
             TOOL_DOCTOR,
             "Doctor",
             "Diagnose the installation.",
-            json!({ "offline": { "type": "boolean" }, "quick": { "type": "boolean" }, "fix": { "type": "boolean" } }),
+            json!({ "offline": { "type": "boolean" }, "quick": { "type": "boolean" }, "fix": { "type": "boolean" }, "webgpu": { "type": "boolean", "description": "Also run a live WebGPU render probe (launches a second Chrome)." }, "headed": { "type": "boolean", "description": "Run the WebGPU probe headed to validate the capture path (auto-Xvfb on displayless Linux). Explicit true/false overrides AGENT_BROWSER_HEADED/config." }, "debug": { "type": "boolean", "description": "Verbose diagnostics from the probes' scratch daemons." } }),
             &[],
         ),
         tool(
@@ -1870,6 +1871,14 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         json!({
             "type": "string",
             "description": "Optional JavaScript expression that must evaluate truthy after restore."
+        }),
+    );
+    props.insert(
+        "allowedDomains".to_string(),
+        json!({
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active."
         }),
     );
     props.insert(
@@ -2112,7 +2121,19 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_NETWORK_UNROUTE => call_optional_one(arguments, &["network", "unroute"], "url"),
         TOOL_NETWORK_REQUESTS => call_network_requests(arguments),
         TOOL_NETWORK_REQUEST => call_one_string(arguments, "network request", "requestId"),
-        TOOL_NETWORK_HAR_START => call_literal(arguments, &["network", "har", "start"]),
+        TOOL_NETWORK_HAR_START => {
+            let mut args: Vec<String> = ["network", "har", "start"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            if let Some(content) = optional_string(arguments, "content")? {
+                if !content.is_empty() {
+                    args.push("--content".to_string());
+                    args.push(content);
+                }
+            }
+            call_cli_tool(arguments, args, None)
+        }
         TOOL_NETWORK_HAR_STOP => call_optional_one(arguments, &["network", "har", "stop"], "path"),
         TOOL_STORAGE_GET => call_storage_get(arguments),
         TOOL_STORAGE_SET => call_storage_set(arguments),
@@ -2306,10 +2327,19 @@ fn call_keyboard(arguments: &Value, subcommand: &str) -> Result<Value, ProtocolE
     )
 }
 
-fn call_open(arguments: &Value) -> Result<Value, ProtocolError> {
+/// Build the CLI args for the open tool. Explicit booleans are forwarded as
+/// `--flag true|false` so an MCP caller can override env/config defaults
+/// (e.g. webgpu: false with AGENT_BROWSER_WEBGPU=1 set); an absent field
+/// sends nothing and leaves the env/config resolution to the CLI.
+fn open_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = Vec::new();
-    if optional_bool(arguments, "headed")?.unwrap_or(false) {
+    if let Some(headed) = optional_bool(arguments, "headed")? {
         args.push("--headed".to_string());
+        args.push(headed.to_string());
+    }
+    if let Some(webgpu) = optional_bool(arguments, "webgpu")? {
+        args.push("--webgpu".to_string());
+        args.push(webgpu.to_string());
     }
     args.push("open".to_string());
     if let Some(url) = optional_string(arguments, "url")? {
@@ -2317,6 +2347,11 @@ fn call_open(arguments: &Value) -> Result<Value, ProtocolError> {
             args.push(url);
         }
     }
+    Ok(args)
+}
+
+fn call_open(arguments: &Value) -> Result<Value, ProtocolError> {
+    let args = open_args(arguments)?;
     call_cli_tool(arguments, args, None)
 }
 
@@ -3198,7 +3233,11 @@ fn plugin_run_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     Ok(args)
 }
 
-fn call_doctor(arguments: &Value) -> Result<Value, ProtocolError> {
+/// Build the CLI args for the doctor tool. offline/quick/fix are parsed by
+/// doctor as bare presence flags, so they are only sent when true; the
+/// value-taking booleans are forwarded explicitly so callers can override
+/// env/config defaults (e.g. headed: false with AGENT_BROWSER_HEADED=1).
+fn doctor_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = vec!["doctor".to_string()];
     for (key, flag) in [
         ("offline", "--offline"),
@@ -3209,6 +3248,21 @@ fn call_doctor(arguments: &Value) -> Result<Value, ProtocolError> {
             args.push(flag.to_string());
         }
     }
+    for (key, flag) in [
+        ("webgpu", "--webgpu"),
+        ("headed", "--headed"),
+        ("debug", "--debug"),
+    ] {
+        if let Some(value) = optional_bool(arguments, key)? {
+            args.push(flag.to_string());
+            args.push(value.to_string());
+        }
+    }
+    Ok(args)
+}
+
+fn call_doctor(arguments: &Value) -> Result<Value, ProtocolError> {
+    let args = doctor_args(arguments)?;
     call_cli_tool(arguments, args, None)
 }
 
@@ -3458,6 +3512,12 @@ fn append_common_global_args(
     if let Some(check) = optional_string(arguments, "restoreCheckFn")? {
         args.push("--restore-check-fn".to_string());
         args.push(check);
+    }
+    if let Some(domains) = optional_string_array(arguments, "allowedDomains")? {
+        if !domains.is_empty() {
+            args.push("--allowed-domains".to_string());
+            args.push(domains.join(","));
+        }
     }
 
     Ok(())
@@ -3710,6 +3770,75 @@ mod tests {
     }
 
     #[test]
+    fn open_tool_exposes_launch_options() {
+        let tools = tools();
+        let open = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some(TOOL_OPEN))
+            .unwrap();
+        let props = &open["inputSchema"]["properties"];
+        assert!(props.get("headed").is_some());
+        assert!(props.get("webgpu").is_some());
+    }
+
+    #[test]
+    fn open_args_forwards_explicit_booleans() {
+        // Absent fields send nothing (env/config resolution stays with the CLI).
+        assert_eq!(open_args(&json!({})).unwrap(), vec!["open"]);
+
+        // Explicit true and false are both forwarded, so MCP callers can
+        // override AGENT_BROWSER_WEBGPU/config just like `--webgpu false`.
+        assert_eq!(
+            open_args(&json!({ "webgpu": false, "url": "https://example.com" })).unwrap(),
+            vec!["--webgpu", "false", "open", "https://example.com"]
+        );
+        assert_eq!(
+            open_args(&json!({ "headed": true, "webgpu": true })).unwrap(),
+            vec!["--headed", "true", "--webgpu", "true", "open"]
+        );
+        assert_eq!(
+            open_args(&json!({ "headed": false })).unwrap(),
+            vec!["--headed", "false", "open"]
+        );
+    }
+
+    #[test]
+    fn doctor_tool_exposes_webgpu_option() {
+        let tools = tools();
+        let doctor = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some(TOOL_DOCTOR))
+            .unwrap();
+        let props = &doctor["inputSchema"]["properties"];
+        assert!(props.get("offline").is_some());
+        assert!(props.get("quick").is_some());
+        assert!(props.get("fix").is_some());
+        assert!(props.get("webgpu").is_some());
+        assert!(props.get("headed").is_some());
+        assert!(props.get("debug").is_some());
+    }
+
+    #[test]
+    fn doctor_args_forwards_explicit_booleans() {
+        assert_eq!(doctor_args(&json!({})).unwrap(), vec!["doctor"]);
+        // Presence flags only sent when true.
+        assert_eq!(
+            doctor_args(&json!({ "offline": true, "quick": false })).unwrap(),
+            vec!["doctor", "--offline"]
+        );
+        // Value-taking booleans forwarded both ways so env/config can be
+        // overridden.
+        assert_eq!(
+            doctor_args(&json!({ "webgpu": true, "headed": false })).unwrap(),
+            vec!["doctor", "--webgpu", "true", "--headed", "false"]
+        );
+        assert_eq!(
+            doctor_args(&json!({ "debug": true })).unwrap(),
+            vec!["doctor", "--debug", "true"]
+        );
+    }
+
+    #[test]
     fn tools_list_uses_unique_names() {
         let tools = tools();
         let mut names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
@@ -3948,6 +4077,22 @@ mod tests {
     }
 
     #[test]
+    fn common_global_args_include_allowed_domains() {
+        let mut args = Vec::new();
+
+        append_common_global_args(
+            &mut args,
+            &json!({
+                "allowedDomains": ["example.com", "*.example.org"]
+            }),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(args, vec!["--allowed-domains", "example.com,*.example.org"]);
+    }
+
+    #[test]
     fn tool_schema_includes_extra_args_for_cli_parity() {
         let tools = tools();
         let open = tools
@@ -3966,6 +4111,24 @@ mod tests {
             open["inputSchema"]["properties"]["namespace"]["type"],
             "string"
         );
+        assert_eq!(
+            open["inputSchema"]["properties"]["allowedDomains"]["type"],
+            "array"
+        );
+    }
+
+    #[test]
+    fn tool_schema_har_start_content_matches_cli_modes() {
+        let tools = tools();
+        let har_start = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some(TOOL_NETWORK_HAR_START))
+            .unwrap();
+        let modes = har_start["inputSchema"]["properties"]["content"]["enum"]
+            .as_array()
+            .unwrap();
+        // Must stay in sync with the CLI parser's accepted --content values.
+        assert_eq!(modes, &vec![json!("all"), json!("text"), json!("none")]);
     }
 
     #[test]

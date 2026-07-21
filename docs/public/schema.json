@@ -112,6 +112,10 @@
       "type": "boolean",
       "description": "Hide native scrollbars in headless Chromium screenshots. Defaults to true."
     },
+    "webgpu": {
+      "type": "boolean",
+      "description": "Enable WebGPU (SwiftShader software Vulkan on Linux; no GPU required). Defaults to false."
+    },
     "ignoreHttpsErrors": {
       "type": "boolean",
       "description": "Ignore HTTPS errors during navigation."
@@ -155,7 +159,7 @@
       "items": {
         "type": "string"
       },
-      "description": "Allowed domain patterns (e.g., ['example.com', '*.example.com'])."
+      "description": "Allowed domain patterns (e.g., ['example.com', '*.example.com']). Requires a fresh controllable browser context, so CDP, auto-connect, Chrome profiles, restore/state replay, direct-page provider plugins, iOS, and Safari are not supported."
     },
     "actionPolicy": {
       "type": "string",

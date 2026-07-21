@@ -1,8 +1,77 @@
 # agent-browser
 
-## 0.31.1
+## 0.32.3
 
 <!-- release:start -->
+### New Features
+
+- Added **HAR response body capture** with text bodies embedded by default and configurable `all`, `text`, and `none` content modes across the CLI and MCP surfaces (#1578)
+- Added a **derive-client skill** for recording browser traffic and generating reusable API clients from HAR request and response data (#1578)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.32.2
+
+### Improvements
+
+- Updated **eve extension packaging** for eve 0.25.1, adopting the new source and dist extension manifest format, updating the eve example to stable AI SDK releases, and keeping extension tests aligned with eve's scoped config registry (#1570)
+
+### Contributors
+
+- @AndrewBarba
+
+## 0.32.1
+
+### Improvements
+
+- Widened **eve compatibility** for `@agent-browser/eve` to accept eve 0.23 and future major releases without peer-resolution warnings (#1563)
+
+### Documentation
+
+- Standardized **eve branding** to use lowercase styling across the docs, examples, package readmes, and release notes (#1557)
+
+### Contributors
+
+- @ctate
+
+## 0.32.0
+
+### New Features
+
+- **eve extension** - Added `@agent-browser/eve`, an eve extension that mounts the agent-browser tool set with namespaced browser tools, sandbox bootstrap helpers, docs, examples, CI, and release packaging (#1547)
+
+### Security
+
+- Hardened **domain allowlists** by blocking WebRTC bypasses, applying network containment across launch modes, workers, popups, restored state, and reused daemon sessions, rejecting unsafe startup arguments, and adding Chrome regression coverage (#1546)
+
+### Bug Fixes
+
+- Fixed **completed-page waits** so load and DOMContentLoaded waits resolve immediately when the current document is already ready, with structured eve wait timeout handling and focused coverage (#1554)
+
+### Contributors
+
+- @ctate
+- @dnukumamras
+
+## 0.31.2
+
+### New Features
+
+- **WebGPU launch preset** - Added `--webgpu` across the CLI, config, environment, and MCP surfaces, with hardware backends on macOS and Windows, software Vulkan on Linux, automatic Xvfb for displayless headed sessions, and a `doctor --webgpu` render and screenshot probe (#1529)
+
+### Improvements
+
+- Added periodic **restore-state autosaves** while the browser remains open, preserving recent state after a browser window is closed by hand and capturing background page changes while honoring the restore save policy. The interval is configurable with `AGENT_BROWSER_AUTOSAVE_INTERVAL_MS` (#1509)
+
+### Contributors
+
+- @ctate
+
+## 0.31.1
+
 ### Bug Fixes
 
 - Fixed the **React renderer** so it picks the react-dom renderer instead of hardcoding renderer id 1, which prevented reading an empty tree on Next.js 16.3 Turbopack (#1491)
@@ -10,7 +79,6 @@
 ### Contributors
 
 - @gaojude
-<!-- release:end -->
 
 ## 0.31.0
 
@@ -54,7 +122,7 @@
 
 ### Improvements
 
-- Defaulted **sandbox system dependency installs** so the Eve and Vercel sandbox helpers install Chromium's required libraries unless explicitly disabled, making first-run sandbox setup simpler (#1469)
+- Defaulted **sandbox system dependency installs** so the eve and Vercel sandbox helpers install Chromium's required libraries unless explicitly disabled, making first-run sandbox setup simpler (#1469)
 
 ### Contributors
 
@@ -64,7 +132,7 @@
 
 ### New Features
 
-- **Sandbox package** - Added `@agent-browser/sandbox` with shared, Eve, and Vercel Sandbox helpers, example projects, and docs for running agent-browser in hosted sandbox environments (#1465)
+- **Sandbox package** - Added `@agent-browser/sandbox` with shared, eve, and Vercel Sandbox helpers, example projects, and docs for running agent-browser in hosted sandbox environments (#1465)
 
 ### Improvements
 

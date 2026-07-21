@@ -58,7 +58,11 @@ agent-browser mcp --tools all
 agent-browser mcp --tools core,network,react
 ```
 
-Configure the MCP client to launch `agent-browser` with `["mcp"]`. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization. The default tools profile is `core`, which keeps MCP context small for everyday browser automation. Use `--tools all` for the full typed CLI parity surface, or combine profiles with commas, such as `--tools core,network,react`. Profiles are `core`, `network`, `state`, `debug`, `tabs`, `react`, `mobile`, and `all`; the `debug` profile includes plugin registry and command.run tools. Each tool accepts typed arguments plus `extraArgs` for advanced CLI flags and exact CLI parity. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the tool `session` argument or `AGENT_BROWSER_SESSION` to isolate browser sessions.
+Configure the MCP client to launch `agent-browser` with `["mcp"]`. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization. The default tools profile is `core`, which keeps MCP context small for everyday browser automation. Use `--tools all` for the full typed CLI parity surface, or combine profiles with commas, such as `--tools core,network,react`. Profiles are `core`, `network`, `state`, `debug`, `tabs`, `react`, `mobile`, and `all`; the `debug` profile includes plugin registry and command.run tools. Each tool accepts typed arguments plus `extraArgs` for advanced CLI flags and exact CLI parity. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the tool `session` argument or `AGENT_BROWSER_SESSION` to isolate browser sessions.
+
+## eve agent integration
+
+For eve agents, mount the `@agent-browser/eve` extension instead of hand-writing browser tools. It adds namespaced tools such as `browser__navigate`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, and `browser__screenshot`, all backed by agent-browser running inside the eve sandbox. The sandbox bootstrap helpers (`installAgentBrowser`, `agentBrowserRevalidationKey`) ship with the same package under `@agent-browser/eve/sandbox`, so `agent/sandbox.ts` needs no extra dependency.
 
 ## Reading a page
 
@@ -104,6 +108,8 @@ agent-browser get count ".item"           # count matching elements
 ```
 
 Use `read [url]` when you need to consume documentation or other text pages rather than interact with a rendered UI. Omit the URL to read the rendered DOM of the active tab in the current browser session, including browser auth state and client-side updates. Explicit URL reads send `Accept: text/markdown`, try the same URL with `.md` appended when the first response is not markdown, walk ancestor paths toward `/` to find the nearest `llms.txt` for a matching docs link, print markdown/plain text when available, and fall back to readable text extracted from HTML without launching Chrome. Add `--filter <text>` to narrow a page to matching heading sections, `--outline` for compact headings on one page, `--llms index` for a compact nearest-ancestor `llms.txt` link list, and `--llms full` only when you explicitly need `llms-full.txt`. With `--llms` or `--require-md`, omitting the URL uses the active tab URL because those modes depend on HTTP resources. With `--llms` or `--outline`, `--filter <text>` narrows links, sections, or headings. Add `--require-md` when you specifically want to verify markdown negotiation, `--raw` when you need the response body unchanged, and `--json` when you need metadata such as `source` and `contentType`. Global safeguards such as `--allowed-domains`, `--content-boundaries`, and `--max-output` also apply to read fetches and output.
+
+For sessions that handle sensitive data, use `--allowed-domains` to restrict navigations and page-initiated network traffic. Supported Chromium sessions also disable `RTCPeerConnection` while the allowlist is active so WebRTC STUN, TURN, and related DNS traffic cannot bypass the HTTP filter. Dedicated and shared workers are guarded with a bootstrap wrapper; if a page CSP forbids that wrapper, the worker fails closed rather than running without the allowlist guard. Pre-existing CDP sessions, auto-connect, Chrome profiles, direct-page provider plugins, agent-browser restore or state-file replay, raw Chrome args that select profiles, restore sessions, or open startup pages, iOS, and Safari reject this option because agent-browser cannot install equivalent containment before page scripts run. This is browser-level containment, not an operating-system firewall; see [Trust boundaries](references/trust-boundaries.md) for deployment guidance.
 
 ## Interacting
 
@@ -304,6 +310,10 @@ agent-browser network requests                                     # inspect wha
 agent-browser network har start                                    # record all traffic
 # ... perform actions ...
 agent-browser network har stop /tmp/trace.har
+
+# HAR files embed text response bodies (JSON/HTML/JS) by default, so the
+# recording alone is enough to study a site's API offline. Use
+# `--content all` to include binary bodies or `--content none` to disable.
 ```
 
 ### Record a video of the workflow
@@ -400,6 +410,8 @@ EOF
 
 **Cross-origin iframe not accessible** Cross-origin iframes that block accessibility tree access are silently skipped. Use `frame "#iframe"` to switch into them explicitly if the parent opts in, otherwise the iframe's contents aren't available via snapshot — fall back to `eval` in the iframe's origin or use the `--headers` flag to satisfy CORS.
 
+**WebGPU page renders black in screenshots** Headless Chrome doesn't expose WebGPU by default; three.js `WebGPURenderer` then silently falls back or renders nothing. Relaunch with the `--webgpu` flag, wait for the app's first rendered frame, then screenshot. On Linux install `libvulkan1 mesa-vulkan-drivers` first. If it's still black on Windows/Linux, that's an upstream headless-capture limitation: add `--headed` (needs a logged-in desktop on Windows; on Linux agent-browser starts a private virtual display automatically when Xvfb is installed — never wrap in `xvfb-run`, which kills the display when the CLI exits while the browser lives on). Verify with `agent-browser doctor --webgpu`. See [references/webgpu.md](references/webgpu.md).
+
 **Authentication expires mid-workflow** Use `--session <id> --restore` so your session survives browser restarts. Check `agent-browser session info --json` if restore fails. See [references/session-management.md](references/session-management.md) and [references/authentication.md](references/authentication.md).
 
 ## Global flags worth knowing
@@ -408,6 +420,7 @@ EOF
 --session <name>        # isolated browser session
 --json                  # JSON output (for machine parsing)
 --headed                # show the window (default is headless)
+--webgpu                # enable WebGPU (software Vulkan on Linux, no GPU needed)
 --auto-connect          # connect to an already-running Chrome
 --cdp <port>            # connect to a specific CDP port
 --profile <name|path>   # use a Chrome profile (login state survives)
@@ -466,4 +479,5 @@ That pulls in:
 - `references/profiling.md` — Chrome DevTools tracing and profiling
 - `references/video-recording.md` — video capture options
 - `references/proxy-support.md` — proxy configuration
+- `references/webgpu.md` — screenshots/video of WebGPU pages (three.js, Babylon.js), Linux/CI setup
 - `templates/*` — starter shell scripts for auth, capture, form automation

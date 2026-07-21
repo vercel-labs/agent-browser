@@ -1,6 +1,6 @@
 {
   "name": "agent-browser",
-  "version": "0.31.1",
+  "version": "0.32.3",
   "description": "Browser automation CLI for AI agents",
   "type": "module",
   "packageManager": "pnpm@11.1.3",
