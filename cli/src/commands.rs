@@ -367,6 +367,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }
             };
             let url_lower = url.to_lowercase();
+            // Preserve recognized URL schemes; normalize other inputs with https://.
             let url = if url_lower.starts_with("http://")
                 || url_lower.starts_with("https://")
                 || url_lower.starts_with("about:")
@@ -374,6 +375,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 || url_lower.starts_with("file:")
                 || url_lower.starts_with("chrome-extension://")
                 || url_lower.starts_with("chrome://")
+                || url_lower.starts_with("edge://")
             {
                 url.to_string()
             } else {
@@ -3841,6 +3843,13 @@ mod tests {
         let cmd = parse_command(&args("open chrome://extensions"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "navigate");
         assert_eq!(cmd["url"], "chrome://extensions");
+    }
+
+    #[test]
+    fn test_navigate_edge_url() {
+        let cmd = parse_command(&args("open edge://extensions"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "navigate");
+        assert_eq!(cmd["url"], "edge://extensions");
     }
 
     // === Set Headers Tests ===

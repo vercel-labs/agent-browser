@@ -3993,6 +3993,13 @@ mod tests {
     }
 
     #[test]
+    fn open_args_preserve_edge_url_for_cli_parser() {
+        let args = open_args(&json!({ "url": "edge://extensions" })).unwrap();
+
+        assert_eq!(args, vec!["open", "edge://extensions"]);
+    }
+
+    #[test]
     fn react_json_uses_command_local_raw_json_flag() {
         let mut args = vec!["react".to_string(), "tree".to_string()];
         append_react_raw_json_arg(&json!({ "json": true }), &mut args).unwrap();
