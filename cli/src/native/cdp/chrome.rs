@@ -1389,6 +1389,68 @@ fn should_disable_dev_shm(existing_args: &[String]) -> bool {
     false
 }
 
+/// On Linux, verify that a candidate Chrome binary's ELF architecture matches
+/// the host. The Puppeteer and Playwright caches can hold a Chrome built for a
+/// different architecture than the host — most notably on arm64 Linux, where
+/// Chrome for Testing publishes no arm64 build, so `@puppeteer/browsers`
+/// downloads the x86-64 `chrome-linux64` archive into a `linux_arm-<version>`
+/// directory. Returning such a binary makes launch fail with "Exec format
+/// error", so we skip candidates whose ELF `e_machine` clearly disagrees with
+/// the host.
+///
+/// Fails open: if the header can't be read or the machine is unrecognized, we
+/// assume it matches and let the launch proceed as before. The only candidate
+/// this ever rejects is a parseable ELF whose architecture we are confident
+/// does not match the host.
+#[cfg(target_os = "linux")]
+fn binary_arch_matches_host(path: &Path) -> bool {
+    use std::io::Read;
+
+    // EM_* values from the ELF spec for the architectures we ship on.
+    const EM_386: u16 = 0x03;
+    const EM_ARM: u16 = 0x28;
+    const EM_X86_64: u16 = 0x3E;
+    const EM_AARCH64: u16 = 0xB7;
+
+    let host_machine: u16 = match std::env::consts::ARCH {
+        "x86_64" => EM_X86_64,
+        "aarch64" => EM_AARCH64,
+        "x86" => EM_386,
+        "arm" => EM_ARM,
+        // Unknown host arch: don't second-guess, accept the candidate.
+        _ => return true,
+    };
+
+    // e_ident (16 bytes) + e_type (2) + e_machine (2): need the first 20 bytes.
+    let mut header = [0u8; 20];
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return true;
+    };
+    if file.read_exact(&mut header).is_err() {
+        return true;
+    }
+
+    // Must be an ELF file; if not, leave the decision to the launcher.
+    if &header[0..4] != b"\x7fELF" {
+        return true;
+    }
+
+    // e_machine is a 2-byte field at offset 18. Honor the file's endianness
+    // (byte 5 is EI_DATA: 1 = little-endian, 2 = big-endian).
+    let machine = if header[5] == 2 {
+        u16::from_be_bytes([header[18], header[19]])
+    } else {
+        u16::from_le_bytes([header[18], header[19]])
+    };
+
+    machine == host_machine
+}
+
+#[cfg(not(target_os = "linux"))]
+fn binary_arch_matches_host(_path: &Path) -> bool {
+    true
+}
+
 /// Search Puppeteer's browser cache for a Chrome binary.
 /// Puppeteer v19+ stores Chrome in ~/.cache/puppeteer/chrome/<platform>-<version>/
 fn find_puppeteer_chrome() -> Option<PathBuf> {
@@ -1412,7 +1474,7 @@ fn find_puppeteer_chrome() -> Option<PathBuf> {
                 .filter(|e| e.path().is_dir())
                 .filter_map(|e| {
                     let candidate = build_puppeteer_binary_path(&e.path());
-                    if candidate.exists() {
+                    if candidate.exists() && binary_arch_matches_host(&candidate) {
                         Some(candidate)
                     } else {
                         None
@@ -1487,7 +1549,7 @@ fn find_playwright_chromium() -> Option<PathBuf> {
                 })
                 .filter_map(|e| {
                     let candidate = build_playwright_binary_path(&e.path());
-                    if candidate.exists() {
+                    if candidate.exists() && binary_arch_matches_host(&candidate) {
                         Some(candidate)
                     } else {
                         None
@@ -1649,6 +1711,200 @@ mod tests {
 
         let result = find_playwright_chromium();
         assert!(result.is_none());
+    }
+
+    /// Build a minimal little-endian ELF header advertising `e_machine` and
+    /// write it to a fresh temp file. Returns the path for the caller to clean
+    /// up. Only the first 20 bytes (e_ident + e_type + e_machine) matter.
+    #[cfg(target_os = "linux")]
+    fn write_fake_elf(e_machine: u16) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "agent-browser-fake-elf-{}-{}-{}",
+            std::process::id(),
+            e_machine,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after unix epoch")
+                .as_nanos()
+        ));
+        let mut header = [0u8; 64];
+        header[0..4].copy_from_slice(b"\x7fELF");
+        header[4] = 2; // EI_CLASS = ELFCLASS64
+        header[5] = 1; // EI_DATA = little-endian
+        header[6] = 1; // EI_VERSION
+        header[16..18].copy_from_slice(&2u16.to_le_bytes()); // e_type = ET_EXEC
+        header[18..20].copy_from_slice(&e_machine.to_le_bytes());
+        std::fs::write(&path, header).expect("temp ELF should be writable");
+        path
+    }
+
+    // EM_X86_64 and EM_AARCH64 as defined by the ELF spec.
+    #[cfg(target_os = "linux")]
+    const TEST_EM_X86_64: u16 = 0x3E;
+    #[cfg(target_os = "linux")]
+    const TEST_EM_AARCH64: u16 = 0xB7;
+
+    #[cfg(target_os = "linux")]
+    fn host_em() -> u16 {
+        match std::env::consts::ARCH {
+            "x86_64" => TEST_EM_X86_64,
+            "aarch64" => TEST_EM_AARCH64,
+            "x86" => 0x03,
+            "arm" => 0x28,
+            other => panic!("unhandled test host arch: {other}"),
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_binary_arch_matches_host_accepts_matching() {
+        let path = write_fake_elf(host_em());
+        let matches = binary_arch_matches_host(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(matches, "host-arch ELF should be accepted");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_binary_arch_matches_host_rejects_mismatch() {
+        // Pick an arch that is definitely not the host's.
+        let other = if host_em() == TEST_EM_X86_64 {
+            TEST_EM_AARCH64
+        } else {
+            TEST_EM_X86_64
+        };
+        let path = write_fake_elf(other);
+        let matches = binary_arch_matches_host(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(!matches, "foreign-arch ELF should be rejected");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_binary_arch_matches_host_fails_open_on_non_elf() {
+        let path = std::env::temp_dir().join(format!(
+            "agent-browser-not-elf-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after unix epoch")
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"#!/bin/sh\necho not an elf\n").expect("temp file");
+        let matches = binary_arch_matches_host(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(matches, "non-ELF candidate should fail open (accepted)");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_binary_arch_matches_host_fails_open_on_short_and_missing() {
+        // Missing file.
+        assert!(binary_arch_matches_host(Path::new("/nonexistent/chrome")));
+
+        // Too short to contain an ELF header.
+        let path = std::env::temp_dir().join(format!(
+            "agent-browser-short-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after unix epoch")
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"\x7fEL").expect("temp file");
+        let matches = binary_arch_matches_host(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(matches, "truncated header should fail open (accepted)");
+    }
+
+    /// Lay out a fake Puppeteer cache (`<root>/chrome/<version>/chrome-linux64/chrome`)
+    /// whose Chrome binary advertises `e_machine`, and return the cache root.
+    #[cfg(target_os = "linux")]
+    fn fake_puppeteer_cache(version: &str, e_machine: u16) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "agent-browser-pcache-{}-{}-{}",
+            std::process::id(),
+            e_machine,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after unix epoch")
+                .as_nanos()
+        ));
+        let bin_dir = root.join("chrome").join(version).join("chrome-linux64");
+        std::fs::create_dir_all(&bin_dir).expect("cache layout should be creatable");
+        let mut header = [0u8; 64];
+        header[0..4].copy_from_slice(b"\x7fELF");
+        header[4] = 2;
+        header[5] = 1;
+        header[6] = 1;
+        header[16..18].copy_from_slice(&2u16.to_le_bytes());
+        header[18..20].copy_from_slice(&e_machine.to_le_bytes());
+        std::fs::write(bin_dir.join("chrome"), header).expect("fake chrome should be writable");
+        root
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_find_puppeteer_chrome_skips_foreign_arch() {
+        let foreign = if host_em() == TEST_EM_X86_64 {
+            TEST_EM_AARCH64
+        } else {
+            TEST_EM_X86_64
+        };
+        // This mirrors arm64 Linux, where Puppeteer stores an x86-64 Chrome
+        // under a linux_arm directory.
+        let root = fake_puppeteer_cache("linux_arm-148.0.7778.97", foreign);
+
+        let guard = EnvGuard::new(&["PUPPETEER_CACHE_DIR", "HOME", "USERPROFILE"]);
+        guard.set("PUPPETEER_CACHE_DIR", &root.to_string_lossy());
+        // Point HOME at an empty dir so the real ~/.cache/puppeteer is ignored.
+        let empty_home = std::env::temp_dir().join(format!(
+            "agent-browser-empty-home-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&empty_home).expect("empty home should be creatable");
+        guard.set("HOME", &empty_home.to_string_lossy());
+        guard.set("USERPROFILE", &empty_home.to_string_lossy());
+
+        let result = find_puppeteer_chrome();
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&empty_home);
+        assert!(
+            result.is_none(),
+            "a foreign-arch cached Chrome must not be selected, got {result:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_find_puppeteer_chrome_accepts_host_arch() {
+        let root = fake_puppeteer_cache("linux-148.0.7778.97", host_em());
+
+        let guard = EnvGuard::new(&["PUPPETEER_CACHE_DIR", "HOME", "USERPROFILE"]);
+        guard.set("PUPPETEER_CACHE_DIR", &root.to_string_lossy());
+        let empty_home = std::env::temp_dir().join(format!(
+            "agent-browser-empty-home2-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&empty_home).expect("empty home should be creatable");
+        guard.set("HOME", &empty_home.to_string_lossy());
+        guard.set("USERPROFILE", &empty_home.to_string_lossy());
+
+        let result = find_puppeteer_chrome();
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&empty_home);
+        assert!(
+            result.is_some(),
+            "a host-arch cached Chrome should still be selected"
+        );
     }
 
     #[test]
