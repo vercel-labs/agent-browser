@@ -1,0 +1,11 @@
+{
+  "0.31.1": {
+    "agent-browser-darwin-arm64": "fd7acd17b3071ff7f75a03c1ecd30501959d9c2d063bdaa05adb6f77abf2a7bf",
+    "agent-browser-darwin-x64": "05aa3e2ed3550e06fb3eb7423a1cef0d9d6031c4d6a8835b9dbe033baf83ef6d",
+    "agent-browser-linux-arm64": "5f80bff26b25e9a9f712be64dda1f8ea2b22213a1a07c0f97ea8f9f226c2894b",
+    "agent-browser-linux-musl-arm64": "1ca397f714820ca954c6b575e816c08acc937ffacea2b901f5cf6524fc4a6853",
+    "agent-browser-linux-musl-x64": "b7492a3e00e52790bffbd2900c399265e6a80598276f89fb8b2fbfa314cc8d22",
+    "agent-browser-linux-x64": "72c13bcfd2fd6b188325bdd23c646d06ca69a1a964a9cdaab37e4ff8f47aa5c6",
+    "agent-browser-win32-x64.exe": "0a355020b0ff2f9199fbb7385a0b8b7e16b548bb0d6df64498b456b76898adfa"
+  }
+}
