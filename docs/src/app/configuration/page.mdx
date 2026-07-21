@@ -175,6 +175,8 @@ agent-browser --headed true open example.com  # explicit
 
 This applies to boolean flags such as `--headed`, `--debug`, `--json`, `--ignore-https-errors`, `--allow-file-access`, `--hide-scrollbars`, `--auto-connect`, `--annotate`, `--content-boundaries`, `--confirm-interactive`, and `--no-auto-dialog`.
 
+`--json` applies even when startup fails before daemon dispatch. Missing or malformed explicit config files and invalid standalone subcommands return a nonzero exit code with a typed `{"success":false,"error":"...","type":"..."}` payload on stdout instead of an unstructured stderr-only failure. `AGENT_BROWSER_JSON` enables the same behavior, while an explicit `--json false` keeps text output.
+
 ## Extensions Merging
 
 Extensions from user-level and project-level configs are **concatenated**, not replaced. For example, if `~/.agent-browser/config.json` specifies `["/ext1"]` and `./agent-browser.json` specifies `["/ext2"]`, the result is `["/ext1", "/ext2"]`.
