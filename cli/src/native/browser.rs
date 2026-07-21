@@ -729,17 +729,15 @@ impl BrowserManager {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {
                 return Err(format!(
-                    "tab is not responding (discarded or crashed) and Target.activateTarget \
+                    "tab is not responding and Target.activateTarget \
                      failed: {}",
                     e
                 ))
             }
             Err(_) => {
-                return Err(
-                    "tab is not responding (discarded or crashed) and Target.activateTarget \
+                return Err("tab is not responding and Target.activateTarget \
                      timed out"
-                        .to_string(),
-                )
+                    .to_string())
             }
         }
         if self
@@ -748,10 +746,7 @@ impl BrowserManager {
         {
             Ok(RendererState::Revived)
         } else {
-            Err(
-                "tab is not responding (discarded or crashed) and did not recover after activation"
-                    .to_string(),
-            )
+            Err("tab is not responding and did not recover after activation".to_string())
         }
     }
 
@@ -1363,19 +1358,30 @@ impl BrowserManager {
             )
             .await;
 
-        let session_id = self.pages[self.active_page_index].session_id.clone();
-        let target_id = self.pages[self.active_page_index].target_id.clone();
-        // The tab that becomes active after the close may itself be discarded,
-        // which would hang enable_domains; revive it before enabling domains.
-        self.ensure_renderer_alive(&session_id, &target_id, dialog_session)
-            .await?;
-        self.enable_domains(&session_id).await?;
-
-        Ok(json!({
+        let mut result = json!({
             "tabId": format_tab_id(closed_tab_id),
             "label": closed_label,
             "closed": true,
-        }))
+        });
+
+        // The close has already committed. The tab that becomes active may
+        // itself be discarded, which would hang enable_domains; revive it
+        // first. A successor that cannot revive must not turn the completed
+        // close into a reported failure, so its error is not propagated.
+        let session_id = self.pages[self.active_page_index].session_id.clone();
+        let target_id = self.pages[self.active_page_index].target_id.clone();
+        if let Ok(state) = self
+            .ensure_renderer_alive(&session_id, &target_id, dialog_session)
+            .await
+        {
+            self.enable_domains(&session_id).await?;
+            // Surface a reload of the newly active tab, mirroring tab switch.
+            if matches!(state, RendererState::Revived) {
+                result["activeTabRevived"] = json!(true);
+            }
+        }
+
+        Ok(result)
     }
 
     // -----------------------------------------------------------------------
@@ -2849,6 +2855,34 @@ mod tests {
             .expect("closing a tab with a discarded successor should succeed");
 
         assert_eq!(result["closed"], json!(true));
+        assert_eq!(
+            result["activeTabRevived"],
+            json!(true),
+            "a reloaded successor must be surfaced, mirroring tab switch"
+        );
+        assert_eq!(mgr.pages.len(), 1);
+    }
+
+    /// Once the close has committed, a successor that cannot revive must not
+    /// turn the completed close into a reported failure: the closed tab is
+    /// already gone, so reporting an error would leave the caller unable to
+    /// retry.
+    #[tokio::test]
+    async fn test_tab_close_succeeds_even_if_successor_unrevivable() {
+        let url = start_mock_cdp_browser_with_discarded_tab(false).await;
+        let mut mgr = BrowserManager::connect_cdp(&url).await.expect("connect");
+        assert_eq!(mgr.pages.len(), 2);
+
+        let result = tokio::time::timeout(Duration::from_secs(25), mgr.tab_close(Some(0), None))
+            .await
+            .expect("tab_close must not hang")
+            .expect("a committed close must report success even if the successor is dead");
+
+        assert_eq!(result["closed"], json!(true));
+        assert!(
+            result.get("activeTabRevived").is_none(),
+            "an unrevivable successor must not be marked revived"
+        );
         assert_eq!(mgr.pages.len(), 1);
     }
 }
