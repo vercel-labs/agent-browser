@@ -7268,3 +7268,61 @@ async fn e2e_find_role_directory_matches_only_explicit_attribute() {
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }
+
+/// The presentational DOM lookup must honor the selected frame, not always the
+/// top document. Force-red: revert the frame dispatch in the presentational path
+/// (search the top document only) and the in-frame element is missed.
+#[tokio::test]
+#[ignore]
+async fn e2e_presentational_role_honors_selected_frame() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Top document has no role="none"; the same-origin iframe does. `srcdoc`
+    // inherits the parent origin, so the child is same-origin (the path this fix
+    // targets) without needing a server; a `data:` child would be cross-origin.
+    let outer = "<body><iframe id='f' srcdoc=\"<div role='none'>INSIDE</div>\"></iframe></body>";
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(outer));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Before selecting the frame, the top document has no match.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "getbyrole", "role": "none", "subaction": "text" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(|v| v.as_bool()),
+        Some(false),
+        "top document has no role=none: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
+
+    // Select the frame; the presentational lookup must now find the frame element.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "frame", "selector": "#f" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "getbyrole", "role": "none", "subaction": "text" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "INSIDE");
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}

@@ -7831,9 +7831,6 @@ async fn handle_presentational_getbyrole(
     name: Option<&str>,
     exact: bool,
 ) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
-
     let name_check = match name {
         Some(n) => {
             let name_json = serde_json::to_string(n).unwrap_or_default();
@@ -7852,15 +7849,17 @@ async fn handle_presentational_getbyrole(
     // ARIA roles Playwright recognizes (WAI-ARIA 1.2). The operative role is the
     // first token that is a defined role, so omitting one (e.g. `mark`) lets a
     // later presentational token wrongly win.
-    let query = format!(
-        r#"(() => {{
+    // A function of `root` (the document to search), so it can run against the
+    // top document or a selected frame's document, not just the global one.
+    let locate_body = format!(
+        r#"(root) => {{
             const VALID_ROLES = new Set(['alert','alertdialog','application','article','banner','blockquote','button','caption','cell','checkbox','code','columnheader','combobox','complementary','contentinfo','definition','deletion','dialog','directory','document','emphasis','feed','figure','form','generic','grid','gridcell','group','heading','img','insertion','link','list','listbox','listitem','log','main','mark','marquee','math','meter','menu','menubar','menuitem','menuitemcheckbox','menuitemradio','navigation','none','note','option','paragraph','presentation','progressbar','radio','radiogroup','region','row','rowgroup','rowheader','scrollbar','search','searchbox','separator','slider','spinbutton','status','strong','subscript','superscript','switch','tab','table','tablist','tabpanel','term','textbox','time','timer','toolbar','tooltip','tree','treegrid','treeitem']);
             const norm = s => (s || '').replace(/\s+/g, ' ').trim();
             const nameOf = el => {{
                 const lb = el.getAttribute('aria-labelledby');
                 if (lb) {{
                     const t = lb.trim().split(/\s+/)
-                        .map(id => {{ const r = document.getElementById(id); return r ? r.textContent : ''; }})
+                        .map(id => {{ const r = root.getElementById(id); return r ? r.textContent : ''; }})
                         .join(' ');
                     if (norm(t)) return t;
                 }}
@@ -7869,7 +7868,7 @@ async fn handle_presentational_getbyrole(
                 return el.textContent || '';
             }};
             const role = {role_json};
-            for (const el of document.querySelectorAll('[role]')) {{
+            for (const el of root.querySelectorAll('[role]')) {{
                 const tokens = (el.getAttribute('role') || '').trim().toLowerCase().split(/\s+/);
                 const operative = tokens.find(t => VALID_ROLES.has(t));
                 if (operative !== role) continue;
@@ -7878,29 +7877,23 @@ async fn handle_presentational_getbyrole(
                 return true;
             }}
             return false;
-        }})()"#
+        }}"#
     );
 
-    let result: super::cdp::types::EvaluateResult = mgr
-        .client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &super::cdp::types::EvaluateParams {
-                expression: query,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&session_id),
+    let located = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        let top_session = mgr.active_session_id()?.to_string();
+        eval_body_in_active_frame(
+            mgr,
+            state.active_frame_id.as_deref(),
+            &top_session,
+            &state.iframe_sessions,
+            &locate_body,
         )
-        .await?;
+        .await?
+    };
 
-    if !result
-        .result
-        .value
-        .as_ref()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    if !located.as_bool().unwrap_or(false) {
         return Err(format!(
             "No element found: {}",
             build_role_selector(role, name, exact)
@@ -7910,16 +7903,81 @@ async fn handle_presentational_getbyrole(
     let selector = "[data-agent-browser-located='true']";
     let action_result = execute_subaction(cmd, state, selector).await;
 
-    if let Some(ref browser) = state.browser {
-        let _ = browser
-            .evaluate(
-                "document.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located')",
-                None,
+    // Clean up the marker in whichever document it was set in.
+    if let Some(mgr) = state.browser.as_ref() {
+        if let Ok(top_session) = mgr.active_session_id() {
+            let top_session = top_session.to_string();
+            let _ = eval_body_in_active_frame(
+                mgr,
+                state.active_frame_id.as_deref(),
+                &top_session,
+                &state.iframe_sessions,
+                "(root) => { root.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located'); }",
             )
             .await;
+        }
     }
 
     action_result
+}
+
+/// Evaluate a `(root) => {...}` body against the active frame's document, or the
+/// top document when no frame is selected. Runtime.evaluate cannot target a
+/// same-origin child frame, so that case runs the body against the frame owner's
+/// contentDocument (as element resolution does); an OOPIF has its own session
+/// where `document` is already the frame document.
+async fn eval_body_in_active_frame(
+    mgr: &BrowserManager,
+    frame_id: Option<&str>,
+    top_session: &str,
+    iframe_sessions: &HashMap<String, String>,
+    body: &str,
+) -> Result<Value, String> {
+    match frame_id {
+        Some(fid) if !iframe_sessions.contains_key(fid) => {
+            let owner =
+                super::element::frame_owner_object_id(&mgr.client, top_session, fid).await?;
+            let func = format!(
+                "function() {{ const d = this.contentDocument; if (!d) return null; return ({body})(d); }}"
+            );
+            let res = mgr
+                .client
+                .send_command(
+                    "Runtime.callFunctionOn",
+                    Some(serde_json::json!({
+                        "objectId": owner,
+                        "functionDeclaration": func,
+                        "returnByValue": true,
+                    })),
+                    Some(top_session),
+                )
+                .await?;
+            Ok(res
+                .get("result")
+                .and_then(|r| r.get("value"))
+                .cloned()
+                .unwrap_or(Value::Null))
+        }
+        _ => {
+            let session = frame_id
+                .and_then(|f| iframe_sessions.get(f))
+                .map(|s| s.as_str())
+                .unwrap_or(top_session);
+            let res: super::cdp::types::EvaluateResult = mgr
+                .client
+                .send_command_typed(
+                    "Runtime.evaluate",
+                    &super::cdp::types::EvaluateParams {
+                        expression: format!("({body})(document)"),
+                        return_by_value: Some(true),
+                        await_promise: Some(false),
+                    },
+                    Some(session),
+                )
+                .await?;
+            Ok(res.result.value.unwrap_or(Value::Null))
+        }
+    }
 }
 
 async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
