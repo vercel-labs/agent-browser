@@ -8529,7 +8529,40 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
     let timeout_ms = state.timeout_ms(cmd);
 
     let mut rx = mgr.client.subscribe();
+
+    let destination = if let Some(path_str) = cmd.get("path").and_then(|v| v.as_str()) {
+        let raw_dest = if std::path::Path::new(path_str).is_absolute() {
+            PathBuf::from(path_str)
+        } else {
+            std::env::current_dir()
+                .map_err(|e| format!("Failed to get current directory: {}", e))?
+                .join(path_str)
+        };
+        let download_dir = raw_dest
+            .parent()
+            .ok_or("Invalid download path: no parent directory")?
+            .to_path_buf();
+        std::fs::create_dir_all(&download_dir)
+            .map_err(|e| format!("Failed to create download directory: {}", e))?;
+        let download_dir = download_dir
+            .canonicalize()
+            .map_err(|e| format!("Failed to resolve download directory: {}", e))?;
+        let dest = download_dir.join(
+            raw_dest
+                .file_name()
+                .ok_or("Invalid download path: no filename")?,
+        );
+        let download_dir_str = download_dir
+            .to_str()
+            .ok_or("Download directory path is not valid UTF-8")?;
+        mgr.set_download_behavior(download_dir_str).await?;
+        Some((download_dir, dest, path_str.to_string()))
+    } else {
+        None
+    };
+
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+    let mut downloaded_guid: Option<String> = None;
 
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -8542,12 +8575,24 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
                 // Browser-domain events may arrive without a sessionId;
                 // Page-domain events are matched by session.
                 let is_page_session = event.session_id.as_deref() == Some(&session_id);
+                let is_will_begin = event.method == "Browser.downloadWillBegin"
+                    || (event.method == "Page.downloadWillBegin" && is_page_session);
+
+                if destination.is_some() && is_will_begin {
+                    if let Some(guid) = event.params.get("guid").and_then(|v| v.as_str()) {
+                        downloaded_guid = Some(guid.to_string());
+                    }
+                }
+
                 let is_progress = event.method == "Browser.downloadProgress"
                     || (event.method == "Page.downloadProgress" && is_page_session);
 
                 if is_progress
                     && event.params.get("state").and_then(|v| v.as_str()) == Some("completed")
                 {
+                    if destination.is_some() {
+                        break;
+                    }
                     let path = cmd
                         .get("path")
                         .and_then(|v| v.as_str())
@@ -8560,6 +8605,34 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
             Err(_) => return Err("Timeout waiting for download".to_string()),
         }
     }
+
+    if let Some((download_dir, dest, path)) = destination {
+        if let Some(guid) = downloaded_guid {
+            let guid_path = download_dir.join(&guid);
+            for _ in 0..10 {
+                if guid_path.exists() {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+            if guid_path.exists() {
+                std::fs::rename(&guid_path, &dest)
+                    .map_err(|e| format!("Failed to rename downloaded file: {}", e))?;
+            } else if !dest.exists() {
+                return Err(format!(
+                    "Downloaded file not found at expected path (GUID: {})",
+                    guid
+                ));
+            }
+        } else if !dest.exists() {
+            return Err(
+                "Download completed but could not determine the downloaded file name".to_string(),
+            );
+        }
+        return Ok(json!({ "path": path }));
+    }
+
+    Ok(json!({ "path": "download" }))
 }
 
 async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
