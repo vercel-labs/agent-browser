@@ -102,7 +102,10 @@ fn build_ffmpeg_command(output_path: &str) -> tokio::process::Command {
             "-i",
             "pipe:0",
         ])
-        .args(["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"]);
+        .args([
+            "-vf",
+            "pad=ceil(iw/2)*2:ceil(ih/2)*2,scale=in_range=pc:out_range=tv:out_color_matrix=bt709",
+        ]);
 
     if output_path.ends_with(".webm") {
         cmd.args(["-c:v", "libvpx", "-crf", "30", "-b:v", "1M"]);
@@ -110,7 +113,20 @@ fn build_ffmpeg_command(output_path: &str) -> tokio::process::Command {
         cmd.args(["-c:v", "libx264", "-preset", "ultrafast"]);
     }
 
-    cmd.args(["-pix_fmt", "yuv420p", "-threads", "1"])
+    cmd.args([
+        "-pix_fmt",
+        "yuv420p",
+        "-color_range",
+        "tv",
+        "-colorspace",
+        "bt709",
+        "-color_primaries",
+        "bt709",
+        "-color_trc",
+        "bt709",
+        "-threads",
+        "1",
+    ])
         .arg(output_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -309,6 +325,11 @@ mod tests {
         let args: Vec<&std::ffi::OsStr> = cmd.as_std().get_args().collect();
         let args_str: Vec<&str> = args.iter().filter_map(|a| a.to_str()).collect();
         assert!(args_str.contains(&"libvpx"));
+        assert!(args_str.contains(
+            &"pad=ceil(iw/2)*2:ceil(ih/2)*2,scale=in_range=pc:out_range=tv:out_color_matrix=bt709"
+        ));
+        assert!(args_str.contains(&"-color_range"));
+        assert!(args_str.contains(&"bt709"));
         assert!(args_str.contains(&"/tmp/out.webm"));
     }
 
