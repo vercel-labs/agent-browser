@@ -21,6 +21,16 @@ agent-browser snapshot -i       # 4. Re-snapshot after any page change
 
 Refs (`@e1`, `@e2`, ...) are assigned fresh on every snapshot. They become **stale the moment the page changes** — after clicks that navigate, form submits, dynamic re-renders, dialog opens. Always re-snapshot before your next ref interaction.
 
+## Always use your own session
+
+Before your first command, set a named session for the whole task:
+
+```bash
+export AGENT_BROWSER_SESSION="$(agent-browser session id --scope worktree --prefix task)"
+```
+
+The default (unnamed) session is a single shared browser: it is shared with every other agent on the machine and it persists across conversations, so working in it can hijack another agent's page mid-task or navigate away from something the human left open. Every example below assumes a named session is active. See [Run multiple browsers in parallel](#run-multiple-browsers-in-parallel) and `references/session-management.md`.
+
 ## Quickstart
 
 ```bash
