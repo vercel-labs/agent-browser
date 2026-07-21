@@ -1674,6 +1674,36 @@ When enabled, agent-browser connects to a Browserbase session instead of launchi
 
 Get your API key from the [Browserbase Dashboard](https://browserbase.com/overview).
 
+### Firecrawl
+
+[Firecrawl](https://firecrawl.dev) provides a managed cloud browser (proxies, anti-bot, persistent login profiles, live view) via its Browser Sandbox. Use it when running agent-browser in environments where a local browser isn't feasible.
+
+To enable Firecrawl, use the `-p` flag:
+
+```bash
+export FIRECRAWL_API_KEY="fc-your-api-key"
+agent-browser -p firecrawl open https://example.com
+```
+
+Or use environment variables for CI/scripts:
+
+```bash
+export AGENT_BROWSER_PROVIDER=firecrawl
+export FIRECRAWL_API_KEY="fc-your-api-key"
+agent-browser open https://example.com
+```
+
+Optional configuration via environment variables:
+
+| Variable                 | Description                                                        | Default                     |
+| ------------------------ | ------------------------------------------------------------------ | --------------------------- |
+| `FIRECRAWL_API_URL`      | Base API URL (for self-hosted Firecrawl)                           | `https://api.firecrawl.dev` |
+| `FIRECRAWL_PROFILE_NAME` | Persistent profile to load (cookies/localStorage/login state)      | —                           |
+
+When enabled, agent-browser creates a Firecrawl browser session (`POST /v2/interact`), connects to the returned CDP URL instead of launching a local browser, and deletes the session on close. All commands work identically.
+
+Get your API key from the [Firecrawl Dashboard](https://www.firecrawl.dev/app).
+
 ### Browser Use
 
 [Browser Use](https://browser-use.com) provides cloud browser infrastructure for AI agents. Use it when running agent-browser in environments where a local browser isn't available (serverless, CI/CD, etc.).

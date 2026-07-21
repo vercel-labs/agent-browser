@@ -1,7 +1,8 @@
 //! Browser provider connections for remote CDP sessions.
 //!
-//! Supports AgentCore, Browserbase, Browserless, Browser Use, and Kernel providers.
-//! Each provider returns a CDP WebSocket URL for connecting via BrowserManager.
+//! Supports AgentCore, Browserbase, Browserless, Browser Use, Firecrawl, and
+//! Kernel providers. Each provider returns a CDP WebSocket URL for connecting
+//! via BrowserManager.
 
 use serde_json::{json, Value};
 use std::env;
@@ -69,6 +70,15 @@ pub async fn connect_provider_with_plugins_and_options(
         }
         "browser-use" | "browseruse" => {
             let (url, session) = connect_browser_use().await?;
+            Ok(ProviderConnection {
+                ws_url: url,
+                session,
+                direct_page: false,
+                metadata: None,
+            })
+        }
+        "firecrawl" => {
+            let (url, session) = connect_firecrawl().await?;
             Ok(ProviderConnection {
                 ws_url: url,
                 session,
@@ -170,6 +180,21 @@ pub async fn close_provider_session_with_plugins(
                     .await;
             }
         }
+        "firecrawl" => {
+            if let Ok(api_key) = env::var("FIRECRAWL_API_KEY") {
+                let api_url = env::var("FIRECRAWL_API_URL")
+                    .unwrap_or_else(|_| "https://api.firecrawl.dev".to_string());
+                let _ = client
+                    .delete(format!(
+                        "{}/v2/interact/{}",
+                        api_url.trim_end_matches('/'),
+                        session.session_id
+                    ))
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .send()
+                    .await;
+            }
+        }
         "agentcore" => {
             // AgentCore session cleanup is handled via signed DELETE request
             let _ = close_agentcore_session(&session.session_id).await;
@@ -192,7 +217,7 @@ pub async fn connect_plugin_provider_with_plugins_and_options(
 ) -> Result<ProviderConnection, String> {
     if crate::plugins::find_plugin(plugins, provider_name).is_none() {
         return Err(format!(
-            "Unknown provider '{}'. Supported: browserbase, browserless, browser-use, kernel, agentcore, or a configured plugin with browser.provider",
+            "Unknown provider '{}'. Supported: browserbase, browserless, browser-use, firecrawl, kernel, agentcore, or a configured plugin with browser.provider",
             provider_name
         ));
     }
@@ -388,6 +413,72 @@ async fn connect_browser_use() -> Result<(String, Option<ProviderSession>), Stri
     let ws_url = format!("wss://connect.browser-use.com?apiKey={}", api_key);
 
     Ok((ws_url, None))
+}
+
+async fn connect_firecrawl() -> Result<(String, Option<ProviderSession>), String> {
+    let api_key = env::var("FIRECRAWL_API_KEY")
+        .map_err(|_| "FIRECRAWL_API_KEY environment variable is not set")?;
+    let api_url =
+        env::var("FIRECRAWL_API_URL").unwrap_or_else(|_| "https://api.firecrawl.dev".to_string());
+
+    let url = format!("{}/v2/interact", api_url.trim_end_matches('/'));
+
+    // Optional persistent profile (cookies/localStorage/login state) by name.
+    let mut body = json!({});
+    if let Ok(profile) = env::var("FIRECRAWL_PROFILE_NAME") {
+        if !profile.is_empty() {
+            body.as_object_mut()
+                .unwrap()
+                .insert("profile".to_string(), json!({ "name": profile }));
+        }
+    }
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Firecrawl request failed: {}", e))?;
+
+    let status = response.status();
+    let resp_body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read Firecrawl response: {}", e))?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "Firecrawl API error ({}): {}",
+            status.as_u16(),
+            resp_body
+        ));
+    }
+
+    let json: Value = serde_json::from_str(&resp_body)
+        .map_err(|e| format!("Invalid Firecrawl response: {}", e))?;
+
+    let session_id = json
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let ws_url = json
+        .get("cdpUrl")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| "Firecrawl response missing cdpUrl".to_string())?;
+
+    Ok((
+        ws_url,
+        Some(ProviderSession {
+            provider: "firecrawl".to_string(),
+            session_id,
+        }),
+    ))
 }
 
 async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
