@@ -147,21 +147,47 @@ pub fn diff_snapshots(before: &str, after: &str) -> SnapshotDiffResult {
     }
 }
 
-/// Legacy JSON diff output for backwards compatibility.
-pub fn diff_text(a: &str, b: &str) -> Value {
-    let result = diff_snapshots(a, b);
-    json!({
-        "identical": !result.changed,
-        "additions": result.additions,
-        "removals": result.removals,
-        "deletions": result.removals,
-        "unchanged": result.unchanged,
-        "changed": result.changed,
-    })
-}
+/// Remove ephemeral element refs (`ref=eN`) from snapshot text.
+///
+/// Refs are reassigned on every snapshot, so two structurally identical pages
+/// produce different ref ids and diff as "changed". Stripping refs before
+/// diffing keeps `diff url` focused on real content changes. Only the `ref=eN`
+/// token (and its attribute-list separator) is removed; other attributes such
+/// as `url=` are preserved.
+pub fn strip_refs(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    // Scan the unprocessed remainder. Working relative to `rest` (always moving
+    // forward) means a separator can never be claimed twice, so no index can
+    // invert — strip_refs never panics on arbitrary input.
+    let mut rest = text;
+    while let Some(pos) = rest.find("ref=e") {
+        let digits = rest[pos + 5..]
+            .bytes()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+        let token_end = pos + 5 + digits;
+        let before = &rest[..pos];
+        let after = &rest[token_end..];
 
-pub fn diff_unified(a: &str, b: &str) -> String {
-    diff_snapshots(a, b).diff
+        // A real ref is `eN` (n>0) sitting after ", " or " [". Drop the token
+        // with exactly one separator so the `[...]` list stays well-formed;
+        // anything else (e.g. "ref=enabled", or text content) is kept verbatim.
+        if digits > 0 && before.ends_with(", ") {
+            out.push_str(&before[..before.len() - 2]); // "…, ref=eN"
+            rest = after;
+        } else if digits > 0 && after.starts_with(", ") {
+            out.push_str(before); // "ref=eN, …"
+            rest = &after[2..];
+        } else if digits > 0 && before.ends_with(" [") && after.starts_with(']') {
+            out.push_str(&before[..before.len() - 2]); // " [ref=eN]" (only attr)
+            rest = &after[1..];
+        } else {
+            out.push_str(&rest[..token_end]); // not a ref — emit and move on
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -169,33 +195,73 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_diff_identical() {
-        let result = diff_text("hello\nworld", "hello\nworld");
-        assert_eq!(result.get("identical").unwrap(), true);
-        assert_eq!(result.get("changed").unwrap(), false);
-        assert_eq!(result.get("unchanged").unwrap(), 2);
+    fn test_strip_refs_clears_ref_only_attribute() {
+        assert_eq!(strip_refs("- link \"Home\" [ref=e4]"), "- link \"Home\"");
     }
 
     #[test]
-    fn test_diff_additions() {
-        let result = diff_text("hello\n", "hello\nworld\n");
-        assert_eq!(result.get("identical").unwrap(), false);
-        assert_eq!(result.get("changed").unwrap(), true);
-        assert!(result.get("additions").unwrap().as_i64().unwrap() > 0);
+    fn test_strip_refs_keeps_preceding_attribute() {
+        assert_eq!(
+            strip_refs("- heading \"X\" [level=1, ref=e3]"),
+            "- heading \"X\" [level=1]"
+        );
     }
 
     #[test]
-    fn test_diff_deletions() {
-        let result = diff_text("hello\nworld\n", "hello\n");
-        assert_eq!(result.get("identical").unwrap(), false);
-        assert!(result.get("removals").unwrap().as_i64().unwrap() > 0);
+    fn test_strip_refs_keeps_following_attribute() {
+        assert_eq!(
+            strip_refs("- link \"Learn\" [ref=e3, url=https://x.com]"),
+            "- link \"Learn\" [url=https://x.com]"
+        );
     }
 
     #[test]
-    fn test_diff_unified_output() {
-        let output = diff_unified("a\nb\nc\n", "a\nx\nc\n");
-        assert!(output.contains("---"));
-        assert!(output.contains("+++"));
+    fn test_strip_refs_no_panic_on_adjacent_refs() {
+        // Regression: a "delete-range" refactor once panicked here by claiming the
+        // same ", " separator twice. strip_refs must tolerate arbitrary text
+        // (these aren't real snapshot shapes) without crashing.
+        let _ = strip_refs("[ref=e1, ref=e2]");
+        let _ = strip_refs("a, ref=e1, ref=e2, b");
+        let _ = strip_refs("x [ref=e1] y, ref=e2, z");
+    }
+
+    #[test]
+    fn test_strip_refs_preserves_ref_like_substring_in_url() {
+        // Only real attribute refs are stripped; a "ref=eN" substring inside a
+        // url= value must survive untouched.
+        assert_eq!(
+            strip_refs("- link \"x\" [ref=e3, url=https://x.com/?q=ref=e9]"),
+            "- link \"x\" [url=https://x.com/?q=ref=e9]"
+        );
+        let url_only = "- link \"x\" [url=https://x.com/?q=ref=e9]";
+        assert_eq!(strip_refs(url_only), url_only);
+    }
+
+    #[test]
+    fn test_strip_refs_neutralizes_ref_shift_on_insertion() {
+        // An inserted element shifts every later ref number. A line-based diff
+        // would then flag every shifted line as changed; stripping refs isolates
+        // the single real insertion. (Clearing the ref counter per snapshot only
+        // helps identical pages; it does NOT fix this shift case.)
+        let a = "- link \"A\" [ref=e1]\n- link \"B\" [ref=e2]\n- link \"C\" [ref=e3]";
+        let b = "- link \"X\" [ref=e1]\n- link \"A\" [ref=e2]\n- link \"B\" [ref=e3]\n- link \"C\" [ref=e4]";
+        let raw = diff_snapshots(a, b);
+        let stripped = diff_snapshots(&strip_refs(a), &strip_refs(b));
+        assert!(stripped.additions + stripped.removals < raw.additions + raw.removals);
+        assert_eq!(stripped.additions, 1);
+        assert_eq!(stripped.removals, 0);
+    }
+
+    #[test]
+    fn test_strip_refs_makes_ref_only_diff_clean() {
+        // Same content, different ref ids -> must not count as a change.
+        let a = "- link \"Home\" [ref=e259]\n- link \"About\" [level=1, ref=e260]";
+        let b = "- link \"Home\" [ref=e101]\n- link \"About\" [level=1, ref=e102]";
+        let result = diff_snapshots(&strip_refs(a), &strip_refs(b));
+        assert!(
+            !result.changed,
+            "ref-only differences should not diff as changed"
+        );
     }
 
     #[test]

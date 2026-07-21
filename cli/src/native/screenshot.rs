@@ -168,7 +168,10 @@ pub async fn take_screenshot(
     })
 }
 
-async fn capture_screenshot_base64(
+/// Capture the screenshot and return base64 PNG/JPEG WITHOUT writing it to disk
+/// (unlike `take_screenshot`, which always saves). Used by diff paths that only
+/// need the bytes for comparison.
+pub(crate) async fn capture_screenshot_base64(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,

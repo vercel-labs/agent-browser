@@ -3691,9 +3691,12 @@ fn print_snapshot_diff(data: &serde_json::Map<String, serde_json::Value>) {
     }
     if let Some(diff) = data.get("diff").and_then(|v| v.as_str()) {
         for line in diff.lines() {
-            if line.starts_with("+ ") {
+            // Check '---'/'+++'/'@@' headers first — they'd otherwise match the bare +/- branch.
+            if line.starts_with("+++") || line.starts_with("---") || line.starts_with("@@") {
+                println!("{}", color::dim(line));
+            } else if line.starts_with('+') {
                 println!("{}", color::green(line));
-            } else if line.starts_with("- ") {
+            } else if line.starts_with('-') {
                 println!("{}", color::red(line));
             } else {
                 println!("{}", color::dim(line));
@@ -3717,9 +3720,11 @@ fn print_screenshot_diff(data: &serde_json::Map<String, serde_json::Value>) {
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
     let is_match = data.get("match").and_then(|v| v.as_bool()).unwrap_or(false);
+    // Producers emit `dimensionMismatch` as an object ({expected, actual}) or null,
+    // not a bool, so treat any present non-null value as a mismatch.
     let dim_mismatch = data
         .get("dimensionMismatch")
-        .and_then(|v| v.as_bool())
+        .map(|v| !v.is_null())
         .unwrap_or(false);
     if dim_mismatch {
         println!(

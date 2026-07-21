@@ -5634,18 +5634,75 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
     };
 
     let result = diff::diff_snapshots(&baseline_text, &current);
-    Ok(json!({
-        "diff": result.diff,
-        "additions": result.additions,
-        "removals": result.removals,
-        "unchanged": result.unchanged,
-        "changed": result.changed,
-    }))
+    Ok(snapshot_diff_json(result))
+}
+
+/// Take a screenshot of the current page and return the decoded image bytes
+/// (PNG or JPEG, per `options.format`). Shared by `diff url --screenshot` and
+/// `diff screenshot`.
+async fn capture_image_bytes(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    options: &ScreenshotOptions,
+    iframe_sessions: &std::collections::HashMap<String, String>,
+) -> Result<Vec<u8>, String> {
+    // capture_screenshot_base64 returns the bytes without persisting a file,
+    // unlike take_screenshot which always saves a timestamped image to disk.
+    let base64 = screenshot::capture_screenshot_base64(
+        client,
+        session_id,
+        ref_map,
+        options,
+        iframe_sessions,
+    )
+    .await?;
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &base64)
+        .map_err(|e| format!("Failed to decode screenshot: {}", e))
+}
+
+/// Like `capture_image_bytes`, but returns None when no screenshot was
+/// requested (`diff url` without `--screenshot`).
+async fn capture_image_bytes_opt(
+    options: Option<&ScreenshotOptions>,
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    iframe_sessions: &std::collections::HashMap<String, String>,
+) -> Result<Option<Vec<u8>>, String> {
+    match options {
+        Some(o) => Ok(Some(
+            capture_image_bytes(client, session_id, ref_map, o, iframe_sessions).await?,
+        )),
+        None => Ok(None),
+    }
+}
+
+/// Shared by `diff snapshot` and the `snapshot` field of `diff url`.
+fn snapshot_diff_json(d: diff::SnapshotDiffResult) -> Value {
+    json!({
+        "diff": d.diff,
+        "additions": d.additions,
+        "removals": d.removals,
+        "unchanged": d.unchanged,
+        "changed": d.changed,
+    })
+}
+
+/// Shared by `diff screenshot` and the `screenshot` field of `diff url`.
+/// `diff_path` is where the diff image was written, or None when it wasn't saved.
+fn screenshot_diff_json(d: diff::ScreenshotDiffResult, diff_path: Option<&str>) -> Value {
+    json!({
+        "match": d.matched,
+        "mismatchPercentage": d.mismatch_percentage,
+        "totalPixels": d.total_pixels,
+        "differentPixels": d.different_pixels,
+        "diffPath": diff_path,
+        "dimensionMismatch": d.dimension_mismatch,
+    })
 }
 
 async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-
     let url1 = cmd
         .get("url1")
         .and_then(|v| v.as_str())
@@ -5661,10 +5718,48 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .map(WaitUntil::from_str)
         .unwrap_or(WaitUntil::Load);
 
-    // Navigate to URL1 and snapshot
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+    // Scope/format flags apply to both snapshots, matching the pre-0.20 contract
+    // and the `snapshot` command. (Screenshot scope is controlled separately by --full.)
+    let options = SnapshotOptions {
+        selector: cmd
+            .get("selector")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        compact: cmd
+            .get("compact")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        depth: cmd
+            .get("maxDepth")
+            .and_then(|v| v.as_u64())
+            .map(|d| d as usize),
+        ..SnapshotOptions::default()
+    };
+    // Built only when --screenshot is set; None means "no pixel diff".
+    let shot_opts = cmd
+        .get("screenshot")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        .then(|| ScreenshotOptions {
+            selector: None,
+            path: None,
+            full_page: cmd
+                .get("fullPage")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            format: "png".to_string(),
+            quality: None,
+            annotate: false,
+            output_dir: None,
+        });
+
+    // Navigate to URL1 and snapshot, taking a screenshot first if requested
+    // (it must be captured before we leave the page). Clear refs before each
+    // capture so both snapshots number from a clean base.
     mgr.navigate(url1, wait_until).await?;
     let session_id = mgr.active_session_id()?.to_string();
-    let options = SnapshotOptions::default();
+    state.ref_map.clear();
     let snap1 = snapshot::take_snapshot(
         &mgr.client,
         &session_id,
@@ -5674,8 +5769,15 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         &state.iframe_sessions,
     )
     .await?;
+    let shot1 = capture_image_bytes_opt(
+        shot_opts.as_ref(),
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        &state.iframe_sessions,
+    )
+    .await?;
 
-    // Navigate to URL2 and snapshot
     mgr.navigate(url2, wait_until).await?;
     state.ref_map.clear();
     let snap2 = snapshot::take_snapshot(
@@ -5687,15 +5789,32 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         &state.iframe_sessions,
     )
     .await?;
+    let shot2 = capture_image_bytes_opt(
+        shot_opts.as_ref(),
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        &state.iframe_sessions,
+    )
+    .await?;
 
-    let result = diff::diff_text(&snap1, &snap2);
-    Ok(json!({
-        "diff": result,
-        "url1": url1,
-        "url2": url2,
-        "snapshot1": snap1,
-        "snapshot2": snap2,
-    }))
+    // Snapshot diff (always included). Strip ephemeral refs first: they are
+    // renumbered per snapshot, so similar pages would otherwise diff as
+    // "changed" purely from ref-number churn.
+    let snap_diff = diff::diff_snapshots(&diff::strip_refs(&snap1), &diff::strip_refs(&snap2));
+    // DiffUrlData contract: `snapshot` always, `screenshot` only with --screenshot.
+    let mut data = json!({ "snapshot": snapshot_diff_json(snap_diff) });
+
+    if let (Some(a), Some(b)) = (shot1, shot2) {
+        // Default tolerance; `diff url` has no --threshold flag (unlike `diff screenshot`).
+        let shot_diff = diff::diff_screenshot(&a, &b, 0.1)?;
+        data.as_object_mut().unwrap().insert(
+            "screenshot".to_string(),
+            screenshot_diff_json(shot_diff, None),
+        );
+    }
+
+    Ok(data)
 }
 
 async fn handle_credentials_set(cmd: &Value) -> Result<Value, String> {
@@ -8675,7 +8794,7 @@ async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Valu
         output_dir: None,
     };
 
-    let result = screenshot::take_screenshot(
+    let current_bytes = capture_image_bytes(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -8683,10 +8802,6 @@ async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Valu
         &state.iframe_sessions,
     )
     .await?;
-
-    let current_bytes =
-        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &result.base64)
-            .map_err(|e| format!("Failed to decode screenshot: {}", e))?;
 
     let baseline_bytes =
         std::fs::read(baseline_path).map_err(|e| format!("Failed to read baseline: {}", e))?;
@@ -8699,14 +8814,7 @@ async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Valu
             .map_err(|e| format!("Failed to write diff image: {}", e))?;
     }
 
-    Ok(json!({
-        "match": result.matched,
-        "mismatchPercentage": result.mismatch_percentage,
-        "totalPixels": result.total_pixels,
-        "differentPixels": result.different_pixels,
-        "diffPath": output_path,
-        "dimensionMismatch": result.dimension_mismatch,
-    }))
+    Ok(screenshot_diff_json(result, output_path))
 }
 
 // ---------------------------------------------------------------------------
