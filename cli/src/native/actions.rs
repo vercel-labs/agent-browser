@@ -5941,6 +5941,29 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 
 async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+
+    if cmd.get("reset").and_then(|v| v.as_bool()).unwrap_or(false) {
+        mgr.reset_viewport().await?;
+
+        state.viewport = None;
+
+        // Update stream server viewport so status messages and screencast use the new dimensions
+        if let Some(ref server) = state.stream_server {
+            server
+                .set_viewport(
+                    super::browser::DEFAULT_VIEWPORT_WIDTH as u32,
+                    super::browser::DEFAULT_VIEWPORT_HEIGHT as u32,
+                )
+                .await;
+        }
+
+        return Ok(json!({
+            "reset": true,
+            "width": super::browser::DEFAULT_VIEWPORT_WIDTH,
+            "height": super::browser::DEFAULT_VIEWPORT_HEIGHT,
+        }));
+    }
+
     let width = cmd.get("width").and_then(|v| v.as_i64()).unwrap_or(1280) as i32;
     let height = cmd.get("height").and_then(|v| v.as_i64()).unwrap_or(720) as i32;
     let scale = cmd

@@ -1877,6 +1877,34 @@ async fn e2e_viewport_emulation() {
         new_width
     );
 
+    // Reset viewport emulation
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "viewport", "reset": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["reset"], true);
+    assert!(state.viewport.is_none());
+
+    // Reload to apply the cleared override
+    let resp = execute_command(&json!({ "id": "8", "action": "reload" }), &mut state).await;
+    assert_success(&resp);
+
+    // Width should be back to the default, not the emulated 375
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "evaluate", "script": "window.innerWidth" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let reset_width = get_data(&resp)["result"].as_i64().unwrap();
+    assert!(
+        reset_width != 375,
+        "Viewport should no longer be emulated after reset (got {})",
+        reset_width
+    );
+
     // Set user agent
     let resp = execute_command(
         &json!({ "id": "5", "action": "user_agent", "userAgent": "TestBot/1.0" }),

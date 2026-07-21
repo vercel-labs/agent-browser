@@ -2761,9 +2761,12 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 
     match rest.first().copied() {
         Some("viewport") => {
+            if rest.get(1).copied() == Some("reset") {
+                return Ok(json!({ "id": id, "action": "viewport", "reset": true }));
+            }
             let w_str = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "set viewport".to_string(),
-                usage: "set viewport <width> <height> [scale]",
+                usage: "set viewport <width> <height> [scale] | set viewport reset",
             })?;
             let h_str = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
                 context: "set viewport".to_string(),
@@ -4762,6 +4765,15 @@ mod tests {
         assert_eq!(cmd["width"], 375);
         assert_eq!(cmd["height"], 812);
         assert_eq!(cmd["deviceScaleFactor"], 3.0);
+    }
+
+    #[test]
+    fn test_set_viewport_reset() {
+        let cmd = parse_command(&args("set viewport reset"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "viewport");
+        assert_eq!(cmd["reset"], true);
+        assert!(cmd.get("width").is_none());
+        assert!(cmd.get("height").is_none());
     }
 
     #[test]

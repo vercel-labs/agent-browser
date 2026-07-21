@@ -1074,9 +1074,9 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SET_VIEWPORT,
             "Set viewport",
-            "Set viewport size.",
-            json!({ "width": int_schema(), "height": int_schema(), "scale": number_schema() }),
-            &["width", "height"],
+            "Set viewport size. Pass reset:true (without width/height) to clear viewport emulation and restore the default viewport.",
+            json!({ "width": int_schema(), "height": int_schema(), "scale": number_schema(), "reset": { "type": "boolean" } }),
+            &[],
         ),
         tool(
             TOOL_SET_DEVICE,
@@ -2649,6 +2649,17 @@ fn call_mouse_wheel(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_set_viewport(arguments: &Value) -> Result<Value, ProtocolError> {
+    if optional_bool(arguments, "reset")?.unwrap_or(false) {
+        return call_cli_tool(
+            arguments,
+            vec![
+                "set".to_string(),
+                "viewport".to_string(),
+                "reset".to_string(),
+            ],
+            None,
+        );
+    }
     let width = required_u64(arguments, "width")?;
     let height = required_u64(arguments, "height")?;
     let mut args = vec![

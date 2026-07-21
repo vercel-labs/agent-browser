@@ -2126,6 +2126,7 @@ Configures various browser settings and emulation options.
 
 Settings:
   viewport <w> <h> [scale]   Set viewport size (scale = deviceScaleFactor, e.g. 2 for retina)
+  viewport reset             Clear viewport emulation and restore the default viewport
   device <name>              Emulate device (e.g., "iPhone 12")
   geo <lat> <lng>            Set geolocation
   offline [on|off]           Toggle offline mode
@@ -2141,6 +2142,7 @@ Global Options:
 Examples:
   agent-browser set viewport 1920 1080
   agent-browser set viewport 1920 1080 2    # 2x retina
+  agent-browser set viewport reset          # Back to the default viewport
   agent-browser set device "iPhone 12"
   agent-browser set geo 37.7749 -122.4194
   agent-browser set offline on
@@ -3368,7 +3370,7 @@ Mouse:  agent-browser mouse <action> [args]
   move <x> <y>, down [btn], up [btn], wheel <dy> [dx]
 
 Browser Settings:  agent-browser set <setting> [value]
-  viewport <w> <h>, device <name>, geo <lat> <lng>
+  viewport <w> <h>, viewport reset, device <name>, geo <lat> <lng>
   offline [on|off], headers <json>, credentials <user> <pass>
   media [dark|light] [reduced-motion]
 
