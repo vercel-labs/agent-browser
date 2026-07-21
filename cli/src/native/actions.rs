@@ -36,6 +36,7 @@ use super::snapshot::{self, SnapshotOptions};
 use super::state;
 use super::storage;
 use super::stream::{self, StreamServer};
+use super::tab_binding;
 use super::tracing::{self as native_tracing, TracingState};
 use super::webdriver::appium::AppiumManager;
 use super::webdriver::backend::{BrowserBackend, WebDriverBackend, WEBDRIVER_UNSUPPORTED_ACTIONS};
@@ -406,10 +407,27 @@ pub struct DaemonState {
     active_provider_session: Option<ActiveProviderSession>,
     /// Actions already approved while replaying a confirmed command.
     confirmed_policy_actions: HashSet<String>,
+    /// Strict session-to-tab binding (`--pin-tab` / AGENT_BROWSER_PIN_TAB).
+    /// Sticky per session: persisted in the binding file so later commands
+    /// and daemon restarts keep the strict semantics.
+    pub pin_tab: bool,
+    /// Last binding written to disk, so persistence is write-on-change.
+    last_persisted_binding: Option<tab_binding::TabBinding>,
 }
 
 impl DaemonState {
     pub fn new() -> Self {
+        let session_id =
+            env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string());
+        // A corrupt binding file is surfaced later, on attach; it does not
+        // enable pinning here because its pinned state is unknowable.
+        let pin_tab = matches!(
+            env::var("AGENT_BROWSER_PIN_TAB").as_deref(),
+            Ok("1" | "true" | "yes")
+        ) || tab_binding::load(&session_id)
+            .ok()
+            .flatten()
+            .is_some_and(|b| b.pinned);
         Self {
             browser: None,
             appium: None,
@@ -440,7 +458,7 @@ impl DaemonState {
             restore_saved_path: None,
             last_command_finished: None,
             last_autosave_attempt: None,
-            session_id: env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string()),
+            session_id,
             tracing_state: TracingState::new(),
             recording_state: RecordingState::new(),
             event_rx: None,
@@ -485,6 +503,8 @@ impl DaemonState {
             plugin_init_scripts: Vec::new(),
             active_provider_session: None,
             confirmed_policy_actions: HashSet::new(),
+            pin_tab,
+            last_persisted_binding: None,
         }
     }
 
@@ -1055,9 +1075,10 @@ impl DaemonState {
                     // Event-discovered target (e.g. a tab the human opened in the
                     // shared Chrome, or a JS-opened popup): register it so it shows
                     // in `tab list`, but do NOT activate it. Auto-activating here is
-                    // the active-tab steal. Explicit commands (`tab new`,
-                    // `window new`, `click --new-tab`) still activate via their own
-                    // paths.
+                    // the active-tab steal, and under pin-tab it would also
+                    // overwrite the persisted binding. Explicit commands
+                    // (`tab new`, `window new`, `click --new-tab`) still activate
+                    // via their own paths.
                     mgr.add_page_without_activation(super::browser::PageInfo {
                         tab_id,
                         label: None,
@@ -2024,6 +2045,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     if let Some(ref server) = state.stream_server {
         let mut broadcast_cmd;
         let has_internal_fields = cmd.get("plugins").is_some()
+            || cmd.get("pinTab").is_some()
             || cmd.get("restoreKey").is_some()
             || cmd.get("restoreSave").is_some()
             || cmd.get("restoreCheckUrl").is_some()
@@ -2033,6 +2055,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             broadcast_cmd = cmd.clone();
             if let Some(obj) = broadcast_cmd.as_object_mut() {
                 obj.remove("plugins");
+                obj.remove("pinTab");
                 obj.remove("restoreKey");
                 obj.remove("restoreSave");
                 obj.remove("restoreCheckUrl");
@@ -2054,6 +2077,33 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     // Keep element resolution in sync with the `frame` selection (see
     // element::set_active_frame for why this is mirrored).
     super::element::set_active_frame(state.active_frame_id.as_deref());
+
+    // `--pin-tab` from the client enables strict tab binding even when the
+    // daemon was started without the flag, and `--no-pin-tab` (pinTab: false)
+    // disables a sticky pin restored from disk or enabled earlier. Both are
+    // persisted with the binding so the setting survives daemon restarts;
+    // absence of the field leaves the current state untouched.
+    match cmd.get("pinTab").and_then(|v| v.as_bool()) {
+        Some(pin) if pin != state.pin_tab => {
+            state.pin_tab = pin;
+            if let Some(ref mut mgr) = state.browser {
+                mgr.set_pin_tab(pin);
+            }
+            // Rewrite the persisted pinned state immediately: relying on the
+            // next browser-touching command would lose the change if the
+            // daemon restarts first (there may be no browser at all, e.g.
+            // when disabling a pin to recover a stuck session).
+            if let Ok(Some(mut binding)) = tab_binding::load(&state.session_id) {
+                if binding.pinned != pin {
+                    binding.pinned = pin;
+                    let _ = tab_binding::save(&state.session_id, &binding);
+                }
+            }
+            // Force write-on-change to re-persist from the live snapshot.
+            state.last_persisted_binding = None;
+        }
+        _ => {}
+    }
 
     let skip_launch = skip_launch_action(action);
     let restore_key_change_needs_launch = !skip_launch
@@ -2415,10 +2465,38 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         state.last_command_finished = Some(std::time::Instant::now());
     }
 
+    // Persist the session-to-tab binding (write-on-change) so a fresh daemon
+    // re-attaches to this session's tab instead of adopting the browser's
+    // most recently active one.
+    let persist_error = if !skip_launch {
+        maybe_persist_tab_binding(state)
+    } else {
+        None
+    };
+
     let mut resp = match result {
         Ok(data) => success_response(&id, data),
         Err(e) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
     };
+
+    // A failed binding write is retried on the next command, but a pinned
+    // session must know its isolation may not survive a daemon restart.
+    if let Some(err) = persist_error {
+        if let Some(obj) = resp.as_object_mut() {
+            let hint = if state.pin_tab {
+                " --pin-tab isolation may not survive a daemon restart until the binding persists."
+            } else {
+                ""
+            };
+            obj.insert(
+                "warning".to_string(),
+                json!(format!(
+                    "Failed to persist the session tab binding: {}.{}",
+                    err, hint
+                )),
+            );
+        }
+    }
     inject_lifecycle(
         &mut resp,
         state,
@@ -2484,20 +2562,147 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// Session-to-tab binding
+// ---------------------------------------------------------------------------
+
+/// Persist the session's tab binding when it changed. Called after every
+/// browser-touching command; skipped while the bound tab is gone so the
+/// stale binding (needed to re-derive the tab_gone state after a daemon
+/// restart) is not overwritten by the fallback tab.
+///
+/// Returns the write error, if any. `last_persisted_binding` is only updated
+/// after a successful durable write, so a transient failure is retried on
+/// the next command instead of being silently treated as persisted (which
+/// would let a daemon restart drop the binding and, for a pinned session,
+/// the strict isolation boundary with it).
+fn maybe_persist_tab_binding(state: &mut DaemonState) -> Option<String> {
+    let mgr = state.browser.as_ref()?;
+    let (target_id, url) = mgr.binding_snapshot()?;
+    let binding = tab_binding::TabBinding {
+        target_id,
+        url: tab_binding::sanitize_url(&url),
+        pinned: state.pin_tab,
+    };
+    if state.last_persisted_binding.as_ref() == Some(&binding) {
+        return None;
+    }
+    match tab_binding::save(&state.session_id, &binding) {
+        Ok(()) => {
+            state.last_persisted_binding = Some(binding);
+            None
+        }
+        Err(e) => Some(e),
+    }
+}
+
+/// Re-apply this session's persisted tab binding after attaching to a
+/// browser over CDP, instead of keeping the default selection (the first
+/// target returned by `Target.getTargets`, i.e. the browser's most recently
+/// active tab, which in a shared browser is usually another session's tab).
+///
+/// Returns true when the session ends up with an established selection:
+/// re-bound to the persisted target, entered the `tab_gone` state (pin-tab,
+/// bound tab dead), or bound to a fresh tab (pin-tab, no prior binding).
+/// Returns false when no binding existed and the legacy selection stands.
+async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, String> {
+    let session = state.session_id.clone();
+    // A corrupt or unreadable binding file is a recovery error, not a
+    // first-time session: it may have carried pinned=true, and silently
+    // starting fresh would drop the strict isolation boundary.
+    let binding = tab_binding::load(&session).map_err(|e| {
+        format!(
+            "{} — delete the file to reset the session's tab binding \
+             (re-run with --pin-tab afterwards if the session was pinned)",
+            e
+        )
+    })?;
+    if binding.as_ref().is_some_and(|b| b.pinned) {
+        state.pin_tab = true;
+    }
+    let pin = state.pin_tab;
+    if state.browser.is_none() {
+        return Ok(false);
+    }
+    if let Some(ref mut mgr) = state.browser {
+        mgr.set_pin_tab(pin);
+    }
+    let established = match binding {
+        Some(b) => {
+            let restored = state
+                .browser
+                .as_mut()
+                .map(|mgr| mgr.restore_target_binding(&b.target_id, &b.url))
+                .unwrap_or(false);
+            if restored {
+                // Attach only enables the CDP domains on the first target;
+                // the restored tab needs them too (like tab_switch), or
+                // lifecycle-dependent commands such as navigate hang.
+                if let Some(ref mgr) = state.browser {
+                    let session_id = mgr.active_session_id()?.to_string();
+                    mgr.enable_domains_pub(&session_id).await?;
+                }
+            }
+            if restored || pin {
+                // Restored, or entered the tab_gone state (the stale binding
+                // file is intentionally kept so the state is re-derived if
+                // the daemon restarts again before the agent re-binds).
+                true
+            } else {
+                // Legacy sessions fall back to the first target; drop the
+                // stale binding.
+                tab_binding::clear(&session);
+                state.last_persisted_binding = None;
+                false
+            }
+        }
+        None => {
+            if pin {
+                // A pinned session never implicitly adopts an existing tab:
+                // start it on a fresh one.
+                if let Some(ref mut mgr) = state.browser {
+                    mgr.tab_new(None, None).await?;
+                }
+                true
+            } else {
+                false
+            }
+        }
+    };
+    if established {
+        if let Some(err) = maybe_persist_tab_binding(state) {
+            // Strict pinning is only as durable as the binding file: fail
+            // the attach instead of pretending the pin is in place.
+            if state.pin_tab {
+                return Err(format!(
+                    "cannot persist the pinned tab binding: {} — \
+                     --pin-tab requires a writable socket directory",
+                    err
+                ));
+            }
+        }
+    }
+    Ok(established)
+}
+
+// ---------------------------------------------------------------------------
 // Auto-launch
 // ---------------------------------------------------------------------------
 
-/// Connect to a running Chrome via auto-discovery and open a fresh tab so
-/// subsequent navigations don't hijack the user's existing tabs.
-async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
-    let mut mgr = BrowserManager::connect_auto().await?;
+/// Open a fresh tab so auto-connect navigations don't hijack the user's
+/// existing tabs. Used when no persisted binding re-established a tab.
+async fn open_fresh_tab_for_auto_connect(state: &mut DaemonState) -> Result<(), String> {
+    let Some(ref mut mgr) = state.browser else {
+        return Ok(());
+    };
     mgr.tab_new(None, None).await?;
     let session_id = mgr.active_session_id()?.to_string();
     let _ = mgr
         .client
         .send_command("Page.bringToFront", None, Some(&session_id))
         .await;
-    Ok(mgr)
+    // Best effort: a failed write is retried after the next command.
+    let _ = maybe_persist_tab_binding(state);
+    Ok(())
 }
 
 async fn current_allowed_domains(state: &DaemonState) -> Vec<String> {
@@ -2983,6 +3188,7 @@ async fn auto_launch(
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
+        apply_tab_binding_on_attach(state).await?;
         state.update_stream_client().await;
         install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
@@ -3014,7 +3220,10 @@ async fn auto_launch(
             None,
         );
         state.reset_input_state();
-        state.browser = Some(connect_auto_with_fresh_tab().await?);
+        state.browser = Some(BrowserManager::connect_auto().await?);
+        if !apply_tab_binding_on_attach(state).await? {
+            open_fresh_tab_for_auto_connect(state).await?;
+        }
         state.launch_hash = Some(hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -3894,6 +4103,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
+        apply_tab_binding_on_attach(state).await?;
         state.update_stream_client().await;
         install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
@@ -3909,6 +4119,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
+        apply_tab_binding_on_attach(state).await?;
         state.update_stream_client().await;
         install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
@@ -3919,7 +4130,10 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     if auto_connect {
         state.reset_input_state();
-        state.browser = Some(connect_auto_with_fresh_tab().await?);
+        state.browser = Some(BrowserManager::connect_auto().await?);
+        if !apply_tab_binding_on_attach(state).await? {
+            open_fresh_tab_for_auto_connect(state).await?;
+        }
         state.launch_hash = Some(new_hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -10606,11 +10820,17 @@ fn inject_lifecycle(
 }
 
 fn error_response(id: &str, error: &str) -> Value {
-    json!({
+    let mut resp = json!({
         "id": id,
         "success": false,
         "error": error,
-    })
+    });
+    // Machine-readable code for "the bound tab no longer exists" so scripts
+    // using --json can match on it instead of parsing the message.
+    if error.starts_with(super::browser::TAB_GONE_PREFIX) {
+        resp["code"] = json!("tab_gone");
+    }
+    resp
 }
 
 #[cfg(test)]
@@ -11665,6 +11885,22 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         assert_eq!(resp["id"], "cmd-2");
         assert_eq!(resp["success"], false);
         assert_eq!(resp["error"], "Something went wrong");
+        // Ordinary errors carry no machine-readable code.
+        assert!(resp.get("code").is_none());
+    }
+
+    #[test]
+    fn test_error_response_tab_gone_code() {
+        // Errors whose message starts with the tab-gone prefix get a
+        // top-level machine-readable `code` so `--json` consumers can match
+        // on it instead of parsing the message.
+        let err = format!(
+            "{} bound tab is gone (target ABC). Run `agent-browser tab new <url>`",
+            super::super::browser::TAB_GONE_PREFIX
+        );
+        let resp = error_response("cmd-3", &err);
+        assert_eq!(resp["success"], false);
+        assert_eq!(resp["code"], "tab_gone");
     }
 
     #[tokio::test]

@@ -1169,6 +1169,16 @@ fn main() {
     // current config without a restart. The daemon strips this from stream
     // broadcasts before observers see the command payload.
     attach_plugins_to_command(&mut cmd, &flags.plugins);
+
+    // Strict session-to-tab binding: sent with every command so an
+    // already-running daemon adopts it too (it is sticky once enabled).
+    // An explicit --no-pin-tab sends false to disable a sticky pin; the
+    // field is omitted entirely when the user expressed no preference.
+    if flags.pin_tab {
+        cmd["pinTab"] = json!(true);
+    } else if flags.cli_pin_tab {
+        cmd["pinTab"] = json!(false);
+    }
     attach_restore_config_to_command(&mut cmd, &flags);
 
     let restore_key = restore_key_from_flags(&flags);
@@ -1211,12 +1221,14 @@ fn main() {
                 success: true,
                 data: Some(data),
                 error: None,
+                code: None,
                 warning: None,
             },
             Err(e) => connection::Response {
                 success: false,
                 data: None,
                 error: Some(e),
+                code: None,
                 warning: None,
             },
         };
@@ -1278,6 +1290,7 @@ fn main() {
         confirm_actions: flags.confirm_actions.as_deref(),
         engine: flags.engine.as_deref(),
         auto_connect: flags.auto_connect,
+        pin_tab: flags.pin_tab,
         idle_timeout: flags.idle_timeout.as_deref(),
         default_timeout: flags.default_timeout,
         cdp: flags.cdp.as_deref(),
@@ -2178,6 +2191,7 @@ mod tests {
     fn test_confirmation_prompt_from_response_finds_nested_confirm_result() {
         let resp = Response {
             success: true,
+            code: None,
             data: Some(json!({
                 "confirmed": true,
                 "action": "navigate",
