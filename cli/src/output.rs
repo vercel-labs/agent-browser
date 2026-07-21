@@ -601,6 +601,8 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             if let Some(tab_id) = data.get("tabId").and_then(|v| v.as_str()) {
                 let note = if data.get("revived").and_then(|v| v.as_bool()) == Some(true) {
                     " (revived, page may have reloaded)"
+                } else if data.get("dialogBlocked").and_then(|v| v.as_bool()) == Some(true) {
+                    " (dialog open, resolve it with `dialog accept`/`dialog dismiss`)"
                 } else {
                     ""
                 };

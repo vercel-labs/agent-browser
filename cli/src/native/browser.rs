@@ -1325,6 +1325,11 @@ impl BrowserManager {
         if matches!(renderer_state, RendererState::Revived) {
             result["revived"] = json!(true);
         }
+        // Surface a dialog block so agents resolve the dialog before treating
+        // the tab as interactive, since its renderer is paused, not discarded.
+        if matches!(renderer_state, RendererState::DialogBlocked) {
+            result["dialogBlocked"] = json!(true);
+        }
         Ok(result)
     }
 
@@ -2813,6 +2818,11 @@ mod tests {
         assert!(
             result.get("revived").is_none(),
             "a dialog-blocked live tab must not be marked revived"
+        );
+        assert_eq!(
+            result["dialogBlocked"],
+            json!(true),
+            "a dialog-blocked switch must surface the block so the agent resolves it"
         );
         assert_eq!(
             activations.load(std::sync::atomic::Ordering::SeqCst),
