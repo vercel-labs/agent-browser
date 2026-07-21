@@ -796,7 +796,19 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             let label = match action {
                 Some("tab_close") => {
                     if let Some(closed_id) = data.get("tabId").and_then(|v| v.as_str()) {
-                        println!("{} Tab [{}] closed", color::success_indicator(), closed_id);
+                        let note = if data.get("activeTabRevived").and_then(|v| v.as_bool())
+                            == Some(true)
+                        {
+                            " (active tab revived, page may have reloaded)"
+                        } else {
+                            ""
+                        };
+                        println!(
+                            "{} Tab [{}] closed{}",
+                            color::success_indicator(),
+                            closed_id,
+                            note
+                        );
                         return;
                     }
                     "Tab closed"
