@@ -31,7 +31,7 @@ use windows_sys::Win32::System::Threading::OpenProcess;
 use commands::{gen_id, parse_command, ParseError};
 use connection::{
     cleanup_stale_files, daemon_unreachable, ensure_daemon, get_socket_dir, is_pid_alive,
-    send_command, walk_daemons, DaemonOptions, Response,
+    read_provider_session_id, send_command, walk_daemons, DaemonOptions, Response,
 };
 use flags::{clean_args, parse_flags, Flags};
 use install::run_install;
@@ -841,11 +841,89 @@ fn run_dashboard_stop(json_mode: bool) {
     }
 }
 
+fn read_provider_file(session: &str) -> Option<String> {
+    let path = get_socket_dir().join(format!("{}.provider", session));
+    fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Clean up remote provider session when daemon is unreachable.
+async fn cleanup_orphaned_provider_session(session: &str, provider_session_id: &str) {
+    let provider = match read_provider_file(session) {
+        Some(p) => p,
+        None => return,
+    };
+
+    let client = reqwest::Client::new();
+    match provider.as_str() {
+        "browser-use" | "browseruse" => {
+            if let Ok(api_key) = env::var("BROWSER_USE_API_KEY") {
+                let _ = client
+                    .patch(format!(
+                        "https://api.browser-use.com/api/v4/browsers/{}",
+                        provider_session_id
+                    ))
+                    .header("X-Browser-Use-API-Key", &api_key)
+                    .header("Content-Type", "application/json")
+                    .json(&json!({ "action": "stop" }))
+                    .send()
+                    .await;
+            }
+        }
+        "browserbase" => {
+            if let Ok(api_key) = env::var("BROWSERBASE_API_KEY") {
+                let _ = client
+                    .post(format!(
+                        "https://api.browserbase.com/v1/sessions/{}",
+                        provider_session_id
+                    ))
+                    .header("Content-Type", "application/json")
+                    .header("X-BB-API-Key", &api_key)
+                    .json(&serde_json::json!({ "status": "REQUEST_RELEASE" }))
+                    .send()
+                    .await;
+            }
+        }
+        "browserless" => {
+            let _ = client.delete(provider_session_id).send().await;
+        }
+        "kernel" => {
+            if let Ok(api_key) = env::var("KERNEL_API_KEY") {
+                let endpoint = env::var("KERNEL_ENDPOINT")
+                    .unwrap_or_else(|_| "https://api.onkernel.com".to_string());
+                let _ = client
+                    .delete(format!(
+                        "{}/browsers/{}",
+                        endpoint.trim_end_matches('/'),
+                        provider_session_id
+                    ))
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .send()
+                    .await;
+            }
+        }
+        _ => {}
+    }
+}
+
 fn run_close_all(flags: &Flags) {
     // walk_daemons auto-cleans stale .pid / .sock / .stream sidecar files and
     // separates out the standalone dashboard. We only want to send `close` to
     // real session daemons; the dashboard has its own `dashboard stop`.
     let inventory = walk_daemons();
+
+    let rt = tokio::runtime::Runtime::new().ok();
+    for cleaned in &inventory.cleaned {
+        if let Some(ref session_id) = cleaned.provider_session_id {
+            if let Some(rt) = rt.as_ref() {
+                rt.block_on(cleanup_orphaned_provider_session(&cleaned.name, session_id));
+            }
+        }
+        let _ = fs::remove_file(get_socket_dir().join(format!("{}.provider", cleaned.name)));
+    }
+
     let sessions: Vec<(String, u32)> = inventory
         .sessions
         .iter()
@@ -889,6 +967,12 @@ fn run_close_all(flags: &Flags) {
                     if handle != 0 {
                         windows_sys::Win32::System::Threading::TerminateProcess(handle, 1);
                         CloseHandle(handle);
+                    }
+                }
+                if let Some(provider_session_id) = read_provider_session_id(session) {
+                    let rt = tokio::runtime::Runtime::new().ok();
+                    if let Some(rt) = rt {
+                        rt.block_on(cleanup_orphaned_provider_session(session, &provider_session_id));
                     }
                 }
                 cleanup_stale_files(session);
