@@ -5947,7 +5947,14 @@ async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .get("deviceScaleFactor")
         .and_then(|v| v.as_f64())
         .unwrap_or(1.0);
-    let mobile = cmd.get("mobile").and_then(|v| v.as_bool()).unwrap_or(false);
+    // When the caller doesn't specify `mobile`, inherit the current session's
+    // mobile state rather than resetting to desktop. Otherwise a plain
+    // `set viewport 375 667` after `set device "iPhone 15"` would silently
+    // drop touch/mobile emulation and re-render the desktop layout branch.
+    let mobile = cmd
+        .get("mobile")
+        .and_then(|v| v.as_bool())
+        .unwrap_or_else(|| state.viewport.map(|(_, _, _, m)| m).unwrap_or(false));
 
     mgr.set_viewport(width, height, scale, mobile).await?;
 
