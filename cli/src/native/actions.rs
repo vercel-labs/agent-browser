@@ -7499,6 +7499,13 @@ async fn current_stream_status(state: &DaemonState) -> Value {
 }
 
 async fn handle_stream_enable(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    if super::daemon::stream_opt_out() {
+        return Err(
+            "Streaming is disabled: this daemon was started with AGENT_BROWSER_NO_STREAM. \
+             Unset it and restart the daemon to use streaming."
+                .to_string(),
+        );
+    }
     if state.stream_server.is_some() {
         return Err("Streaming is already enabled for this session".to_string());
     }
@@ -11465,6 +11472,19 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         let request = fs::read_to_string(request_path).unwrap();
         assert!(request.contains(r#""type":"browser.close""#));
         assert!(request.contains(r#""sessionId":"s1""#));
+    }
+
+    #[tokio::test]
+    async fn test_stream_enable_refuses_under_no_stream_opt_out() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_NO_STREAM"]);
+        guard.set("AGENT_BROWSER_NO_STREAM", "1");
+
+        let mut state = DaemonState::new();
+        let err = handle_stream_enable(&json!({}), &mut state)
+            .await
+            .expect_err("stream enable must refuse under the opt-out");
+        assert!(err.contains("AGENT_BROWSER_NO_STREAM"));
+        assert!(state.stream_server.is_none());
     }
 
     #[tokio::test]

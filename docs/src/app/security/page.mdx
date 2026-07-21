@@ -14,6 +14,7 @@ These features are designed to mitigate the following threats when an LLM-based 
 - **Unauthorized navigation / data exfiltration** — A compromised or manipulated agent could navigate to attacker-controlled domains to exfiltrate data. The domain allowlist (`--allowed-domains`) blocks navigations, sub-resource requests, WebSocket connections, EventSource streams, and `sendBeacon` calls to non-allowed domains. In supported Chromium sessions, it disables WebRTC peer connections so STUN, TURN, and related DNS traffic cannot bypass HTTP interception.
 - **Unauthorized destructive actions** -- Action policy (`--action-policy`) and confirmation gating (`--confirm-actions`) prevent the agent from performing dangerous operations (eval, downloads, uploads) without explicit approval.
 - **Context flooding** -- Large page outputs can overwhelm an LLM's context window. Output truncation (`--max-output`) caps the size of page-sourced content.
+- **Local users reaching the stream server** -- The daemon's live-view stream server listens on 127.0.0.1, and a loopback port is reachable by every local user account, not just yours (WebSocket commands are origin-checked, but the port itself carries no authentication). On multi-user hosts, set `AGENT_BROWSER_NO_STREAM=1` to start the daemon with no stream server and therefore no TCP listener; the CLI-daemon channel is a unix socket on macOS/Linux, gated by filesystem permissions. The live view and dashboard are unavailable for that session and `stream enable` refuses until the daemon restarts without the variable.
 
 ### Known limitations
 
@@ -25,6 +26,7 @@ These features are designed to mitigate the following threats when an LLM-based 
 - **Content boundaries are defense-in-depth.** They rely on the LLM and orchestrator respecting the structural markers. A sufficiently capable adversarial page could attempt to mimic the boundary format, though the per-process CSPRNG nonce makes this impractical to predict.
 - **Plugins are local executables.** Install credential plugins only from maintainers you trust. agent-browser limits the data it sends to plugins and supports policy gates, but it does not sandbox arbitrary local executables.
 - **Plugin config is not secret storage.** Do not put vault tokens or passwords in plugin command args. Use the vendor's own login/session mechanism or environment outside agent-browser config.
+- **The browser's DevTools endpoint remains loopback TCP.** Chrome exposes its automation (CDP) endpoint on a 127.0.0.1 port with no authentication while a session runs; `AGENT_BROWSER_NO_STREAM` does not affect it. Where local-user isolation from the browser endpoint is required, add OS-level isolation (containers, network namespaces) around the session.
 - **Confirmation timeout.** Pending confirmations auto-deny after 60 seconds. Orchestrators must respond within that window.
 - **Non-TTY auto-deny.** When `--confirm-interactive` is set but stdin is not a terminal (e.g., piped input), actions are automatically denied to prevent accidental approval in non-interactive contexts.
 

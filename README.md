@@ -1386,6 +1386,12 @@ To bind to a specific port, set `AGENT_BROWSER_STREAM_PORT`:
 AGENT_BROWSER_STREAM_PORT=9223 agent-browser open example.com
 ```
 
+To start the daemon with no stream server at all, set `AGENT_BROWSER_NO_STREAM=1`. The daemon then holds no TCP listener for the session (the CLI talks to it over a unix socket on macOS/Linux), which matters on multi-user hosts where any local user can connect to a loopback port. The live view and dashboard are unavailable for that session and `stream enable` refuses until the daemon is restarted without the variable:
+
+```bash
+AGENT_BROWSER_NO_STREAM=1 agent-browser open example.com
+```
+
 You can also manage streaming at runtime with `stream enable`, `stream disable`, and `stream status`:
 
 ```bash

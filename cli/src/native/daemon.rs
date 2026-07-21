@@ -20,6 +20,16 @@ use super::state;
 use super::stream::StreamServer;
 use crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION;
 
+/// True when AGENT_BROWSER_NO_STREAM=1|true: the daemon must not bind the
+/// stream server's TCP listener (see run_daemon). Read from the daemon's own
+/// environment, inherited from the CLI invocation that spawned it, so the
+/// answer is stable for the daemon's lifetime.
+pub(crate) fn stream_opt_out() -> bool {
+    env::var("AGENT_BROWSER_NO_STREAM")
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false)
+}
+
 pub async fn run_daemon(session: &str) {
     let socket_dir = get_daemon_socket_dir();
     if !socket_dir.exists() {
@@ -99,20 +109,31 @@ pub async fn run_daemon(session: &str) {
 
     let mut stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>> = None;
     let mut stream_server_instance: Option<Arc<StreamServer>> = None;
-    let preferred_port = env::var("AGENT_BROWSER_STREAM_PORT")
-        .ok()
-        .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(0);
-    match StreamServer::start_without_client(preferred_port, session.to_string(), true).await {
-        Ok((stream_server, client_slot)) => {
-            stream_client = Some(client_slot.clone());
-            if let Err(e) = fs::write(&stream_path, stream_server.port().to_string()) {
-                let _ = writeln!(std::io::stderr(), "Failed to write .stream file: {}", e);
+    // Security opt-out: with AGENT_BROWSER_NO_STREAM=1 the daemon starts no
+    // stream server, so it holds no TCP listener for the session (the CLI IPC
+    // channel is a unix socket on unix platforms). The live view / dashboard
+    // are unavailable and `stream enable` refuses while the daemon runs with
+    // the opt-out. Loopback TCP is reachable by every local user, which some
+    // multi-tenant hosts cannot accept; this restores the pre-#951 off switch
+    // as an explicit security mode rather than a default.
+    if stream_opt_out() {
+        let _ = fs::remove_file(&stream_path);
+    } else {
+        let preferred_port = env::var("AGENT_BROWSER_STREAM_PORT")
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(0);
+        match StreamServer::start_without_client(preferred_port, session.to_string(), true).await {
+            Ok((stream_server, client_slot)) => {
+                stream_client = Some(client_slot.clone());
+                if let Err(e) = fs::write(&stream_path, stream_server.port().to_string()) {
+                    let _ = writeln!(std::io::stderr(), "Failed to write .stream file: {}", e);
+                }
+                stream_server_instance = Some(Arc::new(stream_server));
             }
-            stream_server_instance = Some(Arc::new(stream_server));
-        }
-        Err(e) => {
-            let _ = writeln!(std::io::stderr(), "Stream server failed to start: {}", e);
+            Err(e) => {
+                let _ = writeln!(std::io::stderr(), "Stream server failed to start: {}", e);
+            }
         }
     }
 
