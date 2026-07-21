@@ -101,6 +101,17 @@ const RENDERER_PROBE_TIMEOUT_MS: u64 = 3_000;
 /// declared unrecoverable.
 const REVIVED_RENDERER_TIMEOUT_MS: u64 = 10_000;
 
+/// Outcome of ensuring a tab's renderer can serve commands.
+enum RendererState {
+    /// The renderer answered the liveness probe.
+    Responsive,
+    /// The renderer did not answer and was reactivated; the page may have reloaded.
+    Revived,
+    /// The tab is alive but paused by a JavaScript dialog, so it cannot answer
+    /// renderer-bound commands until the dialog is resolved.
+    DialogBlocked,
+}
+
 /// Returns true for Chrome internal targets that should not be selected
 /// during auto-connect (e.g. chrome://, chrome-extension://, devtools://).
 fn is_internal_chrome_target(url: &str) -> bool {
@@ -682,23 +693,28 @@ impl BrowserManager {
         .is_ok()
     }
 
-    /// Ensure the tab has a live renderer, recovering a non-responsive one with
-    /// Target.activateTarget. Activation reloads a genuinely discarded tab (its
-    /// renderer is gone) but only focuses a live-but-slow one, so a probe false
-    /// positive cannot lose page state. It is a browser-level command that
-    /// answers promptly, so it cannot ride the renderer command timeout the way
-    /// a page-level reload could. Returns whether recovery ran, so callers can
-    /// report that the page may have been reloaded (#1528).
+    /// Ensure the tab's renderer can serve commands. A non-responsive renderer
+    /// is reactivated with Target.activateTarget, which reloads a genuinely
+    /// discarded tab but only focuses a live one, so a probe false positive
+    /// cannot lose page state, and it answers promptly rather than riding the
+    /// renderer command timeout. A tab paused by a JavaScript dialog is alive
+    /// and reported as blocked, not revived.
     async fn ensure_renderer_alive(
         &self,
         session_id: &str,
         target_id: &str,
-    ) -> Result<bool, String> {
+        dialog_session: Option<&str>,
+    ) -> Result<RendererState, String> {
         if self
             .renderer_responds(session_id, RENDERER_PROBE_TIMEOUT_MS)
             .await
         {
-            return Ok(false);
+            return Ok(RendererState::Responsive);
+        }
+        // A tab blocked by a JavaScript dialog is alive; its main thread is
+        // paused, so the probe times out without the tab being discarded.
+        if dialog_session == Some(session_id) {
+            return Ok(RendererState::DialogBlocked);
         }
         match tokio::time::timeout(
             Duration::from_millis(REVIVED_RENDERER_TIMEOUT_MS),
@@ -730,7 +746,7 @@ impl BrowserManager {
             .renderer_responds(session_id, REVIVED_RENDERER_TIMEOUT_MS)
             .await
         {
-            Ok(true)
+            Ok(RendererState::Revived)
         } else {
             Err(
                 "tab is not responding (discarded or crashed) and did not recover after activation"
@@ -1243,7 +1259,11 @@ impl BrowserManager {
         }))
     }
 
-    pub async fn tab_switch(&mut self, index: usize) -> Result<Value, String> {
+    pub async fn tab_switch(
+        &mut self,
+        index: usize,
+        dialog_session: Option<&str>,
+    ) -> Result<Value, String> {
         if index >= self.pages.len() {
             return Err(format!(
                 "Tab index {} out of range (0-{})",
@@ -1254,11 +1274,10 @@ impl BrowserManager {
 
         let session_id = self.pages[index].session_id.clone();
         let target_id = self.pages[index].target_id.clone();
-        // A discarded background tab has no renderer to answer Page.enable,
-        // so the switch used to hang and leave active_page_index on the dead
-        // tab. Revive first; commit the switch only once it's usable (#1528).
-        let revived = self
-            .ensure_renderer_alive(&session_id, &target_id)
+        // A discarded tab has no renderer to answer Page.enable, so revive it
+        // first and commit the switch only once it is usable.
+        let renderer_state = self
+            .ensure_renderer_alive(&session_id, &target_id, dialog_session)
             .await
             .map_err(|e| {
                 format!(
@@ -1276,13 +1295,23 @@ impl BrowserManager {
             .send_command("Page.bringToFront", None, Some(&session_id))
             .await;
 
-        let url = self.get_url().await.unwrap_or_default();
-        let title = self.get_title().await.unwrap_or_default();
-
-        if let Some(page) = self.pages.get_mut(index) {
-            page.url = url.clone();
-            page.title = title.clone();
-        }
+        // A dialog-blocked tab cannot answer script evaluation until the dialog
+        // is resolved, so fall back to the last known url/title instead of
+        // hanging on get_url/get_title.
+        let (url, title) = if matches!(renderer_state, RendererState::DialogBlocked) {
+            (
+                self.pages[index].url.clone(),
+                self.pages[index].title.clone(),
+            )
+        } else {
+            let url = self.get_url().await.unwrap_or_default();
+            let title = self.get_title().await.unwrap_or_default();
+            if let Some(page) = self.pages.get_mut(index) {
+                page.url = url.clone();
+                page.title = title.clone();
+            }
+            (url, title)
+        };
 
         let page = &self.pages[index];
         let mut result = json!({
@@ -1292,15 +1321,18 @@ impl BrowserManager {
             "title": title,
         });
         // Surface the revival so agents know a discarded tab was reactivated
-        // and its page may have been reloaded, rather than recovering silently
-        // (#1528).
-        if revived {
+        // and its page may have been reloaded, rather than recovering silently.
+        if matches!(renderer_state, RendererState::Revived) {
             result["revived"] = json!(true);
         }
         Ok(result)
     }
 
-    pub async fn tab_close(&mut self, index: Option<usize>) -> Result<Value, String> {
+    pub async fn tab_close(
+        &mut self,
+        index: Option<usize>,
+        dialog_session: Option<&str>,
+    ) -> Result<Value, String> {
         let target_index = index.unwrap_or(self.active_page_index);
 
         if target_index >= self.pages.len() {
@@ -1327,6 +1359,11 @@ impl BrowserManager {
             .await;
 
         let session_id = self.pages[self.active_page_index].session_id.clone();
+        let target_id = self.pages[self.active_page_index].target_id.clone();
+        // The tab that becomes active after the close may itself be discarded,
+        // which would hang enable_domains; revive it before enabling domains.
+        self.ensure_renderer_alive(&session_id, &target_id, dialog_session)
+            .await?;
         self.enable_domains(&session_id).await?;
 
         Ok(json!({
@@ -1586,16 +1623,24 @@ impl BrowserManager {
         Ok(())
     }
 
-    pub async fn tab_switch_by_id(&mut self, tab_id: u32) -> Result<Value, String> {
+    pub async fn tab_switch_by_id(
+        &mut self,
+        tab_id: u32,
+        dialog_session: Option<&str>,
+    ) -> Result<Value, String> {
         let index = self
             .pages
             .iter()
             .position(|p| p.tab_id == tab_id)
             .ok_or_else(|| format!("Tab ID {} not found", tab_id))?;
-        self.tab_switch(index).await
+        self.tab_switch(index, dialog_session).await
     }
 
-    pub async fn tab_close_by_id(&mut self, tab_id: Option<u32>) -> Result<Value, String> {
+    pub async fn tab_close_by_id(
+        &mut self,
+        tab_id: Option<u32>,
+        dialog_session: Option<&str>,
+    ) -> Result<Value, String> {
         let index = match tab_id {
             Some(id) => Some(
                 self.pages
@@ -1605,7 +1650,7 @@ impl BrowserManager {
             ),
             None => None,
         };
-        self.tab_close(index).await
+        self.tab_close(index, dialog_session).await
     }
 
     pub fn assign_tab_id(&mut self) -> u32 {
@@ -2507,7 +2552,7 @@ mod tests {
         assert_eq!(mgr.pages.len(), 2);
         assert_eq!(mgr.active_page_index, 0);
 
-        let result = tokio::time::timeout(Duration::from_secs(20), mgr.tab_switch(1))
+        let result = tokio::time::timeout(Duration::from_secs(20), mgr.tab_switch(1, None))
             .await
             .expect("tab_switch must not hang on a discarded tab")
             .expect("switching to a discarded tab should revive it");
@@ -2530,7 +2575,7 @@ mod tests {
         let url = start_mock_cdp_browser_with_discarded_tab(false).await;
         let mut mgr = BrowserManager::connect_cdp(&url).await.expect("connect");
 
-        let err = tokio::time::timeout(Duration::from_secs(25), mgr.tab_switch(1))
+        let err = tokio::time::timeout(Duration::from_secs(25), mgr.tab_switch(1, None))
             .await
             .expect("tab_switch must not hang on a dead tab")
             .expect_err("switching to an unrevivable tab should fail");
@@ -2629,7 +2674,7 @@ mod tests {
         let mut mgr = BrowserManager::connect_cdp(&url).await.expect("connect");
         assert_eq!(mgr.pages.len(), 2);
 
-        let result = tokio::time::timeout(Duration::from_secs(20), mgr.tab_switch(1))
+        let result = tokio::time::timeout(Duration::from_secs(20), mgr.tab_switch(1, None))
             .await
             .expect("tab_switch must not hang")
             .expect("switching to a responsive tab should succeed");
@@ -2652,7 +2697,7 @@ mod tests {
         let url = start_mock_cdp_browser_with_discarded_tab(true).await;
         let mut mgr = BrowserManager::connect_cdp(&url).await.expect("connect");
 
-        let _ = tokio::time::timeout(Duration::from_secs(20), mgr.tab_switch(1))
+        let _ = tokio::time::timeout(Duration::from_secs(20), mgr.tab_switch(1, None))
             .await
             .expect("tab_switch must not hang")
             .expect("switching to a discarded tab should revive it");
@@ -2665,5 +2710,135 @@ mod tests {
             0,
             "a cancelled probe left an orphaned CDP request in the pending map"
         );
+    }
+
+    /// Mock CDP endpoint whose second tab is alive but blocked by a JavaScript
+    /// dialog: it never answers Runtime.evaluate (its main thread is paused)
+    /// but still answers domain-enable and other browser-served commands.
+    /// Returns a counter of Target.activateTarget calls so a test can assert a
+    /// blocked tab is treated as live without reactivation.
+    async fn start_mock_cdp_browser_with_dialog_blocked_tab(
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use futures_util::{SinkExt, StreamExt};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let activations = Arc::new(AtomicUsize::new(0));
+        let activations_task = activations.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "ws://127.0.0.1:{}/devtools/browser/mock",
+            listener.local_addr().unwrap().port()
+        );
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut tx, mut rx) = ws.split();
+
+            while let Some(Ok(msg)) = rx.next().await {
+                let text = match msg {
+                    Message::Text(t) => t,
+                    Message::Ping(p) => {
+                        let _ = tx.send(Message::Pong(p)).await;
+                        continue;
+                    }
+                    _ => continue,
+                };
+                let cmd: Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let Some(id) = cmd["id"].as_u64() else {
+                    continue;
+                };
+                let method = cmd["method"].as_str().unwrap_or("");
+                let session = cmd["sessionId"].as_str().unwrap_or("");
+                let respond = |result: Value| json!({ "id": id, "result": result }).to_string();
+
+                if method == "Target.activateTarget" {
+                    activations_task.fetch_add(1, Ordering::SeqCst);
+                }
+
+                let reply = match method {
+                    "Target.getTargets" => Some(respond(json!({
+                        "targetInfos": [
+                            { "targetId": "T-ALIVE", "type": "page", "title": "alive",
+                              "url": "https://alive.test/", "attached": false },
+                            { "targetId": "T-BLOCKED", "type": "page", "title": "blocked",
+                              "url": "https://blocked.test/", "attached": false },
+                        ]
+                    }))),
+                    "Target.attachToTarget" => {
+                        let target = cmd["params"]["targetId"].as_str().unwrap_or("");
+                        Some(respond(json!({ "sessionId": format!("S-{}", target) })))
+                    }
+                    // The blocked tab's main thread is paused, so evaluation
+                    // never answers, but the tab is alive: everything else does.
+                    "Runtime.evaluate" if session == "S-T-BLOCKED" => None,
+                    "Runtime.evaluate" => Some(respond(
+                        json!({ "result": { "type": "string", "value": "https://alive.test/" } }),
+                    )),
+                    _ => Some(respond(json!({}))),
+                };
+                if let Some(r) = reply {
+                    let _ = tx.send(Message::Text(r)).await;
+                }
+            }
+        });
+
+        (url, activations)
+    }
+
+    /// A live tab blocked by a JavaScript dialog must not be misread as
+    /// discarded: the probe times out because the main thread is paused, but
+    /// when a dialog is known to be open on that tab the switch must succeed
+    /// without reactivation and without hanging on script evaluation.
+    #[tokio::test]
+    async fn test_tab_switch_does_not_misclassify_dialog_blocked_tab() {
+        let (url, activations) = start_mock_cdp_browser_with_dialog_blocked_tab().await;
+        let mut mgr = BrowserManager::connect_cdp(&url).await.expect("connect");
+        assert_eq!(mgr.pages.len(), 2);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            mgr.tab_switch(1, Some("S-T-BLOCKED")),
+        )
+        .await
+        .expect("tab_switch must not hang on a dialog-blocked tab")
+        .expect("switching to a dialog-blocked live tab should succeed");
+
+        assert!(
+            result.get("revived").is_none(),
+            "a dialog-blocked live tab must not be marked revived"
+        );
+        assert_eq!(
+            activations.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a dialog-blocked live tab must not be reactivated"
+        );
+        assert_eq!(mgr.active_page_index, 1);
+    }
+
+    /// Closing the active tab must not hang when the tab that becomes active is
+    /// itself discarded: the successor is revived before domains are enabled,
+    /// rather than enable_domains blocking on a dead renderer.
+    #[tokio::test]
+    async fn test_tab_close_revives_discarded_successor() {
+        let url = start_mock_cdp_browser_with_discarded_tab(true).await;
+        let mut mgr = BrowserManager::connect_cdp(&url).await.expect("connect");
+        assert_eq!(mgr.pages.len(), 2);
+        assert_eq!(mgr.active_page_index, 0);
+
+        // Close the live active tab; the discarded tab becomes the successor.
+        let result = tokio::time::timeout(Duration::from_secs(20), mgr.tab_close(Some(0), None))
+            .await
+            .expect("tab_close must not hang on a discarded successor")
+            .expect("closing a tab with a discarded successor should succeed");
+
+        assert_eq!(result["closed"], json!(true));
+        assert_eq!(mgr.pages.len(), 1);
     }
 }

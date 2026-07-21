@@ -5890,13 +5890,20 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
         mgr.resolve_tab_ref(&tab_ref)?
     };
+    let dialog_session = state
+        .pending_dialog
+        .as_ref()
+        .and_then(|d| d.session_id.clone());
+    let result = {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        mgr.tab_switch_by_id(tab_id, dialog_session.as_deref())
+            .await?
+    };
+    // Clear only after the switch commits, so a failed switch does not strand
+    // the user on the old tab with dead refs and frame scope.
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    let result = {
-        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-        mgr.tab_switch_by_id(tab_id).await?
-    };
 
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
     install_network_controls_or_close(state, has_proxy_creds).await?;
@@ -5925,18 +5932,23 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
 }
 
 async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let tab_id = match cmd.get("tabId").and_then(|v| v.as_str()) {
         Some(s) => {
             let tab_ref = super::browser::TabRef::parse(s)?;
+            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
             Some(mgr.resolve_tab_ref(&tab_ref)?)
         }
         None => None,
     };
+    let dialog_session = state
+        .pending_dialog
+        .as_ref()
+        .and_then(|d| d.session_id.clone());
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    mgr.tab_close_by_id(tab_id).await
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+    mgr.tab_close_by_id(tab_id, dialog_session.as_deref()).await
 }
 
 async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
