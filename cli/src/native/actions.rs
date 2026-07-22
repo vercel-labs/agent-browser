@@ -244,6 +244,14 @@ fn is_active_iframe_network_event(
         && session_id.is_some_and(|sid| active_iframe_sessions.contains(sid))
 }
 
+fn active_frame_scope_may_have_changed(drained: &DrainedEvents) -> bool {
+    !drained.attached_iframe_sessions.is_empty()
+        || !drained.detached_iframe_sessions.is_empty()
+        || !drained.attached_page_sessions.is_empty()
+        || !drained.new_targets.is_empty()
+        || !drained.destroyed_targets.is_empty()
+}
+
 /// Compute a hash of the [`LaunchOptions`] fields that require a browser
 /// relaunch when changed (baked into the Chrome process at startup).
 ///
@@ -867,8 +875,10 @@ impl DaemonState {
     }
 
     async fn apply_drained_events(&mut self, drained: DrainedEvents) -> Result<(), String> {
-        let iframe_topology_changed = !drained.attached_iframe_sessions.is_empty()
-            || !drained.detached_iframe_sessions.is_empty();
+        // Popups and externally closed pages can change the active top-level
+        // target without changing iframe topology. Refresh after either kind
+        // of event so network capture stays scoped to the active page.
+        let active_frame_scope_changed = active_frame_scope_may_have_changed(&drained);
         // ACK screencast frames
         if !drained.pending_acks.is_empty() {
             if let Some(ref browser) = self.browser {
@@ -1202,7 +1212,7 @@ impl DaemonState {
             }
         }
 
-        if iframe_topology_changed {
+        if active_frame_scope_changed {
             self.refresh_active_iframe_sessions().await;
         }
 
@@ -10802,6 +10812,25 @@ mod tests {
             false,
             &active_sessions,
         ));
+    }
+
+    #[test]
+    fn test_active_frame_scope_tracks_top_level_and_iframe_changes() {
+        assert!(!active_frame_scope_may_have_changed(
+            &DrainedEvents::default()
+        ));
+
+        let mut destroyed_page = DrainedEvents::default();
+        destroyed_page
+            .destroyed_targets
+            .push("page-target".to_string());
+        assert!(active_frame_scope_may_have_changed(&destroyed_page));
+
+        let mut attached_iframe = DrainedEvents::default();
+        attached_iframe
+            .attached_iframe_sessions
+            .push(("frame".to_string(), "session".to_string()));
+        assert!(active_frame_scope_may_have_changed(&attached_iframe));
     }
 
     #[test]

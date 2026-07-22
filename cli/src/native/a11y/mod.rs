@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
 use super::cdp::client::CdpClient;
-use super::cdp::types::EvaluateResult;
+use super::cdp::types::{EvaluateResult, RemoteObject};
 
 /// Unmodified axe-core build, injected via `Runtime.evaluate` (which is
 /// not subject to the page's CSP, unlike a CDN `<script>` tag).
@@ -216,6 +216,108 @@ async fn evaluate(
     Ok(result.result.value.unwrap_or(Value::Null))
 }
 
+async fn evaluate_remote(
+    client: &CdpClient,
+    session_id: &str,
+    context_id: Option<i64>,
+    expression: &str,
+) -> Result<RemoteObject, String> {
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.evaluate",
+            &ContextEvaluateParams {
+                expression,
+                return_by_value: false,
+                await_promise: false,
+                context_id,
+            },
+            Some(session_id),
+        )
+        .await?;
+
+    if let Some(details) = result.exception_details {
+        let message = details
+            .exception
+            .as_ref()
+            .and_then(|exception| exception.description.as_deref())
+            .unwrap_or(&details.text);
+        return Err(format!("Evaluation error: {}", message));
+    }
+
+    Ok(result.result)
+}
+
+fn frame_owner_expression(frame_spec: &Value) -> Result<String, String> {
+    let selector = frame_spec
+        .get("selector")
+        .and_then(|value| value.as_array())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "axe frame result is missing its selector".to_string())?;
+    let selector_json = json!(selector).to_string();
+    Ok(format!(
+        r#"(() => {{
+  const selectorPath = {selector_json};
+  const selector = selectorPath[selectorPath.length - 1];
+  if (Array.isArray(selector)) {{
+    let root = document;
+    let element = null;
+    for (let index = 0; index < selector.length; index += 1) {{
+      element = root.querySelector(selector[index]);
+      if (!element) return null;
+      if (index + 1 < selector.length) {{
+        root = element.shadowRoot;
+        if (!root) return null;
+      }}
+    }}
+    return element;
+  }}
+  return typeof selector === 'string' ? document.querySelector(selector) : null;
+}})()"#,
+    ))
+}
+
+async fn resolve_child_frame_id(
+    client: &CdpClient,
+    session_id: &str,
+    context_id: Option<i64>,
+    frame_spec: &Value,
+) -> Result<String, String> {
+    let expression = frame_owner_expression(frame_spec)?;
+    let remote = evaluate_remote(client, session_id, context_id, &expression).await?;
+    let object_id = remote
+        .object_id
+        .ok_or_else(|| "Could not resolve axe frame selector".to_string())?;
+    let describe = client
+        .send_command(
+            "DOM.describeNode",
+            Some(json!({ "objectId": object_id, "depth": 1 })),
+            Some(session_id),
+        )
+        .await;
+    let _ = client
+        .send_command(
+            "Runtime.releaseObject",
+            Some(json!({ "objectId": object_id })),
+            Some(session_id),
+        )
+        .await;
+    let describe = describe?;
+
+    describe
+        .get("node")
+        .and_then(|node| node.get("contentDocument"))
+        .and_then(|document| document.get("frameId"))
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            describe
+                .get("node")
+                .and_then(|node| node.get("frameId"))
+                .and_then(|value| value.as_str())
+        })
+        .map(ToString::to_string)
+        .ok_or_else(|| "Could not resolve axe frame ID".to_string())
+}
+
 #[cfg(test)]
 fn collect_frame_ids(tree: &Value, frame_ids: &mut Vec<String>) {
     if let Some(frame_id) = tree
@@ -236,27 +338,19 @@ fn collect_frame_ids(tree: &Value, frame_ids: &mut Vec<String>) {
 struct FrameTarget {
     frame_id: String,
     session_id: String,
-    depth: usize,
-}
-
-struct SessionFrameTree {
-    session_id: String,
-    parent_id: String,
-    tree: Value,
+    parent_id: Option<String>,
 }
 
 fn collect_frame_targets(
     tree: &Value,
-    depth: usize,
     parent_session_id: &str,
     iframe_sessions: &HashMap<String, String>,
-    targets: &mut Vec<FrameTarget>,
+    targets: &mut HashMap<String, FrameTarget>,
 ) {
-    let session_id = if let Some(frame_id) = tree
-        .get("frame")
-        .and_then(|frame| frame.get("id"))
-        .and_then(|id| id.as_str())
-    {
+    let session_id = if let Some(frame) = tree.get("frame") {
+        let Some(frame_id) = frame.get("id").and_then(|id| id.as_str()) else {
+            return;
+        };
         // Same-process child frames do not have their own target session. They
         // execute in the nearest ancestor target, which may itself be an
         // out-of-process iframe rather than the top-level page.
@@ -264,19 +358,60 @@ fn collect_frame_targets(
             .get(frame_id)
             .cloned()
             .unwrap_or_else(|| parent_session_id.to_string());
-        targets.push(FrameTarget {
+        let target = FrameTarget {
             frame_id: frame_id.to_string(),
             session_id: session_id.clone(),
-            depth,
-        });
+            parent_id: frame
+                .get("parentId")
+                .and_then(|id| id.as_str())
+                .map(ToString::to_string),
+        };
+        targets
+            .entry(frame_id.to_string())
+            .and_modify(|existing| {
+                // A tree queried through the frame's dedicated target is the
+                // authoritative source for its execution session and children.
+                if iframe_sessions.get(frame_id) == Some(&session_id) {
+                    let mut authoritative = target.clone();
+                    if authoritative.parent_id.is_none() {
+                        authoritative.parent_id.clone_from(&existing.parent_id);
+                    }
+                    *existing = authoritative;
+                }
+            })
+            .or_insert(target);
         session_id
     } else {
         parent_session_id.to_string()
     };
     if let Some(children) = tree.get("childFrames").and_then(|value| value.as_array()) {
         for child in children {
-            collect_frame_targets(child, depth + 1, &session_id, iframe_sessions, targets);
+            collect_frame_targets(child, &session_id, iframe_sessions, targets);
         }
+    }
+}
+
+fn frame_reaches_top(
+    frame_id: &str,
+    top_frame_id: &str,
+    targets: &HashMap<String, FrameTarget>,
+) -> bool {
+    let mut current = frame_id;
+    let mut visited = HashSet::new();
+    loop {
+        if current == top_frame_id {
+            return true;
+        }
+        if !visited.insert(current.to_string()) {
+            return false;
+        }
+        let Some(parent_id) = targets
+            .get(current)
+            .and_then(|target| target.parent_id.as_deref())
+        else {
+            return false;
+        };
+        current = parent_id;
     }
 }
 
@@ -296,21 +431,18 @@ async fn collect_frame_sessions(
         .ok_or("Could not determine top-level frame ID")?
         .to_string();
 
-    let mut targets = Vec::new();
+    let mut targets = HashMap::new();
     if let Some(tree) = top_tree.get("frameTree") {
-        collect_frame_targets(tree, 0, top_session_id, iframe_sessions, &mut targets);
+        collect_frame_targets(tree, top_session_id, iframe_sessions, &mut targets);
     }
 
-    // Page.getFrameTree on the top session can omit OOPIF subtrees entirely.
-    // Query each attached iframe session so same-process descendants within
-    // that target are included and inherit the correct session.
-    let mut session_entries: Vec<_> = iframe_sessions.iter().collect();
+    // Query every attached iframe target. The top target's frame tree can
+    // omit descendants below an OOPIF, while the OOPIF's own tree exposes
+    // those same-process descendants with the correct execution session.
+    let mut session_entries: Vec<_> = iframe_sessions.values().collect();
     session_entries.sort_unstable();
-    let mut subtrees = Vec::new();
-    for (frame_id, session_id) in session_entries {
-        if targets.iter().any(|target| target.frame_id == *frame_id) {
-            continue;
-        }
+    session_entries.dedup();
+    for session_id in session_entries {
         let Some(tree) = client
             .send_command_no_params("Page.getFrameTree", Some(session_id))
             .await
@@ -319,66 +451,29 @@ async fn collect_frame_sessions(
         else {
             continue;
         };
-        let Some(parent_id) = tree
-            .get("frame")
-            .and_then(|frame| frame.get("parentId"))
-            .and_then(|id| id.as_str())
-            .map(ToString::to_string)
-        else {
-            continue;
-        };
-        subtrees.push(SessionFrameTree {
-            session_id: session_id.clone(),
-            parent_id,
-            tree,
-        });
+        collect_frame_targets(&tree, session_id, iframe_sessions, &mut targets);
     }
 
-    // Parents must precede descendants because missing frame contexts use
-    // depth to skip only that frame's subtree. Chrome does not guarantee the
-    // attachment event order, so resolve the hierarchy from parentId.
-    while !subtrees.is_empty() {
-        let mut progressed = false;
-        let mut index = 0;
-        while index < subtrees.len() {
-            let Some(parent_depth) = targets
-                .iter()
-                .find(|target| target.frame_id == subtrees[index].parent_id)
-                .map(|target| target.depth)
-            else {
-                index += 1;
-                continue;
-            };
+    // The daemon retains sessions for background tabs. Keep only frames whose
+    // parent chain reaches the active page; audit ordering is resolved later
+    // from axe's frame specs rather than HashMap or attachment order.
+    let mut active_targets: Vec<_> = targets
+        .values()
+        .filter(|target| frame_reaches_top(&target.frame_id, &top_frame_id, &targets))
+        .cloned()
+        .collect();
+    active_targets.sort_unstable_by(|left, right| left.frame_id.cmp(&right.frame_id));
 
-            let subtree = subtrees.remove(index);
-            let depth = parent_depth + 1;
-            let mut subtree_targets = Vec::new();
-            collect_frame_targets(
-                &subtree.tree,
-                depth,
-                &subtree.session_id,
-                iframe_sessions,
-                &mut subtree_targets,
-            );
-            for target in subtree_targets {
-                if !targets
-                    .iter()
-                    .any(|existing| existing.frame_id == target.frame_id)
-                {
-                    targets.push(target);
-                }
-            }
-            progressed = true;
-        }
+    Ok((top_frame_id, active_targets))
+}
 
-        if !progressed {
-            // Remaining sessions belong to background tabs or raced a parent
-            // attachment. Neither can be merged safely into this page's audit.
-            break;
-        }
+#[cfg(test)]
+fn frame_target(frame_id: &str, session_id: &str, parent_id: Option<&str>) -> FrameTarget {
+    FrameTarget {
+        frame_id: frame_id.to_string(),
+        session_id: session_id.to_string(),
+        parent_id: parent_id.map(ToString::to_string),
     }
-
-    Ok((top_frame_id, targets))
 }
 
 /// Return the dedicated target sessions that belong to the active page's
@@ -492,6 +587,14 @@ fn skipped_frame_partial() -> Value {
     Value::Bool(false)
 }
 
+enum AuditTask {
+    Frame {
+        frame_id: String,
+        selector: Option<String>,
+    },
+    Skip,
+}
+
 /// Run `axe.runPartial` in top-to-bottom frame order, then combine those
 /// serialized partials with `axe.finishRun`. This avoids cross-frame page
 /// messaging and keeps every frame's page-owned `window.axe` value intact.
@@ -502,30 +605,6 @@ pub async fn run_audit(
     tags: Option<&str>,
     selector: Option<&str>,
 ) -> Result<Value, String> {
-    // A selector scopes the current document only. Disable axe's frame walk so
-    // finishRun does not expect partials for frames outside that subtree.
-    if selector.is_some() {
-        let partial = evaluate(
-            client,
-            top_session_id,
-            None,
-            &partial_expression(tags, selector, true),
-        )
-        .await
-        .and_then(parse_audit_result)?;
-        if partial.get("error").is_some() {
-            return Ok(partial);
-        }
-        let finished = evaluate(
-            client,
-            top_session_id,
-            None,
-            &finish_expression(&[partial], tags, selector),
-        )
-        .await?;
-        return parse_audit_result(finished);
-    }
-
     let (top_frame_id, frame_targets) =
         match collect_frame_sessions(client, top_session_id, iframe_sessions).await {
             Ok(frame_data) => frame_data,
@@ -544,52 +623,85 @@ pub async fn run_audit(
         .await
         .unwrap_or_default();
 
+    // axe.finishRun consumes partials in document preorder. Derive that order
+    // from each partial's frame specs so it matches axe's exact selector scope
+    // and DOM order instead of CDP target attachment or frame ID order.
     let mut partials = Vec::new();
-    let mut skipped_descendant_depth = None;
-    for target in frame_targets {
-        if let Some(skipped_depth) = skipped_descendant_depth {
-            if target.depth > skipped_depth {
-                continue;
-            }
-            skipped_descendant_depth = None;
-        }
-
-        let context = if target.frame_id == top_frame_id {
+    let mut tasks = vec![AuditTask::Frame {
+        frame_id: top_frame_id.clone(),
+        selector: selector.map(ToString::to_string),
+    }];
+    while let Some(task) = tasks.pop() {
+        let AuditTask::Frame { frame_id, selector } = task else {
+            partials.push(skipped_frame_partial());
+            continue;
+        };
+        let context = if frame_id == top_frame_id {
             Some((top_session_id, None))
         } else {
             contexts
-                .get(&target.frame_id)
+                .get(&frame_id)
                 .map(|context| (context.session_id.as_str(), Some(context.context_id)))
         };
         let Some((session_id, context_id)) = context else {
             partials.push(skipped_frame_partial());
-            skipped_descendant_depth = Some(target.depth);
             continue;
         };
+
+        // runPartial still reports frame specs when iframe messaging is
+        // disabled. We execute those descendants directly through CDP.
         let partial = evaluate(
             client,
             session_id,
             context_id,
-            &partial_expression(tags, None, false),
+            &partial_expression(tags, selector.as_deref(), true),
         )
         .await
         .and_then(parse_audit_result);
-        match partial {
-            Ok(partial) if partial.get("error").is_none() => partials.push(partial),
-            _ if target.frame_id == top_frame_id => {
+        let partial = match partial {
+            Ok(partial) if partial.get("error").is_none() => partial,
+            Ok(partial) if frame_id == top_frame_id && partial.get("error").is_some() => {
+                return Ok(partial);
+            }
+            _ if frame_id == top_frame_id => {
                 let value = evaluate(
                     client,
                     top_session_id,
                     None,
-                    &run_expression(tags, selector),
+                    &run_expression(tags, selector.as_deref()),
                 )
                 .await?;
                 return parse_audit_result(value);
             }
             _ => {
                 partials.push(skipped_frame_partial());
-                skipped_descendant_depth = Some(target.depth);
+                continue;
             }
+        };
+
+        let frame_specs = partial
+            .get("frames")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        partials.push(partial);
+
+        let mut child_tasks = Vec::with_capacity(frame_specs.len());
+        for frame_spec in frame_specs {
+            let child_task =
+                match resolve_child_frame_id(client, session_id, context_id, &frame_spec).await {
+                    Ok(child_frame_id) if contexts.contains_key(&child_frame_id) => {
+                        AuditTask::Frame {
+                            frame_id: child_frame_id,
+                            selector: None,
+                        }
+                    }
+                    _ => AuditTask::Skip,
+                };
+            child_tasks.push(child_task);
+        }
+        for child_task in child_tasks.into_iter().rev() {
+            tasks.push(child_task);
         }
     }
 
@@ -681,18 +793,59 @@ mod tests {
         let tree = json!({
             "frame": { "id": "top" },
             "childFrames": [{
-                "frame": { "id": "oopif" },
-                "childFrames": [{ "frame": { "id": "same-process-child" } }]
+                "frame": { "id": "oopif", "parentId": "top" },
+                "childFrames": [{
+                    "frame": { "id": "same-process-child", "parentId": "oopif" }
+                }]
             }]
         });
         let iframe_sessions = HashMap::from([("oopif".to_string(), "oopif-session".to_string())]);
-        let mut targets = Vec::new();
+        let mut targets = HashMap::new();
 
-        collect_frame_targets(&tree, 0, "top-session", &iframe_sessions, &mut targets);
+        collect_frame_targets(&tree, "top-session", &iframe_sessions, &mut targets);
 
         assert_eq!(targets.len(), 3);
-        assert_eq!(targets[0].session_id, "top-session");
-        assert_eq!(targets[1].session_id, "oopif-session");
-        assert_eq!(targets[2].session_id, "oopif-session");
+        assert_eq!(targets["top"].session_id, "top-session");
+        assert_eq!(targets["oopif"].session_id, "oopif-session");
+        assert_eq!(targets["same-process-child"].session_id, "oopif-session");
+        assert_eq!(
+            targets["same-process-child"].parent_id.as_deref(),
+            Some("oopif")
+        );
+    }
+
+    #[test]
+    fn test_frame_reaches_top_filters_background_frames() {
+        let targets = HashMap::from([
+            ("top".to_string(), frame_target("top", "top-session", None)),
+            (
+                "active-child".to_string(),
+                frame_target("active-child", "active-session", Some("top")),
+            ),
+            (
+                "background".to_string(),
+                frame_target("background", "background-session", None),
+            ),
+            (
+                "background-child".to_string(),
+                frame_target("background-child", "background-session", Some("background")),
+            ),
+        ]);
+
+        assert!(frame_reaches_top("active-child", "top", &targets));
+        assert!(!frame_reaches_top("background-child", "top", &targets));
+    }
+
+    #[test]
+    fn test_frame_owner_expression_preserves_axe_selector_paths() {
+        let expression = frame_owner_expression(&json!({
+            "selector": ["#ancestor", ["#shadow-host", "iframe[data-name=\"quoted\"]"]]
+        }))
+        .unwrap();
+
+        assert!(expression.contains(
+            r##"const selectorPath = ["#ancestor",["#shadow-host","iframe[data-name=\"quoted\"]"]]"##
+        ));
+        assert!(expression.contains("root = element.shadowRoot"));
     }
 }

@@ -7057,6 +7057,31 @@ async fn start_a11y_frame_server() -> (u16, tokio::task::JoinHandle<()>) {
 <body><main aria-label="Inner"><h1>Inner</h1><img id="inner-image" src="/missing-inner.png"></main></body></html>"#
                             .to_string(),
                     ),
+                    "/siblings" => (
+                        "200 OK",
+                        "text/html",
+                        format!(
+                            r#"<!doctype html><html lang="en"><head><title>Siblings</title></head>
+<body><main><h1>Siblings</h1>
+<iframe id="first-frame" title="First" src="http://127.0.0.1:{port}/first-frame"></iframe>
+<iframe id="second-frame" title="Second" src="http://127.0.0.1:{port}/second-frame"></iframe>
+</main></body></html>"#
+                        ),
+                    ),
+                    "/first-frame" => (
+                        "200 OK",
+                        "text/html",
+                        r#"<!doctype html><html lang="en"><head><title>First</title></head>
+<body><main><h1>First</h1><img id="first-image" src="/missing-first.png"></main></body></html>"#
+                            .to_string(),
+                    ),
+                    "/second-frame" => (
+                        "200 OK",
+                        "text/html",
+                        r#"<!doctype html><html lang="en"><head><title>Second</title></head>
+<body><main><h1>Second</h1><img id="second-image" src="/missing-second.png"></main></body></html>"#
+                            .to_string(),
+                    ),
                     "/background" => (
                         "200 OK",
                         "text/html",
@@ -7280,6 +7305,63 @@ async fn e2e_a11y_preserves_nested_frame_sessions_across_tab_switches() {
     assert_frame_violations(&resp);
 
     let resp = execute_command(
+        &json!({ "id": "3-selector", "action": "a11y", "selector": "main" }),
+        &mut state,
+    )
+    .await;
+    assert_frame_violations(&resp);
+
+    // Simulate a popup created outside the tab commands. Target lifecycle
+    // events must move active iframe scoping to the popup and back when it is
+    // externally closed.
+    let browser_client = state.browser.as_ref().unwrap().client.clone();
+    let created = browser_client
+        .send_command(
+            "Target.createTarget",
+            Some(json!({
+                "url": format!("http://localhost:{port}/background")
+            })),
+            None,
+        )
+        .await
+        .unwrap();
+    let external_target_id = created["targetId"].as_str().unwrap().to_string();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let resp = execute_command(
+        &json!({ "id": "external-open", "action": "tab_list" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let resp = execute_command(
+        &json!({ "id": "external-loaded", "action": "tab_list" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let external_iframe_sessions = state.active_iframe_sessions.clone();
+    assert!(!external_iframe_sessions.is_empty());
+    assert!(top_iframe_sessions.is_disjoint(&external_iframe_sessions));
+
+    browser_client
+        .send_command(
+            "Target.closeTarget",
+            Some(json!({ "targetId": external_target_id })),
+            None,
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let resp = execute_command(
+        &json!({ "id": "external-close", "action": "tab_list" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(state.active_iframe_sessions, top_iframe_sessions);
+
+    let resp = execute_command(
         &json!({
             "id": "4",
             "action": "tab_new",
@@ -7305,6 +7387,57 @@ async fn e2e_a11y_preserves_nested_frame_sessions_across_tab_switches() {
 
     let resp = execute_command(&json!({ "id": "6", "action": "a11y" }), &mut state).await;
     assert_frame_violations(&resp);
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_a11y_preserves_sibling_frame_dom_order() {
+    let (port, server) = start_a11y_frame_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": format!("http://localhost:{port}/siblings")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "a11y" }), &mut state).await;
+    assert_success(&resp);
+    let image_alt = get_data(&resp)["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|violation| violation["id"] == "image-alt")
+        .expect("audit should report both sibling frame images");
+    assert_eq!(image_alt["nodeCount"], 2);
+    let targets: Vec<_> = image_alt["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["target"].clone())
+        .collect();
+    assert_eq!(
+        targets,
+        vec![
+            json!(["#first-frame", "#first-image"]),
+            json!(["#second-frame", "#second-image"]),
+        ]
+    );
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     server.abort();
