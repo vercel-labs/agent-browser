@@ -7012,6 +7012,83 @@ async fn e2e_vitals_reports_metrics() {
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }
 
+async fn start_a11y_frame_server() -> (u16, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let handle = tokio::spawn(async move {
+        for _ in 0..100 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+
+                let (status, content_type, body) = match path {
+                    "/top" => (
+                        "200 OK",
+                        "text/html",
+                        format!(
+                            r#"<!doctype html><html lang="en"><head><title>Top</title></head>
+<body><main aria-label="Top"><h1>Top</h1>
+<iframe id="outer" title="Outer" src="http://127.0.0.1:{port}/outer"></iframe>
+</main></body></html>"#
+                        ),
+                    ),
+                    "/outer" => (
+                        "200 OK",
+                        "text/html",
+                        r#"<!doctype html><html lang="en"><head><title>Outer</title></head>
+<body><main aria-label="Outer"><h1>Outer</h1><img id="outer-image" src="/missing-outer.png">
+<iframe id="inner" title="Inner" src="/inner"></iframe></main></body></html>"#
+                            .to_string(),
+                    ),
+                    "/inner" => (
+                        "200 OK",
+                        "text/html",
+                        r#"<!doctype html><html lang="en"><head><title>Inner</title></head>
+<body><main aria-label="Inner"><h1>Inner</h1><img id="inner-image" src="/missing-inner.png"></main></body></html>"#
+                            .to_string(),
+                    ),
+                    "/background" => (
+                        "200 OK",
+                        "text/html",
+                        format!(
+                            r#"<!doctype html><html lang="en"><head><title>Background</title></head>
+<body><main><h1>Background</h1>
+<iframe id="background-frame" title="Background frame" src="http://127.0.0.1:{port}/background-frame"></iframe>
+</main></body></html>"#
+                        ),
+                    ),
+                    "/background-frame" => (
+                        "200 OK",
+                        "text/html",
+                        r#"<!doctype html><html lang="en"><head><title>Background frame</title></head>
+<body><main><h1>Background frame</h1><img id="background-image" src="/missing-background.png"></main></body></html>"#
+                            .to_string(),
+                    ),
+                    _ => ("404 Not Found", "text/plain", "not found".to_string()),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    (port, handle)
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
@@ -7138,6 +7215,84 @@ async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
     assert!(!state.iframe_sessions.contains_key("stale-frame"));
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_a11y_preserves_nested_frame_sessions_across_tab_switches() {
+    let (port, server) = start_a11y_frame_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": format!("http://localhost:{port}/top")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        !state.iframe_sessions.is_empty(),
+        "cross-origin frame should have an attached target session"
+    );
+
+    let assert_frame_violations = |resp: &Value| {
+        assert_success(resp);
+        let image_alt = get_data(resp)["violations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|violation| violation["id"] == "image-alt")
+            .unwrap_or_else(|| {
+                panic!(
+                    "audit should include images in nested cross-origin frames: {}",
+                    serde_json::to_string_pretty(resp).unwrap_or_default()
+                )
+            });
+        assert_eq!(image_alt["nodeCount"], 2);
+        let nodes = image_alt["nodes"].as_array().unwrap();
+        assert!(nodes
+            .iter()
+            .any(|node| node["target"] == json!(["#outer", "#outer-image"])));
+        assert!(nodes
+            .iter()
+            .any(|node| node["target"] == json!(["#outer", "#inner", "#inner-image"])));
+    };
+
+    let resp = execute_command(&json!({ "id": "3", "action": "a11y" }), &mut state).await;
+    assert_frame_violations(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "tab_new",
+            "url": format!("http://localhost:{port}/background")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "tab_switch", "tabId": "t1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "6", "action": "a11y" }), &mut state).await;
+    assert_frame_violations(&resp);
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    server.abort();
 }
 
 #[tokio::test]

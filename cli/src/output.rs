@@ -278,7 +278,7 @@ fn format_vitals_text(data: &serde_json::Value) -> String {
     lines.join("\n")
 }
 
-fn format_a11y_text(data: &serde_json::Value) -> String {
+pub(crate) fn format_a11y_text(data: &serde_json::Value) -> String {
     let url = data.get("url").and_then(|v| v.as_str()).unwrap_or("-");
     let version = data
         .get("axeVersion")

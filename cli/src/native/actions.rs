@@ -361,6 +361,9 @@ pub struct DaemonState {
     pub active_frame_id: Option<String>,
     /// Cross-origin iframe frame_id → dedicated CDP session_id.
     /// Populated by Target.attachedToTarget events from Target.setAutoAttach.
+    /// Entries are retained across tab changes because Chrome does not emit a
+    /// second attachment event when returning to an already-attached tab.
+    /// Target.detachedFromTarget events remove stale sessions.
     pub iframe_sessions: HashMap<String, String>,
     /// Origin-scoped extra HTTP headers set via `--headers` on navigate.
     /// Key is the origin (scheme + host + port), value is the headers map.
@@ -1875,6 +1878,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
     close_active_provider_session(state).await;
     state.launch_hash = None;
     state.network_auto_attach_installed = false;
+    state.iframe_sessions.clear();
     state.screencasting = false;
     state.reset_input_state();
     state.update_stream_client().await;
@@ -4166,6 +4170,17 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         }
     }
 
+    // With one tab, every tracked iframe belongs to the page being replaced.
+    // With multiple tabs, retain the other tabs' sessions so switching back to
+    // an already-attached OOPIF does not lose its execution context.
+    let has_background_tabs = state
+        .browser
+        .as_ref()
+        .is_some_and(|browser| browser.page_count() > 1);
+    if !has_background_tabs {
+        state.iframe_sessions.clear();
+    }
+
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
 
     let wait_until = cmd
@@ -4217,7 +4232,6 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     }
 
     state.ref_map.clear();
-    state.iframe_sessions.clear();
     state.active_frame_id = None;
     mgr.navigate(url, wait_until).await
 }
@@ -5857,7 +5871,6 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         should_defer_url_until_network_controls(domain_filter.as_ref(), has_proxy_creds, url)?;
 
     state.ref_map.clear();
-    state.iframe_sessions.clear();
     state.active_frame_id = None;
     let mut result = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
@@ -5899,7 +5912,6 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
         mgr.resolve_tab_ref(&tab_ref)?
     };
     state.ref_map.clear();
-    state.iframe_sessions.clear();
     state.active_frame_id = None;
     let result = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
@@ -5942,7 +5954,6 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         None => None,
     };
     state.ref_map.clear();
-    state.iframe_sessions.clear();
     state.active_frame_id = None;
     mgr.tab_close_by_id(tab_id).await
 }
@@ -11549,6 +11560,18 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         let request = fs::read_to_string(request_path).unwrap();
         assert!(request.contains(r#""type":"browser.close""#));
         assert!(request.contains(r#""sessionId":"s1""#));
+    }
+
+    #[tokio::test]
+    async fn test_close_current_browser_clears_iframe_sessions() {
+        let mut state = DaemonState::new();
+        state
+            .iframe_sessions
+            .insert("frame-1".to_string(), "session-1".to_string());
+
+        close_current_browser(&mut state).await.unwrap();
+
+        assert!(state.iframe_sessions.is_empty());
     }
 
     #[tokio::test]

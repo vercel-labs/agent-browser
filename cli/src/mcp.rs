@@ -3714,6 +3714,17 @@ fn response_text(value: &Value) -> Option<String> {
         }
 
         if let Some(data) = obj.get("data") {
+            // Accessibility reports carry a URL alongside their findings. Use
+            // the same report formatter as the CLI before the generic string
+            // field fallback turns the MCP text content into only that URL.
+            if data.get("axeVersion").is_some()
+                && data
+                    .get("violations")
+                    .and_then(|value| value.as_array())
+                    .is_some()
+            {
+                return Some(crate::output::format_a11y_text(data));
+            }
             for key in [
                 "snapshot", "text", "html", "report", "value", "content", "title", "url", "path",
             ] {
@@ -4024,6 +4035,37 @@ mod tests {
         .unwrap();
 
         assert_eq!(text, "# Docs\n\nReadable content.");
+    }
+
+    #[test]
+    fn response_text_formats_a11y_findings_before_url_metadata() {
+        let text = response_text(&json!({
+            "success": true,
+            "data": {
+                "url": "https://example.com",
+                "axeVersion": "4.12.1",
+                "counts": {
+                    "violations": 1,
+                    "incomplete": 0,
+                    "passes": 12,
+                    "inapplicable": 20
+                },
+                "violations": [{
+                    "id": "image-alt",
+                    "impact": "critical",
+                    "help": "Images must have alternative text",
+                    "nodeCount": 1,
+                    "nodes": [{ "target": ["#hero"] }]
+                }],
+                "incomplete": []
+            }
+        }))
+        .unwrap();
+
+        assert!(text.contains("violations: 1"));
+        assert!(text.contains("[critical] image-alt"));
+        assert!(text.contains("  - #hero"));
+        assert_ne!(text, "https://example.com");
     }
 
     #[test]

@@ -238,30 +238,43 @@ struct FrameTarget {
     depth: usize,
 }
 
+struct SessionFrameTree {
+    session_id: String,
+    parent_id: String,
+    tree: Value,
+}
+
 fn collect_frame_targets(
     tree: &Value,
     depth: usize,
-    top_session_id: &str,
+    parent_session_id: &str,
     iframe_sessions: &HashMap<String, String>,
     targets: &mut Vec<FrameTarget>,
 ) {
-    if let Some(frame_id) = tree
+    let session_id = if let Some(frame_id) = tree
         .get("frame")
         .and_then(|frame| frame.get("id"))
         .and_then(|id| id.as_str())
     {
+        // Same-process child frames do not have their own target session. They
+        // execute in the nearest ancestor target, which may itself be an
+        // out-of-process iframe rather than the top-level page.
+        let session_id = iframe_sessions
+            .get(frame_id)
+            .cloned()
+            .unwrap_or_else(|| parent_session_id.to_string());
         targets.push(FrameTarget {
             frame_id: frame_id.to_string(),
-            session_id: iframe_sessions
-                .get(frame_id)
-                .cloned()
-                .unwrap_or_else(|| top_session_id.to_string()),
+            session_id: session_id.clone(),
             depth,
         });
-    }
+        session_id
+    } else {
+        parent_session_id.to_string()
+    };
     if let Some(children) = tree.get("childFrames").and_then(|value| value.as_array()) {
         for child in children {
-            collect_frame_targets(child, depth + 1, top_session_id, iframe_sessions, targets);
+            collect_frame_targets(child, depth + 1, &session_id, iframe_sessions, targets);
         }
     }
 }
@@ -287,16 +300,80 @@ async fn collect_frame_sessions(
         collect_frame_targets(tree, 0, top_session_id, iframe_sessions, &mut targets);
     }
 
-    // Chrome normally includes OOPIFs in the top frame tree. Retain any newly
-    // attached session not present there so it is represented instead of
-    // silently omitted.
-    for (frame_id, session_id) in iframe_sessions {
-        if !targets.iter().any(|target| target.frame_id == *frame_id) {
-            targets.push(FrameTarget {
-                frame_id: frame_id.clone(),
-                session_id: session_id.clone(),
-                depth: 1,
-            });
+    // Page.getFrameTree on the top session can omit OOPIF subtrees entirely.
+    // Query each attached iframe session so same-process descendants within
+    // that target are included and inherit the correct session.
+    let mut session_entries: Vec<_> = iframe_sessions.iter().collect();
+    session_entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let mut subtrees = Vec::new();
+    for (frame_id, session_id) in session_entries {
+        if targets.iter().any(|target| target.frame_id == *frame_id) {
+            continue;
+        }
+        let Some(tree) = client
+            .send_command_no_params("Page.getFrameTree", Some(session_id))
+            .await
+            .ok()
+            .and_then(|result| result.get("frameTree").cloned())
+        else {
+            continue;
+        };
+        let Some(parent_id) = tree
+            .get("frame")
+            .and_then(|frame| frame.get("parentId"))
+            .and_then(|id| id.as_str())
+            .map(ToString::to_string)
+        else {
+            continue;
+        };
+        subtrees.push(SessionFrameTree {
+            session_id: session_id.clone(),
+            parent_id,
+            tree,
+        });
+    }
+
+    // Parents must precede descendants because missing frame contexts use
+    // depth to skip only that frame's subtree. Chrome does not guarantee the
+    // attachment event order, so resolve the hierarchy from parentId.
+    while !subtrees.is_empty() {
+        let mut progressed = false;
+        let mut index = 0;
+        while index < subtrees.len() {
+            let Some(parent_depth) = targets
+                .iter()
+                .find(|target| target.frame_id == subtrees[index].parent_id)
+                .map(|target| target.depth)
+            else {
+                index += 1;
+                continue;
+            };
+
+            let subtree = subtrees.remove(index);
+            let depth = parent_depth + 1;
+            let mut subtree_targets = Vec::new();
+            collect_frame_targets(
+                &subtree.tree,
+                depth,
+                &subtree.session_id,
+                iframe_sessions,
+                &mut subtree_targets,
+            );
+            for target in subtree_targets {
+                if !targets
+                    .iter()
+                    .any(|existing| existing.frame_id == target.frame_id)
+                {
+                    targets.push(target);
+                }
+            }
+            progressed = true;
+        }
+
+        if !progressed {
+            // Remaining sessions belong to background tabs or raced a parent
+            // attachment. Neither can be merged safely into this page's audit.
+            break;
         }
     }
 
@@ -562,5 +639,25 @@ mod tests {
         collect_frame_ids(&tree, &mut frame_ids);
 
         assert_eq!(frame_ids, vec!["top", "child", "grandchild"]);
+    }
+
+    #[test]
+    fn test_collect_frame_targets_inherits_nearest_ancestor_session() {
+        let tree = json!({
+            "frame": { "id": "top" },
+            "childFrames": [{
+                "frame": { "id": "oopif" },
+                "childFrames": [{ "frame": { "id": "same-process-child" } }]
+            }]
+        });
+        let iframe_sessions = HashMap::from([("oopif".to_string(), "oopif-session".to_string())]);
+        let mut targets = Vec::new();
+
+        collect_frame_targets(&tree, 0, "top-session", &iframe_sessions, &mut targets);
+
+        assert_eq!(targets.len(), 3);
+        assert_eq!(targets[0].session_id, "top-session");
+        assert_eq!(targets[1].session_id, "oopif-session");
+        assert_eq!(targets[2].session_id, "oopif-session");
     }
 }
