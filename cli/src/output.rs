@@ -2904,6 +2904,9 @@ Notes:
   - 'screencast_start' and 'screencast_stop' still control explicit CDP screencasts.
   - Streaming is always enabled. Set AGENT_BROWSER_STREAM_PORT to bind to a
     specific port instead of the default OS-assigned port.
+  - AGENT_BROWSER_NO_STREAM=1 starts the daemon with no stream server at all
+    (no TCP listener; security opt-out for multi-user hosts). The live view is
+    unavailable and 'stream enable' refuses until the daemon restarts without it.
 
 Global Options:
   --json               Output as JSON
@@ -3613,6 +3616,7 @@ Environment:
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete saved states older than N days (default: 30)
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM session encryption
   AGENT_BROWSER_STREAM_PORT      Override WebSocket streaming port (default: OS-assigned)
+  AGENT_BROWSER_NO_STREAM        Start the daemon with no stream server / TCP listener (security opt-out)
   AGENT_BROWSER_IDLE_TIMEOUT_MS  Auto-shutdown daemon after N ms of inactivity (disabled by default)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
