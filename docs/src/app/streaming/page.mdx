@@ -82,6 +82,25 @@ Connection and screencast status:
 }
 ```
 
+### Frame delivery
+
+Frames are delivered latest-first: when a client falls behind (slow network, slow render loop), stale frames are dropped and the client always receives the newest available frame instead of draining a backlog. Status, console, and tab messages flow through a separate ordered channel and are not subject to frame dropping.
+
+Input handling is independent of frame delivery. Each connection reads input on its own task, so clicks and keystrokes dispatch to the browser immediately even while a large frame is mid-write to a slow client.
+
+### Client configuration
+
+A client can cap its own frame rate by sending a `config` message at any time:
+
+```json
+{
+  "type": "config",
+  "maxFps": 10
+}
+```
+
+`maxFps` caps how many frames per second the server sends to this client (1 to 120). Set `0` to remove the cap (the default). Each client controls its own rate; other connected clients are unaffected. Combined with latest-first delivery, a preview on a constrained link can request a low rate and still always show the current state of the page.
+
 ## Input injection
 
 Send input events to control the browser remotely.

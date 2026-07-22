@@ -46,6 +46,9 @@ pub struct StreamServer {
     port: u16,
     session_name: String,
     frame_tx: broadcast::Sender<String>,
+    /// Latest-value channel for screencast frames. Slow clients skip straight
+    /// to the newest frame instead of draining a stale ordered backlog.
+    frame_watch: watch::Sender<Option<Arc<String>>>,
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
     /// The active CDP page session ID (from Target.attachToTarget).
@@ -56,7 +59,6 @@ pub struct StreamServer {
     viewport_height: Arc<Mutex<u32>>,
     last_tabs: Arc<RwLock<Vec<Value>>>,
     last_engine: Arc<RwLock<String>>,
-    last_frame: Arc<RwLock<Option<String>>>,
     recording: Arc<Mutex<bool>>,
     shutdown_tx: watch::Sender<bool>,
     accept_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -177,6 +179,7 @@ impl StreamServer {
         let port = actual_addr.port();
 
         let (frame_tx, _) = broadcast::channel::<String>(64);
+        let (frame_watch_tx, frame_watch_rx) = watch::channel::<Option<Arc<String>>>(None);
         let client_count = Arc::new(Mutex::new(0usize));
         let client_notify = Arc::new(Notify::new());
         let screencasting = Arc::new(Mutex::new(false));
@@ -185,7 +188,6 @@ impl StreamServer {
         let viewport_height = Arc::new(Mutex::new(720u32));
         let last_tabs = Arc::new(RwLock::new(Vec::<Value>::new()));
         let last_engine = Arc::new(RwLock::new("chrome".to_string()));
-        let last_frame = Arc::new(RwLock::new(None::<String>));
         let recording = Arc::new(Mutex::new(false));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -200,14 +202,15 @@ impl StreamServer {
         let vh_clone = viewport_height.clone();
         let last_tabs_clone = last_tabs.clone();
         let last_engine_clone = last_engine.clone();
-        let last_frame_clone = last_frame.clone();
         let recording_clone = recording.clone();
         let accept_shutdown_rx = shutdown_rx.clone();
         let session_name_clone = session_id.clone();
+        let frame_watch_accept = frame_watch_rx.clone();
         let accept_task = tokio::spawn(async move {
             websocket::accept_loop(
                 listener,
                 frame_tx_clone,
+                frame_watch_accept,
                 client_count_clone,
                 client_slot_clone,
                 notify_clone,
@@ -217,7 +220,6 @@ impl StreamServer {
                 vh_clone,
                 last_tabs_clone,
                 last_engine_clone,
-                last_frame_clone,
                 recording_clone,
                 accept_shutdown_rx,
                 session_name_clone,
@@ -233,13 +235,14 @@ impl StreamServer {
         let cdp_session_bg = cdp_session_id.clone();
         let vw_bg = viewport_width.clone();
         let vh_bg = viewport_height.clone();
-        let last_frame_bg = last_frame.clone();
         let last_tabs_bg = last_tabs.clone();
         let last_engine_bg = last_engine.clone();
         let recording_bg = recording.clone();
+        let frame_watch_bg = frame_watch_tx.clone();
         let cdp_task = tokio::spawn(async move {
             cdp_loop::cdp_event_loop(
                 frame_tx_bg,
+                frame_watch_bg,
                 client_slot_bg,
                 client_notify_bg,
                 screencasting_bg,
@@ -247,7 +250,6 @@ impl StreamServer {
                 cdp_session_bg,
                 vw_bg,
                 vh_bg,
-                last_frame_bg,
                 last_tabs_bg,
                 last_engine_bg,
                 recording_bg,
@@ -261,6 +263,7 @@ impl StreamServer {
                 port,
                 session_name: session_id,
                 frame_tx,
+                frame_watch: frame_watch_tx,
                 client_count,
                 client_slot: client_slot.clone(),
                 cdp_session_id,
@@ -270,7 +273,6 @@ impl StreamServer {
                 viewport_height,
                 last_tabs,
                 last_engine,
-                last_frame,
                 recording,
                 shutdown_tx,
                 accept_task: Mutex::new(Some(accept_task)),
@@ -286,11 +288,8 @@ impl StreamServer {
 
     /// Broadcast a raw frame string (legacy).
     pub fn broadcast_frame(&self, frame_json: &str) {
-        let s = frame_json.to_string();
-        if let Ok(mut lf) = self.last_frame.try_write() {
-            *lf = Some(s.clone());
-        }
-        let _ = self.frame_tx.send(s);
+        self.frame_watch
+            .send_replace(Some(Arc::new(frame_json.to_string())));
     }
 
     /// Broadcast a screencast frame with structured metadata.
@@ -308,11 +307,8 @@ impl StreamServer {
                 "timestamp": metadata.timestamp,
             }
         });
-        let s = msg.to_string();
-        if let Ok(mut lf) = self.last_frame.try_write() {
-            *lf = Some(s.clone());
-        }
-        let _ = self.frame_tx.send(s);
+        self.frame_watch
+            .send_replace(Some(Arc::new(msg.to_string())));
     }
 
     /// Broadcast a status message to all connected clients.
@@ -482,5 +478,151 @@ mod tests {
         assert_eq!(meta.device_width, 1280);
         assert_eq!(meta.device_height, 720);
         assert_eq!(meta.page_scale_factor, 1.0);
+    }
+
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    type WsClient = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    async fn connect_client(port: u16) -> WsClient {
+        let (ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}", port))
+            .await
+            .expect("client connect");
+        ws
+    }
+
+    /// Read messages until one of type "frame" arrives (skipping status/tabs),
+    /// with a timeout so a broken server fails the test instead of hanging.
+    async fn next_frame(ws: &mut WsClient) -> Value {
+        loop {
+            let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+                .await
+                .expect("timed out waiting for frame")
+                .expect("stream ended")
+                .expect("ws error");
+            if let Message::Text(text) = msg {
+                let parsed: Value = serde_json::from_str(&text).expect("valid json");
+                if parsed.get("type").and_then(|v| v.as_str()) == Some("frame") {
+                    return parsed;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_new_client_receives_latest_frame_only() {
+        let (server, _slot) = StreamServer::start_without_client(0, "t1".to_string(), true)
+            .await
+            .expect("server start");
+
+        // Frames sent before any client connects: only the newest survives.
+        server.broadcast_frame(r#"{"type":"frame","data":"stale"}"#);
+        server.broadcast_frame(r#"{"type":"frame","data":"fresh"}"#);
+
+        let mut ws = connect_client(server.port()).await;
+        let frame = next_frame(&mut ws).await;
+        assert_eq!(frame.get("data").and_then(|v| v.as_str()), Some("fresh"));
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_max_fps_cap_skips_stale_frames() {
+        let (server, _slot) = StreamServer::start_without_client(0, "t2".to_string(), true)
+            .await
+            .expect("server start");
+
+        let mut ws = connect_client(server.port()).await;
+        ws.send(Message::Text(r#"{"type":"config","maxFps":1}"#.to_string()))
+            .await
+            .expect("send config");
+        // Let the reader task apply the config before frames start flowing.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // First frame after the cap is immediate.
+        server.broadcast_frame(r#"{"type":"frame","data":"first"}"#);
+        let frame = next_frame(&mut ws).await;
+        assert_eq!(frame.get("data").and_then(|v| v.as_str()), Some("first"));
+
+        // Two frames inside one throttle window: the older one is skipped.
+        server.broadcast_frame(r#"{"type":"frame","data":"skipped"}"#);
+        server.broadcast_frame(r#"{"type":"frame","data":"latest"}"#);
+        let frame = next_frame(&mut ws).await;
+        assert_eq!(frame.get("data").and_then(|v| v.as_str()), Some("latest"));
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_uncapped_client_receives_consecutive_frames() {
+        let (server, _slot) = StreamServer::start_without_client(0, "t3".to_string(), true)
+            .await
+            .expect("server start");
+
+        let mut ws = connect_client(server.port()).await;
+        // No config message: delivery is uncapped by default.
+        server.broadcast_frame(r#"{"type":"frame","data":"one"}"#);
+        let frame = next_frame(&mut ws).await;
+        assert_eq!(frame.get("data").and_then(|v| v.as_str()), Some("one"));
+
+        server.broadcast_frame(r#"{"type":"frame","data":"two"}"#);
+        let frame = next_frame(&mut ws).await;
+        assert_eq!(frame.get("data").and_then(|v| v.as_str()), Some("two"));
+
+        server.shutdown().await;
+    }
+
+    /// Loosening a client's own cap mid-stream must take effect immediately.
+    /// Regression guard: previously the writer stayed asleep on the deadline
+    /// computed from the old (slower) rate, so the first frame after switching
+    /// from 1 fps to uncapped was delayed by nearly the old interval (~1s).
+    #[tokio::test]
+    async fn test_loosening_cap_midstream_takes_effect_immediately() {
+        let (server, _slot) = StreamServer::start_without_client(0, "t4".to_string(), true)
+            .await
+            .expect("server start");
+
+        let mut ws = connect_client(server.port()).await;
+        ws.send(Message::Text(r#"{"type":"config","maxFps":1}"#.to_string()))
+            .await
+            .expect("send config");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // First frame is immediate and arms next_allowed = now + 1s (1 fps).
+        server.broadcast_frame(r#"{"type":"frame","data":"a"}"#);
+        assert_eq!(
+            next_frame(&mut ws)
+                .await
+                .get("data")
+                .and_then(|v| v.as_str()),
+            Some("a")
+        );
+
+        // Loosen to uncapped, then send a frame. It must not wait out the
+        // stale 1 fps deadline.
+        ws.send(Message::Text(r#"{"type":"config","maxFps":0}"#.to_string()))
+            .await
+            .expect("send config uncapped");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let t0 = std::time::Instant::now();
+        server.broadcast_frame(r#"{"type":"frame","data":"b"}"#);
+        assert_eq!(
+            next_frame(&mut ws)
+                .await
+                .get("data")
+                .and_then(|v| v.as_str()),
+            Some("b")
+        );
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(300),
+            "uncapped frame after loosening the cap stalled for {elapsed:?}"
+        );
+
+        server.shutdown().await;
     }
 }
