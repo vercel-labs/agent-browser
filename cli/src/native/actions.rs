@@ -7868,10 +7868,20 @@ async fn handle_presentational_getbyrole(
                 return el.textContent || '';
             }};
             const role = {role_json};
+            const isPresentational = role === 'none' || role === 'presentation';
+            // Global ARIA states/properties (WAI-ARIA 1.2); their presence, not any
+            // aria-* attribute, triggers presentational-roles conflict resolution.
+            const GLOBAL_ARIA = new Set(['aria-atomic','aria-busy','aria-controls','aria-current','aria-describedby','aria-description','aria-details','aria-disabled','aria-dropeffect','aria-errormessage','aria-flowto','aria-grabbed','aria-haspopup','aria-hidden','aria-invalid','aria-keyshortcuts','aria-label','aria-labelledby','aria-live','aria-owns','aria-relevant','aria-roledescription']);
+            const isFocusable = el => el.tabIndex >= 0 || el.hasAttribute('tabindex');
             for (const el of root.querySelectorAll('[role]')) {{
                 const tokens = (el.getAttribute('role') || '').trim().toLowerCase().split(/\s+/);
                 const operative = tokens.find(t => VALID_ROLES.has(t));
                 if (operative !== role) continue;
+                // ARIA presentational-roles conflict resolution: none/presentation
+                // is ignored on a focusable element or one carrying global ARIA
+                // states/properties, so it keeps its implicit role and must not
+                // answer a query for none/presentation.
+                if (isPresentational && (isFocusable(el) || el.getAttributeNames().some(a => GLOBAL_ARIA.has(a)))) continue;
                 {name_check}
                 el.setAttribute('data-agent-browser-located', 'true');
                 return true;
@@ -8034,14 +8044,16 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     result
 }
 
-/// Map a Chrome AX tree role to its ARIA name. The only divergence is `image`,
-/// which ARIA and Playwright call `img`; queries pass through the same table so
-/// both spellings match. `directory` is not mapped here (Chrome collapses it
-/// into `list`); it is matched on the DOM attribute instead, see handle_getbyrole.
+/// Map a Chrome AX tree role to its ARIA name. Divergences: `image` -> `img`
+/// and `RootWebArea` -> `document` (Chrome's names for what ARIA/Playwright call
+/// `img` and `document`); queries pass through the same table so both spellings
+/// match. `directory` is not mapped here (Chrome collapses it into `list`); it is
+/// matched on the DOM attribute instead, see handle_getbyrole.
 fn normalize_ax_role(role: &str) -> String {
     let lower = role.to_ascii_lowercase();
     match lower.as_str() {
         "image" => "img".to_string(),
+        "rootwebarea" => "document".to_string(),
         _ => lower,
     }
 }
@@ -8067,7 +8079,11 @@ fn find_ax_node_by_role(
     exact: bool,
 ) -> Result<(i64, String), String> {
     let mut matched_without_backend_id = false;
+    // `names_seen` keeps first-seen order for the error message; `names_set` makes
+    // the dedup check O(1) so a failed name query is linear, not quadratic, in the
+    // number of role matches.
     let mut names_seen: Vec<String> = Vec::new();
+    let mut names_set: HashSet<String> = HashSet::new();
     let mut role_match_count: usize = 0;
     let target_role = normalize_ax_role(role);
 
@@ -8093,7 +8109,7 @@ fn find_ax_node_by_role(
         if !matches {
             if name.is_some() {
                 role_match_count += 1;
-                if !names_seen.contains(&node_name) {
+                if names_set.insert(node_name.clone()) {
                     names_seen.push(node_name);
                 }
             }
@@ -10716,6 +10732,15 @@ mod tests {
             backend_d_o_m_node_id: backend_node_id,
             ignored: Some(ignored),
         }
+    }
+
+    #[test]
+    fn normalize_ax_role_maps_rootwebarea_to_document() {
+        // Chrome's AX root is `RootWebArea`; ARIA and Playwright call it
+        // `document`. Force-red: drop the mapping and `find role document` misses
+        // the root. `image` is pre-existing and covered elsewhere.
+        assert_eq!(normalize_ax_role("RootWebArea"), "document");
+        assert_eq!(normalize_ax_role("document"), "document");
     }
 
     #[test]

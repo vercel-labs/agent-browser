@@ -7326,3 +7326,90 @@ async fn e2e_presentational_role_honors_selected_frame() {
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }
+
+/// ARIA presentational-roles conflict resolution: role="none" on a focusable
+/// element (or one with global ARIA props) is ignored, so `find role none` must
+/// skip it but still match a truly presentational element. Force-red: drop the
+/// conflict check and the `<button role="none">` is matched.
+#[tokio::test]
+#[ignore]
+async fn e2e_presentational_role_respects_conflict_resolution() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Each non-matching element triggers conflict resolution a different way:
+    // native focusable, explicit tabindex=-1 (programmatically focusable), and a
+    // global ARIA property. Only the last, truly presentational div must match.
+    let html = concat!(
+        "<body>",
+        "<button role='none'>NativeFocusable</button>",
+        "<div role='none' tabindex='-1'>TabindexFocusable</div>",
+        "<div role='none' aria-label='named'>GlobalAria</div>",
+        "<div role='none'>Plain</div>",
+        "</body>"
+    );
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The focusable button keeps its implicit role, so the match must be the div.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "getbyrole", "role": "none", "subaction": "text" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["text"],
+        "Plain",
+        "role=none on a focusable button must be ignored (conflict resolution)"
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+/// `find role document` must match the page root. Chrome exposes it as
+/// `RootWebArea`; without the normalization to `document` the query misses.
+/// End-to-end guard for that mapping (the unit test only checks the string).
+#[tokio::test]
+#[ignore]
+async fn e2e_find_role_document_matches_root() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let url = format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode("<title>T</title><body>hi</body>")
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "getbyrole", "role": "document", "subaction": "text" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
