@@ -22,10 +22,10 @@ export default defineTool({
     query: z
       .string()
       .describe('What to match: the role name, text, label, etc. For "first"/"last", a CSS selector.'),
-    value: z.string().optional().describe('Text to enter for "fill" and "type" actions.'),
+    value: z.string().optional().describe('Text to enter for the "fill" action.'),
   }),
   async execute({ action, by, exact, name, query, value }, ctx) {
-    if ((action === "fill" || action === "type") && value === undefined) {
+    if (action === "fill" && value === undefined) {
       throw new Error(`The "${action}" action requires a value.`);
     }
     const args = ["find", by, query, action];
