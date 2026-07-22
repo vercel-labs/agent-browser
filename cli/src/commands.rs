@@ -1957,6 +1957,12 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         cmd["json"] = json!(true);
                     }
                     other if !other.starts_with('-') => {
+                        if cmd.get("url").is_some() {
+                            return Err(ParseError::InvalidValue {
+                                message: format!("Unexpected argument: {}", other),
+                                usage: A11Y_USAGE,
+                            });
+                        }
                         cmd["url"] = json!(other);
                     }
                     other => {
@@ -3424,6 +3430,11 @@ mod tests {
 
         assert!(parse_command(&args("a11y --tags"), &default_flags()).is_err());
         assert!(parse_command(&args("a11y --bogus"), &default_flags()).is_err());
+        assert!(parse_command(
+            &args("a11y https://first.example https://second.example"),
+            &default_flags()
+        )
+        .is_err());
     }
 
     #[test]

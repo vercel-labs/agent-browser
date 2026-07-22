@@ -7225,14 +7225,10 @@ async fn handle_a11y(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
 
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
 
-    // Inject the vendored axe-core unless the page already ships one.
-    let present = mgr.evaluate(a11y::AXE_PRESENT, None).await?;
-    if present != json!(true) {
-        let _ = mgr.evaluate(a11y::AXE_JS, None).await?;
-    }
-
     let tags = cmd.get("tags").and_then(|v| v.as_str());
     let selector = cmd.get("selector").and_then(|v| v.as_str());
+    // `run_expression` loads the vendored build through a private CommonJS
+    // export, runs the audit, and restores any page-owned `window.axe` value.
     let result = mgr
         .evaluate(&a11y::run_expression(tags, selector), None)
         .await?;

@@ -2,8 +2,9 @@
 //!
 //! `axe.min.js` is the unmodified upstream build (MPL-2.0 — see
 //! LICENSE-axe-core.txt alongside it; the file-level license permits
-//! bundling the unmodified source). The script is injected into the page
-//! on demand; a page that already ships its own axe instance is reused.
+//! bundling the unmodified source). Each audit evaluates this exact build
+//! through a local CommonJS export so page-owned `window.axe` values cannot
+//! replace the audit engine.
 
 use serde_json::json;
 
@@ -11,9 +12,8 @@ use serde_json::json;
 /// not subject to the page's CSP, unlike a CDN `<script>` tag).
 pub const AXE_JS: &str = include_str!("axe.min.js");
 
-/// Expression that reports whether axe is already available on the page.
-pub const AXE_PRESENT: &str =
-    "typeof window.axe === 'object' && typeof window.axe.run === 'function'";
+/// Version of the vendored axe-core build. Keep this in sync with `axe.min.js`.
+pub const AXE_VERSION: &str = "4.12.1";
 
 /// Build the `axe.run()` expression. `tags` is a comma-separated list of
 /// axe rule tags (e.g. "wcag2a,wcag2aa"); `selector` scopes the audit to
@@ -33,8 +33,30 @@ pub fn run_expression(tags: Option<&str>, selector: Option<&str>) -> String {
     // script.
     let tags_json = json!(tag_values).to_string();
     let selector_json = json!(selector).to_string();
+    let axe_js = AXE_JS;
+    let axe_version_json = json!(AXE_VERSION).to_string();
     format!(
         r#"(() => {{
+  const previousAxe = Object.getOwnPropertyDescriptor(window, 'axe');
+  let agentAxe;
+  try {{
+    // The vendored UMD build exports through this lexical CommonJS module.
+    // Capturing that export avoids trusting a page-owned `window.axe` value.
+    const module = {{ exports: {{}} }};
+    {axe_js}
+    agentAxe = module.exports;
+  }} finally {{
+    // axe-core also assigns window.axe in browsers. Restore the page exactly
+    // after capturing our private export so the audit has no lasting global.
+    if (previousAxe) {{
+      Object.defineProperty(window, 'axe', previousAxe);
+    }} else {{
+      delete window.axe;
+    }}
+  }}
+  if (!agentAxe || agentAxe.version !== {axe_version_json} || typeof agentAxe.run !== 'function') {{
+    return JSON.stringify({{ error: 'Failed to initialize vendored axe-core {axe_version}' }});
+  }}
   const tags = {tags_json};
   const selector = {selector_json};
   if (selector !== null && !document.querySelector(selector)) {{
@@ -43,7 +65,9 @@ pub fn run_expression(tags: Option<&str>, selector: Option<&str>) -> String {
   const options = {{ resultTypes: ['violations', 'incomplete'] }};
   if (tags.length > 0) options.runOnly = {{ type: 'tag', values: tags }};
   const trimNodes = (nodes) => nodes.slice(0, 10).map((n) => ({{
-    target: Array.isArray(n.target) ? n.target.join(' ') : String(n.target),
+    // Keep axe's selector path intact. Nested arrays identify shadow DOM
+    // boundaries and multiple entries can identify frame boundaries.
+    target: n.target,
     html: typeof n.html === 'string' ? n.html.slice(0, 300) : '',
     failureSummary: n.failureSummary || '',
   }}));
@@ -56,7 +80,7 @@ pub fn run_expression(tags: Option<&str>, selector: Option<&str>) -> String {
     nodeCount: r.nodes.length,
     nodes: trimNodes(r.nodes),
   }}));
-  return axe.run(selector === null ? document : selector, options).then((r) => JSON.stringify({{
+  return agentAxe.run(selector === null ? document : selector, options).then((r) => JSON.stringify({{
     url: r.url,
     axeVersion: r.testEngine ? r.testEngine.version : null,
     counts: {{
@@ -68,7 +92,8 @@ pub fn run_expression(tags: Option<&str>, selector: Option<&str>) -> String {
     violations: trim(r.violations),
     incomplete: trim(r.incomplete),
   }}));
-}})()"#
+}})()"#,
+        axe_version = AXE_VERSION,
     )
 }
 
@@ -79,14 +104,19 @@ mod tests {
     #[test]
     fn test_axe_js_embedded() {
         assert!(AXE_JS.contains("axe"));
+        assert!(AXE_JS.contains(&format!("axe.version=\"{}\"", AXE_VERSION)));
         assert!(AXE_JS.len() > 100_000);
     }
 
     #[test]
     fn test_run_expression_defaults() {
         let expr = run_expression(None, None);
+        assert!(expr.contains("const module = { exports: {} }"));
+        assert!(expr.contains("agentAxe = module.exports"));
+        assert!(expr.contains("agentAxe.version !== \"4.12.1\""));
         assert!(expr.contains("const tags = []"));
         assert!(expr.contains("const selector = null"));
+        assert!(expr.contains("target: n.target"));
     }
 
     #[test]

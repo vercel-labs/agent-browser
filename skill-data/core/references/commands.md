@@ -424,7 +424,7 @@ agent-browser pushstate <url>                       # SPA client-side nav (auto-
 
 ## Accessibility audit
 
-Runs an embedded axe-core audit (no CDN fetch; injected via CDP so page CSP doesn't block it). Reports WCAG violations with impact, rule id, fix guidance URL, and failing-node selectors.
+Runs an embedded axe-core audit (no CDN fetch; evaluated via CDP so page CSP does not block it). The vendored engine is captured through an agent-owned module, so page-provided `window.axe` values cannot replace it. Reports WCAG violations with impact, rule id, fix guidance URL, and failing-node selectors.
 
 ```bash
 agent-browser a11y                                  # Audit the current page
@@ -434,7 +434,7 @@ agent-browser a11y --selector "#main"               # Scope audit to a subtree
 agent-browser a11y <url> --json                     # Structured results for automation
 ```
 
-`--json` returns `counts` plus `violations`/`incomplete` arrays; each entry has `id`, `impact`, `help`, `helpUrl`, `tags`, `nodeCount`, and up to 10 `nodes` (`target` selector, `html` snippet, `failureSummary`). `incomplete` lists rules axe could not evaluate automatically — review those manually.
+`--json` returns `counts` plus `violations`/`incomplete` arrays; each entry has `id`, `impact`, `help`, `helpUrl`, `tags`, `nodeCount`, and up to 10 `nodes` (`target` selector path arrays, `html` snippet, `failureSummary`). Nested `target` arrays preserve shadow DOM boundaries. `incomplete` lists rules axe could not evaluate automatically — review those manually.
 
 ## Init scripts
 

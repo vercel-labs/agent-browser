@@ -447,7 +447,7 @@ Works on any React app — Next.js, Remix, Vite+React, CRA, TanStack Start, Reac
 
 ### Accessibility audits
 
-Run an [axe-core](https://github.com/dequelabs/axe-core) accessibility audit against the current page or a URL. The axe-core engine is embedded in the binary (no CDN fetch, works offline and under strict CSP) and injected on demand; pages that already ship axe are reused.
+Run an [axe-core](https://github.com/dequelabs/axe-core) accessibility audit against the current page or a URL. The axe-core engine is embedded in the binary (no CDN fetch, works offline and under strict CSP) and evaluated through an agent-owned module so page-provided `window.axe` values cannot replace the audit engine.
 
 ```bash
 agent-browser a11y                                 # Audit the current page
@@ -473,7 +473,7 @@ axe-core: 4.12.1  violations: 2  incomplete: 0  passes: 24
   - .nav a.muted
 ```
 
-`--json` returns the same data structured for automation (`counts`, `violations`, `incomplete`, each violation's `nodes` with `target`, `html`, and `failureSummary`). Rules that axe could not evaluate automatically are reported under `incomplete` for manual review.
+`--json` returns the same data structured for automation (`counts`, `violations`, `incomplete`, each violation's `nodes` with `target`, `html`, and `failureSummary`). Each `target` preserves axe's selector path arrays, including nested arrays for shadow DOM boundaries. Rules that axe could not evaluate automatically are reported under `incomplete` for manual review.
 
 ### Init scripts
 

@@ -320,7 +320,7 @@ fn format_a11y_text(data: &serde_json::Value) -> String {
             }
             if let Some(nodes) = r.get("nodes").and_then(|v| v.as_array()) {
                 for n in nodes {
-                    if let Some(target) = n.get("target").and_then(|v| v.as_str()) {
+                    if let Some(target) = n.get("target").and_then(format_a11y_target) {
                         lines.push(format!("  - {}", target));
                     }
                 }
@@ -355,6 +355,33 @@ fn format_a11y_text(data: &serde_json::Value) -> String {
     }
 
     lines.join("\n")
+}
+
+fn format_a11y_target(target: &serde_json::Value) -> Option<String> {
+    match target {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Array(parts) => {
+            let rendered = parts
+                .iter()
+                .filter_map(|part| match part {
+                    // axe represents a selector that crosses one or more
+                    // shadow roots as a nested array.
+                    serde_json::Value::Array(shadow_parts) => {
+                        let path = shadow_parts
+                            .iter()
+                            .filter_map(format_a11y_target)
+                            .collect::<Vec<_>>()
+                            .join(" >>> ");
+                        (!path.is_empty()).then_some(path)
+                    }
+                    _ => format_a11y_target(part),
+                })
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            (!rendered.is_empty()).then_some(rendered)
+        }
+        _ => None,
+    }
 }
 
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
@@ -3155,6 +3182,33 @@ Examples:
 "##
         }
 
+        "a11y" => {
+            r##"
+agent-browser a11y - Run an axe-core accessibility audit
+
+Usage: agent-browser a11y [url] [options]
+
+Audits the current page, or navigates to the optional URL first. The vendored
+axe-core engine runs without a network request and does not trust or replace a
+page-owned window.axe value.
+
+Options:
+  --tags <tag1,tag2>    Run only rules matching these axe tags
+  -s, --selector <css> Scope the audit to a matching subtree
+  --json                Return structured violations and incomplete results
+
+Structured node targets preserve axe selector paths. Nested arrays identify
+shadow DOM boundaries, while multiple path entries can identify frame boundaries.
+
+Examples:
+  agent-browser a11y
+  agent-browser a11y https://example.com
+  agent-browser a11y --tags wcag2a,wcag2aa
+  agent-browser a11y --selector "#main"
+  agent-browser a11y https://example.com --json
+"##
+        }
+
         "profiles" => {
             r##"
 agent-browser profiles - List available Chrome profiles
@@ -3230,8 +3284,9 @@ Tool profiles:
              screenshots, JavaScript eval, close, tab basics, and profile discovery
   network    Network routes, request inspection, HAR, headers, credentials, offline
   state      Cookies, storage, auth, saved state, sessions, profiles, skills
-  debug      Console/errors, tracing, profiling, recording, clipboard, plugins,
-             doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
+  debug      Console/errors, tracing, profiling, recording, accessibility audits,
+             clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff,
+             batch, confirm/deny
   tabs       Back/forward/reload, tabs, windows, frames, dialogs
   react      React tree/inspect/renders/suspense, vitals, pushstate
   mobile     Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
@@ -3934,8 +3989,8 @@ mod tests {
                 "helpUrl": "https://dequeuniversity.com/rules/axe/4.12/image-alt",
                 "nodeCount": 2,
                 "nodes": [
-                    { "target": "img.hero", "html": "<img class=\"hero\">" },
-                    { "target": "#logo > img", "html": "<img>" }
+                    { "target": ["img.hero"], "html": "<img class=\"hero\">" },
+                    { "target": ["#logo > img"], "html": "<img>" }
                 ]
             }],
             "incomplete": []
@@ -3972,6 +4027,31 @@ axe-core: 4.12.1  violations: 1  incomplete: 0  passes: 24\n\
             "url: https://example.com\n\
 axe-core: 4.12.1  violations: 0  incomplete: 0  passes: 30"
         );
+    }
+
+    #[test]
+    fn test_format_a11y_text_preserves_shadow_and_frame_boundaries() {
+        let data = json!({
+            "url": "https://example.com",
+            "axeVersion": "4.12.1",
+            "counts": { "violations": 1, "incomplete": 0, "passes": 1 },
+            "violations": [{
+                "id": "image-alt",
+                "impact": "critical",
+                "help": "Images must have alternative text",
+                "nodeCount": 2,
+                "nodes": [
+                    { "target": [["#shadow-host", "img"]] },
+                    { "target": ["iframe", "#nested-image"] }
+                ]
+            }],
+            "incomplete": []
+        });
+
+        let rendered = format_a11y_text(&data);
+
+        assert!(rendered.contains("  - #shadow-host >>> img"));
+        assert!(rendered.contains("  - iframe -> #nested-image"));
     }
 
     #[test]

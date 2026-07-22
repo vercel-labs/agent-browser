@@ -7014,6 +7014,82 @@ async fn e2e_vitals_reports_metrics() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<!doctype html>
+<html lang="en">
+<head><title>Accessibility audit fixture</title></head>
+<body>
+  <main>
+    <h1>Accessibility audit fixture</h1>
+    <img id="light-image" src="missing.png">
+    <div id="shadow-host"></div>
+  </main>
+  <script>
+    window.axe = {
+      version: 'spoofed',
+      run: () => Promise.resolve({
+        url: 'spoofed',
+        testEngine: { version: 'spoofed' },
+        violations: [],
+        incomplete: [],
+        passes: [],
+        inapplicable: []
+      })
+    };
+    document.getElementById('shadow-host').attachShadow({ mode: 'open' }).innerHTML =
+      '<img id="shadow-image" src="missing.png">';
+  </script>
+</body>
+</html>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "a11y" }), &mut state).await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["axeVersion"], "4.12.1");
+    let image_alt = data["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|violation| violation["id"] == "image-alt")
+        .expect("vendored axe should report missing image alternatives");
+    assert_eq!(image_alt["nodeCount"], 2);
+    let nodes = image_alt["nodes"].as_array().unwrap();
+    assert!(nodes
+        .iter()
+        .any(|node| node["target"] == json!(["#light-image"])));
+    assert!(nodes
+        .iter()
+        .any(|node| node["target"] == json!([["#shadow-host", "#shadow-image"]])));
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "window.axe.version" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "spoofed");
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_pushstate_changes_url() {
     let mut state = DaemonState::new();
 

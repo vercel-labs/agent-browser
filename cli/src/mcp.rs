@@ -254,7 +254,7 @@ impl ToolProfile {
             Self::Core => "Everyday browser automation with navigation, snapshots, common interaction, waits, screenshots, basic reads, tab basics, JavaScript eval, close, and profile discovery.",
             Self::Network => "Network interception, request inspection, HAR capture, headers, credentials, and offline mode.",
             Self::State => "Cookies, storage, auth profiles, saved browser state, sessions, Chrome profiles, and bundled skills.",
-            Self::Debug => "Console/errors, highlighting, DevTools, tracing, profiling, PDF, downloads/uploads, recording, clipboard, plugin registry and plugin command.run, doctor, dashboard, install, upgrade, and chat.",
+            Self::Debug => "Console/errors, highlighting, DevTools, tracing, profiling, accessibility audits, PDF, downloads/uploads, recording, clipboard, plugin registry and plugin command.run, doctor, dashboard, install, upgrade, and chat.",
             Self::Tabs => "Tab, window, frame, and JavaScript dialog management.",
             Self::React => "React tree inspection, render recording, Suspense inspection, Web Vitals, SPA pushstate, and init-script removal.",
             Self::Mobile => "Viewport/device/geolocation/media emulation plus touch, swipe, and lower-level mouse tools.",
@@ -4000,6 +4000,17 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("agent-browser mcp --tools all"));
+        let debug_profile = result["structuredContent"]["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|profile| profile["name"] == "debug")
+            .unwrap();
+        assert!(debug_profile["description"]
+            .as_str()
+            .unwrap()
+            .contains("accessibility audits"));
+        assert!(McpConfig::from_profiles(vec![ToolProfile::Debug]).allows(TOOL_A11Y));
     }
 
     #[test]
