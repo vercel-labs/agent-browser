@@ -191,11 +191,11 @@ agent-browser is checked <sel>        # Check if checked
 
 ```bash
 agent-browser find role <role> <action> [value]       # By ARIA role
-agent-browser find text <text> <action>               # By text content
+agent-browser find text <text> <action> [value]       # By text content
 agent-browser find label <label> <action> [value]     # By label
 agent-browser find placeholder <ph> <action> [value]  # By placeholder
-agent-browser find alt <text> <action>                # By alt text
-agent-browser find title <text> <action>              # By title attr
+agent-browser find alt <text> <action> [value]        # By alt text
+agent-browser find title <text> <action> [value]      # By title attr
 agent-browser find testid <id> <action> [value]       # By data-testid
 agent-browser find first <sel> <action> [value]       # First match
 agent-browser find last <sel> <action> [value]        # Last match

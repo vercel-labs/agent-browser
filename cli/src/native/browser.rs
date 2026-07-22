@@ -137,6 +137,16 @@ fn active_page_index_after_removal(
 /// Converts common error messages into AI-friendly, actionable descriptions.
 pub fn to_ai_friendly_error(error: &str) -> String {
     let lower = error.to_lowercase();
+    // Classify a genuine locator miss first: its anchored shape ("No element
+    // found: ...") echoes the selector/name, which may itself contain a word like
+    // "timeout" or "intercept". The broad substring checks below would otherwise
+    // flatten such a miss into the wrong guidance.
+    if is_locator_miss(&lower) {
+        let detail = error.trim_end_matches('.');
+        return format!(
+            "{detail}. Verify the selector, role, or name is correct and the element exists in the DOM."
+        );
+    }
     if lower.contains("strict mode violation") {
         return "Element matched multiple results. Use a more specific selector.".to_string();
     }
@@ -151,12 +161,6 @@ pub fn to_ai_friendly_error(error: &str) -> String {
     if lower.contains("timeout") {
         return "Operation timed out. The page may still be loading or the element may not exist."
             .to_string();
-    }
-    if is_locator_miss(&lower) {
-        let detail = error.trim_end_matches('.');
-        return format!(
-            "{detail}. Verify the selector, role, or name is correct and the element exists in the DOM."
-        );
     }
     error.to_string()
 }
@@ -2046,6 +2050,25 @@ mod tests {
         assert_eq!(
             to_ai_friendly_error("Timeout waiting for element"),
             "Operation timed out. The page may still be loading or the element may not exist."
+        );
+    }
+
+    #[test]
+    fn test_to_ai_friendly_error_miss_wins_over_keyword_in_name() {
+        // A genuine locator miss whose echoed name contains a classifier keyword
+        // must classify as a miss, not be flattened by the broad substring checks.
+        // Force-red: run the broad checks before is_locator_miss and this returns
+        // the timeout guidance instead.
+        let out =
+            to_ai_friendly_error("No element found: getByRole('button', { name: 'timeout' })");
+        assert!(
+            out.starts_with("No element found") && out.contains("Verify the selector"),
+            "miss with 'timeout' in the name must stay a miss, got: {out}"
+        );
+        let out = to_ai_friendly_error("No element found: getByText('please do not intercept')");
+        assert!(
+            out.contains("Verify the selector"),
+            "miss with 'intercept' in the name must stay a miss, got: {out}"
         );
     }
 
