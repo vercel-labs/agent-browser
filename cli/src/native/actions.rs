@@ -7306,29 +7306,35 @@ async fn handle_clipboard(cmd: &Value, state: &DaemonState) -> Result<Value, Str
     }
 }
 
-async fn handle_wheel(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+/// Dispatches a wheel event at the tracked mouse position, so `mouse move x y`
+/// followed by `mouse wheel dy` scrolls whatever sits under the cursor rather
+/// than whatever sits at the viewport origin. An explicit `x`/`y` in the command
+/// overrides the tracked position and becomes the new position, matching the
+/// other mouse handlers.
+async fn handle_wheel(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
-    let x = cmd.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let y = cmd.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let delta_x = cmd.get("deltaX").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let delta_y = cmd.get("deltaY").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let params = build_mouse_event_params(
+        &mut state.mouse_state,
+        "mouseWheel",
+        cmd.get("x").and_then(|v| v.as_f64()),
+        cmd.get("y").and_then(|v| v.as_f64()),
+        None,
+        None,
+        None,
+        Some(delta_x),
+        Some(delta_y),
+        None,
+    );
+    let (x, y) = (params.x, params.y);
 
     mgr.client
-        .send_command(
-            "Input.dispatchMouseEvent",
-            Some(json!({
-                "type": "mouseWheel",
-                "x": x,
-                "y": y,
-                "deltaX": delta_x,
-                "deltaY": delta_y,
-            })),
-            Some(&session_id),
-        )
+        .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
 
-    Ok(json!({ "scrolled": true, "deltaX": delta_x, "deltaY": delta_y }))
+    Ok(json!({ "scrolled": true, "x": x, "y": y, "deltaX": delta_x, "deltaY": delta_y }))
 }
 
 async fn handle_device(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {

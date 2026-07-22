@@ -38,6 +38,7 @@ fn native_test_fixture_html(name: &str) -> &'static str {
         "html5_drag_probe" => include_str!("test_fixtures/html5_drag_probe.html"),
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
         "upload_probe" => include_str!("test_fixtures/upload_probe.html"),
+        "wheel_probe" => include_str!("test_fixtures/wheel_probe.html"),
         _ => panic!("Unknown native test fixture: {}", name),
     }
 }
@@ -7094,4 +7095,167 @@ async fn e2e_removeinitscript_roundtrip() {
     assert_eq!(get_data(&resp)["removed"], true);
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_mouse_wheel_targets_element_under_cursor() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": native_test_fixture_url("wheel_probe")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "evaluate",
+            "script": r#"(() => {
+                const rect = document.getElementById('viewport').getBoundingClientRect();
+                return {
+                    x: Math.round(rect.left + rect.width / 2),
+                    y: Math.round(rect.top + rect.height / 2)
+                };
+            })()"#
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let center = &get_data(&resp)["result"];
+    let target_x = center["x"].as_i64().expect("viewport x should be numeric");
+    let target_y = center["y"].as_i64().expect("viewport y should be numeric");
+    assert!(
+        target_x > 0 && target_y > 0,
+        "Fixture should place the wheel target away from the viewport origin"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "mousemove", "x": target_x, "y": target_y }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "wheel", "deltaX": 0, "deltaY": 240 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["x"].as_f64(), Some(target_x as f64));
+    assert_eq!(get_data(&resp)["y"].as_f64(), Some(target_y as f64));
+
+    let resp = execute_command(
+        &json!({
+            "id": "6",
+            "action": "wait",
+            "function": "window.__wheelProbe.onWindow.length === 1",
+            "timeout": 5000
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "7",
+            "action": "evaluate",
+            "script": "JSON.stringify(window.__wheelProbe)"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let probe: Value = serde_json::from_str(
+        get_data(&resp)["result"]
+            .as_str()
+            .expect("probe should serialize to a string"),
+    )
+    .expect("probe should be valid JSON");
+
+    let on_viewport = probe["onViewport"]
+        .as_array()
+        .expect("probe should record viewport wheel events");
+    assert_eq!(
+        on_viewport.len(),
+        1,
+        "Wheel should land on the element under the cursor, got: {}",
+        probe
+    );
+    assert_eq!(on_viewport[0]["deltaY"].as_f64(), Some(240.0));
+    assert_eq!(on_viewport[0]["x"].as_f64(), Some(target_x as f64));
+    assert_eq!(on_viewport[0]["y"].as_f64(), Some(target_y as f64));
+    assert_eq!(on_viewport[0]["target"], "viewport");
+
+    // An explicit x/y overrides the tracked position and moves the cursor there.
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "wheel", "x": 1, "y": 1, "deltaX": 0, "deltaY": 120 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "9",
+            "action": "wait",
+            "function": "window.__wheelProbe.onWindow.length === 2",
+            "timeout": 5000
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "10",
+            "action": "evaluate",
+            "script": "JSON.stringify(window.__wheelProbe)"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let probe: Value = serde_json::from_str(
+        get_data(&resp)["result"]
+            .as_str()
+            .expect("probe should serialize to a string"),
+    )
+    .expect("probe should be valid JSON");
+
+    assert_eq!(
+        probe["onViewport"].as_array().map(|events| events.len()),
+        Some(1),
+        "Explicit coordinates should not reach the element, got: {}",
+        probe
+    );
+    let on_window = probe["onWindow"]
+        .as_array()
+        .expect("probe should record window wheel events");
+    assert_eq!(on_window.len(), 2);
+    assert_eq!(on_window[1]["x"].as_f64(), Some(1.0));
+    assert_eq!(on_window[1]["y"].as_f64(), Some(1.0));
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
 }

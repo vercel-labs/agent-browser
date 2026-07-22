@@ -268,8 +268,10 @@ agent-browser clipboard paste                     # Paste from clipboard (Ctrl+V
 agent-browser mouse move <x> <y>      # Move mouse
 agent-browser mouse down [button]     # Press button (left/right/middle)
 agent-browser mouse up [button]       # Release button
-agent-browser mouse wheel <dy> [dx]   # Scroll wheel
+agent-browser mouse wheel <dy> [dx]   # Scroll wheel at the current mouse position
 ```
+
+The wheel is dispatched at the current mouse position, which starts at `0,0`. Move the mouse over the element first when the page listens for `wheel` on a specific element rather than on the document.
 
 ### Browser Settings
 
