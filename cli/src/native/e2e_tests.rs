@@ -7270,6 +7270,105 @@ async fn e2e_pin_tab_rebinds_after_daemon_restart() {
     assert_success(&resp);
 }
 
+// Real-Chrome smoke test: a foreign tab opened via `window.open` inside the
+// pinned session's own page must never steal the active tab or overwrite the
+// pin binding. NOTE: this does NOT specifically guard finding #3 (the
+// `Target.attachedToTarget`-before-`Target.targetCreated` race) — empirically
+// in this environment Chrome always delivers `Target.targetCreated` first for
+// a `window.open()` popup, so this only exercises the `new_targets` drain
+// path in actions.rs (~line 1082), which was never the buggy branch. The
+// deterministic, race-independent regression coverage for finding #3 itself
+// lives at the unit level: `BrowserManager::register_discovered_page` (the
+// single decision point both drain handlers call) is exercised directly by
+// `test_register_discovered_page_untracked_target_does_not_steal_pinned_tab`
+// in browser.rs, which fails if that function's internal `add_page` vs.
+// `add_page_without_activation` choice regresses. This e2e test is kept as a
+// general non-regression smoke check against real Chrome, not as #3 proof.
+#[tokio::test]
+#[ignore]
+async fn e2e_auto_attached_foreign_tab_does_not_steal_pinned_tab() {
+    let (guard, _dir) = binding_test_env();
+    let (mut host, ws_url) = launch_binding_host(&guard).await;
+
+    let url_a = "data:text/html,pinned-session-a";
+    let mut state_a = attach_pinned_session(&guard, "e2e-foreign-a", &ws_url, url_a).await;
+    let binding_before = load_binding("e2e-foreign-a", "session A binding should persist");
+
+    // Open a foreign tab in the shared browser. This is not an agent command
+    // (`tab new`), it is a plain popup — the same shape as a human opening a
+    // tab or a page calling `window.open`.
+    let resp = execute_command(
+        &json!({
+            "id": "foreign-open",
+            "action": "evaluate",
+            "script": "window.open('data:text/html,foreign-popup'); 'opened'"
+        }),
+        &mut state_a,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let resp = current_url(&mut state_a, "a-url-after-foreign").await;
+    assert_success(&resp);
+
+    let mgr = state_a.browser.as_ref().expect("browser should be running");
+    let page_count_before = 1; // the pinned session's own bound tab
+    assert!(
+        mgr.page_count() > page_count_before,
+        "the foreign popup must still register in tab list (got {} pages)",
+        mgr.page_count()
+    );
+    assert_eq!(
+        get_data(&resp)["url"],
+        url_a,
+        "the pinned session's active tab must not be stolen by the foreign popup"
+    );
+    assert_eq!(
+        mgr.bound_target_id(),
+        Some(binding_before.target_id.as_str()),
+        "the pin binding must not be overwritten by the foreign popup"
+    );
+
+    let resp = execute_command(&json!({ "id": "host-99", "action": "close" }), &mut host).await;
+    assert_success(&resp);
+}
+
+// SCRATCH (finding #3): explicit agent commands must still end up active
+// even under the same auto-attach shared browser, proving the fix does not
+// regress `tab new`.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_new_still_activates_under_auto_attach() {
+    let (guard, _dir) = binding_test_env();
+    let (mut host, ws_url) = launch_binding_host(&guard).await;
+
+    let url_a = "data:text/html,pinned-session-a";
+    let mut state_a = attach_pinned_session(&guard, "e2e-tabnew-a", &ws_url, url_a).await;
+
+    let resp = execute_command(
+        &json!({
+            "id": "tab-new",
+            "action": "tab_new",
+            "url": "data:text/html,agent-opened-tab"
+        }),
+        &mut state_a,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = current_url(&mut state_a, "a-url-after-tab-new").await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["url"],
+        "data:text/html,agent-opened-tab",
+        "an explicit `tab new` must activate the new tab it created"
+    );
+
+    let resp = execute_command(&json!({ "id": "host-99", "action": "close" }), &mut host).await;
+    assert_success(&resp);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_pin_tab_gone_error_and_recovery() {

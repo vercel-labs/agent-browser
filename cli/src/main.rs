@@ -1794,15 +1794,36 @@ fn run_batch(
         attach_plugins_to_command(&mut parsed, &flags.plugins);
         attach_restore_config_to_command(&mut parsed, flags);
 
+        // Strict session-to-tab binding: sent with every batched command so
+        // an already-running daemon adopts it too (it is sticky once
+        // enabled), matching the single-command flow above. An explicit
+        // `--no-pin-tab` sends false to disable a sticky pin; the field is
+        // omitted entirely when the user expressed no preference. Without
+        // this, `--pin-tab batch ...` never pins a running daemon and
+        // `--no-pin-tab batch ...` can never disable a sticky pin.
+        if flags.pin_tab {
+            parsed["pinTab"] = json!(true);
+        } else if flags.cli_pin_tab {
+            parsed["pinTab"] = json!(false);
+        }
+
         match send_command_with_respawn(parsed, &flags.session, daemon_opts) {
             Ok(resp) => {
                 if flags.json {
-                    results.push(json!({
+                    let mut result = json!({
                         "command": cmd_args,
                         "success": resp.success,
                         "result": resp.data,
                         "error": resp.error,
-                    }));
+                    });
+                    // Match the single-command `Response` serialization,
+                    // which only emits `code` when set (e.g. `tab_gone`).
+                    // Without this, machine-readable error codes are
+                    // silently dropped in batch mode.
+                    if let Some(ref code) = resp.code {
+                        result["code"] = json!(code);
+                    }
+                    results.push(result);
                 } else {
                     if i > 0 {
                         println!();

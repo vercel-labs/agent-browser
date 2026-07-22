@@ -942,20 +942,27 @@ impl DaemonState {
                         }
                     }
 
-                    if mgr.has_target(&target_info.target_id) {
-                        mgr.update_page_target_info(target_info);
-                    } else {
-                        let tab_id = mgr.assign_tab_id();
-                        mgr.add_page(super::browser::PageInfo {
-                            tab_id,
-                            label: None,
-                            target_id: target_info.target_id.clone(),
-                            session_id: page_sid.clone(),
-                            url: page_url,
-                            title: target_info.title.clone(),
-                            target_type: target_info.target_type.clone(),
-                        });
-                    }
+                    // This handler drains `Target.attachedToTarget` for a
+                    // page that browser-level auto-attach discovered before
+                    // its own `Target.targetCreated` was drained (e.g. a
+                    // human-opened tab, or a JS-opened popup in the shared
+                    // Chrome). Explicit agent commands (`tab new`, `window
+                    // new`, `click --new-tab`) already register their own
+                    // page via `add_page` on their own path before this
+                    // event is ever drained, so this branch never runs for
+                    // agent-initiated tabs. `register_discovered_page` is the
+                    // single decision point shared with the
+                    // `Target.targetCreated` handler below (~line 1082):
+                    // never activate an event-discovered target, since that
+                    // would steal the agent's active tab and, under
+                    // pin-tab, overwrite the persisted binding.
+                    mgr.register_discovered_page(
+                        &target_info.target_id,
+                        page_sid,
+                        page_url,
+                        target_info.title.clone(),
+                        target_info.target_type.clone(),
+                    );
 
                     mgr.resume_if_waiting_pub(page_sid).await
                 }
@@ -1071,23 +1078,22 @@ impl DaemonState {
                         }
                     }
 
-                    let tab_id = mgr.assign_tab_id();
                     // Event-discovered target (e.g. a tab the human opened in the
-                    // shared Chrome, or a JS-opened popup): register it so it shows
-                    // in `tab list`, but do NOT activate it. Auto-activating here is
-                    // the active-tab steal, and under pin-tab it would also
-                    // overwrite the persisted binding. Explicit commands
+                    // shared Chrome, or a JS-opened popup): register it via the
+                    // same `register_discovered_page` decision point used by the
+                    // `Target.attachedToTarget` handler above (~line 945), so it
+                    // shows in `tab list` but is never activated. Auto-activating
+                    // here is the active-tab steal, and under pin-tab it would
+                    // also overwrite the persisted binding. Explicit commands
                     // (`tab new`, `window new`, `click --new-tab`) still activate
                     // via their own paths.
-                    mgr.add_page_without_activation(super::browser::PageInfo {
-                        tab_id,
-                        label: None,
-                        target_id: te.target_info.target_id.clone(),
-                        session_id: attach.session_id.clone(),
-                        url: page_url,
-                        title: te.target_info.title.clone(),
-                        target_type: te.target_info.target_type.clone(),
-                    });
+                    mgr.register_discovered_page(
+                        &te.target_info.target_id,
+                        &attach.session_id,
+                        page_url,
+                        te.target_info.title.clone(),
+                        te.target_info.target_type.clone(),
+                    );
                     mgr.resume_if_waiting_pub(&attach.session_id).await
                 }
                 .await

@@ -1773,6 +1773,45 @@ impl BrowserManager {
         self.pages.iter().any(|p| p.target_id == target_id)
     }
 
+    /// Single decision point for both CDP-event-discovered target drains
+    /// (`Target.attachedToTarget` and `Target.targetCreated` handlers in
+    /// actions.rs). If the target is already tracked, only its metadata is
+    /// refreshed in place. Otherwise a new page is appended WITHOUT
+    /// activation: event-discovered targets (a tab the human opened in the
+    /// shared Chrome, or a JS-opened popup) must never steal the agent's
+    /// active tab or overwrite the pin binding. Explicit agent commands
+    /// (`tab new`, `window new`, `click --new-tab`) register their own page
+    /// via `add_page` on their own path and never go through this function.
+    /// Both drain handlers call this one function so the activation policy
+    /// can't diverge between them; a regression here breaks both handlers
+    /// at once and is caught by `test_register_discovered_page_*` below.
+    pub fn register_discovered_page(
+        &mut self,
+        target_id: &str,
+        session_id: &str,
+        url: String,
+        title: String,
+        target_type: String,
+    ) -> bool {
+        if let Some(p) = self.pages.iter_mut().find(|p| p.target_id == target_id) {
+            p.url = url;
+            p.title = title;
+            p.target_type = target_type;
+            return false;
+        }
+        let tab_id = self.assign_tab_id();
+        self.add_page_without_activation(PageInfo {
+            tab_id,
+            label: None,
+            target_id: target_id.to_string(),
+            session_id: session_id.to_string(),
+            url,
+            title,
+            target_type,
+        });
+        true
+    }
+
     pub fn page_count(&self) -> usize {
         self.pages.len()
     }
@@ -2737,6 +2776,85 @@ mod tests {
         assert_eq!(mgr.active_target_id().unwrap(), TARGET_A);
         assert_eq!(mgr.bound_target_id(), Some(TARGET_A));
         assert_eq!(mgr.tab_list().len(), 2);
+    }
+
+    /// Calls the REAL production function `BrowserManager::register_discovered_page`
+    /// that both `apply_drained_events` drain handlers in cli/src/native/actions.rs
+    /// call (the `Target.attachedToTarget` handler ~line 945 and the
+    /// `Target.targetCreated` handler ~line 1082) — not a duplicated copy. This
+    /// is the single decision point for finding #3: a foreign target discovered
+    /// via a CDP event drain, while untracked, must never steal the active tab
+    /// or overwrite the pin binding. If `register_discovered_page`'s internal
+    /// call is reverted from `add_page_without_activation` to `add_page`, this
+    /// test fails, and BOTH actions.rs call sites are broken simultaneously
+    /// since there is no other path to diverge through.
+    #[tokio::test]
+    async fn test_register_discovered_page_untracked_target_does_not_steal_pinned_tab() {
+        let mut mgr = test_manager(vec![page(1, TARGET_A, "https://mine.example")]).await;
+        mgr.set_pin_tab(true);
+        assert!(mgr.restore_target_binding(TARGET_A, "https://mine.example"));
+
+        assert!(
+            !mgr.has_target(TARGET_B),
+            "target must be untracked to exercise the vulnerable branch"
+        );
+        let newly_added = mgr.register_discovered_page(
+            TARGET_B,
+            "session-b",
+            "https://foreign.example".to_string(),
+            String::new(),
+            "page".to_string(),
+        );
+
+        assert!(newly_added, "an untracked target must be registered");
+        assert_eq!(
+            mgr.active_target_id().unwrap(),
+            TARGET_A,
+            "the pinned session's active tab must not be stolen by the foreign auto-attached tab"
+        );
+        assert_eq!(
+            mgr.bound_target_id(),
+            Some(TARGET_A),
+            "the pin binding must not be overwritten by the foreign auto-attached tab"
+        );
+        assert_eq!(
+            mgr.tab_list().len(),
+            2,
+            "the foreign tab must still be registered so it shows in `tab list`"
+        );
+    }
+
+    /// The already-tracked branch: `register_discovered_page` must refresh
+    /// metadata in place rather than pushing a duplicate page or touching
+    /// activation/binding at all.
+    #[tokio::test]
+    async fn test_register_discovered_page_tracked_target_updates_metadata_only() {
+        let mut mgr = test_manager(vec![page(1, TARGET_A, "https://mine.example")]).await;
+        mgr.set_pin_tab(true);
+        assert!(mgr.restore_target_binding(TARGET_A, "https://mine.example"));
+
+        let newly_added = mgr.register_discovered_page(
+            TARGET_A,
+            "session-a",
+            "https://mine.example/updated".to_string(),
+            "Updated Title".to_string(),
+            "page".to_string(),
+        );
+
+        assert!(
+            !newly_added,
+            "an already-tracked target must not be re-added"
+        );
+        assert_eq!(
+            mgr.tab_list().len(),
+            1,
+            "no duplicate page should be created"
+        );
+        assert_eq!(
+            mgr.bound_target_id(),
+            Some(TARGET_A),
+            "binding must be unaffected by a metadata-only update"
+        );
     }
 
     #[tokio::test]
