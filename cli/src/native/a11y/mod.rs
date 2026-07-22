@@ -35,6 +35,17 @@ fn private_engine_setup() -> String {
         r#"const previousAxe = Object.getOwnPropertyDescriptor(window, 'axe');
   let agentAxe;
   try {{
+    // Prevent axe's UMD wrapper from invoking a page-owned setter when it
+    // assigns window.axe. A configurable own property also shadows inherited
+    // accessors without mutating application state.
+    if (!previousAxe || previousAxe.configurable) {{
+      Object.defineProperty(window, 'axe', {{
+        value: undefined,
+        writable: true,
+        enumerable: previousAxe ? previousAxe.enumerable : false,
+        configurable: true,
+      }});
+    }}
     // The vendored UMD build exports through this lexical CommonJS module.
     // Hide page-owned AMD loaders so evaluating axe does not register modules
     // or otherwise mutate the page's loader state.

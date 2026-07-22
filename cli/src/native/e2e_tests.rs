@@ -7137,11 +7137,22 @@ async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
     <iframe id="audit-frame" title="Audit frame" srcdoc="
       <!doctype html><html lang='en'><head><title>Frame</title></head>
       <body><main><h1>Frame</h1><img id='frame-image' src='missing.png'></main>
-      <script>window.axe = { version: 'frame-spoofed' };</script></body></html>
+      <script>
+        window.frameAxe = { version: 'frame-spoofed' };
+        window.frameAxeSetterCalls = 0;
+        Object.defineProperty(window, 'axe', {
+          configurable: true,
+          get() { return window.frameAxe; },
+          set() {
+            window.frameAxeSetterCalls += 1;
+            throw new Error('frame axe setter must not run');
+          }
+        });
+      </script></body></html>
     "></iframe>
   </main>
   <script>
-    window.axe = {
+    window.pageAxe = {
       version: 'spoofed',
       run: () => Promise.resolve({
         url: 'spoofed',
@@ -7152,6 +7163,15 @@ async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
         inapplicable: []
       })
     };
+    window.axeSetterCalls = 0;
+    Object.defineProperty(window, 'axe', {
+      configurable: true,
+      get() { return window.pageAxe; },
+      set() {
+        window.axeSetterCalls += 1;
+        throw new Error('page axe setter must not run');
+      }
+    });
     window.amdCalls = 0;
     window.define = () => { window.amdCalls += 1; };
     window.define.amd = {};
@@ -7208,7 +7228,7 @@ async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
         &json!({
             "id": "4",
             "action": "evaluate",
-            "script": "[window.axe.version, document.querySelector('#audit-frame').contentWindow.axe.version, window.amdCalls]"
+            "script": "[window.axe.version, document.querySelector('#audit-frame').contentWindow.axe.version, window.axeSetterCalls, document.querySelector('#audit-frame').contentWindow.frameAxeSetterCalls, window.amdCalls]"
         }),
         &mut state,
     )
@@ -7216,7 +7236,7 @@ async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
     assert_success(&resp);
     assert_eq!(
         get_data(&resp)["result"],
-        json!(["spoofed", "frame-spoofed", 0])
+        json!(["spoofed", "frame-spoofed", 0, 0, 0])
     );
 
     state
