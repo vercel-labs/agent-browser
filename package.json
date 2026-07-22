@@ -12,7 +12,9 @@
     "bin",
     "scripts",
     "skill-data",
-    "skills"
+    "skills",
+    "cli/src/native/a11y/LICENSE-axe-core.txt",
+    "cli/src/native/a11y/LICENSE-axe-core-THIRD-PARTY.txt"
   ],
   "bin": {
     "agent-browser": "./bin/agent-browser.js"

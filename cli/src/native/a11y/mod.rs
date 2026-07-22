@@ -1,11 +1,10 @@
 //! Accessibility auditing backed by a vendored copy of Deque's axe-core.
 //!
 //! `axe.min.js` is the unmodified upstream build (MPL-2.0 — see
-//! LICENSE-axe-core.txt alongside it; the file-level license permits
-//! bundling the unmodified source). The top-level audit captures this exact
-//! build through a private CommonJS export in every frame. Serialized partial
-//! results are merged outside axe's cross-frame messaging, so page-owned
-//! `window.axe` values remain intact.
+//! LICENSE-axe-core.txt and LICENSE-axe-core-THIRD-PARTY.txt alongside it).
+//! The top-level audit captures this exact build through a private CommonJS
+//! export in every frame. Serialized partial results are merged outside axe's
+//! cross-frame messaging, so page-owned `window.axe` values remain intact.
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -37,8 +36,10 @@ fn private_engine_setup() -> String {
   let agentAxe;
   try {{
     // The vendored UMD build exports through this lexical CommonJS module.
-    // Capturing that export avoids trusting a page-owned `window.axe` value.
+    // Hide page-owned AMD loaders so evaluating axe does not register modules
+    // or otherwise mutate the page's loader state.
     const module = {{ exports: {{}} }};
+    const define = undefined;
     {axe_js}
     agentAxe = module.exports;
   }} finally {{
@@ -304,7 +305,7 @@ async fn collect_frame_sessions(
     // Query each attached iframe session so same-process descendants within
     // that target are included and inherit the correct session.
     let mut session_entries: Vec<_> = iframe_sessions.iter().collect();
-    session_entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    session_entries.sort_unstable();
     let mut subtrees = Vec::new();
     for (frame_id, session_id) in session_entries {
         if targets.iter().any(|target| target.frame_id == *frame_id) {
@@ -378,6 +379,23 @@ async fn collect_frame_sessions(
     }
 
     Ok((top_frame_id, targets))
+}
+
+/// Return the dedicated target sessions that belong to the active page's
+/// frame tree. The daemon keeps iframe sessions from background tabs so an
+/// audit can recover them after a tab switch, while network capture uses this
+/// active subset to avoid mixing traffic from different tabs.
+pub async fn active_iframe_session_ids(
+    client: &CdpClient,
+    top_session_id: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<HashSet<String>, String> {
+    let (_, frame_targets) =
+        collect_frame_sessions(client, top_session_id, iframe_sessions).await?;
+    Ok(frame_targets
+        .into_iter()
+        .filter_map(|target| (target.session_id != top_session_id).then_some(target.session_id))
+        .collect())
 }
 
 #[derive(Debug)]
@@ -592,6 +610,7 @@ mod tests {
     fn test_run_expression_defaults() {
         let expr = run_expression(None, None);
         assert!(expr.contains("const module = { exports: {} }"));
+        assert!(expr.contains("const define = undefined"));
         assert!(expr.contains("agentAxe = module.exports"));
         assert!(expr.contains("agentAxe.version !== \"4.12.1\""));
         assert!(expr.contains("const tags = []"));

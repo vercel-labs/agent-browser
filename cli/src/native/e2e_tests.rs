@@ -7127,6 +7127,9 @@ async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
         inapplicable: []
       })
     };
+    window.amdCalls = 0;
+    window.define = () => { window.amdCalls += 1; };
+    window.define.amd = {};
     document.getElementById('shadow-host').attachShadow({ mode: 'open' }).innerHTML =
       '<img id="shadow-image" src="missing.png">';
   </script>
@@ -7180,7 +7183,7 @@ async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
         &json!({
             "id": "4",
             "action": "evaluate",
-            "script": "[window.axe.version, document.querySelector('#audit-frame').contentWindow.axe.version]"
+            "script": "[window.axe.version, document.querySelector('#audit-frame').contentWindow.axe.version, window.amdCalls]"
         }),
         &mut state,
     )
@@ -7188,7 +7191,7 @@ async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
     assert_success(&resp);
     assert_eq!(
         get_data(&resp)["result"],
-        json!(["spoofed", "frame-spoofed"])
+        json!(["spoofed", "frame-spoofed", 0])
     );
 
     state
@@ -7244,6 +7247,11 @@ async fn e2e_a11y_preserves_nested_frame_sessions_across_tab_switches() {
         !state.iframe_sessions.is_empty(),
         "cross-origin frame should have an attached target session"
     );
+    let top_iframe_sessions = state.active_iframe_sessions.clone();
+    assert!(
+        !top_iframe_sessions.is_empty(),
+        "active frame sessions should include the top tab's cross-origin frame"
+    );
 
     let assert_frame_violations = |resp: &Value| {
         assert_success(resp);
@@ -7281,12 +7289,19 @@ async fn e2e_a11y_preserves_nested_frame_sessions_across_tab_switches() {
     )
     .await;
     assert_success(&resp);
+    let background_iframe_sessions = state.active_iframe_sessions.clone();
+    assert!(
+        !background_iframe_sessions.is_empty(),
+        "active frame sessions should follow the newly opened tab"
+    );
+    assert!(top_iframe_sessions.is_disjoint(&background_iframe_sessions));
     let resp = execute_command(
         &json!({ "id": "5", "action": "tab_switch", "tabId": "t1" }),
         &mut state,
     )
     .await;
     assert_success(&resp);
+    assert_eq!(state.active_iframe_sessions, top_iframe_sessions);
 
     let resp = execute_command(&json!({ "id": "6", "action": "a11y" }), &mut state).await;
     assert_frame_violations(&resp);

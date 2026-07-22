@@ -233,6 +233,17 @@ struct DrainedEvents {
     har_finished_requests: Vec<(String, Option<String>)>,
 }
 
+fn is_active_iframe_network_event(
+    method: &str,
+    session_id: Option<&str>,
+    tracking_enabled: bool,
+    active_iframe_sessions: &HashSet<String>,
+) -> bool {
+    tracking_enabled
+        && method.starts_with("Network.")
+        && session_id.is_some_and(|sid| active_iframe_sessions.contains(sid))
+}
+
 /// Compute a hash of the [`LaunchOptions`] fields that require a browser
 /// relaunch when changed (baked into the Chrome process at startup).
 ///
@@ -365,6 +376,10 @@ pub struct DaemonState {
     /// second attachment event when returning to an already-attached tab.
     /// Target.detachedFromTarget events remove stale sessions.
     pub iframe_sessions: HashMap<String, String>,
+    /// Dedicated iframe sessions reachable from the currently active page.
+    /// Network tracking uses this subset so background-tab iframe traffic is
+    /// not mixed into the active tab's request list or HAR capture.
+    pub active_iframe_sessions: HashSet<String>,
     /// Origin-scoped extra HTTP headers set via `--headers` on navigate.
     /// Key is the origin (scheme + host + port), value is the headers map.
     /// Wrapped in Arc<RwLock<>> so the background Fetch handler can read it.
@@ -462,6 +477,7 @@ impl DaemonState {
             request_tracking: false,
             active_frame_id: None,
             iframe_sessions: HashMap::new(),
+            active_iframe_sessions: HashSet::new(),
             origin_headers: Arc::new(RwLock::new(HashMap::new())),
             proxy_credentials: Arc::new(RwLock::new(None)),
             fetch_handler_task: None,
@@ -828,7 +844,31 @@ impl DaemonState {
         self.apply_drained_events(drained).await
     }
 
+    async fn refresh_active_iframe_sessions(&mut self) {
+        let Some(ref browser) = self.browser else {
+            self.active_iframe_sessions.clear();
+            return;
+        };
+        let Ok(top_session_id) = browser.active_session_id().map(ToString::to_string) else {
+            self.active_iframe_sessions.clear();
+            return;
+        };
+        if self.iframe_sessions.is_empty() {
+            self.active_iframe_sessions.clear();
+            return;
+        }
+
+        let client = browser.client.clone();
+        let iframe_sessions = self.iframe_sessions.clone();
+        self.active_iframe_sessions =
+            a11y::active_iframe_session_ids(&client, &top_session_id, &iframe_sessions)
+                .await
+                .unwrap_or_default();
+    }
+
     async fn apply_drained_events(&mut self, drained: DrainedEvents) -> Result<(), String> {
+        let iframe_topology_changed = !drained.attached_iframe_sessions.is_empty()
+            || !drained.detached_iframe_sessions.is_empty();
         // ACK screencast frames
         if !drained.pending_acks.is_empty() {
             if let Some(ref browser) = self.browser {
@@ -1009,6 +1049,7 @@ impl DaemonState {
 
         for sid in &drained.detached_iframe_sessions {
             self.iframe_sessions.retain(|_, v| v != sid);
+            self.active_iframe_sessions.remove(sid);
         }
 
         // Attach and register new targets
@@ -1161,6 +1202,10 @@ impl DaemonState {
             }
         }
 
+        if iframe_topology_changed {
+            self.refresh_active_iframe_sessions().await;
+        }
+
         Ok(())
     }
 
@@ -1290,12 +1335,12 @@ impl DaemonState {
                     // Allow Network events from cross-origin iframe sessions
                     // when HAR recording or request tracking is active.
                     let iframe_network_event = !session_matches
-                        && (self.har_recording || self.request_tracking)
-                        && event.method.starts_with("Network.")
-                        && event
-                            .session_id
-                            .as_ref()
-                            .is_some_and(|sid| self.iframe_sessions.values().any(|v| v == sid));
+                        && is_active_iframe_network_event(
+                            &event.method,
+                            event.session_id.as_deref(),
+                            self.har_recording || self.request_tracking,
+                            &self.active_iframe_sessions,
+                        );
 
                     if !session_matches && !iframe_network_event {
                         continue;
@@ -1879,6 +1924,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
     state.launch_hash = None;
     state.network_auto_attach_installed = false;
     state.iframe_sessions.clear();
+    state.active_iframe_sessions.clear();
     state.screencasting = false;
     state.reset_input_state();
     state.update_stream_client().await;
@@ -4232,8 +4278,11 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     }
 
     state.ref_map.clear();
+    state.active_iframe_sessions.clear();
     state.active_frame_id = None;
-    mgr.navigate(url, wait_until).await
+    let result = mgr.navigate(url, wait_until).await?;
+    state.refresh_active_iframe_sessions().await;
+    Ok(result)
 }
 
 async fn handle_url(state: &DaemonState) -> Result<Value, String> {
@@ -5871,6 +5920,7 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         should_defer_url_until_network_controls(domain_filter.as_ref(), has_proxy_creds, url)?;
 
     state.ref_map.clear();
+    state.active_iframe_sessions.clear();
     state.active_frame_id = None;
     let mut result = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
@@ -5898,6 +5948,8 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         }
     }
 
+    state.refresh_active_iframe_sessions().await;
+
     Ok(result)
 }
 
@@ -5912,6 +5964,7 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
         mgr.resolve_tab_ref(&tab_ref)?
     };
     state.ref_map.clear();
+    state.active_iframe_sessions.clear();
     state.active_frame_id = None;
     let result = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
@@ -5920,6 +5973,7 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
 
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
     install_network_controls_or_close(state, has_proxy_creds).await?;
+    state.refresh_active_iframe_sessions().await;
 
     if let Some(ref server) = state.stream_server {
         if let Some(ref mgr) = state.browser {
@@ -5945,17 +5999,25 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
 }
 
 async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    let tab_id = match cmd.get("tabId").and_then(|v| v.as_str()) {
-        Some(s) => {
-            let tab_ref = super::browser::TabRef::parse(s)?;
-            Some(mgr.resolve_tab_ref(&tab_ref)?)
+    let tab_id = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        match cmd.get("tabId").and_then(|v| v.as_str()) {
+            Some(s) => {
+                let tab_ref = super::browser::TabRef::parse(s)?;
+                Some(mgr.resolve_tab_ref(&tab_ref)?)
+            }
+            None => None,
         }
-        None => None,
     };
     state.ref_map.clear();
+    state.active_iframe_sessions.clear();
     state.active_frame_id = None;
-    mgr.tab_close_by_id(tab_id).await
+    let result = {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        mgr.tab_close_by_id(tab_id).await?
+    };
+    state.refresh_active_iframe_sessions().await;
+    Ok(result)
 }
 
 async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7572,6 +7634,7 @@ async fn handle_stream_enable(cmd: &Value, state: &mut DaemonState) -> Result<Va
     state.stream_client = Some(client_slot);
     state.stream_server = Some(Arc::new(server));
     state.request_tracking = true;
+    state.refresh_active_iframe_sessions().await;
     if state.screencasting {
         if let Some(ref server) = state.stream_server {
             server.set_screencasting(true).await;
@@ -8807,6 +8870,7 @@ async fn handle_har_start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         Some(s) => HarContentMode::parse(s)?,
         None => HarContentMode::default(),
     };
+    state.refresh_active_iframe_sessions().await;
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     // Larger buffers so response bodies survive until the periodic event
@@ -8824,7 +8888,7 @@ async fn handle_har_start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .await?;
     // Also enable Network on cross-origin iframe sessions so their
     // requests are captured in the HAR output.
-    for iframe_sid in state.iframe_sessions.values() {
+    for iframe_sid in &state.active_iframe_sessions {
         let _ = mgr
             .client
             .send_command(
@@ -9654,6 +9718,7 @@ async fn handle_requests(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 
     if !state.request_tracking {
         state.request_tracking = true;
+        state.refresh_active_iframe_sessions().await;
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
                 let _ = mgr
@@ -10710,6 +10775,36 @@ mod tests {
     }
 
     #[test]
+    fn test_iframe_network_events_are_scoped_to_active_page_sessions() {
+        let active_sessions = HashSet::from(["active-iframe".to_string()]);
+
+        assert!(is_active_iframe_network_event(
+            "Network.requestWillBeSent",
+            Some("active-iframe"),
+            true,
+            &active_sessions,
+        ));
+        assert!(!is_active_iframe_network_event(
+            "Network.requestWillBeSent",
+            Some("background-iframe"),
+            true,
+            &active_sessions,
+        ));
+        assert!(!is_active_iframe_network_event(
+            "Runtime.consoleAPICalled",
+            Some("active-iframe"),
+            true,
+            &active_sessions,
+        ));
+        assert!(!is_active_iframe_network_event(
+            "Network.requestWillBeSent",
+            Some("active-iframe"),
+            false,
+            &active_sessions,
+        ));
+    }
+
+    #[test]
     fn test_restore_validation_is_deferred_after_launch() {
         assert!(!should_validate_restore_after_action("launch"));
         assert!(should_validate_restore_after_action("navigate"));
@@ -11568,10 +11663,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         state
             .iframe_sessions
             .insert("frame-1".to_string(), "session-1".to_string());
+        state.active_iframe_sessions.insert("session-1".to_string());
 
         close_current_browser(&mut state).await.unwrap();
 
         assert!(state.iframe_sessions.is_empty());
+        assert!(state.active_iframe_sessions.is_empty());
     }
 
     #[tokio::test]
