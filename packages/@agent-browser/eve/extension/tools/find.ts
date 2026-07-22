@@ -7,7 +7,7 @@ export default defineTool({
   description:
     'Find an element semantically (by ARIA role, text, label, placeholder, alt text, title, or test id) and act on it in one step. Useful when you know what the element is without taking a snapshot, e.g. find the "Email" label and fill it.',
   inputSchema: z.object({
-    action: z.enum(["click", "fill", "type", "hover", "focus", "check", "uncheck", "text"]),
+    action: z.enum(["click", "fill", "check", "hover", "text"]),
     by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testid", "first", "last"]),
     exact: z
       .boolean()

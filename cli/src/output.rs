@@ -2065,7 +2065,7 @@ Locators:
   nth <index> <selector>   Nth matching element (0-based)
 
 Actions (default: click):
-  click, fill, type, hover, focus, check, uncheck
+  click, fill, check, hover, text
 
 Options:
   --name <name>        Filter role by accessible name
