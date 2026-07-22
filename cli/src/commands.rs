@@ -367,6 +367,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }
             };
             let url_lower = url.to_lowercase();
+            // Preserve recognized URL schemes; normalize other inputs with https://.
             let url = if url_lower.starts_with("http://")
                 || url_lower.starts_with("https://")
                 || url_lower.starts_with("about:")
