@@ -2,9 +2,10 @@
 //!
 //! `axe.min.js` is the unmodified upstream build (MPL-2.0 — see
 //! LICENSE-axe-core.txt and LICENSE-axe-core-THIRD-PARTY.txt alongside it).
-//! The top-level audit captures this exact build through a private CommonJS
-//! export in every frame. Serialized partial results are merged outside axe's
-//! cross-frame messaging, so page-owned `window.axe` values remain intact.
+//! The audit captures this exact build through a private CommonJS export in an
+//! isolated world for every frame. Serialized partial results are merged
+//! outside axe's cross-frame messaging, so page-owned JavaScript globals remain
+//! untouched.
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -19,6 +20,8 @@ pub const AXE_JS: &str = include_str!("axe.min.js");
 
 /// Version of the vendored axe-core build. Keep this in sync with `axe.min.js`.
 pub const AXE_VERSION: &str = "4.12.1";
+
+const AUDIT_WORLD_NAME: &str = "__agent_browser_a11y_4_12_1__";
 
 fn tag_values(tags: Option<&str>) -> Vec<&str> {
     tags.map(|tags| {
@@ -35,27 +38,28 @@ fn private_engine_setup() -> String {
         r#"const previousAxe = Object.getOwnPropertyDescriptor(window, 'axe');
   let agentAxe;
   try {{
-    // Prevent axe's UMD wrapper from invoking a page-owned setter when it
-    // assigns window.axe. A configurable own property also shadows inherited
-    // accessors without mutating application state.
-    if (!previousAxe || previousAxe.configurable) {{
-      Object.defineProperty(window, 'axe', {{
-        value: undefined,
-        writable: true,
-        enumerable: previousAxe ? previousAxe.enumerable : false,
-        configurable: true,
-      }});
+    // This runs in an isolated world, never the page's JavaScript world. Guard
+    // the world-local descriptor anyway so axe's UMD assignment cannot invoke
+    // an accessor if another audit helper reused this world name.
+    if (previousAxe && !previousAxe.configurable) {{
+      throw new Error('Accessibility audit world has a locked axe property');
     }}
+    Object.defineProperty(window, 'axe', {{
+      value: undefined,
+      writable: true,
+      enumerable: previousAxe ? previousAxe.enumerable : false,
+      configurable: true,
+    }});
     // The vendored UMD build exports through this lexical CommonJS module.
-    // Hide page-owned AMD loaders so evaluating axe does not register modules
-    // or otherwise mutate the page's loader state.
+    // Hide world-local AMD loaders so evaluating axe cannot register modules
+    // outside the private CommonJS export.
     const module = {{ exports: {{}} }};
     const define = undefined;
     {axe_js}
     agentAxe = module.exports;
   }} finally {{
-    // axe-core also assigns window.axe in browsers. Restore the page exactly
-    // after capturing our private export so the audit has no lasting global.
+    // axe-core also assigns window.axe in browsers. Restore this isolated world
+    // exactly after capturing our private export.
     if (previousAxe) {{
       Object.defineProperty(window, 'axe', previousAxe);
     }} else {{
@@ -144,9 +148,15 @@ pub fn run_expression(tags: Option<&str>, selector: Option<&str>) -> String {
     )
 }
 
-fn partial_expression(tags: Option<&str>, selector: Option<&str>, disable_iframes: bool) -> String {
+fn partial_expression(
+    tags: Option<&str>,
+    selector: Option<&str>,
+    frame_context: Option<&Value>,
+    disable_iframes: bool,
+) -> String {
     let tags_json = json!(tag_values(tags)).to_string();
     let selector_json = json!(selector).to_string();
+    let frame_context_json = json!(frame_context).to_string();
     let axe_version_json = json!(AXE_VERSION).to_string();
     let iframes_option = if disable_iframes {
         "options.iframes = false;"
@@ -156,19 +166,25 @@ fn partial_expression(tags: Option<&str>, selector: Option<&str>, disable_iframe
     format!(
         r#"(() => {{
   {engine_setup}
-  if (!agentAxe || agentAxe.version !== {axe_version_json} || typeof agentAxe.runPartial !== 'function') {{
+  if (!agentAxe || agentAxe.version !== {axe_version_json} || typeof agentAxe.runPartial !== 'function' || !agentAxe.utils || typeof agentAxe.utils.getFrameContexts !== 'function') {{
     return JSON.stringify({{ error: 'Failed to initialize vendored axe-core {axe_version}' }});
   }}
   const tags = {tags_json};
   const selector = {selector_json};
-  if (selector !== null && !document.querySelector(selector)) {{
+  const frameContext = {frame_context_json};
+  if (frameContext === null && selector !== null && !document.querySelector(selector)) {{
     return JSON.stringify({{ error: 'No element matches selector: ' + selector }});
   }}
   const options = {{ resultTypes: ['violations', 'incomplete'] }};
   {iframes_option}
   if (tags.length > 0) options.runOnly = {{ type: 'tag', values: tags }};
-  return agentAxe.runPartial(selector === null ? document : selector, options)
-    .then((result) => JSON.stringify(result));
+  const context = frameContext === null
+    ? (selector === null ? document : selector)
+    : frameContext;
+  const frameContexts = agentAxe.utils.getFrameContexts(context)
+    .map(({{ frameContext: childFrameContext }}) => childFrameContext);
+  return agentAxe.runPartial(context, options)
+    .then((partial) => JSON.stringify({{ partial, frameContexts }}));
 }})()"#,
         engine_setup = private_engine_setup(),
         axe_version = AXE_VERSION,
@@ -505,80 +521,61 @@ pub async fn active_iframe_session_ids(
 }
 
 #[derive(Debug)]
-struct FrameContext {
+struct IsolatedFrameWorld {
     session_id: String,
     context_id: i64,
 }
 
-async fn collect_default_frame_contexts(
+async fn create_isolated_frame_context(
     client: &CdpClient,
-    top_session_id: &str,
+    target: &FrameTarget,
+    world_name: &str,
+) -> Result<IsolatedFrameWorld, String> {
+    let result = client
+        .send_command(
+            "Page.createIsolatedWorld",
+            Some(json!({
+                "frameId": target.frame_id,
+                "worldName": world_name,
+                "grantUniveralAccess": true,
+            })),
+            Some(&target.session_id),
+        )
+        .await?;
+    let context_id = result
+        .get("executionContextId")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "Could not create isolated accessibility audit world".to_string())?;
+    Ok(IsolatedFrameWorld {
+        session_id: target.session_id.clone(),
+        context_id,
+    })
+}
+
+async fn collect_isolated_frame_contexts(
+    client: &CdpClient,
+    top_frame_id: &str,
     frame_targets: &[FrameTarget],
-) -> Result<HashMap<String, FrameContext>, String> {
-    let mut events = client.subscribe();
-    let unique_sessions: HashSet<String> = frame_targets
+) -> Result<HashMap<String, IsolatedFrameWorld>, String> {
+    let top_target = frame_targets
         .iter()
-        .map(|target| target.session_id.clone())
-        .collect();
+        .find(|target| target.frame_id == top_frame_id)
+        .ok_or_else(|| "Could not determine top-level accessibility audit target".to_string())?;
 
-    // Re-enabling Runtime makes Chrome report every existing execution
-    // context, including same-process child frames that have no target session.
-    for session_id in &unique_sessions {
-        let _ = client
-            .send_command_no_params("Runtime.disable", Some(session_id))
-            .await;
-        client
-            .send_command_no_params("Runtime.enable", Some(session_id))
-            .await?;
+    // The top frame must have an isolated world because every report is
+    // finalized there. Child frames can detach while an audit starts; those
+    // are represented by skipped partials without falling back to page-owned
+    // JavaScript globals.
+    let top_context = create_isolated_frame_context(client, top_target, AUDIT_WORLD_NAME).await?;
+    let mut contexts = HashMap::from([(top_frame_id.to_string(), top_context)]);
+    for target in frame_targets {
+        if target.frame_id == top_frame_id {
+            continue;
+        }
+        if let Ok(context) = create_isolated_frame_context(client, target, AUDIT_WORLD_NAME).await {
+            contexts.insert(target.frame_id.clone(), context);
+        }
     }
-
-    let mut contexts: HashMap<String, FrameContext> = HashMap::new();
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
-    while tokio::time::Instant::now() < deadline && contexts.len() < frame_targets.len() {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let event = match tokio::time::timeout(remaining, events.recv()).await {
-            Ok(Ok(event)) => event,
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => break,
-        };
-        if event.method != "Runtime.executionContextCreated" {
-            continue;
-        }
-        let Some(context) = event.params.get("context") else {
-            continue;
-        };
-        let Some(context_id) = context.get("id").and_then(|id| id.as_i64()) else {
-            continue;
-        };
-        let Some(aux_data) = context.get("auxData") else {
-            continue;
-        };
-        if aux_data.get("isDefault").and_then(|value| value.as_bool()) != Some(true) {
-            continue;
-        }
-        let Some(frame_id) = aux_data.get("frameId").and_then(|id| id.as_str()) else {
-            continue;
-        };
-        let Some(expected_session_id) = frame_targets
-            .iter()
-            .find(|target| target.frame_id == frame_id)
-            .map(|target| target.session_id.as_str())
-        else {
-            continue;
-        };
-        let event_session_id = event.session_id.as_deref().unwrap_or(top_session_id);
-        if event_session_id != expected_session_id {
-            continue;
-        }
-        contexts.insert(
-            frame_id.to_string(),
-            FrameContext {
-                session_id: expected_session_id.to_string(),
-                context_id,
-            },
-        );
-    }
-
     Ok(contexts)
 }
 
@@ -602,13 +599,15 @@ enum AuditTask {
     Frame {
         frame_id: String,
         selector: Option<String>,
+        frame_context: Option<Value>,
     },
     Skip,
 }
 
 /// Run `axe.runPartial` in top-to-bottom frame order, then combine those
-/// serialized partials with `axe.finishRun`. This avoids cross-frame page
-/// messaging and keeps every frame's page-owned `window.axe` value intact.
+/// serialized partials with `axe.finishRun`. Each partial runs in an isolated
+/// world with axe's exact inherited frame context, avoiding both cross-frame
+/// page messaging and page-owned JavaScript globals.
 pub async fn run_audit(
     client: &CdpClient,
     top_session_id: &str,
@@ -617,22 +616,8 @@ pub async fn run_audit(
     selector: Option<&str>,
 ) -> Result<Value, String> {
     let (top_frame_id, frame_targets) =
-        match collect_frame_sessions(client, top_session_id, iframe_sessions).await {
-            Ok(frame_data) => frame_data,
-            Err(_) => {
-                let value = evaluate(
-                    client,
-                    top_session_id,
-                    None,
-                    &run_expression(tags, selector),
-                )
-                .await?;
-                return parse_audit_result(value);
-            }
-        };
-    let contexts = collect_default_frame_contexts(client, top_session_id, &frame_targets)
-        .await
-        .unwrap_or_default();
+        collect_frame_sessions(client, top_session_id, iframe_sessions).await?;
+    let contexts = collect_isolated_frame_contexts(client, &top_frame_id, &frame_targets).await?;
 
     // axe.finishRun consumes partials in document preorder. Derive that order
     // from each partial's frame specs so it matches axe's exact selector scope
@@ -641,19 +626,21 @@ pub async fn run_audit(
     let mut tasks = vec![AuditTask::Frame {
         frame_id: top_frame_id.clone(),
         selector: selector.map(ToString::to_string),
+        frame_context: None,
     }];
     while let Some(task) = tasks.pop() {
-        let AuditTask::Frame { frame_id, selector } = task else {
+        let AuditTask::Frame {
+            frame_id,
+            selector,
+            frame_context,
+        } = task
+        else {
             partials.push(skipped_frame_partial());
             continue;
         };
-        let context = if frame_id == top_frame_id {
-            Some((top_session_id, None))
-        } else {
-            contexts
-                .get(&frame_id)
-                .map(|context| (context.session_id.as_str(), Some(context.context_id)))
-        };
+        let context = contexts
+            .get(&frame_id)
+            .map(|context| (context.session_id.as_str(), Some(context.context_id)));
         let Some((session_id, context_id)) = context else {
             partials.push(skipped_frame_partial());
             continue;
@@ -665,20 +652,20 @@ pub async fn run_audit(
             client,
             session_id,
             context_id,
-            &partial_expression(tags, selector.as_deref(), true),
+            &partial_expression(tags, selector.as_deref(), frame_context.as_ref(), true),
         )
         .await
         .and_then(parse_audit_result);
-        let partial = match partial {
-            Ok(partial) if partial.get("error").is_none() => partial,
-            Ok(partial) if frame_id == top_frame_id && partial.get("error").is_some() => {
-                return Ok(partial);
+        let audit_payload = match partial {
+            Ok(payload) if payload.get("error").is_none() => payload,
+            Ok(payload) if frame_id == top_frame_id && payload.get("error").is_some() => {
+                return Ok(payload);
             }
             _ if frame_id == top_frame_id => {
                 let value = evaluate(
                     client,
-                    top_session_id,
-                    None,
+                    session_id,
+                    context_id,
                     &run_expression(tags, selector.as_deref()),
                 )
                 .await?;
@@ -689,26 +676,44 @@ pub async fn run_audit(
                 continue;
             }
         };
+        let Some(partial) = audit_payload.get("partial").cloned() else {
+            if frame_id == top_frame_id {
+                return Err("a11y returned a partial result without audit data".to_string());
+            }
+            partials.push(skipped_frame_partial());
+            continue;
+        };
 
         let frame_specs = partial
             .get("frames")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        let frame_contexts = audit_payload
+            .get("frameContexts")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         partials.push(partial);
 
         let mut child_tasks = Vec::with_capacity(frame_specs.len());
-        for frame_spec in frame_specs {
-            let child_task =
-                match resolve_child_frame_id(client, session_id, context_id, &frame_spec).await {
-                    Ok(child_frame_id) if contexts.contains_key(&child_frame_id) => {
-                        AuditTask::Frame {
-                            frame_id: child_frame_id,
-                            selector: None,
+        for (index, frame_spec) in frame_specs.into_iter().enumerate() {
+            let child_task = match frame_contexts.get(index).cloned() {
+                Some(child_context) => {
+                    match resolve_child_frame_id(client, session_id, context_id, &frame_spec).await
+                    {
+                        Ok(child_frame_id) if contexts.contains_key(&child_frame_id) => {
+                            AuditTask::Frame {
+                                frame_id: child_frame_id,
+                                selector: None,
+                                frame_context: Some(child_context),
+                            }
                         }
+                        _ => AuditTask::Skip,
                     }
-                    _ => AuditTask::Skip,
-                };
+                }
+                None => AuditTask::Skip,
+            };
             child_tasks.push(child_task);
         }
         for child_task in child_tasks.into_iter().rev() {
@@ -716,10 +721,13 @@ pub async fn run_audit(
         }
     }
 
+    let top_context = contexts
+        .get(&top_frame_id)
+        .ok_or_else(|| "Could not find isolated top-level audit world".to_string())?;
     let finished = evaluate(
         client,
-        top_session_id,
-        None,
+        &top_context.session_id,
+        Some(top_context.context_id),
         &finish_expression(&partials, tags, selector),
     )
     .await?;
@@ -765,10 +773,25 @@ mod tests {
 
     #[test]
     fn test_partial_and_finish_expressions_use_private_axe() {
-        let partial = partial_expression(Some("wcag2a"), None, false);
+        let partial = partial_expression(
+            Some("wcag2a"),
+            None,
+            Some(&json!({
+                "include": [],
+                "exclude": [],
+                "initiator": false,
+                "focusable": false,
+                "size": { "width": 300, "height": 150 },
+                "page": true
+            })),
+            false,
+        );
         assert!(partial.contains("agentAxe.runPartial"));
         assert!(partial.contains("const module = { exports: {} }"));
         assert!(partial.contains(r#"["wcag2a"]"#));
+        assert!(partial.contains("agentAxe.utils.getFrameContexts(context)"));
+        assert!(partial.contains(r#""initiator":false"#));
+        assert!(partial.contains("JSON.stringify({ partial, frameContexts })"));
 
         let finish = finish_expression(&[json!({ "results": [] })], Some("wcag2a"), None);
         assert!(finish.contains("agentAxe.finishRun"));

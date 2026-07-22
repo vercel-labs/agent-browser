@@ -7134,14 +7134,14 @@ async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
     <h1>Accessibility audit fixture</h1>
     <img id="light-image" src="missing.png">
     <div id="shadow-host"></div>
-    <iframe id="audit-frame" title="Audit frame" srcdoc="
+    <iframe id="audit-frame" title="Audit frame" tabindex="-1" srcdoc="
       <!doctype html><html lang='en'><head><title>Frame</title></head>
-      <body><main><h1>Frame</h1><img id='frame-image' src='missing.png'></main>
+      <body><main><h1>Frame</h1><a href='https://example.com'>Frame link</a><img id='frame-image' src='missing.png'></main>
       <script>
         window.frameAxe = { version: 'frame-spoofed' };
         window.frameAxeSetterCalls = 0;
         Object.defineProperty(window, 'axe', {
-          configurable: true,
+          configurable: false,
           get() { return window.frameAxe; },
           set() {
             window.frameAxeSetterCalls += 1;
@@ -7165,7 +7165,7 @@ async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
     };
     window.axeSetterCalls = 0;
     Object.defineProperty(window, 'axe', {
-      configurable: true,
+      configurable: false,
       get() { return window.pageAxe; },
       set() {
         window.axeSetterCalls += 1;
@@ -7209,6 +7209,17 @@ async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
     assert!(nodes
         .iter()
         .any(|node| node["target"] == json!(["#audit-frame", "#frame-image"])));
+    let frame_focusable_content = data["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|violation| violation["id"] == "frame-focusable-content")
+        .expect("audit should preserve the child context for non-focusable frames");
+    assert!(frame_focusable_content["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["target"] == json!(["#audit-frame", "html"])));
 
     let resp = execute_command(
         &json!({ "id": "3-selector", "action": "a11y", "selector": "#shadow-host" }),
