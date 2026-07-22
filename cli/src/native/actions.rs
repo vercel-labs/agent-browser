@@ -5948,11 +5948,17 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .pending_dialog
         .as_ref()
         .and_then(|d| d.session_id.clone());
+    let result = {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        mgr.tab_close_by_id(tab_id, dialog_session.as_deref())
+            .await?
+    };
+    // Clear only after the close commits; a rejected close (last tab, bad
+    // index) must not wipe the caller's refs and frame scope.
     state.ref_map.clear();
     state.iframe_sessions.clear();
     state.active_frame_id = None;
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    mgr.tab_close_by_id(tab_id, dialog_session.as_deref()).await
+    Ok(result)
 }
 
 async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
