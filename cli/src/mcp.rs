@@ -1568,7 +1568,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_A11Y,
             "Accessibility audit",
-            "Run an axe-core accessibility audit and report WCAG violations.",
+            "Run an axe-core accessibility audit and report WCAG violations, optionally navigating to a URL first.",
             json!({
                 "url": { "type": "string" },
                 "tags": { "type": "string" },
@@ -1977,7 +1977,6 @@ fn is_read_only_tool(name: &str) -> bool {
             | TOOL_REACT_INSPECT
             | TOOL_REACT_SUSPENSE
             | TOOL_VITALS
-            | TOOL_A11Y
             | TOOL_STREAM_STATUS
             | TOOL_SESSION
             | TOOL_SESSION_LIST
@@ -4192,6 +4191,10 @@ mod tests {
             .iter()
             .find(|t| t["name"].as_str() == Some(TOOL_READ))
             .unwrap();
+        let a11y = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some(TOOL_A11Y))
+            .unwrap();
         let skills_get = tools
             .iter()
             .find(|t| t["name"].as_str() == Some(TOOL_SKILLS_GET))
@@ -4200,6 +4203,7 @@ mod tests {
         assert_eq!(open["annotations"]["readOnlyHint"], false);
         assert_eq!(open["annotations"]["openWorldHint"], true);
         assert_eq!(read["annotations"]["readOnlyHint"], true);
+        assert_eq!(a11y["annotations"]["readOnlyHint"], false);
         assert_eq!(read["annotations"]["openWorldHint"], true);
         assert_eq!(get_url["annotations"]["readOnlyHint"], true);
         assert_eq!(get_url["annotations"]["openWorldHint"], true);

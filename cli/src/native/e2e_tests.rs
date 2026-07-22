@@ -7032,6 +7032,11 @@ async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
     <h1>Accessibility audit fixture</h1>
     <img id="light-image" src="missing.png">
     <div id="shadow-host"></div>
+    <iframe id="audit-frame" title="Audit frame" srcdoc="
+      <!doctype html><html lang='en'><head><title>Frame</title></head>
+      <body><main><h1>Frame</h1><img id='frame-image' src='missing.png'></main>
+      <script>window.axe = { version: 'frame-spoofed' };</script></body></html>
+    "></iframe>
   </main>
   <script>
     window.axe = {
@@ -7068,7 +7073,7 @@ async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
         .iter()
         .find(|violation| violation["id"] == "image-alt")
         .expect("vendored axe should report missing image alternatives");
-    assert_eq!(image_alt["nodeCount"], 2);
+    assert_eq!(image_alt["nodeCount"], 3);
     let nodes = image_alt["nodes"].as_array().unwrap();
     assert!(nodes
         .iter()
@@ -7076,14 +7081,61 @@ async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
     assert!(nodes
         .iter()
         .any(|node| node["target"] == json!([["#shadow-host", "#shadow-image"]])));
+    assert!(nodes
+        .iter()
+        .any(|node| node["target"] == json!(["#audit-frame", "#frame-image"])));
 
     let resp = execute_command(
-        &json!({ "id": "4", "action": "evaluate", "script": "window.axe.version" }),
+        &json!({ "id": "3-selector", "action": "a11y", "selector": "#shadow-host" }),
         &mut state,
     )
     .await;
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["result"], "spoofed");
+    let scoped_image_alt = get_data(&resp)["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|violation| violation["id"] == "image-alt")
+        .expect("scoped audit should report the shadow image");
+    assert_eq!(scoped_image_alt["nodeCount"], 1);
+
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "evaluate",
+            "script": "[window.axe.version, document.querySelector('#audit-frame').contentWindow.axe.version]"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        json!(["spoofed", "frame-spoofed"])
+    );
+
+    state
+        .ref_map
+        .add("e999".to_string(), Some(999), "button", "stale", None);
+    state.active_frame_id = Some("stale-frame".to_string());
+    state
+        .iframe_sessions
+        .insert("stale-frame".to_string(), "stale-session".to_string());
+    let fresh_url = format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode(
+            "<!doctype html><html lang='en'><head><title>Fresh audit</title></head><body><main><h1>Fresh audit</h1></main></body></html>"
+        )
+    );
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "a11y", "url": fresh_url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(state.ref_map.get("e999").is_none());
+    assert!(state.active_frame_id.is_none());
+    assert!(!state.iframe_sessions.contains_key("stale-frame"));
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }

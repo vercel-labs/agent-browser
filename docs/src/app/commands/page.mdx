@@ -518,7 +518,7 @@ See [React & Web Vitals](/react) for full command details and examples.
 
 ## Accessibility audits
 
-Run an embedded axe-core audit against the current page or navigate to a URL first. The vendored engine works without a CDN request, runs under strict page CSP, and is captured through an agent-owned module so page-provided `window.axe` values cannot replace it.
+Run an embedded axe-core audit against the current page or navigate to a URL first. The vendored engine works without a CDN request and runs under strict page CSP. It runs private partial audits across the page's frame tree and merges serialized results without page messaging, so page-provided `window.axe` values remain intact and iframe violations retain their frame selector paths. Accessibility audits require a CDP browser and are not available with Safari or iOS WebDriver sessions.
 
 ```bash
 agent-browser a11y                                 # Audit the current page
@@ -528,7 +528,7 @@ agent-browser a11y --selector "#main"              # Scope to a subtree
 agent-browser a11y https://example.com --json      # Structured results
 ```
 
-The default output lists violations and incomplete checks with impact, rule ID, fix guidance, and failing-node paths. JSON output preserves axe's `target` selector path arrays, including nested arrays for shadow DOM boundaries.
+The default output lists violations and incomplete checks with impact, rule ID, fix guidance, and failing-node paths. JSON output preserves axe's `target` selector path arrays, including nested arrays for shadow DOM boundaries and multiple entries for frame boundaries.
 
 ## Init scripts
 

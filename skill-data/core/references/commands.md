@@ -424,7 +424,7 @@ agent-browser pushstate <url>                       # SPA client-side nav (auto-
 
 ## Accessibility audit
 
-Runs an embedded axe-core audit (no CDN fetch; evaluated via CDP so page CSP does not block it). The vendored engine is captured through an agent-owned module, so page-provided `window.axe` values cannot replace it. Reports WCAG violations with impact, rule id, fix guidance URL, and failing-node selectors.
+Runs an embedded axe-core audit with no CDN fetch. The vendored engine runs private partial audits through CDP across the page's frame tree and merges serialized results without page messaging, so page CSP does not block it, page-provided `window.axe` values remain intact, and iframe violations retain their frame selector paths. Accessibility audits require a CDP browser and are not available with Safari or iOS WebDriver sessions. Reports WCAG violations with impact, rule id, fix guidance URL, and failing-node selectors.
 
 ```bash
 agent-browser a11y                                  # Audit the current page

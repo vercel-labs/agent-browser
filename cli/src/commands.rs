@@ -71,6 +71,24 @@ pub fn gen_id() -> String {
     )
 }
 
+/// Normalize browser navigation inputs while preserving schemes Chrome can
+/// open directly. Bare hostnames use HTTPS, matching the `open` command.
+fn normalize_navigation_url(url: &str) -> String {
+    let url_lower = url.to_lowercase();
+    if url_lower.starts_with("http://")
+        || url_lower.starts_with("https://")
+        || url_lower.starts_with("about:")
+        || url_lower.starts_with("data:")
+        || url_lower.starts_with("file:")
+        || url_lower.starts_with("chrome-extension://")
+        || url_lower.starts_with("chrome://")
+    {
+        url.to_string()
+    } else {
+        format!("https://{}", url)
+    }
+}
+
 pub fn is_top_level_command(value: &str) -> bool {
     matches!(
         value,
@@ -367,19 +385,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     });
                 }
             };
-            let url_lower = url.to_lowercase();
-            let url = if url_lower.starts_with("http://")
-                || url_lower.starts_with("https://")
-                || url_lower.starts_with("about:")
-                || url_lower.starts_with("data:")
-                || url_lower.starts_with("file:")
-                || url_lower.starts_with("chrome-extension://")
-                || url_lower.starts_with("chrome://")
-            {
-                url.to_string()
-            } else {
-                format!("https://{}", url)
-            };
+            let url = normalize_navigation_url(url);
             let mut nav_cmd = json!({ "id": id, "action": "navigate", "url": url });
             if flags.provider.is_some() {
                 nav_cmd["waitUntil"] = json!("none");
@@ -1963,7 +1969,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                 usage: A11Y_USAGE,
                             });
                         }
-                        cmd["url"] = json!(other);
+                        cmd["url"] = json!(normalize_navigation_url(other));
                     }
                     other => {
                         return Err(ParseError::InvalidValue {
@@ -3427,6 +3433,12 @@ mod tests {
         assert_eq!(cmd["tags"], "wcag2a,wcag2aa");
         assert_eq!(cmd["selector"], "#main");
         assert_eq!(cmd["json"], true);
+
+        let cmd = parse_command(&args("a11y example.com"), &default_flags()).unwrap();
+        assert_eq!(cmd["url"], "https://example.com");
+
+        let cmd = parse_command(&args("a11y about:blank"), &default_flags()).unwrap();
+        assert_eq!(cmd["url"], "about:blank");
 
         assert!(parse_command(&args("a11y --tags"), &default_flags()).is_err());
         assert!(parse_command(&args("a11y --bogus"), &default_flags()).is_err());

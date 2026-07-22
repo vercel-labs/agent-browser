@@ -447,7 +447,7 @@ Works on any React app — Next.js, Remix, Vite+React, CRA, TanStack Start, Reac
 
 ### Accessibility audits
 
-Run an [axe-core](https://github.com/dequelabs/axe-core) accessibility audit against the current page or a URL. The axe-core engine is embedded in the binary (no CDN fetch, works offline and under strict CSP) and evaluated through an agent-owned module so page-provided `window.axe` values cannot replace the audit engine.
+Run an [axe-core](https://github.com/dequelabs/axe-core) accessibility audit against the current page or a URL. The axe-core engine is embedded in the binary, so it works offline and under strict CSP. It runs private partial audits across the page's frame tree and merges serialized results without page messaging, so page-provided `window.axe` values remain intact and iframe violations retain their frame selector paths. Accessibility audits require a CDP browser and are not available with Safari or iOS WebDriver sessions.
 
 ```bash
 agent-browser a11y                                 # Audit the current page

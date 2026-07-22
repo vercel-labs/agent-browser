@@ -1956,6 +1956,12 @@ fn policy_actions_for_command(
     needs_implicit_launch: bool,
 ) -> Vec<String> {
     let mut actions = vec![action.to_string()];
+    // `a11y <url>` performs a real browser navigation before the audit. Keep
+    // navigation deny and confirmation policies effective for the compound
+    // command instead of treating it as a read-only audit.
+    if action == "a11y" && cmd.get("url").and_then(|v| v.as_str()).is_some() {
+        actions.push("navigate".to_string());
+    }
     if action == "auth_login" {
         if let Some(provider) = cmd.get("credentialProvider").and_then(|v| v.as_str()) {
             let plugins = plugins_from_command_or_env(cmd);
@@ -7212,27 +7218,30 @@ async fn handle_vitals(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 async fn handle_a11y(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     // Navigate first if a target URL was given, so `a11y <url>` audits a
     // fresh load rather than whatever page is currently active.
-    if let Some(url) = cmd.get("url").and_then(|v| v.as_str()) {
-        {
-            let df = state.domain_filter.read().await;
-            if let Some(ref filter) = *df {
-                filter.check_url(url)?;
-            }
-        }
-        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-        let _ = mgr.navigate(url, WaitUntil::Load).await?;
+    if cmd.get("url").and_then(|v| v.as_str()).is_some() {
+        // Reuse canonical navigation so element refs, selected frames, domain
+        // filtering, and backend-specific behavior stay consistent.
+        let _ = handle_navigate(cmd, state).await?;
+        // Navigation can attach new out-of-process iframe sessions. Apply
+        // those events before installing axe into the complete frame tree.
+        state.drain_cdp_events_background().await?;
     }
 
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
 
     let tags = cmd.get("tags").and_then(|v| v.as_str());
     let selector = cmd.get("selector").and_then(|v| v.as_str());
-    // `run_expression` loads the vendored build through a private CommonJS
-    // export, runs the audit, and restores any page-owned `window.axe` value.
-    let result = mgr
-        .evaluate(&a11y::run_expression(tags, selector), None)
-        .await?;
-    let raw = parse_json_string(result, "a11y")?;
+    // Run private partial audits throughout the frame tree, then merge their
+    // serialized results through the vendored top-frame engine.
+    let session_id = mgr.active_session_id()?;
+    let raw = a11y::run_audit(
+        &mgr.client,
+        session_id,
+        &state.iframe_sessions,
+        tags,
+        selector,
+    )
+    .await?;
     if let Some(err) = raw.get("error").and_then(|v| v.as_str()) {
         return Err(err.to_string());
     }
@@ -10984,6 +10993,28 @@ mod tests {
     }
 
     #[test]
+    fn test_a11y_url_policy_actions_include_navigation() {
+        let with_url = json!({
+            "action": "a11y",
+            "id": "a11y-policy-url",
+            "url": "https://example.com"
+        });
+        let current_page = json!({
+            "action": "a11y",
+            "id": "a11y-policy-current"
+        });
+
+        assert_eq!(
+            policy_actions_for_command(&with_url, "a11y", false),
+            vec!["a11y".to_string(), "navigate".to_string()]
+        );
+        assert_eq!(
+            policy_actions_for_command(&current_page, "a11y", false),
+            vec!["a11y".to_string()]
+        );
+    }
+
+    #[test]
     fn test_policy_actions_use_command_plugins_for_provider_auto_launch() {
         let guard = EnvGuard::new(&["AGENT_BROWSER_PROVIDER"]);
         guard.set("AGENT_BROWSER_PROVIDER", "browserbox");
@@ -11119,6 +11150,27 @@ mod tests {
 
         assert_eq!(resp["success"], false);
         assert!(resp["error"].as_str().unwrap().contains("read"));
+        assert!(state.browser.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_policy_denies_a11y_url_as_navigation_before_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("policy.json");
+        fs::write(&policy_path, r#"{"deny":["navigate"]}"#).unwrap();
+
+        let mut state = DaemonState::new();
+        state.policy = Some(ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
+        let cmd = json!({
+            "action": "a11y",
+            "id": "a11y-navigation-denied",
+            "url": "https://example.com"
+        });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(resp["success"], false);
+        assert!(resp["error"].as_str().unwrap().contains("navigate"));
         assert!(state.browser.is_none());
     }
 

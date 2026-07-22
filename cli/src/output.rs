@@ -3189,8 +3189,11 @@ agent-browser a11y - Run an axe-core accessibility audit
 Usage: agent-browser a11y [url] [options]
 
 Audits the current page, or navigates to the optional URL first. The vendored
-axe-core engine runs without a network request and does not trust or replace a
-page-owned window.axe value.
+axe-core engine runs private partial audits without a network request across
+the page frame tree, does not trust or replace page-owned window.axe values,
+and merges serialized results without page messaging. Accessibility audits
+require a CDP browser and are not available with Safari or iOS WebDriver
+sessions.
 
 Options:
   --tags <tag1,tag2>    Run only rules matching these axe tags
