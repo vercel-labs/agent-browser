@@ -1557,6 +1557,81 @@ async fn e2e_element_queries() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_getbyrole_uses_accessibility_tree_for_implicit_roles() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = concat!(
+        "<html><head>",
+        "<link rel='stylesheet' href='data:text/css,body{}'>",
+        "</head><body>",
+        "<h1 style='text-transform:uppercase'>Welcome</h1>",
+        "<a id='services' href='#services' onclick='window.__clicked = \"services\"'>Services</a>",
+        "<button id='submit'>Submit</button>",
+        "</body></html>"
+    );
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Implicit role from a plain HTML tag (<h1> -> heading), matched
+    // case-insensitively against the accessible name despite the CSS
+    // text-transform rendering it as "WELCOME".
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "getbyrole",
+            "role": "heading",
+            "name": "welcome",
+            "subaction": "text"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "WELCOME");
+
+    // A real <a href> must win over the unrelated <link rel="stylesheet">
+    // element, which is not exposed as an AX "link" node at all.
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "getbyrole",
+            "role": "link",
+            "name": "Services",
+            "exact": true,
+            "subaction": "click"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": "window.__clicked" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "services");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Wait command
 // ---------------------------------------------------------------------------
@@ -7444,4 +7519,293 @@ async fn e2e_pin_tab_gone_error_and_recovery() {
 
     let resp = execute_command(&json!({ "id": "host-99", "action": "close" }), &mut host).await;
     assert_success(&resp);
+}
+
+/// A multiselect locator miss must surface the anchored "No element found"
+/// guidance, not a raw "Evaluation error: ...". Guards the handler wiring end to
+/// end: a unit test of the mapping alone stays green if the handler stops routing
+/// misses through it. Force-red: drop the sentinel miss handling in
+/// handle_multiselect and this assertion fails on the raw evaluate error.
+#[tokio::test]
+#[ignore]
+async fn e2e_multiselect_miss_surfaces_anchored_error() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // about:blank has no #picker, so the selector misses.
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "multiselect", "selector": "#picker", "values": ["a"] }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(|v| v.as_bool()),
+        Some(false),
+        "multiselect on a missing selector should error: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
+    let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    // Assert the full anchored shape, not just the guidance suffix: the miss must
+    // carry "No element found", retain the "#picker" selector detail, and end with
+    // the locator-miss guidance. A generic suffix-only check would pass even if the
+    // detail were dropped or a different classifier produced the guidance.
+    assert!(
+        err.starts_with("No element found") && err.contains("#picker"),
+        "miss should keep the anchored shape and selector detail, got: {err}"
+    );
+    assert!(
+        err.contains("Verify the selector, role, or name is correct"),
+        "miss should surface the anchored locator-miss guidance, got: {err}"
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+/// An earlier valid ARIA token in a multi-token role attribute is the operative
+/// role, so `role="mark none"` is a mark and must not answer `find role none`.
+/// Force-red: drop `mark` from the presentational VALID_ROLES set and the query
+/// matches this element, so the miss assertion fails.
+#[tokio::test]
+#[ignore]
+async fn e2e_presentational_role_respects_earlier_operative_token() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "<html><body><span role='mark none'>marked</span></body></html>";
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "getbyrole", "role": "none", "subaction": "text" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(|v| v.as_bool()),
+        Some(false),
+        "operative role is `mark`, so `find role none` must not match: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+/// `find role directory` must match an explicit `role="directory"` element but
+/// not an ordinary list. Chrome collapses `directory` into the `list` AX role,
+/// so this goes through the DOM-attribute path, not the AX tree. Force-red:
+/// route `directory` back through the AX tree and the explicit element is missed
+/// (its AX role is `list`), so the found-text assertion fails.
+#[tokio::test]
+#[ignore]
+async fn e2e_find_role_directory_matches_only_explicit_attribute() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // A plain list must not be matched by `find role directory`.
+    let plain = "data:text/html;base64,".to_string()
+        + &STANDARD.encode("<html><body><ul><li>item</li></ul></body></html>");
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": plain }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "getbyrole", "role": "directory", "subaction": "text" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(|v| v.as_bool()),
+        Some(false),
+        "a plain <ul> must not match `find role directory`: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
+
+    // An explicit role="directory" element is found.
+    let explicit = "data:text/html;base64,".to_string()
+        + &STANDARD.encode("<html><body><div role='directory'>DIR</div></body></html>");
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "navigate", "url": explicit }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "getbyrole", "role": "directory", "subaction": "text" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "DIR");
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+/// The presentational DOM lookup must honor the selected frame, not always the
+/// top document. Force-red: revert the frame dispatch in the presentational path
+/// (search the top document only) and the in-frame element is missed.
+#[tokio::test]
+#[ignore]
+async fn e2e_presentational_role_honors_selected_frame() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Top document has no role="none"; the same-origin iframe does. `srcdoc`
+    // inherits the parent origin, so the child is same-origin (the path this fix
+    // targets) without needing a server; a `data:` child would be cross-origin.
+    let outer = "<body><iframe id='f' srcdoc=\"<div role='none'>INSIDE</div>\"></iframe></body>";
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(outer));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Before selecting the frame, the top document has no match.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "getbyrole", "role": "none", "subaction": "text" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(|v| v.as_bool()),
+        Some(false),
+        "top document has no role=none: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
+
+    // Select the frame; the presentational lookup must now find the frame element.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "frame", "selector": "#f" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "getbyrole", "role": "none", "subaction": "text" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "INSIDE");
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+/// ARIA presentational-roles conflict resolution: role="none" on a focusable
+/// element (or one with global ARIA props) is ignored, so `find role none` must
+/// skip it but still match a truly presentational element. Force-red: drop the
+/// conflict check and the `<button role="none">` is matched.
+#[tokio::test]
+#[ignore]
+async fn e2e_presentational_role_respects_conflict_resolution() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Each non-matching element triggers conflict resolution a different way:
+    // native focusable, explicit tabindex=-1 (programmatically focusable), and a
+    // global ARIA property. Only the last, truly presentational div must match.
+    let html = concat!(
+        "<body>",
+        "<button role='none'>NativeFocusable</button>",
+        "<div role='none' tabindex='-1'>TabindexFocusable</div>",
+        "<div role='none' aria-label='named'>GlobalAria</div>",
+        "<div role='none'>Plain</div>",
+        "</body>"
+    );
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The focusable button keeps its implicit role, so the match must be the div.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "getbyrole", "role": "none", "subaction": "text" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["text"],
+        "Plain",
+        "role=none on a focusable button must be ignored (conflict resolution)"
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+/// `find role document` must match the page root. Chrome exposes it as
+/// `RootWebArea`; without the normalization to `document` the query misses.
+/// End-to-end guard for that mapping (the unit test only checks the string).
+#[tokio::test]
+#[ignore]
+async fn e2e_find_role_document_matches_root() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let url = format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode("<title>T</title><body>hi</body>")
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "getbyrole", "role": "document", "subaction": "text" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }

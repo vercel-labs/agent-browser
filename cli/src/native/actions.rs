@@ -18,8 +18,9 @@ use super::cdp::chrome::LaunchOptions;
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CdpEvent, CreateTargetResult,
-    DispatchMouseEventParams, ExceptionThrownEvent, JavascriptDialogOpeningEvent,
-    TargetCreatedEvent, TargetDestroyedEvent, TargetInfo, TargetInfoChangedEvent,
+    DispatchMouseEventParams, ExceptionThrownEvent, GetFullAXTreeResult,
+    JavascriptDialogOpeningEvent, TargetCreatedEvent, TargetDestroyedEvent, TargetInfo,
+    TargetInfoChangedEvent,
 };
 use super::cookies;
 use super::diff;
@@ -2036,6 +2037,13 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     let cmd_start = std::time::Instant::now();
 
     if let Err(err) = validate_restore_config_from_command(cmd) {
+        return error_response(&id, &err);
+    }
+
+    // Invalid inputs are rejected before expensive setup: an unsupported
+    // `find` action must fail here, not after a browser launch and a locator
+    // resolution that can mask it with "element not found".
+    if let Err(err) = validate_find_subaction(action, cmd) {
         return error_response(&id, &err);
     }
 
@@ -8068,6 +8076,49 @@ async fn handle_mainframe(state: &mut DaemonState) -> Result<Value, String> {
 // Semantic locator handlers
 // ---------------------------------------------------------------------------
 
+/// The exact set of `find` actions `execute_subaction` dispatches. Shared by
+/// the validation guard, the error message, and the accepted-actions test,
+/// so drift between the guard and the match arms fails a test instead of
+/// silently reopening the "Unknown subaction: type" bug this fixes.
+const FIND_ACTIONS: &[&str] = &["click", "fill", "check", "hover", "text"];
+
+/// The daemon commands that dispatch a `find` subaction through
+/// `execute_subaction` after resolving their locator.
+const FIND_SUBACTION_COMMANDS: &[&str] = &[
+    "getbyrole",
+    "getbytext",
+    "getbylabel",
+    "getbyplaceholder",
+    "getbyalttext",
+    "getbytitle",
+    "getbytestid",
+    "nth",
+];
+
+/// Reject an unsupported `find` action before any browser launch or locator
+/// resolution. The guard inside `execute_subaction` only runs after both, so
+/// on a missing element it never runs at all: the caller fails first with an
+/// "element not found" error that names the wrong fault, after paying for a
+/// browser launch to say it. Validation order follows the input, not the
+/// setup cost.
+fn validate_find_subaction(action: &str, cmd: &Value) -> Result<(), String> {
+    if !FIND_SUBACTION_COMMANDS.contains(&action) {
+        return Ok(());
+    }
+    let subaction = cmd
+        .get("subaction")
+        .and_then(|v| v.as_str())
+        .unwrap_or("click");
+    if !FIND_ACTIONS.contains(&subaction) {
+        return Err(format!(
+            "Unknown action '{}' for find. Valid actions: {}.",
+            subaction,
+            FIND_ACTIONS.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 async fn execute_subaction(
     cmd: &Value,
     state: &mut DaemonState,
@@ -8077,6 +8128,18 @@ async fn execute_subaction(
         .get("subaction")
         .and_then(|v| v.as_str())
         .unwrap_or("click");
+
+    // Validate before dispatching: an unsupported action (e.g. "type",
+    // "focus", "uncheck", all real standalone commands, just not `find`
+    // actions) gets a message naming the valid set here.
+    if !FIND_ACTIONS.contains(&subaction) {
+        return Err(format!(
+            "Unknown action '{}' for find. Valid actions: {}.",
+            subaction,
+            FIND_ACTIONS.join(", ")
+        ));
+    }
+
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
@@ -8147,7 +8210,12 @@ async fn execute_subaction(
             .await?;
             Ok(json!({ "text": text }))
         }
-        _ => Err(format!("Unknown subaction: {}", subaction)),
+        // Unreachable today; a real Err rather than unreachable!() in case
+        // this ever drifts out of sync with the guard above.
+        _ => Err(format!(
+            "Internal error: action '{}' passed validation but has no handler.",
+            subaction
+        )),
     }
 }
 
@@ -8161,6 +8229,191 @@ fn build_role_selector(role: &str, name: Option<&str>, exact: bool) -> String {
     }
 }
 
+/// role="none" and role="presentation" (ARIA synonyms) exist to strip an
+/// element's semantics, so Chrome prunes such elements from the AX tree
+/// entirely (divs, lists, imgs) or keeps them only as ignored nodes
+/// (tables). The accessibility tree can never answer a query for them.
+fn is_presentational_role(role: &str) -> bool {
+    role.eq_ignore_ascii_case("none") || role.eq_ignore_ascii_case("presentation")
+}
+
+/// Match presentational roles against the explicit `role` attribute in the
+/// DOM, the only place the author's intent survives (see
+/// `is_presentational_role`). ARIA treats the role attribute as an ordered
+/// fallback list whose first supported token is the operative role, so
+/// `role="button none"` is a button and must not answer a query for "none",
+/// while `role="none button"` must. Matching is literal per synonym: a query
+/// for "none" only matches an operative "none", mirroring Playwright's
+/// literal role comparison. Name matching approximates accessible-name
+/// precedence (aria-labelledby, then aria-label, then text content) with
+/// whitespace normalized; non-exact is a case-insensitive substring check,
+/// exact is a case-sensitive whole-name comparison.
+async fn handle_presentational_getbyrole(
+    cmd: &Value,
+    state: &mut DaemonState,
+    role: &str,
+    name: Option<&str>,
+    exact: bool,
+) -> Result<Value, String> {
+    let name_check = match name {
+        Some(n) => {
+            let name_json = serde_json::to_string(n).unwrap_or_default();
+            if exact {
+                format!("if (norm(nameOf(el)) !== norm({name_json})) continue;")
+            } else {
+                format!(
+                    "if (!norm(nameOf(el)).toLowerCase().includes(norm({name_json}).toLowerCase())) continue;"
+                )
+            }
+        }
+        None => String::new(),
+    };
+
+    let role_json = serde_json::to_string(&role.to_ascii_lowercase()).unwrap_or_default();
+    // ARIA roles Playwright recognizes (WAI-ARIA 1.2). The operative role is the
+    // first token that is a defined role, so omitting one (e.g. `mark`) lets a
+    // later presentational token wrongly win.
+    // A function of `root` (the document to search), so it can run against the
+    // top document or a selected frame's document, not just the global one.
+    let locate_body = format!(
+        r#"(root) => {{
+            const VALID_ROLES = new Set(['alert','alertdialog','application','article','banner','blockquote','button','caption','cell','checkbox','code','columnheader','combobox','complementary','contentinfo','definition','deletion','dialog','directory','document','emphasis','feed','figure','form','generic','grid','gridcell','group','heading','img','insertion','link','list','listbox','listitem','log','main','mark','marquee','math','meter','menu','menubar','menuitem','menuitemcheckbox','menuitemradio','navigation','none','note','option','paragraph','presentation','progressbar','radio','radiogroup','region','row','rowgroup','rowheader','scrollbar','search','searchbox','separator','slider','spinbutton','status','strong','subscript','superscript','switch','tab','table','tablist','tabpanel','term','textbox','time','timer','toolbar','tooltip','tree','treegrid','treeitem']);
+            const norm = s => (s || '').replace(/\s+/g, ' ').trim();
+            const nameOf = el => {{
+                const lb = el.getAttribute('aria-labelledby');
+                if (lb) {{
+                    const t = lb.trim().split(/\s+/)
+                        .map(id => {{ const r = root.getElementById(id); return r ? r.textContent : ''; }})
+                        .join(' ');
+                    if (norm(t)) return t;
+                }}
+                const al = el.getAttribute('aria-label');
+                if (al !== null && norm(al)) return al;
+                return el.textContent || '';
+            }};
+            const role = {role_json};
+            const isPresentational = role === 'none' || role === 'presentation';
+            // Global ARIA states/properties (WAI-ARIA 1.2); their presence, not any
+            // aria-* attribute, triggers presentational-roles conflict resolution.
+            const GLOBAL_ARIA = new Set(['aria-atomic','aria-busy','aria-controls','aria-current','aria-describedby','aria-description','aria-details','aria-disabled','aria-dropeffect','aria-errormessage','aria-flowto','aria-grabbed','aria-haspopup','aria-hidden','aria-invalid','aria-keyshortcuts','aria-label','aria-labelledby','aria-live','aria-owns','aria-relevant','aria-roledescription']);
+            const isFocusable = el => el.tabIndex >= 0 || el.hasAttribute('tabindex');
+            for (const el of root.querySelectorAll('[role]')) {{
+                const tokens = (el.getAttribute('role') || '').trim().toLowerCase().split(/\s+/);
+                const operative = tokens.find(t => VALID_ROLES.has(t));
+                if (operative !== role) continue;
+                // ARIA presentational-roles conflict resolution: none/presentation
+                // is ignored on a focusable element or one carrying global ARIA
+                // states/properties, so it keeps its implicit role and must not
+                // answer a query for none/presentation.
+                if (isPresentational && (isFocusable(el) || el.getAttributeNames().some(a => GLOBAL_ARIA.has(a)))) continue;
+                {name_check}
+                el.setAttribute('data-agent-browser-located', 'true');
+                return true;
+            }}
+            return false;
+        }}"#
+    );
+
+    let located = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        let top_session = mgr.active_session_id()?.to_string();
+        eval_body_in_active_frame(
+            mgr,
+            state.active_frame_id.as_deref(),
+            &top_session,
+            &state.iframe_sessions,
+            &locate_body,
+        )
+        .await?
+    };
+
+    if !located.as_bool().unwrap_or(false) {
+        return Err(format!(
+            "No element found: {}",
+            build_role_selector(role, name, exact)
+        ));
+    }
+
+    let selector = "[data-agent-browser-located='true']";
+    let action_result = execute_subaction(cmd, state, selector).await;
+
+    // Clean up the marker in whichever document it was set in.
+    if let Some(mgr) = state.browser.as_ref() {
+        if let Ok(top_session) = mgr.active_session_id() {
+            let top_session = top_session.to_string();
+            let _ = eval_body_in_active_frame(
+                mgr,
+                state.active_frame_id.as_deref(),
+                &top_session,
+                &state.iframe_sessions,
+                "(root) => { root.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located'); }",
+            )
+            .await;
+        }
+    }
+
+    action_result
+}
+
+/// Evaluate a `(root) => {...}` body against the active frame's document, or the
+/// top document when no frame is selected. Runtime.evaluate cannot target a
+/// same-origin child frame, so that case runs the body against the frame owner's
+/// contentDocument (as element resolution does); an OOPIF has its own session
+/// where `document` is already the frame document.
+async fn eval_body_in_active_frame(
+    mgr: &BrowserManager,
+    frame_id: Option<&str>,
+    top_session: &str,
+    iframe_sessions: &HashMap<String, String>,
+    body: &str,
+) -> Result<Value, String> {
+    match frame_id {
+        Some(fid) if !iframe_sessions.contains_key(fid) => {
+            let owner =
+                super::element::frame_owner_object_id(&mgr.client, top_session, fid).await?;
+            let func = format!(
+                "function() {{ const d = this.contentDocument; if (!d) return null; return ({body})(d); }}"
+            );
+            let res = mgr
+                .client
+                .send_command(
+                    "Runtime.callFunctionOn",
+                    Some(serde_json::json!({
+                        "objectId": owner,
+                        "functionDeclaration": func,
+                        "returnByValue": true,
+                    })),
+                    Some(top_session),
+                )
+                .await?;
+            Ok(res
+                .get("result")
+                .and_then(|r| r.get("value"))
+                .cloned()
+                .unwrap_or(Value::Null))
+        }
+        _ => {
+            let session = frame_id
+                .and_then(|f| iframe_sessions.get(f))
+                .map(|s| s.as_str())
+                .unwrap_or(top_session);
+            let res: super::cdp::types::EvaluateResult = mgr
+                .client
+                .send_command_typed(
+                    "Runtime.evaluate",
+                    &super::cdp::types::EvaluateParams {
+                        expression: format!("({body})(document)"),
+                        return_by_value: Some(true),
+                        await_promise: Some(false),
+                    },
+                    Some(session),
+                )
+                .await?;
+            Ok(res.result.value.unwrap_or(Value::Null))
+        }
+    }
+}
+
 async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -8171,78 +8424,173 @@ async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let name = cmd.get("name").and_then(|v| v.as_str());
     let exact = cmd.get("exact").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    let name_match = name
-        .map(|n| {
-            if exact {
-                format!(
-                    "el.getAttribute('aria-label') === {} || el.textContent.trim() === {}",
-                    serde_json::to_string(n).unwrap_or_default(),
-                    serde_json::to_string(n).unwrap_or_default()
-                )
-            } else {
-                format!(
-                    "(el.getAttribute('aria-label') || '').includes({n}) || el.textContent.includes({n})",
-                    n = serde_json::to_string(n).unwrap_or_default()
-                )
-            }
-        })
-        .unwrap_or_else(|| "true".to_string());
+    // The AX tree cannot answer these, so they fall back to a DOM match on the
+    // explicit `role` attribute: none/presentation are pruned from the tree, and
+    // Chrome collapses `directory` into `list` (only the attribute tells them apart).
+    if is_presentational_role(role) || role.eq_ignore_ascii_case("directory") {
+        return handle_presentational_getbyrole(cmd, state, role, name, exact).await;
+    }
 
-    let js = format!(
-        r#"(() => {{
-            const els = document.querySelectorAll('[role="{role}"], {role}');
-            for (const el of els) {{
-                if ({name_match}) {{
-                    el.setAttribute('data-agent-browser-located', 'true');
-                    return true;
-                }}
-            }}
-            return false;
-        }})()"#,
-        role = role,
-        name_match = name_match,
+    // Query the accessibility tree via CDP: the browser engine is the
+    // authoritative source for implicit roles (e.g. <h2> -> "heading",
+    // <a href> -> "link"), which a CSS selector cannot approximate.
+    let (ax_params, effective_session_id) = super::element::resolve_ax_session(
+        state.active_frame_id.as_deref(),
+        &session_id,
+        &state.iframe_sessions,
     );
 
-    let result: super::cdp::types::EvaluateResult = mgr
+    let ax_tree: GetFullAXTreeResult = mgr
         .client
         .send_command_typed(
-            "Runtime.evaluate",
-            &super::cdp::types::EvaluateParams {
-                expression: js,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&session_id),
+            "Accessibility.getFullAXTree",
+            &ax_params,
+            Some(effective_session_id),
         )
         .await?;
 
-    if !result
-        .result
-        .value
-        .as_ref()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
-        let desc = build_role_selector(role, name, exact);
-        return Err(format!("No element found: {}", desc));
+    let (backend_node_id, actual_name) = find_ax_node_by_role(&ax_tree.nodes, role, name, exact)?;
+
+    let ref_num = state.ref_map.next_ref_num();
+    let temp_ref = format!("e{}", ref_num);
+    state.ref_map.add_with_frame(
+        temp_ref.clone(),
+        Some(backend_node_id),
+        role,
+        &actual_name,
+        None,
+        state.active_frame_id.as_deref(),
+    );
+    state.ref_map.set_next_ref_num(ref_num + 1);
+
+    let result = execute_subaction(cmd, state, &format!("@{}", temp_ref)).await;
+    state.ref_map.remove(&temp_ref);
+    result
+}
+
+/// Map a Chrome AX tree role to its ARIA name. Divergences: `image` -> `img`
+/// and `RootWebArea` -> `document` (Chrome's names for what ARIA/Playwright call
+/// `img` and `document`); queries pass through the same table so both spellings
+/// match. `directory` is not mapped here (Chrome collapses it into `list`); it is
+/// matched on the DOM attribute instead, see handle_getbyrole.
+fn normalize_ax_role(role: &str) -> String {
+    let lower = role.to_ascii_lowercase();
+    match lower.as_str() {
+        "image" => "img".to_string(),
+        "rootwebarea" => "document".to_string(),
+        _ => lower,
+    }
+}
+
+/// Collapse internal whitespace runs to single spaces and trim, mirroring
+/// Playwright's accessible-name normalization: `"Save   changes"` and
+/// `"Save changes"` are the same accessible name.
+fn normalize_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Match a role and (optional) accessible name against the AX tree, mirroring
+/// Playwright's getByRole semantics: role values are compared case-insensitively
+/// after AX-to-ARIA normalization; accessible names are whitespace-normalized on
+/// both sides, then non-exact matching is a case-insensitive substring check and
+/// exact matching is a case-sensitive whole-name comparison. Continues past AX
+/// nodes without a backendDOMNodeId (virtual nodes) so a later actionable match
+/// still wins.
+fn find_ax_node_by_role(
+    nodes: &[super::cdp::types::AXNode],
+    role: &str,
+    name: Option<&str>,
+    exact: bool,
+) -> Result<(i64, String), String> {
+    let mut matched_without_backend_id = false;
+    // `names_seen` keeps first-seen order for the error message; `names_set` makes
+    // the dedup check O(1) so a failed name query is linear, not quadratic, in the
+    // number of role matches.
+    let mut names_seen: Vec<String> = Vec::new();
+    let mut names_set: HashSet<String> = HashSet::new();
+    let mut role_match_count: usize = 0;
+    let target_role = normalize_ax_role(role);
+
+    for node in nodes {
+        if node.ignored.unwrap_or(false) {
+            continue;
+        }
+
+        let node_role = super::element::extract_ax_string(&node.role);
+        if normalize_ax_role(&node_role) != target_role {
+            continue;
+        }
+
+        let node_name = super::element::extract_ax_string(&node.name);
+        let matches = match name {
+            Some(target_name) if exact => normalize_ws(&node_name) == normalize_ws(target_name),
+            Some(target_name) => normalize_ws(&node_name)
+                .to_lowercase()
+                .contains(&normalize_ws(target_name).to_lowercase()),
+            None => true,
+        };
+
+        if !matches {
+            if name.is_some() {
+                role_match_count += 1;
+                if names_set.insert(node_name.clone()) {
+                    names_seen.push(node_name);
+                }
+            }
+            continue;
+        }
+
+        if let Some(id) = node.backend_d_o_m_node_id {
+            return Ok((id, node_name));
+        }
+
+        matched_without_backend_id = true;
     }
 
-    let selector = "[data-agent-browser-located='true']";
-    let result = execute_subaction(cmd, state, selector).await;
+    if matched_without_backend_id {
+        return Err(match name {
+            Some(target_name) => format!(
+                "Found role \"{}\" matching name \"{}\" in the accessibility tree, but it has no live DOM element to act on.",
+                role, target_name
+            ),
+            None => format!(
+                "Found role \"{}\" in the accessibility tree, but it has no live DOM element to act on.",
+                role
+            ),
+        });
+    }
 
-    // Clean up the marker attribute
-    if let Some(ref browser) = state.browser {
-        if browser.active_session_id().is_ok() {
-            let _ = browser
-                .evaluate(
-                    "document.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located')",
-                    None,
-                )
-                .await;
+    // A role match with no name match is more actionable than a blanket
+    // "not found": show what the query actually saw, so an agent can fix a
+    // typo'd name without a blind retry.
+    if let Some(target_name) = name {
+        if !names_seen.is_empty() {
+            let shown: Vec<String> = names_seen
+                .iter()
+                .take(5)
+                .map(|n| format!("\"{}\"", n))
+                .collect();
+            let more = if names_seen.len() > 5 { ", ..." } else { "" };
+            let (plural, verb) = if role_match_count == 1 {
+                ("", "has")
+            } else {
+                ("s", "have")
+            };
+            return Err(format!(
+                "{count} element{plural} {verb} role \"{role}\", but none match name \"{target_name}\". Names seen: {shown}{more}",
+                count = role_match_count,
+                plural = plural,
+                verb = verb,
+                role = role,
+                target_name = target_name,
+                shown = shown.join(", "),
+                more = more,
+            ));
         }
     }
 
-    result
+    let desc = build_role_selector(role, name, exact);
+    Err(format!("No element found: {}", desc))
 }
 
 async fn handle_semantic_locator(
@@ -8647,23 +8995,35 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
         .unwrap_or_default();
 
     let values_json = serde_json::to_string(&values).unwrap_or("[]".to_string());
+    // A locator miss returns a sentinel instead of throwing, so it is detected in
+    // Rust and normalized to the anchored "No element found: ..." shape. A thrown
+    // error surfaces as "Evaluation error: ...", which is_locator_miss skips, and
+    // a sentinel avoids misclassifying an invalid-selector error too.
     let js = format!(
         r#"(() => {{
             const select = document.querySelector({sel});
-            if (!select) throw new Error('Select element not found');
+            if (!select) return {{ __ab_miss: true }};
             const vals = {vals};
             for (const opt of select.options) {{
                 opt.selected = vals.includes(opt.value);
             }}
             select.dispatchEvent(new Event('change', {{ bubbles: true }}));
-            return Array.from(select.selectedOptions).map(o => o.value);
+            return {{ selected: Array.from(select.selectedOptions).map(o => o.value) }};
         }})()"#,
         sel = serde_json::to_string(selector).unwrap_or_default(),
         vals = values_json,
     );
 
     let result = mgr.evaluate(&js, None).await?;
-    Ok(json!({ "selected": result }))
+    if result
+        .get("__ab_miss")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Err(format!("No element found: {selector}"));
+    }
+    let selected = result.get("selected").cloned().unwrap_or_else(|| json!([]));
+    Ok(json!({ "selected": selected }))
 }
 
 async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
@@ -10841,11 +11201,408 @@ fn error_response(id: &str, error: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use super::super::cdp::types::{AXNode, AXValue};
     use super::*;
     use crate::test_utils::EnvGuard;
     use std::fs;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    /// `find --help`, the MCP tool schema, and the docs/skill references are
+    /// plain text, not generated from `FIND_ACTIONS`; this pins their
+    /// wording to the actual accepted set so an edit to one without the
+    /// others fails here instead of drifting silently again.
+    #[test]
+    fn find_actions_help_text_matches_the_accepted_set() {
+        assert_eq!(FIND_ACTIONS.join(", "), "click, fill, check, hover, text");
+    }
+
+    /// `type`, `focus`, and `uncheck` are real standalone commands but were
+    /// never wired into `execute_subaction`, so they used to reach here and
+    /// fail with "Browser not launched" (masking the real problem) or a bare
+    /// "Unknown subaction: type". No prior test caught this:
+    /// `test_all_documented_actions_are_handled` only covers top-level
+    /// `action` values, not `find`'s nested `subaction`.
+    #[tokio::test]
+    async fn execute_subaction_rejects_undocumented_actions_before_requiring_a_browser() {
+        let mut state = DaemonState::new();
+        assert!(state.browser.is_none());
+
+        for bogus in ["type", "focus", "uncheck", "drag", ""] {
+            assert!(
+                !FIND_ACTIONS.contains(&bogus),
+                "test fixture '{bogus}' must not overlap the real accepted set"
+            );
+            let cmd = json!({ "subaction": bogus });
+            let err = execute_subaction(&cmd, &mut state, "@e1")
+                .await
+                .expect_err(&format!(
+                    "'{bogus}' is not a find action and must be rejected"
+                ));
+            assert_eq!(
+                err,
+                format!(
+                    "Unknown action '{}' for find. Valid actions: {}.",
+                    bogus,
+                    FIND_ACTIONS.join(", ")
+                )
+            );
+        }
+    }
+
+    /// The dispatch-level validation must reject an unsupported `find`
+    /// action for every find-family command, before any browser launch or
+    /// locator resolution. Without it, a missing element fails the locator
+    /// step first and masks the invalid action with "element not found"
+    /// (after paying for a browser launch to say it).
+    #[test]
+    fn validate_find_subaction_rejects_before_any_browser_work() {
+        for command in FIND_SUBACTION_COMMANDS {
+            let err = validate_find_subaction(command, &json!({ "subaction": "type" }))
+                .expect_err(&format!("'{command}' must validate its find action"));
+            assert_eq!(
+                err,
+                format!(
+                    "Unknown action 'type' for find. Valid actions: {}.",
+                    FIND_ACTIONS.join(", ")
+                )
+            );
+        }
+
+        // The default subaction and every accepted action pass.
+        assert!(validate_find_subaction("getbyrole", &json!({})).is_ok());
+        for accepted in FIND_ACTIONS {
+            assert!(
+                validate_find_subaction("getbytext", &json!({ "subaction": accepted })).is_ok()
+            );
+        }
+
+        // Commands outside the find family carry no subaction contract.
+        assert!(validate_find_subaction("click", &json!({ "subaction": "type" })).is_ok());
+    }
+
+    /// Every entry in `FIND_ACTIONS` must actually dispatch in
+    /// `execute_subaction`'s match, not just pass the guard; this is the
+    /// real lock the guard alone can't provide, since the guard and the
+    /// match arms are two separate lists that Rust can't check against each
+    /// other at compile time.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_execute_subaction_dispatches_every_find_action() {
+        let mut state = DaemonState::new();
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert!(resp.get("success").and_then(|v| v.as_bool()) == Some(true));
+
+        let resp = execute_command(
+            &json!({
+                "id": "2",
+                "action": "navigate",
+                "url": "data:text/html,<input id='i' role='textbox' value='x'><button>Go</button><input type='checkbox' role='checkbox'>"
+            }),
+            &mut state,
+        )
+        .await;
+        assert!(resp.get("success").and_then(|v| v.as_bool()) == Some(true));
+
+        for action in FIND_ACTIONS {
+            let mut cmd = json!({
+                "id": "3",
+                "action": "getbyrole",
+                "role": match *action {
+                    "fill" => "textbox",
+                    "check" => "checkbox",
+                    _ => "button",
+                },
+                "subaction": action,
+            });
+            if *action == "fill" {
+                cmd["value"] = json!("y");
+            }
+            let resp = execute_command(&cmd, &mut state).await;
+            // success == true is the only assertion that proves the action
+            // reached a real handler AND that handler worked: a guard-only
+            // check ("not Unknown action") stays green when an entry added
+            // to FIND_ACTIONS falls through to the internal-error fallback.
+            let error = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(
+                resp.get("success").and_then(|v| v.as_bool()) == Some(true),
+                "action '{action}' must dispatch to a working handler: {error}"
+            );
+        }
+
+        let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    }
+
+    fn ax_value(value: &str) -> AXValue {
+        AXValue {
+            value_type: "string".to_string(),
+            value: Some(Value::String(value.to_string())),
+        }
+    }
+
+    fn ax_node(role: &str, name: &str, backend_node_id: Option<i64>, ignored: bool) -> AXNode {
+        AXNode {
+            node_id: format!("node-{}", name),
+            role: Some(ax_value(role)),
+            name: Some(ax_value(name)),
+            value: None,
+            description: None,
+            properties: None,
+            child_ids: None,
+            backend_d_o_m_node_id: backend_node_id,
+            ignored: Some(ignored),
+        }
+    }
+
+    #[test]
+    fn normalize_ax_role_maps_rootwebarea_to_document() {
+        // Chrome's AX root is `RootWebArea`; ARIA and Playwright call it
+        // `document`. Force-red: drop the mapping and `find role document` misses
+        // the root. `image` is pre-existing and covered elsewhere.
+        assert_eq!(normalize_ax_role("RootWebArea"), "document");
+        assert_eq!(normalize_ax_role("document"), "document");
+    }
+
+    #[test]
+    fn find_ax_node_by_role_matches_browser_computed_implicit_roles() {
+        let nodes = vec![
+            ax_node("RootWebArea", "Fixture", Some(1), false),
+            ax_node("link", "Services", Some(42), false),
+            ax_node("heading", "Skills", Some(43), false),
+        ];
+
+        let (backend_id, actual_name) =
+            find_ax_node_by_role(&nodes, "link", Some("Services"), true)
+                .expect("computed AX link role should match the anchor");
+        assert_eq!(backend_id, 42);
+        assert_eq!(actual_name, "Services");
+
+        let (backend_id, _) = find_ax_node_by_role(&nodes, "heading", None, false)
+            .expect("role-only lookup should match the implicit heading");
+        assert_eq!(backend_id, 43);
+    }
+
+    #[test]
+    fn find_ax_node_by_role_non_exact_name_is_case_insensitive() {
+        let nodes = vec![ax_node("heading", "SKILLS", Some(43), false)];
+
+        for query in ["Skills", "skills", "SKILLS", "kill"] {
+            let (backend_id, actual_name) =
+                find_ax_node_by_role(&nodes, "heading", Some(query), false).unwrap_or_else(|e| {
+                    panic!("expected case-insensitive match for {query:?}: {e}")
+                });
+            assert_eq!(backend_id, 43);
+            assert_eq!(actual_name, "SKILLS");
+        }
+    }
+
+    #[test]
+    fn find_ax_node_by_role_exact_name_stays_case_sensitive() {
+        let nodes = vec![ax_node("heading", "SKILLS", Some(43), false)];
+
+        let err = find_ax_node_by_role(&nodes, "heading", Some("Skills"), true)
+            .expect_err("exact matching must not ignore case");
+        assert!(err.contains("Names seen: \"SKILLS\""));
+
+        let (backend_id, _) = find_ax_node_by_role(&nodes, "heading", Some("SKILLS"), true)
+            .expect("exact match with identical case should still succeed");
+        assert_eq!(backend_id, 43);
+    }
+
+    #[test]
+    fn find_ax_node_by_role_matches_role_case_insensitively() {
+        let nodes = vec![ax_node("heading", "Skills", Some(43), false)];
+
+        let (backend_id, _) = find_ax_node_by_role(&nodes, "Heading", None, false)
+            .expect("role matching should ignore case, same as name matching");
+        assert_eq!(backend_id, 43);
+    }
+
+    /// Chrome's AX tree reports `<img>` as role "image" while ARIA (and
+    /// Playwright queries) call it "img"; both spellings must find the node.
+    #[test]
+    fn find_ax_node_by_role_normalizes_ax_role_synonyms() {
+        let nodes = vec![ax_node("image", "Logo", Some(51), false)];
+
+        let (backend_id, _) = find_ax_node_by_role(&nodes, "img", Some("Logo"), false)
+            .expect("the ARIA role name must match Chrome's AX role");
+        assert_eq!(backend_id, 51);
+
+        let (backend_id, _) = find_ax_node_by_role(&nodes, "image", Some("Logo"), false)
+            .expect("the AX spelling keeps matching after normalization");
+        assert_eq!(backend_id, 51);
+    }
+
+    /// Accessible names are whitespace-normalized on both sides, so a name
+    /// rendered with a collapsed run of spaces still matches exactly.
+    #[test]
+    fn find_ax_node_by_role_normalizes_whitespace_in_names() {
+        let nodes = vec![ax_node("button", "Save   changes", Some(52), false)];
+
+        let (backend_id, _) = find_ax_node_by_role(&nodes, "button", Some("Save changes"), true)
+            .expect("exact matching must normalize internal whitespace");
+        assert_eq!(backend_id, 52);
+
+        let (backend_id, _) = find_ax_node_by_role(&nodes, "button", Some("save  changes"), false)
+            .expect("substring matching must normalize internal whitespace");
+        assert_eq!(backend_id, 52);
+    }
+
+    #[test]
+    fn find_ax_node_by_role_supports_substring_matching() {
+        let nodes = vec![ax_node("button", "Submit form", Some(7), false)];
+
+        let (backend_id, actual_name) =
+            find_ax_node_by_role(&nodes, "button", Some("submit"), false)
+                .expect("substring matching should be allowed without exact");
+        assert_eq!(backend_id, 7);
+        assert_eq!(actual_name, "Submit form");
+
+        let err = find_ax_node_by_role(&nodes, "button", Some("Submit"), true)
+            .expect_err("exact matching should reject partial names");
+        assert!(err.contains("Names seen: \"Submit form\""));
+    }
+
+    #[test]
+    fn find_ax_node_by_role_skips_ignored_nodes_and_requires_backend_id() {
+        let nodes = vec![
+            ax_node("link", "Services", Some(1), true),
+            ax_node("link", "Services", None, false),
+        ];
+
+        let err = find_ax_node_by_role(&nodes, "link", Some("Services"), true)
+            .expect_err("matching AX nodes must have a backend DOM node id");
+        assert!(err.contains("no live DOM element"));
+    }
+
+    #[test]
+    fn find_ax_node_by_role_uses_later_actionable_match() {
+        let nodes = vec![
+            ax_node("link", "Services", None, false),
+            ax_node("link", "Services", Some(42), false),
+        ];
+
+        let (backend_id, actual_name) =
+            find_ax_node_by_role(&nodes, "link", Some("Services"), true)
+                .expect("lookup should continue past matching virtual AX nodes");
+        assert_eq!(backend_id, 42);
+        assert_eq!(actual_name, "Services");
+    }
+
+    #[test]
+    fn find_ax_node_by_role_name_miss_lists_names_seen() {
+        let nodes = vec![
+            ax_node("heading", "Skills", Some(43), false),
+            ax_node("heading", "Experience", Some(44), false),
+        ];
+
+        let err = find_ax_node_by_role(&nodes, "heading", Some("Nope"), false)
+            .expect_err("no node should match an unrelated name");
+        assert!(err.contains("2 elements have role \"heading\""));
+        assert!(err.contains("Nope"));
+        assert!(err.contains("\"Skills\""));
+        assert!(err.contains("\"Experience\""));
+    }
+
+    #[test]
+    fn find_ax_node_by_role_name_miss_count_is_elements_not_unique_names() {
+        let nodes = vec![
+            ax_node("heading", "Skills", Some(43), false),
+            ax_node("heading", "Skills", Some(44), false),
+            ax_node("heading", "Skills", Some(45), false),
+        ];
+
+        let err = find_ax_node_by_role(&nodes, "heading", Some("Nope"), false)
+            .expect_err("no node should match an unrelated name");
+        // 3 elements share the same name, so names_seen dedupes to 1 entry;
+        // the element count must still say 3, not 1.
+        assert!(
+            err.contains("3 elements have role \"heading\""),
+            "expected element count 3, got: {err}"
+        );
+        assert_eq!(
+            err.matches("\"Skills\"").count(),
+            1,
+            "names_seen must dedupe the display list: {err}"
+        );
+    }
+
+    #[test]
+    fn find_ax_node_by_role_no_role_match_reports_role_selector() {
+        let nodes = vec![ax_node("button", "Submit", Some(7), false)];
+
+        let err = find_ax_node_by_role(&nodes, "heading", Some("Nope"), false)
+            .expect_err("no node has this role at all");
+        assert!(err.contains("getByRole('heading'"));
+        assert!(err.contains("Nope"));
+    }
+
+    #[test]
+    fn presentational_roles_are_detected_case_insensitively() {
+        assert!(is_presentational_role("none"));
+        assert!(is_presentational_role("presentation"));
+        assert!(is_presentational_role("None"));
+        assert!(is_presentational_role("PRESENTATION"));
+        assert!(!is_presentational_role("heading"));
+        assert!(!is_presentational_role("generic"));
+    }
+
+    /// Chrome prunes role="none"/"presentation" elements from the AX tree
+    /// (divs, uls, imgs vanish; tables survive only as ignored nodes), so
+    /// these queries must resolve through the DOM-attribute fallback, not
+    /// `find_ax_node_by_role`. Regression test for the review finding on
+    /// #1552: the AX rewrite broke `find role none` / `find role
+    /// presentation`, which the old CSS path matched.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_presentational_roles_resolve_through_dom_fallback() {
+        let mut state = DaemonState::new();
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert!(resp.get("success").and_then(|v| v.as_bool()) == Some(true));
+
+        let resp = execute_command(
+            &json!({
+                "id": "2",
+                "action": "navigate",
+                "url": "data:text/html,<div role='none'>alpha</div><div role='presentation'>beta</div><h2>gamma</h2>"
+            }),
+            &mut state,
+        )
+        .await;
+        assert!(resp.get("success").and_then(|v| v.as_bool()) == Some(true));
+
+        for (role, expected) in [
+            ("none", "alpha"),
+            ("presentation", "beta"),
+            ("heading", "gamma"),
+        ] {
+            let resp = execute_command(
+                &json!({ "id": "3", "action": "getbyrole", "role": role, "subaction": "text" }),
+                &mut state,
+            )
+            .await;
+            assert!(
+                resp.get("success").and_then(|v| v.as_bool()) == Some(true),
+                "find role {role} text must succeed: {resp}"
+            );
+            let text = resp
+                .get("data")
+                .and_then(|d| d.get("text"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            assert_eq!(text, expected, "find role {role} text");
+        }
+
+        let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    }
 
     async fn start_webdriver_response_server(
         responses: Vec<(&'static str, Value)>,

@@ -144,10 +144,11 @@ agent-browser mouse wheel 100         # Scroll wheel
 
 ```bash
 agent-browser find role button click --name "Submit"
+agent-browser find role heading text --name "Skills"     # implicit roles work: <h2>=heading, <ul>=list, top-level <header>=banner
 agent-browser find text "Sign In" click
 agent-browser find text "Sign In" click --exact      # Exact match only
 agent-browser find label "Email" fill "user@test.com"
-agent-browser find placeholder "Search" type "query"
+agent-browser find placeholder "Search" fill "query"
 agent-browser find alt "Logo" click
 agent-browser find title "Close" click
 agent-browser find testid "submit-btn" click

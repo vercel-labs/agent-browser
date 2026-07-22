@@ -86,15 +86,15 @@ agent-browser is checked <sel>        # Check if checked
 
 ## Find elements
 
-Semantic locators with actions (`click`, `fill`, `type`, `hover`, `focus`, `check`, `uncheck`, `text`):
+Semantic locators with actions (`click`, `fill`, `check`, `hover`, `text`):
 
 ```bash
 agent-browser find role <role> <action> [value]
-agent-browser find text <text> <action>
+agent-browser find text <text> <action> [value]
 agent-browser find label <label> <action> [value]
 agent-browser find placeholder <ph> <action> [value]
-agent-browser find alt <text> <action>
-agent-browser find title <text> <action>
+agent-browser find alt <text> <action> [value]
+agent-browser find title <text> <action> [value]
 agent-browser find testid <id> <action> [value]
 agent-browser find first <sel> <action> [value]
 agent-browser find last <sel> <action> [value]
@@ -104,12 +104,13 @@ agent-browser find nth <n> <sel> <action> [value]
 Options:
 
 - `--name <name>`: filter role by accessible name
-- `--exact`: require exact text match
+- `--exact`: exact, case-sensitive match. For `role` it applies to the accessible name, whose default is a case-insensitive substring.
 
 Examples:
 
 ```bash
 agent-browser find role button click --name "Submit"
+agent-browser find role heading text --name "Skills"     # implicit roles work: <h2>=heading, <ul>=list, top-level <header>=banner
 agent-browser find label "Email" fill "test@test.com"
 agent-browser find alt "Logo" click
 agent-browser find first ".item" click

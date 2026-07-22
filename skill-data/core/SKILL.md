@@ -149,10 +149,11 @@ Use semantic locators:
 
 ```bash
 agent-browser find role button click --name "Submit"
+agent-browser find role heading text --name "Skills"     # implicit roles work: <h2>=heading, <ul>=list, top-level <header>=banner
 agent-browser find text "Sign In" click
 agent-browser find text "Sign In" click --exact     # exact match only
 agent-browser find label "Email" fill "user@test.com"
-agent-browser find placeholder "Search" type "query"
+agent-browser find placeholder "Search" fill "query"
 agent-browser find testid "submit-btn" click
 agent-browser find first ".card" click
 agent-browser find nth 2 ".card" hover

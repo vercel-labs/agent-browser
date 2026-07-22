@@ -191,25 +191,26 @@ agent-browser is checked <sel>        # Check if checked
 
 ```bash
 agent-browser find role <role> <action> [value]       # By ARIA role
-agent-browser find text <text> <action>               # By text content
+agent-browser find text <text> <action> [value]       # By text content
 agent-browser find label <label> <action> [value]     # By label
 agent-browser find placeholder <ph> <action> [value]  # By placeholder
-agent-browser find alt <text> <action>                # By alt text
-agent-browser find title <text> <action>              # By title attr
+agent-browser find alt <text> <action> [value]        # By alt text
+agent-browser find title <text> <action> [value]      # By title attr
 agent-browser find testid <id> <action> [value]       # By data-testid
 agent-browser find first <sel> <action> [value]       # First match
 agent-browser find last <sel> <action> [value]        # Last match
 agent-browser find nth <n> <sel> <action> [value]     # Nth match
 ```
 
-**Actions:** `click`, `fill`, `type`, `hover`, `focus`, `check`, `uncheck`, `text`
+**Actions:** `click`, `fill`, `check`, `hover`, `text`
 
-**Options:** `--name <name>` (filter role by accessible name), `--exact` (require exact text match)
+**Options:** `--name <name>` (filter role by accessible name), `--exact` (exact, case-sensitive match; for `role` it applies to the accessible name, whose default is a case-insensitive substring)
 
 **Examples:**
 
 ```bash
 agent-browser find role button click --name "Submit"
+agent-browser find role heading text --name "Skills"     # implicit roles work: <h2>=heading, <ul>=list, top-level <header>=banner
 agent-browser find text "Sign In" click
 agent-browser find label "Email" fill "test@test.com"
 agent-browser find first ".item" click
