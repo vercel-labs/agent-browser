@@ -484,6 +484,14 @@ fn parse_audit_result(value: Value) -> Result<Value, String> {
         .map_err(|error| format!("a11y returned invalid JSON: {}", error))
 }
 
+/// axe's frame merge consumes one partial per frame in tree order. A false
+/// value preserves that position while telling the merge to skip the frame.
+/// JSON null cannot be used because axe 4.12.1 dereferences each entry while
+/// locating the report's environment data before it reaches its skip logic.
+fn skipped_frame_partial() -> Value {
+    Value::Bool(false)
+}
+
 /// Run `axe.runPartial` in top-to-bottom frame order, then combine those
 /// serialized partials with `axe.finishRun`. This avoids cross-frame page
 /// messaging and keeps every frame's page-owned `window.axe` value intact.
@@ -554,7 +562,7 @@ pub async fn run_audit(
                 .map(|context| (context.session_id.as_str(), Some(context.context_id)))
         };
         let Some((session_id, context_id)) = context else {
-            partials.push(Value::Null);
+            partials.push(skipped_frame_partial());
             skipped_descendant_depth = Some(target.depth);
             continue;
         };
@@ -579,7 +587,7 @@ pub async fn run_audit(
                 return parse_audit_result(value);
             }
             _ => {
-                partials.push(Value::Null);
+                partials.push(skipped_frame_partial());
                 skipped_descendant_depth = Some(target.depth);
             }
         }
@@ -642,6 +650,14 @@ mod tests {
         let finish = finish_expression(&[json!({ "results": [] })], Some("wcag2a"), None);
         assert!(finish.contains("agentAxe.finishRun"));
         assert!(finish.contains("const module = { exports: {} }"));
+    }
+
+    #[test]
+    fn test_finish_expression_uses_false_for_skipped_frames() {
+        let finish = finish_expression(&[skipped_frame_partial()], None, None);
+
+        assert!(finish.contains("agentAxe.finishRun([false], options)"));
+        assert!(!finish.contains("agentAxe.finishRun([null], options)"));
     }
 
     #[test]

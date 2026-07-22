@@ -1945,18 +1945,30 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 match rest[i] {
                     "--tags" => {
                         i += 1;
-                        let value = rest.get(i).ok_or(ParseError::MissingArguments {
-                            context: "a11y --tags".to_string(),
-                            usage: A11Y_USAGE,
-                        })?;
+                        let value = rest
+                            .get(i)
+                            .copied()
+                            .filter(|value| {
+                                !matches!(*value, "--tags" | "--selector" | "-s" | "--json")
+                            })
+                            .ok_or(ParseError::MissingArguments {
+                                context: "a11y --tags".to_string(),
+                                usage: A11Y_USAGE,
+                            })?;
                         cmd["tags"] = json!(value);
                     }
                     "--selector" | "-s" => {
                         i += 1;
-                        let value = rest.get(i).ok_or(ParseError::MissingArguments {
-                            context: "a11y --selector".to_string(),
-                            usage: A11Y_USAGE,
-                        })?;
+                        let value = rest
+                            .get(i)
+                            .copied()
+                            .filter(|value| {
+                                !matches!(*value, "--tags" | "--selector" | "-s" | "--json")
+                            })
+                            .ok_or(ParseError::MissingArguments {
+                                context: "a11y --selector".to_string(),
+                                usage: A11Y_USAGE,
+                            })?;
                         cmd["selector"] = json!(value);
                     }
                     "--json" => {
@@ -3441,6 +3453,20 @@ mod tests {
         assert_eq!(cmd["url"], "about:blank");
 
         assert!(parse_command(&args("a11y --tags"), &default_flags()).is_err());
+        assert!(matches!(
+            parse_command(
+                &args("a11y --tags --selector #main"),
+                &default_flags()
+            ),
+            Err(ParseError::MissingArguments { context, .. }) if context == "a11y --tags"
+        ));
+        assert!(matches!(
+            parse_command(
+                &args("a11y --selector --tags wcag2a"),
+                &default_flags()
+            ),
+            Err(ParseError::MissingArguments { context, .. }) if context == "a11y --selector"
+        ));
         assert!(parse_command(&args("a11y --bogus"), &default_flags()).is_err());
         assert!(parse_command(
             &args("a11y https://first.example https://second.example"),
