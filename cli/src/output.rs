@@ -2081,10 +2081,11 @@ Examples:
   agent-browser find role button click --name Submit
   agent-browser find text "Sign In" click
   agent-browser find label "Email" fill "user@example.com"
-  agent-browser find placeholder "Search..." type "query"
+  agent-browser find placeholder "Search..." fill "query"
   agent-browser find testid "login-form" click
   agent-browser find first "li.item" click
   agent-browser find nth 2 ".card" hover
+  agent-browser find role heading text --name Welcome
 "##
         }
 
@@ -2175,6 +2176,7 @@ Subcommands:
     --status <code>          Filter by status (200, 2xx, 400-499)
   request <requestId>        View full request/response detail (including body)
   har <start|stop> [path]    Record and export a HAR file
+    --content <mode>         Response bodies to embed on start: text (default), all, none
 
 Global Options:
   --json               Output as JSON
@@ -2191,6 +2193,7 @@ Examples:
   agent-browser network requests --clear
   agent-browser network request 1234.5
   agent-browser network har start
+  agent-browser network har start --content all
   agent-browser network har stop ./capture.har
 "##
         }

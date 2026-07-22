@@ -7171,6 +7171,52 @@ async fn e2e_removeinitscript_roundtrip() {
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }
 
+/// A multiselect locator miss must surface the anchored "No element found"
+/// guidance, not a raw "Evaluation error: ...". Guards the handler wiring end to
+/// end: a unit test of the mapping alone stays green if the handler stops routing
+/// misses through it. Force-red: drop the sentinel miss handling in
+/// handle_multiselect and this assertion fails on the raw evaluate error.
+#[tokio::test]
+#[ignore]
+async fn e2e_multiselect_miss_surfaces_anchored_error() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // about:blank has no #picker, so the selector misses.
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "multiselect", "selector": "#picker", "values": ["a"] }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(|v| v.as_bool()),
+        Some(false),
+        "multiselect on a missing selector should error: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
+    let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    // Assert the full anchored shape, not just the guidance suffix: the miss must
+    // carry "No element found", retain the "#picker" selector detail, and end with
+    // the locator-miss guidance. A generic suffix-only check would pass even if the
+    // detail were dropped or a different classifier produced the guidance.
+    assert!(
+        err.starts_with("No element found") && err.contains("#picker"),
+        "miss should keep the anchored shape and selector detail, got: {err}"
+    );
+    assert!(
+        err.contains("Verify the selector, role, or name is correct"),
+        "miss should surface the anchored locator-miss guidance, got: {err}"
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
 /// An earlier valid ARIA token in a multi-token role attribute is the operative
 /// role, so `role="mark none"` is a mark and must not answer `find role none`.
 /// Force-red: drop `mark` from the presentational VALID_ROLES set and the query

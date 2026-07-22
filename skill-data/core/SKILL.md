@@ -143,7 +143,7 @@ agent-browser find role heading text --name "Skills"     # implicit roles work: 
 agent-browser find text "Sign In" click
 agent-browser find text "Sign In" click --exact     # exact match only
 agent-browser find label "Email" fill "user@test.com"
-agent-browser find placeholder "Search" type "query"
+agent-browser find placeholder "Search" fill "query"
 agent-browser find testid "submit-btn" click
 agent-browser find first ".card" click
 agent-browser find nth 2 ".card" hover
@@ -311,6 +311,10 @@ agent-browser network requests                                     # inspect wha
 agent-browser network har start                                    # record all traffic
 # ... perform actions ...
 agent-browser network har stop /tmp/trace.har
+
+# HAR files embed text response bodies (JSON/HTML/JS) by default, so the
+# recording alone is enough to study a site's API offline. Use
+# `--content all` to include binary bodies or `--content none` to disable.
 ```
 
 ### Record a video of the workflow

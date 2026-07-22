@@ -73,6 +73,7 @@ struct ActiveProviderSession {
 }
 
 /// Captured request/response metadata used to export HAR 1.2 files.
+#[derive(Clone)]
 pub struct HarEntry {
     pub request_id: String,
     /// Seconds since Unix epoch (CDP `wallTime`), with sub-second precision.
@@ -99,7 +100,44 @@ pub struct HarEntry {
     /// Monotonic timestamp (seconds) from `Network.loadingFinished`; used to
     /// compute the `receive` timing phase.
     pub loading_finished_timestamp: Option<f64>,
+    /// Response body fetched via `Network.getResponseBody` when the entry
+    /// finished loading, subject to the active [`HarContentMode`] and size caps.
+    pub response_body: Option<String>,
+    /// Whether `response_body` is base64-encoded (binary content).
+    pub response_body_base64: bool,
 }
+
+/// Which response bodies to embed in HAR output as `content.text`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum HarContentMode {
+    /// Sizes and MIME types only (pre-0.33 behavior).
+    None,
+    /// Text-like bodies only: JSON, XML, HTML, JS, form data, SVG.
+    #[default]
+    Text,
+    /// Every body; binary content is embedded base64-encoded.
+    All,
+}
+
+impl HarContentMode {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "none" => Ok(Self::None),
+            "text" => Ok(Self::Text),
+            "all" => Ok(Self::All),
+            other => Err(format!(
+                "Invalid HAR content mode '{}'. Valid options: all, text, none",
+                other
+            )),
+        }
+    }
+}
+
+/// Bodies larger than this are not embedded in the HAR (the entry keeps its
+/// size/MIME metadata either way).
+const HAR_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+/// Total budget for embedded bodies across one recording session.
+const HAR_MAX_TOTAL_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 pub struct RouteEntry {
     pub url_pattern: String,
@@ -189,6 +227,10 @@ struct DrainedEvents {
     attached_other_sessions: Vec<String>,
     /// Session IDs from Target.detachedFromTarget.
     detached_iframe_sessions: Vec<String>,
+    /// (request_id, event session_id) pairs from `Network.loadingFinished`
+    /// while HAR recording; bodies are fetched for these in
+    /// `apply_drained_events` before Chrome evicts them (e.g. on navigation).
+    har_finished_requests: Vec<(String, Option<String>)>,
 }
 
 /// Compute a hash of the [`LaunchOptions`] fields that require a browser
@@ -307,6 +349,10 @@ pub struct DaemonState {
     pub pending_confirmation: Option<PendingConfirmation>,
     pub har_recording: bool,
     pub har_entries: Vec<HarEntry>,
+    pub har_content_mode: HarContentMode,
+    /// Bytes of response bodies embedded so far this recording; enforces
+    /// [`HAR_MAX_TOTAL_BODY_BYTES`].
+    pub har_body_total_bytes: usize,
     pub confirm_actions: Option<ConfirmActions>,
     pub inspect_server: Option<InspectServer>,
     pub routes: Arc<RwLock<Vec<RouteEntry>>>,
@@ -404,6 +450,8 @@ impl DaemonState {
             pending_confirmation: None,
             har_recording: false,
             har_entries: Vec::new(),
+            har_content_mode: HarContentMode::default(),
+            har_body_total_bytes: 0,
             confirm_actions: ConfirmActions::from_env(),
             inspect_server: None,
             routes: Arc::new(RwLock::new(Vec::new())),
@@ -1035,6 +1083,81 @@ impl DaemonState {
             }
         }
 
+        // Fetch response bodies for HAR entries that just finished loading,
+        // while Chrome still has them buffered — bodies are evicted on
+        // navigation, so this cannot wait until `har stop`.
+        if self.har_recording && !drained.har_finished_requests.is_empty() {
+            let mode = self.har_content_mode;
+            let mut to_fetch: Vec<(String, Option<String>)> = Vec::new();
+            for (request_id, session_id) in &drained.har_finished_requests {
+                let Some(entry) = self
+                    .har_entries
+                    .iter()
+                    .rev()
+                    .find(|e| &e.request_id == request_id)
+                else {
+                    continue;
+                };
+                if entry.response_body.is_some() {
+                    continue;
+                }
+                let wanted = match mode {
+                    HarContentMode::None => false,
+                    HarContentMode::Text => har_mime_is_text(&entry.mime_type),
+                    HarContentMode::All => true,
+                };
+                if wanted {
+                    to_fetch.push((request_id.clone(), session_id.clone()));
+                }
+            }
+
+            let mut fetched: Vec<(String, String, bool)> = Vec::new();
+            if let Some(ref mgr) = self.browser {
+                let active_sid = mgr.active_session_id().ok().map(String::from);
+                for (request_id, event_sid) in to_fetch {
+                    let Some(sid) = event_sid.or_else(|| active_sid.clone()) else {
+                        continue;
+                    };
+                    let Ok(result) = mgr
+                        .client
+                        .send_command(
+                            "Network.getResponseBody",
+                            Some(json!({ "requestId": &request_id })),
+                            Some(&sid),
+                        )
+                        .await
+                    else {
+                        continue;
+                    };
+                    let base64_encoded = result
+                        .get("base64Encoded")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if let Some(body) = result.get("body").and_then(|v| v.as_str()) {
+                        if !body.is_empty()
+                            && body.len() <= HAR_MAX_BODY_BYTES
+                            && self.har_body_total_bytes + body.len() <= HAR_MAX_TOTAL_BODY_BYTES
+                        {
+                            self.har_body_total_bytes += body.len();
+                            fetched.push((request_id, body.to_string(), base64_encoded));
+                        }
+                    }
+                }
+            }
+
+            for (request_id, body, base64_encoded) in fetched {
+                if let Some(entry) = self
+                    .har_entries
+                    .iter_mut()
+                    .rev()
+                    .find(|e| e.request_id == request_id)
+                {
+                    entry.response_body = Some(body);
+                    entry.response_body_base64 = base64_encoded;
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1055,6 +1178,7 @@ impl DaemonState {
         let mut attached_worker_sessions: Vec<(TargetInfo, String)> = Vec::new();
         let mut attached_other_sessions: Vec<String> = Vec::new();
         let mut detached_iframe_sessions: Vec<String> = Vec::new();
+        let mut har_finished_requests: Vec<(String, Option<String>)> = Vec::new();
 
         loop {
             match rx.try_recv() {
@@ -1276,6 +1400,8 @@ impl DaemonState {
                                         response_body_size: -1,
                                         cdp_timing: None,
                                         loading_finished_timestamp: None,
+                                        response_body: None,
+                                        response_body_base64: false,
                                     });
                                 }
                                 if self.request_tracking {
@@ -1404,6 +1530,10 @@ impl DaemonState {
                                 if let Some(len) = encoded_data_length {
                                     entry.response_body_size = len;
                                 }
+                                if self.har_content_mode != HarContentMode::None {
+                                    har_finished_requests
+                                        .push((request_id.to_string(), event.session_id.clone()));
+                                }
                             }
                         }
                         "Network.loadingFailed" if self.har_recording => {
@@ -1502,6 +1632,7 @@ impl DaemonState {
             attached_worker_sessions,
             attached_other_sessions,
             detached_iframe_sessions,
+            har_finished_requests,
         }
     }
 }
@@ -1876,6 +2007,13 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         return error_response(&id, &err);
     }
 
+    // Invalid inputs are rejected before expensive setup: an unsupported
+    // `find` action must fail here, not after a browser launch and a locator
+    // resolution that can mask it with "element not found".
+    if let Err(err) = validate_find_subaction(action, cmd) {
+        return error_response(&id, &err);
+    }
+
     if action == INTERNAL_DAEMON_SHUTDOWN_ACTION {
         let mut resp = match handle_close(state).await {
             Ok(data) => success_response(&id, data),
@@ -2239,7 +2377,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "diff_screenshot" => handle_diff_screenshot(cmd, state).await,
         "video_start" => handle_video_start(cmd, state).await,
         "video_stop" => handle_video_stop(state).await,
-        "har_start" => handle_har_start(state).await,
+        "har_start" => handle_har_start(cmd, state).await,
         "har_stop" => handle_har_stop(cmd, state).await,
         "route" => handle_route(cmd, state).await,
         "unroute" => handle_unroute(cmd, state).await,
@@ -7712,6 +7850,49 @@ async fn handle_mainframe(state: &mut DaemonState) -> Result<Value, String> {
 // Semantic locator handlers
 // ---------------------------------------------------------------------------
 
+/// The exact set of `find` actions `execute_subaction` dispatches. Shared by
+/// the validation guard, the error message, and the accepted-actions test,
+/// so drift between the guard and the match arms fails a test instead of
+/// silently reopening the "Unknown subaction: type" bug this fixes.
+const FIND_ACTIONS: &[&str] = &["click", "fill", "check", "hover", "text"];
+
+/// The daemon commands that dispatch a `find` subaction through
+/// `execute_subaction` after resolving their locator.
+const FIND_SUBACTION_COMMANDS: &[&str] = &[
+    "getbyrole",
+    "getbytext",
+    "getbylabel",
+    "getbyplaceholder",
+    "getbyalttext",
+    "getbytitle",
+    "getbytestid",
+    "nth",
+];
+
+/// Reject an unsupported `find` action before any browser launch or locator
+/// resolution. The guard inside `execute_subaction` only runs after both, so
+/// on a missing element it never runs at all: the caller fails first with an
+/// "element not found" error that names the wrong fault, after paying for a
+/// browser launch to say it. Validation order follows the input, not the
+/// setup cost.
+fn validate_find_subaction(action: &str, cmd: &Value) -> Result<(), String> {
+    if !FIND_SUBACTION_COMMANDS.contains(&action) {
+        return Ok(());
+    }
+    let subaction = cmd
+        .get("subaction")
+        .and_then(|v| v.as_str())
+        .unwrap_or("click");
+    if !FIND_ACTIONS.contains(&subaction) {
+        return Err(format!(
+            "Unknown action '{}' for find. Valid actions: {}.",
+            subaction,
+            FIND_ACTIONS.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 async fn execute_subaction(
     cmd: &Value,
     state: &mut DaemonState,
@@ -7721,6 +7902,18 @@ async fn execute_subaction(
         .get("subaction")
         .and_then(|v| v.as_str())
         .unwrap_or("click");
+
+    // Validate before dispatching: an unsupported action (e.g. "type",
+    // "focus", "uncheck", all real standalone commands, just not `find`
+    // actions) gets a message naming the valid set here.
+    if !FIND_ACTIONS.contains(&subaction) {
+        return Err(format!(
+            "Unknown action '{}' for find. Valid actions: {}.",
+            subaction,
+            FIND_ACTIONS.join(", ")
+        ));
+    }
+
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
@@ -7791,7 +7984,12 @@ async fn execute_subaction(
             .await?;
             Ok(json!({ "text": text }))
         }
-        _ => Err(format!("Unknown subaction: {}", subaction)),
+        // Unreachable today; a real Err rather than unreachable!() in case
+        // this ever drifts out of sync with the guard above.
+        _ => Err(format!(
+            "Internal error: action '{}' passed validation but has no handler.",
+            subaction
+        )),
     }
 }
 
@@ -8571,23 +8769,35 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
         .unwrap_or_default();
 
     let values_json = serde_json::to_string(&values).unwrap_or("[]".to_string());
+    // A locator miss returns a sentinel instead of throwing, so it is detected in
+    // Rust and normalized to the anchored "No element found: ..." shape. A thrown
+    // error surfaces as "Evaluation error: ...", which is_locator_miss skips, and
+    // a sentinel avoids misclassifying an invalid-selector error too.
     let js = format!(
         r#"(() => {{
             const select = document.querySelector({sel});
-            if (!select) throw new Error('Select element not found');
+            if (!select) return {{ __ab_miss: true }};
             const vals = {vals};
             for (const opt of select.options) {{
                 opt.selected = vals.includes(opt.value);
             }}
             select.dispatchEvent(new Event('change', {{ bubbles: true }}));
-            return Array.from(select.selectedOptions).map(o => o.value);
+            return {{ selected: Array.from(select.selectedOptions).map(o => o.value) }};
         }})()"#,
         sel = serde_json::to_string(selector).unwrap_or_default(),
         vals = values_json,
     );
 
     let result = mgr.evaluate(&js, None).await?;
-    Ok(json!({ "selected": result }))
+    if result
+        .get("__ab_miss")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Err(format!("No element found: {selector}"));
+    }
+    let selected = result.get("selected").cloned().unwrap_or_else(|| json!([]));
+    Ok(json!({ "selected": selected }))
 }
 
 async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
@@ -8900,22 +9110,42 @@ async fn handle_video_stop(state: &mut DaemonState) -> Result<Value, String> {
 }
 
 /// Begin capturing network traffic for a later HAR export.
-async fn handle_har_start(state: &mut DaemonState) -> Result<Value, String> {
+async fn handle_har_start(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let content_mode = match cmd.get("content").and_then(|v| v.as_str()) {
+        Some(s) => HarContentMode::parse(s)?,
+        None => HarContentMode::default(),
+    };
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
+    // Larger buffers so response bodies survive until the periodic event
+    // drain fetches them via Network.getResponseBody.
+    let network_enable_params = json!({
+        "maxTotalBufferSize": 100_000_000,
+        "maxResourceBufferSize": 10_000_000,
+    });
     mgr.client
-        .send_command_no_params("Network.enable", Some(&session_id))
+        .send_command(
+            "Network.enable",
+            Some(network_enable_params.clone()),
+            Some(&session_id),
+        )
         .await?;
     // Also enable Network on cross-origin iframe sessions so their
     // requests are captured in the HAR output.
     for iframe_sid in state.iframe_sessions.values() {
         let _ = mgr
             .client
-            .send_command_no_params("Network.enable", Some(iframe_sid.as_str()))
+            .send_command(
+                "Network.enable",
+                Some(network_enable_params.clone()),
+                Some(iframe_sid.as_str()),
+            )
             .await;
     }
     state.har_recording = true;
     state.har_entries.clear();
+    state.har_content_mode = content_mode;
+    state.har_body_total_bytes = 0;
     Ok(json!({ "started": true }))
 }
 
@@ -8924,6 +9154,7 @@ async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     let path = har_output_path(cmd.get("path").and_then(|v| v.as_str()));
 
     state.har_recording = false;
+    state.har_body_total_bytes = 0;
 
     let entries: Vec<Value> = state.har_entries.drain(..).map(har_entry_to_json).collect();
     let request_count = entries.len();
@@ -9022,6 +9253,17 @@ fn har_entry_to_json(e: HarEntry) -> Value {
         request["postData"] = json!({ "mimeType": post_content_type, "text": body });
     }
 
+    let mut content = json!({
+        "size": e.response_body_size,
+        "mimeType": mime_type,
+    });
+    if let Some(body) = e.response_body {
+        content["text"] = json!(body);
+        if e.response_body_base64 {
+            content["encoding"] = json!("base64");
+        }
+    }
+
     json!({
         "startedDateTime": started_date_time,
         "time": total_time,
@@ -9032,10 +9274,7 @@ fn har_entry_to_json(e: HarEntry) -> Value {
             "httpVersion": e.http_version,
             "cookies": resp_cookies,
             "headers": resp_headers,
-            "content": {
-                "size": e.response_body_size,
-                "mimeType": mime_type,
-            },
+            "content": content,
             "redirectURL": e.redirect_url,
             "headersSize": -1,
             "bodySize": e.response_body_size,
@@ -9057,6 +9296,30 @@ fn har_extract_headers(headers_val: Option<&Value>) -> Vec<(String, String)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Whether a MIME type is text-like enough to embed as HAR `content.text`
+/// under [`HarContentMode::Text`].
+fn har_mime_is_text(mime: &str) -> bool {
+    let mime = mime
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    mime.starts_with("text/")
+        || mime.ends_with("+json")
+        || mime.ends_with("+xml")
+        || matches!(
+            mime.as_str(),
+            "application/json"
+                | "application/xml"
+                | "application/javascript"
+                | "application/x-javascript"
+                | "application/ecmascript"
+                | "application/x-www-form-urlencoded"
+                | "application/graphql"
+        )
 }
 
 /// Map a CDP `response.protocol` value to an HTTP-version string as required
@@ -10712,6 +10975,135 @@ mod tests {
     use std::fs;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    /// `find --help`, the MCP tool schema, and the docs/skill references are
+    /// plain text, not generated from `FIND_ACTIONS`; this pins their
+    /// wording to the actual accepted set so an edit to one without the
+    /// others fails here instead of drifting silently again.
+    #[test]
+    fn find_actions_help_text_matches_the_accepted_set() {
+        assert_eq!(FIND_ACTIONS.join(", "), "click, fill, check, hover, text");
+    }
+
+    /// `type`, `focus`, and `uncheck` are real standalone commands but were
+    /// never wired into `execute_subaction`, so they used to reach here and
+    /// fail with "Browser not launched" (masking the real problem) or a bare
+    /// "Unknown subaction: type". No prior test caught this:
+    /// `test_all_documented_actions_are_handled` only covers top-level
+    /// `action` values, not `find`'s nested `subaction`.
+    #[tokio::test]
+    async fn execute_subaction_rejects_undocumented_actions_before_requiring_a_browser() {
+        let mut state = DaemonState::new();
+        assert!(state.browser.is_none());
+
+        for bogus in ["type", "focus", "uncheck", "drag", ""] {
+            assert!(
+                !FIND_ACTIONS.contains(&bogus),
+                "test fixture '{bogus}' must not overlap the real accepted set"
+            );
+            let cmd = json!({ "subaction": bogus });
+            let err = execute_subaction(&cmd, &mut state, "@e1")
+                .await
+                .expect_err(&format!(
+                    "'{bogus}' is not a find action and must be rejected"
+                ));
+            assert_eq!(
+                err,
+                format!(
+                    "Unknown action '{}' for find. Valid actions: {}.",
+                    bogus,
+                    FIND_ACTIONS.join(", ")
+                )
+            );
+        }
+    }
+
+    /// The dispatch-level validation must reject an unsupported `find`
+    /// action for every find-family command, before any browser launch or
+    /// locator resolution. Without it, a missing element fails the locator
+    /// step first and masks the invalid action with "element not found"
+    /// (after paying for a browser launch to say it).
+    #[test]
+    fn validate_find_subaction_rejects_before_any_browser_work() {
+        for command in FIND_SUBACTION_COMMANDS {
+            let err = validate_find_subaction(command, &json!({ "subaction": "type" }))
+                .expect_err(&format!("'{command}' must validate its find action"));
+            assert_eq!(
+                err,
+                format!(
+                    "Unknown action 'type' for find. Valid actions: {}.",
+                    FIND_ACTIONS.join(", ")
+                )
+            );
+        }
+
+        // The default subaction and every accepted action pass.
+        assert!(validate_find_subaction("getbyrole", &json!({})).is_ok());
+        for accepted in FIND_ACTIONS {
+            assert!(
+                validate_find_subaction("getbytext", &json!({ "subaction": accepted })).is_ok()
+            );
+        }
+
+        // Commands outside the find family carry no subaction contract.
+        assert!(validate_find_subaction("click", &json!({ "subaction": "type" })).is_ok());
+    }
+
+    /// Every entry in `FIND_ACTIONS` must actually dispatch in
+    /// `execute_subaction`'s match, not just pass the guard; this is the
+    /// real lock the guard alone can't provide, since the guard and the
+    /// match arms are two separate lists that Rust can't check against each
+    /// other at compile time.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_execute_subaction_dispatches_every_find_action() {
+        let mut state = DaemonState::new();
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert!(resp.get("success").and_then(|v| v.as_bool()) == Some(true));
+
+        let resp = execute_command(
+            &json!({
+                "id": "2",
+                "action": "navigate",
+                "url": "data:text/html,<input id='i' role='textbox' value='x'><button>Go</button><input type='checkbox' role='checkbox'>"
+            }),
+            &mut state,
+        )
+        .await;
+        assert!(resp.get("success").and_then(|v| v.as_bool()) == Some(true));
+
+        for action in FIND_ACTIONS {
+            let mut cmd = json!({
+                "id": "3",
+                "action": "getbyrole",
+                "role": match *action {
+                    "fill" => "textbox",
+                    "check" => "checkbox",
+                    _ => "button",
+                },
+                "subaction": action,
+            });
+            if *action == "fill" {
+                cmd["value"] = json!("y");
+            }
+            let resp = execute_command(&cmd, &mut state).await;
+            // success == true is the only assertion that proves the action
+            // reached a real handler AND that handler worked: a guard-only
+            // check ("not Unknown action") stays green when an entry added
+            // to FIND_ACTIONS falls through to the internal-error fallback.
+            let error = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(
+                resp.get("success").and_then(|v| v.as_bool()) == Some(true),
+                "action '{action}' must dispatch to a working handler: {error}"
+            );
+        }
+
+        let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    }
 
     fn ax_value(value: &str) -> AXValue {
         AXValue {
@@ -13058,6 +13450,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_size: 42,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_body: None,
+            response_body_base64: false,
         };
 
         let har = har_entry_to_json(entry);
@@ -13081,6 +13475,68 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert_eq!(har["response"]["cookies"][0]["name"], "token");
         assert_eq!(har["response"]["cookies"][0]["value"], "xyz");
         assert_eq!(har["_resourceType"], "XHR");
+        // No body captured: content carries size/MIME only.
+        assert!(har["response"]["content"].get("text").is_none());
+        assert!(har["response"]["content"].get("encoding").is_none());
+    }
+
+    #[test]
+    fn test_har_entry_to_json_embeds_response_body() {
+        let mut entry = HarEntry {
+            request_id: "req-2".to_string(),
+            wall_time: 1773576000.0,
+            method: "GET".to_string(),
+            url: "https://example.com/api/items".to_string(),
+            request_headers: vec![],
+            post_data: None,
+            request_body_size: 0,
+            resource_type: "XHR".to_string(),
+            status: Some(200),
+            status_text: "OK".to_string(),
+            http_version: "HTTP/2.0".to_string(),
+            response_headers: vec![],
+            mime_type: "application/json".to_string(),
+            redirect_url: String::new(),
+            response_body_size: 13,
+            cdp_timing: None,
+            loading_finished_timestamp: None,
+            response_body: Some(r#"{"items":[1]}"#.to_string()),
+            response_body_base64: false,
+        };
+
+        let har = har_entry_to_json(entry.clone());
+        assert_eq!(har["response"]["content"]["text"], r#"{"items":[1]}"#);
+        assert!(har["response"]["content"].get("encoding").is_none());
+
+        entry.response_body = Some("aGVsbG8=".to_string());
+        entry.response_body_base64 = true;
+        let har = har_entry_to_json(entry);
+        assert_eq!(har["response"]["content"]["text"], "aGVsbG8=");
+        assert_eq!(har["response"]["content"]["encoding"], "base64");
+    }
+
+    #[test]
+    fn test_har_mime_is_text() {
+        assert!(har_mime_is_text("application/json"));
+        assert!(har_mime_is_text("application/json; charset=utf-8"));
+        assert!(har_mime_is_text("application/vnd.api+json"));
+        assert!(har_mime_is_text("text/html"));
+        assert!(har_mime_is_text("text/plain"));
+        assert!(har_mime_is_text("image/svg+xml"));
+        assert!(har_mime_is_text("application/x-www-form-urlencoded"));
+        assert!(!har_mime_is_text("image/png"));
+        assert!(!har_mime_is_text("application/octet-stream"));
+        assert!(!har_mime_is_text("video/mp4"));
+        assert!(!har_mime_is_text(""));
+    }
+
+    #[test]
+    fn test_har_content_mode_parse() {
+        assert_eq!(HarContentMode::parse("text"), Ok(HarContentMode::Text));
+        assert_eq!(HarContentMode::parse("all"), Ok(HarContentMode::All));
+        assert_eq!(HarContentMode::parse("none"), Ok(HarContentMode::None));
+        assert!(HarContentMode::parse("everything").is_err());
+        assert_eq!(HarContentMode::default(), HarContentMode::Text);
     }
 
     #[test]
@@ -13140,6 +13596,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_size: 0,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_body: None,
+            response_body_base64: false,
         };
         let har = har_entry_to_json(entry);
         assert_eq!(har["response"]["cookies"][0]["name"], "token");
@@ -13195,6 +13653,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_size: 128,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_body: None,
+            response_body_base64: false,
         });
 
         let result = handle_har_stop(&json!({ "action": "har_stop" }), &mut state)
@@ -13242,6 +13702,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_size: 64,
             cdp_timing: None,
             loading_finished_timestamp: None,
+            response_body: None,
+            response_body_base64: false,
         });
 
         let result = execute_command(

@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import extension from "../dist/index.mjs";
-import * as tools from "../dist/tools/index.mjs";
+// Since eve 0.25, extension config is bound in a scope-keyed registry instead of
+// on the handle itself. The eve runtime sets this ambient scope global while it
+// loads an extension's modules so `defineExtension` can capture it; emulate that
+// here before importing the built dist so the mount factory calls below
+// (`extension({ ... })`) bind config that the tools then read.
+globalThis[Symbol.for("eve.ext-config-scope")] = "@agent-browser/eve.test";
+
+const { default: extension } = await import("../dist/index.mjs");
+const tools = await import("../dist/tools/index.mjs");
 
 const OK = (data) => JSON.stringify({ success: true, data, error: null });
 

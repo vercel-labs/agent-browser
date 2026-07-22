@@ -191,11 +191,11 @@ agent-browser is checked <sel>        # Check if checked
 
 ```bash
 agent-browser find role <role> <action> [value]       # By ARIA role
-agent-browser find text <text> <action>               # By text content
+agent-browser find text <text> <action> [value]       # By text content
 agent-browser find label <label> <action> [value]     # By label
 agent-browser find placeholder <ph> <action> [value]  # By placeholder
-agent-browser find alt <text> <action>                # By alt text
-agent-browser find title <text> <action>              # By title attr
+agent-browser find alt <text> <action> [value]        # By alt text
+agent-browser find title <text> <action> [value]      # By title attr
 agent-browser find testid <id> <action> [value]       # By data-testid
 agent-browser find first <sel> <action> [value]       # First match
 agent-browser find last <sel> <action> [value]        # Last match
@@ -315,7 +315,9 @@ agent-browser network requests --type xhr,fetch  # Filter by resource type
 agent-browser network requests --method POST   # Filter by HTTP method
 agent-browser network requests --status 2xx    # Filter by status (200, 2xx, 400-499)
 agent-browser network request <requestId>      # View full request/response detail
-agent-browser network har start                # Start HAR recording
+agent-browser network har start                # Start HAR recording (embeds text response bodies)
+agent-browser network har start --content all  # Embed all response bodies (binary as base64)
+agent-browser network har start --content none # Metadata only, no bodies
 agent-browser network har stop [output.har]    # Stop and save HAR (temp path if omitted)
 ```
 
