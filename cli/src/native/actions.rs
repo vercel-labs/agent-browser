@@ -2006,6 +2006,13 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         return error_response(&id, &err);
     }
 
+    // Invalid inputs are rejected before expensive setup: an unsupported
+    // `find` action must fail here, not after a browser launch and a locator
+    // resolution that can mask it with "element not found".
+    if let Err(err) = validate_find_subaction(action, cmd) {
+        return error_response(&id, &err);
+    }
+
     if action == INTERNAL_DAEMON_SHUTDOWN_ACTION {
         let mut resp = match handle_close(state).await {
             Ok(data) => success_response(&id, data),
@@ -7842,6 +7849,49 @@ async fn handle_mainframe(state: &mut DaemonState) -> Result<Value, String> {
 // Semantic locator handlers
 // ---------------------------------------------------------------------------
 
+/// The exact set of `find` actions `execute_subaction` dispatches. Shared by
+/// the validation guard, the error message, and the accepted-actions test,
+/// so drift between the guard and the match arms fails a test instead of
+/// silently reopening the "Unknown subaction: type" bug this fixes.
+const FIND_ACTIONS: &[&str] = &["click", "fill", "check", "hover", "text"];
+
+/// The daemon commands that dispatch a `find` subaction through
+/// `execute_subaction` after resolving their locator.
+const FIND_SUBACTION_COMMANDS: &[&str] = &[
+    "getbyrole",
+    "getbytext",
+    "getbylabel",
+    "getbyplaceholder",
+    "getbyalttext",
+    "getbytitle",
+    "getbytestid",
+    "nth",
+];
+
+/// Reject an unsupported `find` action before any browser launch or locator
+/// resolution. The guard inside `execute_subaction` only runs after both, so
+/// on a missing element it never runs at all: the caller fails first with an
+/// "element not found" error that names the wrong fault, after paying for a
+/// browser launch to say it. Validation order follows the input, not the
+/// setup cost.
+fn validate_find_subaction(action: &str, cmd: &Value) -> Result<(), String> {
+    if !FIND_SUBACTION_COMMANDS.contains(&action) {
+        return Ok(());
+    }
+    let subaction = cmd
+        .get("subaction")
+        .and_then(|v| v.as_str())
+        .unwrap_or("click");
+    if !FIND_ACTIONS.contains(&subaction) {
+        return Err(format!(
+            "Unknown action '{}' for find. Valid actions: {}.",
+            subaction,
+            FIND_ACTIONS.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 async fn execute_subaction(
     cmd: &Value,
     state: &mut DaemonState,
@@ -7851,6 +7901,18 @@ async fn execute_subaction(
         .get("subaction")
         .and_then(|v| v.as_str())
         .unwrap_or("click");
+
+    // Validate before dispatching: an unsupported action (e.g. "type",
+    // "focus", "uncheck", all real standalone commands, just not `find`
+    // actions) gets a message naming the valid set here.
+    if !FIND_ACTIONS.contains(&subaction) {
+        return Err(format!(
+            "Unknown action '{}' for find. Valid actions: {}.",
+            subaction,
+            FIND_ACTIONS.join(", ")
+        ));
+    }
+
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
@@ -7921,7 +7983,12 @@ async fn execute_subaction(
             .await?;
             Ok(json!({ "text": text }))
         }
-        _ => Err(format!("Unknown subaction: {}", subaction)),
+        // Unreachable today; a real Err rather than unreachable!() in case
+        // this ever drifts out of sync with the guard above.
+        _ => Err(format!(
+            "Internal error: action '{}' passed validation but has no handler.",
+            subaction
+        )),
     }
 }
 
@@ -8421,23 +8488,35 @@ async fn handle_multiselect(cmd: &Value, state: &DaemonState) -> Result<Value, S
         .unwrap_or_default();
 
     let values_json = serde_json::to_string(&values).unwrap_or("[]".to_string());
+    // A locator miss returns a sentinel instead of throwing, so it is detected in
+    // Rust and normalized to the anchored "No element found: ..." shape. A thrown
+    // error surfaces as "Evaluation error: ...", which is_locator_miss skips, and
+    // a sentinel avoids misclassifying an invalid-selector error too.
     let js = format!(
         r#"(() => {{
             const select = document.querySelector({sel});
-            if (!select) throw new Error('Select element not found');
+            if (!select) return {{ __ab_miss: true }};
             const vals = {vals};
             for (const opt of select.options) {{
                 opt.selected = vals.includes(opt.value);
             }}
             select.dispatchEvent(new Event('change', {{ bubbles: true }}));
-            return Array.from(select.selectedOptions).map(o => o.value);
+            return {{ selected: Array.from(select.selectedOptions).map(o => o.value) }};
         }})()"#,
         sel = serde_json::to_string(selector).unwrap_or_default(),
         vals = values_json,
     );
 
     let result = mgr.evaluate(&js, None).await?;
-    Ok(json!({ "selected": result }))
+    if result
+        .get("__ab_miss")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Err(format!("No element found: {selector}"));
+    }
+    let selected = result.get("selected").cloned().unwrap_or_else(|| json!([]));
+    Ok(json!({ "selected": selected }))
 }
 
 async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
@@ -10614,6 +10693,135 @@ mod tests {
     use std::fs;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    /// `find --help`, the MCP tool schema, and the docs/skill references are
+    /// plain text, not generated from `FIND_ACTIONS`; this pins their
+    /// wording to the actual accepted set so an edit to one without the
+    /// others fails here instead of drifting silently again.
+    #[test]
+    fn find_actions_help_text_matches_the_accepted_set() {
+        assert_eq!(FIND_ACTIONS.join(", "), "click, fill, check, hover, text");
+    }
+
+    /// `type`, `focus`, and `uncheck` are real standalone commands but were
+    /// never wired into `execute_subaction`, so they used to reach here and
+    /// fail with "Browser not launched" (masking the real problem) or a bare
+    /// "Unknown subaction: type". No prior test caught this:
+    /// `test_all_documented_actions_are_handled` only covers top-level
+    /// `action` values, not `find`'s nested `subaction`.
+    #[tokio::test]
+    async fn execute_subaction_rejects_undocumented_actions_before_requiring_a_browser() {
+        let mut state = DaemonState::new();
+        assert!(state.browser.is_none());
+
+        for bogus in ["type", "focus", "uncheck", "drag", ""] {
+            assert!(
+                !FIND_ACTIONS.contains(&bogus),
+                "test fixture '{bogus}' must not overlap the real accepted set"
+            );
+            let cmd = json!({ "subaction": bogus });
+            let err = execute_subaction(&cmd, &mut state, "@e1")
+                .await
+                .expect_err(&format!(
+                    "'{bogus}' is not a find action and must be rejected"
+                ));
+            assert_eq!(
+                err,
+                format!(
+                    "Unknown action '{}' for find. Valid actions: {}.",
+                    bogus,
+                    FIND_ACTIONS.join(", ")
+                )
+            );
+        }
+    }
+
+    /// The dispatch-level validation must reject an unsupported `find`
+    /// action for every find-family command, before any browser launch or
+    /// locator resolution. Without it, a missing element fails the locator
+    /// step first and masks the invalid action with "element not found"
+    /// (after paying for a browser launch to say it).
+    #[test]
+    fn validate_find_subaction_rejects_before_any_browser_work() {
+        for command in FIND_SUBACTION_COMMANDS {
+            let err = validate_find_subaction(command, &json!({ "subaction": "type" }))
+                .expect_err(&format!("'{command}' must validate its find action"));
+            assert_eq!(
+                err,
+                format!(
+                    "Unknown action 'type' for find. Valid actions: {}.",
+                    FIND_ACTIONS.join(", ")
+                )
+            );
+        }
+
+        // The default subaction and every accepted action pass.
+        assert!(validate_find_subaction("getbyrole", &json!({})).is_ok());
+        for accepted in FIND_ACTIONS {
+            assert!(
+                validate_find_subaction("getbytext", &json!({ "subaction": accepted })).is_ok()
+            );
+        }
+
+        // Commands outside the find family carry no subaction contract.
+        assert!(validate_find_subaction("click", &json!({ "subaction": "type" })).is_ok());
+    }
+
+    /// Every entry in `FIND_ACTIONS` must actually dispatch in
+    /// `execute_subaction`'s match, not just pass the guard; this is the
+    /// real lock the guard alone can't provide, since the guard and the
+    /// match arms are two separate lists that Rust can't check against each
+    /// other at compile time.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_execute_subaction_dispatches_every_find_action() {
+        let mut state = DaemonState::new();
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert!(resp.get("success").and_then(|v| v.as_bool()) == Some(true));
+
+        let resp = execute_command(
+            &json!({
+                "id": "2",
+                "action": "navigate",
+                "url": "data:text/html,<input id='i' role='textbox' value='x'><button>Go</button><input type='checkbox' role='checkbox'>"
+            }),
+            &mut state,
+        )
+        .await;
+        assert!(resp.get("success").and_then(|v| v.as_bool()) == Some(true));
+
+        for action in FIND_ACTIONS {
+            let mut cmd = json!({
+                "id": "3",
+                "action": "getbyrole",
+                "role": match *action {
+                    "fill" => "textbox",
+                    "check" => "checkbox",
+                    _ => "button",
+                },
+                "subaction": action,
+            });
+            if *action == "fill" {
+                cmd["value"] = json!("y");
+            }
+            let resp = execute_command(&cmd, &mut state).await;
+            // success == true is the only assertion that proves the action
+            // reached a real handler AND that handler worked: a guard-only
+            // check ("not Unknown action") stays green when an entry added
+            // to FIND_ACTIONS falls through to the internal-error fallback.
+            let error = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(
+                resp.get("success").and_then(|v| v.as_bool()) == Some(true),
+                "action '{action}' must dispatch to a working handler: {error}"
+            );
+        }
+
+        let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    }
 
     async fn start_webdriver_response_server(
         responses: Vec<(&'static str, Value)>,

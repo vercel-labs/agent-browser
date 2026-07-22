@@ -2556,11 +2556,11 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 context: format!("find {}", locator),
                 usage: match *locator {
                     "role" => "find role <role> [action] [--name <name>] [--exact]",
-                    "text" => "find text <text> [action] [--exact]",
+                    "text" => "find text <text> [action] [value] [--exact]",
                     "label" => "find label <label> [action] [text] [--exact]",
                     "placeholder" => "find placeholder <text> [action] [text] [--exact]",
-                    "alt" => "find alt <text> [action] [--exact]",
-                    "title" => "find title <text> [action] [--exact]",
+                    "alt" => "find alt <text> [action] [value] [--exact]",
+                    "title" => "find title <text> [action] [value] [--exact]",
                     "testid" => "find testid <id> [action] [text]",
                     "first" => "find first <selector> [action] [text]",
                     "last" => "find last <selector> [action] [text]",
@@ -2613,9 +2613,13 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     }
                     Ok(cmd)
                 }
-                "text" => Ok(
-                    json!({ "id": id, "action": "getbytext", "text": value, "subaction": subaction, "exact": exact }),
-                ),
+                "text" => {
+                    let mut cmd = json!({ "id": id, "action": "getbytext", "text": value, "subaction": subaction, "exact": exact });
+                    if let Some(v) = fill_value {
+                        cmd["value"] = json!(v);
+                    }
+                    Ok(cmd)
+                }
                 "label" => {
                     let mut cmd = json!({ "id": id, "action": "getbylabel", "label": value, "subaction": subaction, "exact": exact });
                     if let Some(v) = fill_value {
@@ -2630,12 +2634,20 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     }
                     Ok(cmd)
                 }
-                "alt" => Ok(
-                    json!({ "id": id, "action": "getbyalttext", "text": value, "subaction": subaction, "exact": exact }),
-                ),
-                "title" => Ok(
-                    json!({ "id": id, "action": "getbytitle", "text": value, "subaction": subaction, "exact": exact }),
-                ),
+                "alt" => {
+                    let mut cmd = json!({ "id": id, "action": "getbyalttext", "text": value, "subaction": subaction, "exact": exact });
+                    if let Some(v) = fill_value {
+                        cmd["value"] = json!(v);
+                    }
+                    Ok(cmd)
+                }
+                "title" => {
+                    let mut cmd = json!({ "id": id, "action": "getbytitle", "text": value, "subaction": subaction, "exact": exact });
+                    if let Some(v) = fill_value {
+                        cmd["value"] = json!(v);
+                    }
+                    Ok(cmd)
+                }
                 "testid" => {
                     let mut cmd = json!({ "id": id, "action": "getbytestid", "testId": value, "subaction": subaction });
                     if let Some(v) = fill_value {
@@ -3923,6 +3935,26 @@ mod tests {
         assert_eq!(cmd["action"], "type");
         assert_eq!(cmd["selector"], "#input");
         assert_eq!(cmd["text"], "some text");
+    }
+
+    #[test]
+    fn test_find_fill_value_survives_for_all_locators() {
+        // fill is advertised for these locators, so the value must reach dispatch.
+        // Force-red: drop the value block from the text/alt/title arms and these
+        // assertions fail (value missing).
+        for (loc, action) in [
+            ("text", "getbytext"),
+            ("alt", "getbyalttext"),
+            ("title", "getbytitle"),
+        ] {
+            let cmd = parse_command(
+                &args(&format!("find {loc} Label fill hello")),
+                &default_flags(),
+            )
+            .unwrap();
+            assert_eq!(cmd["action"], action, "{loc}");
+            assert_eq!(cmd["value"], "hello", "{loc} dropped the fill value");
+        }
     }
 
     #[test]
