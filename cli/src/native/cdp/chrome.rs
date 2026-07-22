@@ -532,27 +532,16 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
 }
 
 pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
-    let chrome_path = match &options.executable_path {
-        Some(p) => PathBuf::from(p),
-        None => find_chrome().ok_or_else(|| {
-            let cache_dir = crate::install::get_browsers_dir();
-            format!(
-                "Chrome not found. Checked:\n  \
-                 - agent-browser cache: {}\n  \
-                 - System Chrome installations\n  \
-                 - Puppeteer browser cache\n  \
-                 - Playwright browser cache\n\
-                 Run `agent-browser install` to download Chrome, or use --executable-path.",
-                cache_dir.display()
-            )
-        })?,
-    };
-
     // Profile name preprocessing: if --profile is a Chrome profile name (not a
     // path), resolve it to a directory, copy the profile to a temp dir, and
     // rewrite options so the retry loop uses the copied profile.
     let mut resolved_options: Option<LaunchOptions> = None;
     let mut profile_temp_dir: Option<PathBuf> = None;
+    // When reusing a real Chrome profile, the launched binary must match the
+    // profile's Keychain identity to decrypt its cookies (see
+    // browser_executable_for_user_data_dir). We only override the executable when
+    // the user did not pass one explicitly.
+    let mut profile_executable: Option<PathBuf> = None;
 
     if let Some(ref profile) = options.profile {
         if is_chrome_profile_name(profile) {
@@ -570,8 +559,46 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
             opts.args.push(format!("--profile-directory={}", resolved));
             profile_temp_dir = Some(temp_path);
             resolved_options = Some(opts);
+
+            // Pick the real browser binary matching this profile's Keychain
+            // identity, unless the user explicitly chose an executable.
+            if options.executable_path.is_none() {
+                match browser_executable_for_user_data_dir(&user_data_dir) {
+                    Some(exe) => profile_executable = Some(exe),
+                    None => {
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "Warning: reusing profile \"{}\" from {}, but the matching \
+                             browser is not installed. Falling back to the default browser \
+                             (likely Chrome for Testing), which reads a different Keychain \
+                             key and cannot decrypt this profile's cookies — the session \
+                             may be logged out. Pass --executable-path to the browser that \
+                             owns this profile to fix this.",
+                            resolved,
+                            user_data_dir.display()
+                        );
+                    }
+                }
+            }
         }
     }
+
+    let chrome_path = match (&options.executable_path, &profile_executable) {
+        (Some(p), _) => PathBuf::from(p),
+        (None, Some(exe)) => exe.clone(),
+        (None, None) => find_chrome().ok_or_else(|| {
+            let cache_dir = crate::install::get_browsers_dir();
+            format!(
+                "Chrome not found. Checked:\n  \
+                 - agent-browser cache: {}\n  \
+                 - System Chrome installations\n  \
+                 - Puppeteer browser cache\n  \
+                 - Playwright browser cache\n\
+                 Run `agent-browser install` to download Chrome, or use --executable-path.",
+                cache_dir.display()
+            )
+        })?,
+    };
 
     let effective_options = resolved_options.as_ref().unwrap_or(options);
 
@@ -931,6 +958,117 @@ pub fn find_chrome() -> Option<PathBuf> {
     }
 
     None
+}
+
+/// Returns the real installed browser executable whose cookie-encryption identity
+/// matches the given Chrome user-data directory, if that browser is installed.
+///
+/// This matters for `--profile` reuse on macOS: Chromium-family cookies are sealed
+/// with a key stored in a per-browser Keychain item (`Chrome Safe Storage` vs
+/// `Chromium Safe Storage`, etc.). Chrome for Testing — which `find_chrome()` returns
+/// by default — reads `Chromium Safe Storage`, so it cannot decrypt a real Google
+/// Chrome profile's cookies and the reused session ends up logged out. When we know
+/// which real profile we're copying, we should launch the matching real binary so its
+/// Keychain key lines up with the copied `Cookies` DB. Returns `None` when no matching
+/// real browser is installed (caller should warn and fall back).
+///
+/// The mapping keys off the user-data directory that `find_chrome_user_data_dir()` /
+/// `get_chrome_user_data_dirs()` resolved the profile from, so the two lists stay in
+/// lockstep.
+pub fn browser_executable_for_user_data_dir(user_data_dir: &Path) -> Option<PathBuf> {
+    // Candidate (user-data-dir marker, executable path) pairs, ordered like
+    // get_chrome_user_data_dirs(). The marker is a path suffix that uniquely
+    // identifies the browser family's user-data directory.
+    #[cfg(target_os = "macos")]
+    let candidates: &[(&str, &str)] = &[
+        (
+            "Google/Chrome Canary",
+            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+        ),
+        (
+            "Google/Chrome",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        ),
+        (
+            "BraveSoftware/Brave-Browser",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        ),
+        (
+            "Chromium",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ),
+    ];
+
+    #[cfg(target_os = "linux")]
+    let candidates: &[(&str, &str)] = &[
+        ("google-chrome-unstable", "google-chrome-unstable"),
+        ("google-chrome", "google-chrome"),
+        ("BraveSoftware/Brave-Browser", "brave-browser"),
+        ("chromium", "chromium"),
+    ];
+
+    #[cfg(target_os = "windows")]
+    let candidates: &[(&str, &str)] = &[
+        (
+            r"Google\Chrome SxS",
+            r"Google\Chrome SxS\Application\chrome.exe",
+        ),
+        (r"Google\Chrome", r"Google\Chrome\Application\chrome.exe"),
+        (
+            r"BraveSoftware\Brave-Browser",
+            r"BraveSoftware\Brave-Browser\Application\brave.exe",
+        ),
+        (r"Chromium", r"Chromium\Application\chrome.exe"),
+    ];
+
+    let udd = user_data_dir.to_string_lossy();
+    // Match the most specific marker first (Canary/SxS before plain Chrome).
+    let mut best: Option<(&str, &str)> = None;
+    for &(marker, exe) in candidates {
+        if udd.contains(marker) && best.is_none_or(|(m, _)| marker.len() > m.len()) {
+            best = Some((marker, exe));
+        }
+    }
+    let (_, exe) = best?;
+
+    resolve_browser_executable(exe)
+}
+
+/// Resolves a candidate executable (absolute path on macOS/Windows, or a bare
+/// command name to look up on `PATH` on Linux) to an existing binary path.
+fn resolve_browser_executable(exe: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(exe);
+    if path.is_absolute() {
+        return path.exists().then_some(path);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            let p = PathBuf::from(local).join(exe);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        for base in [r"C:\Program Files", r"C:\Program Files (x86)"] {
+            let p = PathBuf::from(base).join(exe);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        None
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Bare command name (Linux): resolve via `which`.
+        let output = Command::new("which").arg(exe).output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let found = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!found.is_empty()).then(|| PathBuf::from(found))
+    }
 }
 
 pub fn read_devtools_active_port(user_data_dir: &Path) -> Option<(u16, String)> {
@@ -1575,6 +1713,44 @@ mod tests {
             if let Some(path) = result {
                 assert!(path.exists());
             }
+        }
+    }
+
+    #[test]
+    fn test_browser_executable_unknown_user_data_dir() {
+        // A path that matches no known browser family yields no override.
+        let result = browser_executable_for_user_data_dir(Path::new("/tmp/some/random/dir"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_browser_executable_matches_installed_or_none() {
+        // For a real Chrome user-data dir, the result is either None (Chrome not
+        // installed, e.g. CI) or an existing binary path — never a bogus path.
+        #[cfg(target_os = "macos")]
+        let udd = Path::new("/Users/x/Library/Application Support/Google/Chrome");
+        #[cfg(target_os = "linux")]
+        let udd = Path::new("/home/x/.config/google-chrome");
+        #[cfg(target_os = "windows")]
+        let udd = Path::new(r"C:\Users\x\AppData\Local\Google\Chrome\User Data");
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        if let Some(exe) = browser_executable_for_user_data_dir(udd) {
+            assert!(exe.exists(), "returned executable must exist: {:?}", exe);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_browser_executable_prefers_more_specific_marker() {
+        // "Google/Chrome Canary" contains the substring "Google/Chrome"; ensure the
+        // longer, more specific marker wins so Canary profiles don't map to Chrome.
+        // We can't assert the binary exists (may be absent), but the selected exe
+        // path — when resolvable — must be the Canary one, and when Canary is not
+        // installed the result is None (not the plain-Chrome binary).
+        let canary_udd = Path::new("/Users/x/Library/Application Support/Google/Chrome Canary");
+        let result = browser_executable_for_user_data_dir(canary_udd);
+        if let Some(exe) = result {
+            assert!(exe.to_string_lossy().contains("Canary"));
         }
     }
 
