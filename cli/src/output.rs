@@ -2099,7 +2099,7 @@ Subcommands:
   move <x> <y>         Move mouse to coordinates
   down [button]        Press mouse button (left, right, middle)
   up [button]          Release mouse button
-  wheel <dy> [dx]      Scroll mouse wheel
+  wheel <dy> [dx]      Scroll mouse wheel at the current mouse position
 
 Global Options:
   --json               Output as JSON
@@ -2112,6 +2112,7 @@ Examples:
   agent-browser mouse down right
   agent-browser mouse wheel 100
   agent-browser mouse wheel -50 0
+  agent-browser mouse move 400 300 && agent-browser mouse wheel 240
 "##
         }
 

@@ -137,7 +137,15 @@ agent-browser wait --fn "window.ready"     # Wait for JS condition (or -f)
 agent-browser mouse move 100 200      # Move mouse
 agent-browser mouse down left         # Press button
 agent-browser mouse up left           # Release button
-agent-browser mouse wheel 100         # Scroll wheel
+agent-browser mouse wheel 100         # Scroll wheel at the current mouse position
+```
+
+The wheel dispatches wherever the mouse currently is, so move it over the element first when a component listens for `wheel` on itself rather than on the page. The mouse starts at `0,0`, so a wheel with no preceding move scrolls whatever sits in the top-left corner.
+
+```bash
+agent-browser get box @e1             # or: agent-browser eval "..." to compute a center point
+agent-browser mouse move 640 400      # park the cursor over the element
+agent-browser mouse wheel 240         # wheel lands on that element
 ```
 
 ## Semantic Locators (alternative to refs)

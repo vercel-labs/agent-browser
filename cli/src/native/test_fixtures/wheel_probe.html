@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Wheel Probe</title>
+  <style>
+    body {
+      margin: 0;
+      font: 14px/1.4 sans-serif;
+    }
+    #header {
+      height: 200px;
+      background: rgba(0, 0, 0, 0.1);
+    }
+    #viewport {
+      width: 300px;
+      height: 200px;
+      margin-left: 200px;
+      background: rgba(0, 0, 255, 0.15);
+    }
+    pre {
+      white-space: pre-wrap;
+      font-family: ui-monospace, monospace;
+    }
+  </style>
+</head>
+<body>
+  <div id="header" aria-label="header strip"></div>
+  <div id="viewport" aria-label="wheel target"></div>
+  <pre id="log"></pre>
+  <script>
+    const viewport = document.getElementById("viewport");
+    const logEl = document.getElementById("log");
+
+    const state = { onViewport: [], onWindow: [] };
+    window.__wheelProbe = state;
+
+    function record(bucket, event) {
+      bucket.push({
+        deltaX: event.deltaX,
+        deltaY: event.deltaY,
+        x: event.clientX,
+        y: event.clientY,
+        target: event.target.id || event.target.tagName,
+      });
+      logEl.textContent = JSON.stringify(state, null, 2);
+    }
+
+    viewport.addEventListener("wheel", (event) => record(state.onViewport, event));
+    window.addEventListener("wheel", (event) => record(state.onWindow, event));
+  </script>
+</body>
+</html>
