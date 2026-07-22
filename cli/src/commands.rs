@@ -143,6 +143,7 @@ pub fn is_top_level_command(value: &str) -> bool {
             | "react"
             | "vitals"
             | "web-vitals"
+            | "a11y"
             | "pushstate"
             | "removeinitscript"
             | "session"
@@ -1929,6 +1930,47 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             Ok(cmd)
         }
 
+        // === Accessibility audit (axe-core) ===
+        "a11y" => {
+            const A11Y_USAGE: &str = "a11y [url] [--tags <tag1,tag2>] [--selector <css>] [--json]";
+            let mut cmd = json!({ "id": id, "action": "a11y" });
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i] {
+                    "--tags" => {
+                        i += 1;
+                        let value = rest.get(i).ok_or(ParseError::MissingArguments {
+                            context: "a11y --tags".to_string(),
+                            usage: A11Y_USAGE,
+                        })?;
+                        cmd["tags"] = json!(value);
+                    }
+                    "--selector" | "-s" => {
+                        i += 1;
+                        let value = rest.get(i).ok_or(ParseError::MissingArguments {
+                            context: "a11y --selector".to_string(),
+                            usage: A11Y_USAGE,
+                        })?;
+                        cmd["selector"] = json!(value);
+                    }
+                    "--json" => {
+                        cmd["json"] = json!(true);
+                    }
+                    other if !other.starts_with('-') => {
+                        cmd["url"] = json!(other);
+                    }
+                    other => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unknown flag: {}", other),
+                            usage: A11Y_USAGE,
+                        });
+                    }
+                }
+                i += 1;
+            }
+            Ok(cmd)
+        }
+
         // === SPA client-side navigation ===
         "pushstate" => {
             let url = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -3361,6 +3403,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cmd["url"], "http://localhost:3000/dashboard");
+    }
+
+    #[test]
+    fn test_a11y_command() {
+        let cmd = parse_command(&args("a11y"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "a11y");
+        assert!(cmd.get("url").is_none());
+
+        let cmd = parse_command(
+            &args("a11y http://localhost:3000 --tags wcag2a,wcag2aa --selector #main --json"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "a11y");
+        assert_eq!(cmd["url"], "http://localhost:3000");
+        assert_eq!(cmd["tags"], "wcag2a,wcag2aa");
+        assert_eq!(cmd["selector"], "#main");
+        assert_eq!(cmd["json"], true);
+
+        assert!(parse_command(&args("a11y --tags"), &default_flags()).is_err());
+        assert!(parse_command(&args("a11y --bogus"), &default_flags()).is_err());
     }
 
     #[test]

@@ -12,6 +12,7 @@ use tokio::sync::{broadcast, oneshot, RwLock};
 use crate::connection::{get_socket_dir, INTERNAL_DAEMON_SHUTDOWN_ACTION};
 use crate::validation::{is_valid_session_name, session_name_error};
 
+use super::a11y;
 use super::auth;
 use super::browser::{should_track_target, BrowserManager, WaitUntil};
 use super::cdp::chrome::LaunchOptions;
@@ -2335,6 +2336,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "react_renders_stop" => handle_react_renders_stop(cmd, state).await,
         "react_suspense" => handle_react_suspense(cmd, state).await,
         "vitals" => handle_vitals(cmd, state).await,
+        "a11y" => handle_a11y(cmd, state).await,
         "pushstate" => handle_pushstate(cmd, state).await,
         "clipboard" => handle_clipboard(cmd, state).await,
         "wheel" => handle_wheel(cmd, state).await,
@@ -7205,6 +7207,40 @@ async fn handle_vitals(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     // compact text summary in normal mode, while `--json` exposes these exact
     // fields for automation.
     Ok(data_value)
+}
+
+async fn handle_a11y(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    // Navigate first if a target URL was given, so `a11y <url>` audits a
+    // fresh load rather than whatever page is currently active.
+    if let Some(url) = cmd.get("url").and_then(|v| v.as_str()) {
+        {
+            let df = state.domain_filter.read().await;
+            if let Some(ref filter) = *df {
+                filter.check_url(url)?;
+            }
+        }
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        let _ = mgr.navigate(url, WaitUntil::Load).await?;
+    }
+
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+
+    // Inject the vendored axe-core unless the page already ships one.
+    let present = mgr.evaluate(a11y::AXE_PRESENT, None).await?;
+    if present != json!(true) {
+        let _ = mgr.evaluate(a11y::AXE_JS, None).await?;
+    }
+
+    let tags = cmd.get("tags").and_then(|v| v.as_str());
+    let selector = cmd.get("selector").and_then(|v| v.as_str());
+    let result = mgr
+        .evaluate(&a11y::run_expression(tags, selector), None)
+        .await?;
+    let raw = parse_json_string(result, "a11y")?;
+    if let Some(err) = raw.get("error").and_then(|v| v.as_str()) {
+        return Err(err.to_string());
+    }
+    Ok(raw)
 }
 
 async fn handle_pushstate(cmd: &Value, state: &DaemonState) -> Result<Value, String> {

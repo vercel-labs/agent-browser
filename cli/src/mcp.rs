@@ -140,6 +140,7 @@ const TOOL_REACT_RENDERS_START: &str = "agent_browser_react_renders_start";
 const TOOL_REACT_RENDERS_STOP: &str = "agent_browser_react_renders_stop";
 const TOOL_REACT_SUSPENSE: &str = "agent_browser_react_suspense";
 const TOOL_VITALS: &str = "agent_browser_vitals";
+const TOOL_A11Y: &str = "agent_browser_a11y";
 const TOOL_PUSHSTATE: &str = "agent_browser_pushstate";
 const TOOL_REMOVE_INIT_SCRIPT: &str = "agent_browser_remove_init_script";
 const TOOL_CONFIRM: &str = "agent_browser_confirm";
@@ -408,6 +409,7 @@ const DEBUG_PROFILE_TOOLS: &[&str] = &[
     TOOL_RECORD_START,
     TOOL_RECORD_STOP,
     TOOL_RECORD_RESTART,
+    TOOL_A11Y,
     TOOL_CONSOLE,
     TOOL_ERRORS,
     TOOL_HIGHLIGHT,
@@ -1564,6 +1566,18 @@ fn parity_tools() -> Vec<Value> {
             &[],
         ),
         tool(
+            TOOL_A11Y,
+            "Accessibility audit",
+            "Run an axe-core accessibility audit and report WCAG violations.",
+            json!({
+                "url": { "type": "string" },
+                "tags": { "type": "string" },
+                "selector": { "type": "string" },
+                "json": { "type": "boolean" }
+            }),
+            &[],
+        ),
+        tool(
             TOOL_PUSHSTATE,
             "Push state",
             "Perform SPA client-side navigation.",
@@ -1963,6 +1977,7 @@ fn is_read_only_tool(name: &str) -> bool {
             | TOOL_REACT_INSPECT
             | TOOL_REACT_SUSPENSE
             | TOOL_VITALS
+            | TOOL_A11Y
             | TOOL_STREAM_STATUS
             | TOOL_SESSION
             | TOOL_SESSION_LIST
@@ -2192,6 +2207,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_REACT_RENDERS_STOP => call_react_renders_stop(arguments),
         TOOL_REACT_SUSPENSE => call_react_suspense(arguments),
         TOOL_VITALS => call_vitals(arguments),
+        TOOL_A11Y => call_a11y(arguments),
         TOOL_PUSHSTATE => call_one_string(arguments, "pushstate", "url"),
         TOOL_REMOVE_INIT_SCRIPT => call_one_string(arguments, "removeinitscript", "id"),
         TOOL_CONFIRM => call_one_string(arguments, "confirm", "id"),
@@ -3163,6 +3179,25 @@ fn call_vitals(arguments: &Value) -> Result<Value, ProtocolError> {
     }
     if let Some(url) = optional_string(arguments, "url")? {
         args.push(url);
+    }
+    call_cli_tool(arguments, args, None)
+}
+
+fn call_a11y(arguments: &Value) -> Result<Value, ProtocolError> {
+    let mut args = vec!["a11y".to_string()];
+    if let Some(url) = optional_string(arguments, "url")? {
+        args.push(url);
+    }
+    if let Some(tags) = optional_string(arguments, "tags")? {
+        args.push("--tags".to_string());
+        args.push(tags);
+    }
+    if let Some(selector) = optional_string(arguments, "selector")? {
+        args.push("--selector".to_string());
+        args.push(selector);
+    }
+    if optional_bool(arguments, "json")?.unwrap_or(false) {
+        args.push("--json".to_string());
     }
     call_cli_tool(arguments, args, None)
 }

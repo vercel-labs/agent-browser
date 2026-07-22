@@ -445,6 +445,36 @@ Each `react ...` subcommand requires `--enable react-devtools` to have been pass
 
 Works on any React app — Next.js, Remix, Vite+React, CRA, TanStack Start, React Native Web, etc. `vitals` and `pushstate` are framework-agnostic. `vitals` prints a summary by default; pass `--json` for the full structured payload.
 
+### Accessibility audits
+
+Run an [axe-core](https://github.com/dequelabs/axe-core) accessibility audit against the current page or a URL. The axe-core engine is embedded in the binary (no CDN fetch, works offline and under strict CSP) and injected on demand; pages that already ship axe are reused.
+
+```bash
+agent-browser a11y                                 # Audit the current page
+agent-browser a11y https://example.com             # Navigate, then audit
+agent-browser a11y --tags wcag2a,wcag2aa           # Only rules with these axe tags
+agent-browser a11y --selector "#main"              # Scope the audit to a subtree
+agent-browser a11y example.com --json              # Full structured results
+```
+
+The default output lists each violation with its impact, rule id, fix guidance URL, and the CSS selectors of failing nodes:
+
+```
+url: https://example.com/
+axe-core: 4.12.1  violations: 2  incomplete: 0  passes: 24
+
+[critical] image-alt: Images must have alternative text (3 nodes)
+  https://dequeuniversity.com/rules/axe/4.12/image-alt
+  - img.hero
+  - #logo > img
+  - footer img
+[serious] color-contrast: Elements must meet minimum color contrast ratio thresholds (1 node)
+  https://dequeuniversity.com/rules/axe/4.12/color-contrast
+  - .nav a.muted
+```
+
+`--json` returns the same data structured for automation (`counts`, `violations`, `incomplete`, each violation's `nodes` with `target`, `html`, and `failureSummary`). Rules that axe could not evaluate automatically are reported under `incomplete` for manual review.
+
 ### Init scripts
 
 ```bash
@@ -498,7 +528,7 @@ Profiles:
 - `core` — Default. Navigation, snapshots, interaction, waits, reads, screenshots, JavaScript eval, close, tab basics, and profile discovery
 - `network` — Network routes, request inspection, HAR, headers, credentials, offline
 - `state` — Cookies, storage, auth, saved state, sessions, profiles, skills
-- `debug` — Console/errors, tracing, profiling, recording, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
+- `debug` — Console/errors, tracing, profiling, recording, a11y audit, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
 - `tabs` — Back/forward/reload, tabs, windows, frames, dialogs
 - `react` — React tree/inspect/renders/suspense, vitals, pushstate
 - `mobile` — Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
