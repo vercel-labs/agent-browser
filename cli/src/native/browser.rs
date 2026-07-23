@@ -632,8 +632,30 @@ impl BrowserManager {
                 });
             }
 
-            self.active_page_index = 0;
-            let session_id = self.pages[0].session_id.clone();
+            // Enable domains on a live tab, not blindly on the first target.
+            // Target.getTargets order is not activity-sorted, so the first
+            // target is often a Memory-Saver-discarded tab whose renderer is
+            // gone; Page.enable on it never answers and connect hangs (#1036).
+            // Probe for a live renderer and make that tab active. Only if every
+            // tab is discarded do we revive the first one (browser-level and
+            // bounded, so connect never rides the 30s renderer-command ceiling).
+            let session_ids: Vec<String> =
+                self.pages.iter().map(|p| p.session_id.clone()).collect();
+            let active = match self.find_live_page_index(&session_ids).await {
+                Some(index) => index,
+                None => {
+                    // No live tab to fall back to: revive the first one. There
+                    // is no active dialog at connect time, so dialog_session is
+                    // None. The RendererState is discarded; we only need it to
+                    // not error (an unrevivable tab fails connect fast).
+                    let target_id = self.pages[0].target_id.clone();
+                    self.ensure_renderer_alive(&session_ids[0], &target_id, None)
+                        .await?;
+                    0
+                }
+            };
+            self.active_page_index = active;
+            let session_id = self.pages[active].session_id.clone();
             self.enable_domains(&session_id).await?;
         }
 
@@ -774,6 +796,39 @@ impl BrowserManager {
         } else {
             Err("tab is not responding and did not recover after activation".to_string())
         }
+    }
+
+    /// Index of the lowest-numbered page whose renderer answers a liveness
+    /// probe, or `None` if every tab is discarded. The conventional active tab
+    /// (index 0) is almost always live, so it is probed first to keep the
+    /// common connect instant; only when it is discarded do we probe the rest
+    /// concurrently to pick a live tab to enable domains on, instead of hanging
+    /// on the dead first one (#1036). Probing is browser-safe: a `Runtime.evaluate`
+    /// to a discarded session simply never answers (cleaned up when the probe
+    /// times out) and does not reload or focus the tab.
+    async fn find_live_page_index(&self, session_ids: &[String]) -> Option<usize> {
+        if let Some(first) = session_ids.first() {
+            if self
+                .renderer_responds(first, RENDERER_PROBE_TIMEOUT_MS)
+                .await
+            {
+                return Some(0);
+            }
+        }
+        let probes = session_ids
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(index, session_id)| async move {
+                self.renderer_responds(session_id, RENDERER_PROBE_TIMEOUT_MS)
+                    .await
+                    .then_some(index)
+            });
+        futures_util::future::join_all(probes)
+            .await
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     async fn resume_if_waiting(&self, session_id: &str) -> Result<(), String> {
@@ -2966,5 +3021,245 @@ mod tests {
             "an unrevivable successor must not be marked revived"
         );
         assert_eq!(mgr.pages.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests for the connect-attach path (#1036).
+    // -----------------------------------------------------------------------
+
+    /// Flexible mock CDP endpoint for connect-path tests. `targets` is the
+    /// `Target.getTargets` order as `(targetId, initially_alive)`; that order is
+    /// intentionally NOT activity-sorted, mirroring real Chrome. A tab that is
+    /// not alive mimics a Memory-Saver-discarded tab: renderer-bound commands on
+    /// its session get no response, ever, until `Target.activateTarget` revives
+    /// it (only when `revive_on_activate`). Returns the ws URL and a counter of
+    /// `Target.activateTarget` calls, so a test can assert a discarded tab is
+    /// only reactivated when there is no live tab to fall back to.
+    async fn start_mock_cdp_connect(
+        targets: Vec<(&'static str, bool)>,
+        revive_on_activate: bool,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use futures_util::{SinkExt, StreamExt};
+        use std::collections::HashSet;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let activations = Arc::new(AtomicUsize::new(0));
+        let activations_task = activations.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "ws://127.0.0.1:{}/devtools/browser/mock",
+            listener.local_addr().unwrap().port()
+        );
+
+        let target_infos: Vec<Value> = targets
+            .iter()
+            .map(|(id, _)| {
+                json!({
+                    "targetId": id,
+                    "type": "page",
+                    "title": id,
+                    "url": format!("https://{}.test/", id),
+                    "attached": false,
+                })
+            })
+            .collect();
+        let alive_sessions: HashSet<String> = targets
+            .iter()
+            .filter(|(_, alive)| *alive)
+            .map(|(id, _)| format!("S-{}", id))
+            .collect();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut tx, mut rx) = ws.split();
+            let mut revived: HashSet<String> = HashSet::new();
+
+            while let Some(Ok(msg)) = rx.next().await {
+                let text = match msg {
+                    Message::Text(t) => t,
+                    Message::Ping(p) => {
+                        let _ = tx.send(Message::Pong(p)).await;
+                        continue;
+                    }
+                    _ => continue,
+                };
+                let cmd: Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let Some(id) = cmd["id"].as_u64() else {
+                    continue;
+                };
+                let method = cmd["method"].as_str().unwrap_or("");
+                let session = cmd["sessionId"].as_str().unwrap_or("").to_string();
+                let respond = |result: Value| json!({ "id": id, "result": result }).to_string();
+
+                let reply = match method {
+                    "Target.getTargets" => Some(respond(json!({ "targetInfos": target_infos }))),
+                    "Target.attachToTarget" => {
+                        let target = cmd["params"]["targetId"].as_str().unwrap_or("");
+                        Some(respond(json!({ "sessionId": format!("S-{}", target) })))
+                    }
+                    "Target.activateTarget" => {
+                        activations_task.fetch_add(1, Ordering::SeqCst);
+                        if revive_on_activate {
+                            if let Some(t) = cmd["params"]["targetId"].as_str() {
+                                revived.insert(format!("S-{}", t));
+                            }
+                        }
+                        Some(respond(json!({})))
+                    }
+                    // A discarded session (not alive, not yet revived) never
+                    // answers any renderer-bound command.
+                    _ if !session.is_empty()
+                        && !alive_sessions.contains(&session)
+                        && !revived.contains(&session) =>
+                    {
+                        None
+                    }
+                    "Runtime.evaluate" => Some(respond(
+                        json!({ "result": { "type": "string", "value": "1" } }),
+                    )),
+                    _ => Some(respond(json!({}))),
+                };
+                if let Some(r) = reply {
+                    let _ = tx.send(Message::Text(r)).await;
+                }
+            }
+        });
+
+        (url, activations)
+    }
+
+    /// Regression test for #1036: connecting to a browser whose first target is
+    /// a discarded tab must not hang. `discover_and_attach_targets` used to
+    /// enable domains blindly on `pages[0]`; if that tab was discarded,
+    /// `Page.enable` never answered and connect wedged for minutes. The fix
+    /// probes for a live renderer and makes that tab active instead.
+    #[tokio::test]
+    async fn test_connect_skips_discarded_first_target() {
+        let (url, activations) =
+            start_mock_cdp_connect(vec![("DISCARDED", false), ("ALIVE", true)], false).await;
+
+        let mgr = tokio::time::timeout(Duration::from_secs(15), BrowserManager::connect_cdp(&url))
+            .await
+            .expect("connect must not hang on a discarded first target")
+            .expect("connect should succeed by selecting the live tab");
+
+        assert_eq!(mgr.pages.len(), 2, "all targets should still be listed");
+        assert_eq!(
+            mgr.active_page_index, 1,
+            "the live tab, not the discarded first one, must become active"
+        );
+        assert_eq!(
+            activations.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "with a live tab available, connect must not reactivate (reload/focus) any tab"
+        );
+    }
+
+    /// Regression test for #1036: connecting to a browser with many live tabs
+    /// must stay fast. It was never a raw tab-count problem; the hang came from
+    /// enabling domains on a discarded tab. The common all-live case probes the
+    /// conventional active tab once and is done.
+    #[tokio::test]
+    async fn test_connect_many_live_tabs_stays_fast() {
+        let ids: Vec<&'static str> = vec![
+            "t00", "t01", "t02", "t03", "t04", "t05", "t06", "t07", "t08", "t09", "t10", "t11",
+            "t12", "t13", "t14", "t15", "t16", "t17", "t18", "t19", "t20", "t21", "t22", "t23",
+            "t24", "t25", "t26", "t27", "t28", "t29",
+        ];
+        let targets: Vec<(&'static str, bool)> = ids.iter().map(|id| (*id, true)).collect();
+        let (url, activations) = start_mock_cdp_connect(targets, false).await;
+
+        let mgr = tokio::time::timeout(Duration::from_secs(5), BrowserManager::connect_cdp(&url))
+            .await
+            .expect("connect with many live tabs must stay fast")
+            .expect("connect should succeed");
+
+        assert_eq!(mgr.pages.len(), 30);
+        assert_eq!(
+            mgr.active_page_index, 0,
+            "with the first tab live, it stays the active tab"
+        );
+        assert_eq!(
+            activations.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an all-live browser must never be reactivated"
+        );
+    }
+
+    /// When every tab is discarded there is no live tab to fall back to, so
+    /// connect must revive the first tab (browser-level `Target.activateTarget`,
+    /// bounded) rather than hang, and succeed (#1036).
+    #[tokio::test]
+    async fn test_connect_all_discarded_revives_first_tab() {
+        let (url, activations) = start_mock_cdp_connect(vec![("ONLY", false)], true).await;
+
+        let mgr = tokio::time::timeout(Duration::from_secs(20), BrowserManager::connect_cdp(&url))
+            .await
+            .expect("connect must not hang when all tabs are discarded")
+            .expect("connect should succeed after reviving the only tab");
+
+        assert_eq!(mgr.active_page_index, 0);
+        assert!(
+            activations.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the only (discarded) tab must be revived when there is no live fallback"
+        );
+    }
+
+    /// If every tab is discarded and cannot be revived, connect must fail fast
+    /// with a clear error instead of hanging (#1036).
+    #[tokio::test]
+    async fn test_connect_all_discarded_unrevivable_fails_fast() {
+        let (url, _activations) = start_mock_cdp_connect(vec![("ONLY", false)], false).await;
+
+        let result =
+            tokio::time::timeout(Duration::from_secs(30), BrowserManager::connect_cdp(&url))
+                .await
+                .expect("connect must not hang on an unrevivable discarded tab");
+
+        match result {
+            Ok(_) => panic!("connect should fail when no tab can be made live"),
+            Err(e) => assert!(e.contains("not responding"), "unexpected error: {}", e),
+        }
+    }
+
+    /// Adversarial regression for the #1528 failure mode, on the connect path:
+    /// the connect-time selection fires liveness probes concurrently (via
+    /// `join_all`), and each probe to a discarded tab times out with no reply.
+    /// Every one of those cancelled `Runtime.evaluate` requests must be cleaned
+    /// out of the pending map by the send_command drop guard; otherwise
+    /// discarded tabs would silently accumulate orphaned pending requests on
+    /// every connect. Two discarded tabs precede the live one so both the
+    /// fast-path probe and the concurrent join_all probes are exercised.
+    #[tokio::test]
+    async fn test_connect_probes_leave_no_pending_requests() {
+        let (url, _activations) = start_mock_cdp_connect(
+            vec![("DEAD1", false), ("DEAD2", false), ("ALIVE", true)],
+            false,
+        )
+        .await;
+
+        let mgr = tokio::time::timeout(Duration::from_secs(15), BrowserManager::connect_cdp(&url))
+            .await
+            .expect("connect must not hang")
+            .expect("connect should select the live tab");
+        assert_eq!(
+            mgr.active_page_index, 2,
+            "the live tab (index 2), after two discarded ones, must become active"
+        );
+
+        // Drop-guard cleanup runs on a spawned task; let it settle.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            mgr.client.pending_len().await,
+            0,
+            "cancelled connect-time probes left orphaned CDP requests in the pending map"
+        );
     }
 }
