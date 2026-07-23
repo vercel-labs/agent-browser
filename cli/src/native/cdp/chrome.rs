@@ -64,6 +64,18 @@ impl ChromeProcess {
     }
 }
 
+fn terminate_failed_chrome_launch(child: &mut Child) {
+    let _ = child.kill();
+    #[cfg(unix)]
+    {
+        let pgid = child.id() as i32;
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+    let _ = child.wait();
+}
+
 impl Drop for ChromeProcess {
     fn drop(&mut self) {
         self.kill();
@@ -685,7 +697,7 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         Err(primary_err) => {
             // Fallback: scrape stderr (legacy behavior) for better diagnostics.
             let stderr = child.stderr.take().ok_or_else(|| {
-                let _ = child.kill();
+                terminate_failed_chrome_launch(&mut child);
                 cleanup_temp_dir(&temp_user_data_dir);
                 "Failed to capture Chrome stderr".to_string()
             })?;
@@ -693,7 +705,7 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
             match wait_for_ws_url_until(reader, deadline) {
                 Ok(url) => url,
                 Err(fallback_err) => {
-                    let _ = child.kill();
+                    terminate_failed_chrome_launch(&mut child);
                     cleanup_temp_dir(&temp_user_data_dir);
                     return Err(format!(
                         "{}\n(also tried parsing stderr) {}",
@@ -1564,6 +1576,36 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn spawn_sleep_child() -> Child {
+        Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[cfg(windows)]
+    fn spawn_sleep_child() -> Child {
+        Command::new("cmd.exe")
+            .args(["/C", "ping -n 30 127.0.0.1 > NUL"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_terminate_failed_chrome_launch_reaps_child() {
+        let mut child = spawn_sleep_child();
+        terminate_failed_chrome_launch(&mut child);
+
+        assert!(matches!(child.try_wait(), Ok(Some(_))));
     }
 
     #[test]
