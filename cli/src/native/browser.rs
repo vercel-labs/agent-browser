@@ -793,12 +793,18 @@ impl BrowserManager {
     // -----------------------------------------------------------------------
 
     /// Enable or disable strict pin-tab semantics for this session.
-    /// Disabling also clears a pending `tab_gone` state (which only exists
-    /// under pin semantics) so the session falls back to legacy selection
-    /// instead of staying stuck on errors for a pin it no longer has.
+    /// Enabling binds the currently active tab immediately, so a session that
+    /// turns pinning on at runtime enforces on the live tab instead of leaving
+    /// `bound_target_id` unset until a restart re-derives it from the persisted
+    /// snapshot (the "pinning applied too late / without binding" gap).
+    /// Disabling clears a pending `tab_gone` state (which only exists under pin
+    /// semantics) so the session falls back to legacy selection instead of
+    /// staying stuck on errors for a pin it no longer has.
     pub fn set_pin_tab(&mut self, pin: bool) {
         self.pin_tab = pin;
-        if !pin {
+        if pin {
+            self.bind_active_target();
+        } else {
             self.bound_target_gone = None;
         }
     }
@@ -1756,8 +1762,18 @@ impl BrowserManager {
     }
 
     fn add_page_with_activation(&mut self, page: PageInfo, activate: bool) {
-        let was_empty = self.pages.is_empty();
         let new_index = self.pages.len();
+        // A pinned session whose bound tab is gone must not silently adopt a
+        // discovered (non-activated) tab: activating it here would clear the
+        // `tab_gone` state and re-bind the session to a tab it never opened,
+        // exactly the hijack `tab_gone` exists to prevent. The empty-pages
+        // branch of the activation policy would otherwise force this. Recovery
+        // stays explicit (`tab new` / `tab <ref>` pass `activate = true`).
+        if !activate && self.pin_tab && self.bound_target_gone.is_some() {
+            self.pages.push(page);
+            return;
+        }
+        let was_empty = self.pages.is_empty();
         self.pages.push(page);
         self.active_page_index =
             active_page_index_after_add(self.active_page_index, new_index, was_empty, activate);
@@ -2901,6 +2917,97 @@ mod tests {
             mgr.tab_list().len(),
             2,
             "the foreign tab must still be registered so it shows in `tab list`"
+        );
+    }
+
+    /// Finding #1: enabling pin at runtime must bind the currently active tab
+    /// immediately. The attach-to-existing path leaves `bound_target_id`
+    /// unset, so a session that turns `--pin-tab` on later would otherwise be
+    /// pinned-but-unbound until a restart re-derived the binding from disk
+    /// (pinning "applied too late / without binding the active tab").
+    /// Force-red: revert `set_pin_tab` to only flip the flag and
+    /// `bound_target_id` stays `None` here.
+    #[tokio::test]
+    async fn test_enabling_pin_binds_active_tab_immediately() {
+        let mut mgr = test_manager(vec![
+            page(1, TARGET_A, "https://a.example"),
+            page(2, TARGET_B, "https://b.example"),
+        ])
+        .await;
+        assert_eq!(
+            mgr.bound_target_id(),
+            None,
+            "no binding exists before pin is enabled (attach-to-existing path)"
+        );
+
+        mgr.set_pin_tab(true);
+
+        assert_eq!(
+            mgr.bound_target_id(),
+            Some(TARGET_A),
+            "enabling pin must bind the active tab (index 0) right away"
+        );
+        assert_eq!(
+            mgr.binding_snapshot(),
+            Some((TARGET_A.to_string(), "https://a.example".to_string())),
+            "the live binding must be persistable immediately, not only after restart"
+        );
+    }
+
+    /// Finding #2: a pinned session whose only tracked tab is closed enters the
+    /// `tab_gone` state; a subsequently discovered (auto-attached,
+    /// non-activated) tab must NOT silently re-bind the session and clear
+    /// `tab_gone`. Before the fix, `add_page_with_activation`'s empty-pages
+    /// branch forced activation and `bind_active_target` cleared
+    /// `bound_target_gone`, hijacking the session onto a tab it never opened.
+    /// Force-red: drop the `pin_tab && bound_target_gone` guard in
+    /// `add_page_with_activation` and `active_target_id` becomes `Ok` /
+    /// `bound_target_is_gone` becomes false here.
+    #[tokio::test]
+    async fn test_discovered_tab_does_not_recover_gone_pinned_session() {
+        let mut mgr = test_manager(vec![page(1, TARGET_A, "https://mine.example")]).await;
+        mgr.set_pin_tab(true);
+        assert!(mgr.restore_target_binding(TARGET_A, "https://mine.example"));
+
+        // The bound tab is closed externally: the session's only tracked page
+        // is removed, draining the list to empty and entering tab_gone.
+        mgr.remove_page_by_target_id(TARGET_A);
+        assert!(
+            mgr.bound_target_is_gone(),
+            "closing the bound tab must enter tab_gone"
+        );
+        assert_eq!(
+            mgr.page_count(),
+            0,
+            "the session tracks no pages after the close"
+        );
+
+        // A foreign tab appears and is discovered via a CDP event drain while
+        // the session is gone.
+        let newly_added = mgr.register_discovered_page(
+            TARGET_B,
+            "session-b",
+            "https://foreign.example".to_string(),
+            String::new(),
+            "page".to_string(),
+        );
+        assert!(
+            newly_added,
+            "the foreign tab is still registered so it shows in `tab list`"
+        );
+
+        assert!(
+            mgr.bound_target_is_gone(),
+            "a discovered tab must not clear the tab_gone state"
+        );
+        assert!(
+            mgr.active_target_id().is_err(),
+            "page commands must still fail with tab_gone, not act on the foreign tab"
+        );
+        assert_eq!(
+            mgr.bound_target_id(),
+            None,
+            "the session must not silently re-bind to a tab it never opened"
         );
     }
 
