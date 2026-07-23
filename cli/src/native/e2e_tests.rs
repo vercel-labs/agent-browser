@@ -1972,6 +1972,97 @@ async fn e2e_viewport_emulation() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_viewport_auto_restores_window_tracking() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "about:blank" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "viewport", "width": 1200, "height": 800 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(state.viewport.is_some());
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "viewport", "auto": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["auto"], true);
+    assert_eq!(get_data(&resp)["width"], 1200);
+    assert_eq!(get_data(&resp)["height"], 800);
+    assert!(state.viewport.is_none());
+
+    let mgr = state.browser.as_ref().unwrap();
+    let target_id = mgr.active_target_id().unwrap();
+    let window_info = mgr
+        .client
+        .send_command(
+            "Browser.getWindowForTarget",
+            Some(json!({ "targetId": target_id })),
+            None,
+        )
+        .await
+        .unwrap();
+    let window_id = window_info["windowId"].as_i64().unwrap();
+    mgr.client
+        .send_command(
+            "Browser.setContentsSize",
+            Some(json!({
+                "windowId": window_id,
+                "width": 640,
+                "height": 480,
+            })),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let resp = execute_command(
+        &json!({
+            "id": "5",
+            "action": "waitforfunction",
+            "expression": "window.innerWidth === 640",
+            "timeout": 5000,
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "window.innerWidth" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        640,
+        "CSS viewport should follow the browser content size after auto mode"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Hover, scroll, press
 // ---------------------------------------------------------------------------
@@ -5522,9 +5613,158 @@ async fn e2e_stream_frame_metadata_respects_custom_viewport() {
         "should have received a frame with JPEG dimensions 800x600 within the deadline"
     );
 
+    // Disconnect the stream before clearing emulation and resizing. The next
+    // client must get the current CSS viewport even though no listener saw the
+    // resize event.
+    ws.close(None)
+        .await
+        .expect("websocket client should close cleanly");
+    let stream_server = state
+        .stream_server
+        .as_ref()
+        .expect("stream server should remain enabled");
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+    while stream_server.is_screencasting().await && tokio::time::Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !stream_server.is_screencasting().await,
+        "stream server should observe the disconnected client"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "viewport", "auto": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let mgr = state.browser.as_ref().expect("browser should be running");
+    let target_id = mgr
+        .active_target_id()
+        .expect("an active target should exist");
+    let browser_client = Arc::clone(&mgr.client);
+    let window_info = browser_client
+        .send_command(
+            "Browser.getWindowForTarget",
+            Some(json!({ "targetId": target_id })),
+            None,
+        )
+        .await
+        .expect("window should be discoverable");
+    let window_id = window_info["windowId"]
+        .as_i64()
+        .expect("window id should be present");
+    browser_client
+        .send_command(
+            "Browser.setContentsSize",
+            Some(json!({
+                "windowId": window_id,
+                "width": 640,
+                "height": 480,
+            })),
+            None,
+        )
+        .await
+        .expect("window contents should resize");
+
+    let resp = execute_command(
+        &json!({
+            "id": "5",
+            "action": "waitforfunction",
+            "expression": "window.innerWidth === 640 && window.innerHeight === 480",
+            "timeout": 5000,
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
+        .await
+        .expect("websocket client should reconnect to runtime stream");
+
+    let mut found_resized_frame = false;
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
+    while tokio::time::Instant::now() < deadline {
+        let msg = tokio::time::timeout(tokio::time::Duration::from_secs(3), ws.next()).await;
+        let Some(Ok(message)) = msg.ok().flatten() else {
+            continue;
+        };
+        if !message.is_text() {
+            continue;
+        }
+        let parsed: Value =
+            serde_json::from_str(message.to_text().expect("text message should be readable"))
+                .expect("stream payload should be valid JSON");
+        if parsed.get("type") == Some(&json!("frame"))
+            && parsed["metadata"]["deviceWidth"] == 640
+            && parsed["metadata"]["deviceHeight"] == 480
+        {
+            found_resized_frame = true;
+            break;
+        }
+    }
+    assert!(
+        found_resized_frame,
+        "stream frame metadata should follow a manual resize after viewport auto"
+    );
+
+    // A resize while connected must also update the active stream.
+    browser_client
+        .send_command(
+            "Browser.setContentsSize",
+            Some(json!({
+                "windowId": window_id,
+                "width": 700,
+                "height": 520,
+            })),
+            None,
+        )
+        .await
+        .expect("window contents should resize while streaming");
+
+    let resp = execute_command(
+        &json!({
+            "id": "6",
+            "action": "waitforfunction",
+            "expression": "window.innerWidth === 700 && window.innerHeight === 520",
+            "timeout": 5000,
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let mut found_live_resized_frame = false;
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
+    while tokio::time::Instant::now() < deadline {
+        let msg = tokio::time::timeout(tokio::time::Duration::from_secs(3), ws.next()).await;
+        let Some(Ok(message)) = msg.ok().flatten() else {
+            continue;
+        };
+        if !message.is_text() {
+            continue;
+        }
+        let parsed: Value =
+            serde_json::from_str(message.to_text().expect("text message should be readable"))
+                .expect("stream payload should be valid JSON");
+        if parsed.get("type") == Some(&json!("frame"))
+            && parsed["metadata"]["deviceWidth"] == 700
+            && parsed["metadata"]["deviceHeight"] == 520
+        {
+            found_live_resized_frame = true;
+            break;
+        }
+    }
+    assert!(
+        found_live_resized_frame,
+        "stream frame metadata should follow a resize while connected"
+    );
+
     // Cleanup
     let resp = execute_command(
-        &json!({ "id": "4", "action": "stream_disable" }),
+        &json!({ "id": "7", "action": "stream_disable" }),
         &mut state,
     )
     .await;

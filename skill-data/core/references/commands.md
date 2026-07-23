@@ -162,6 +162,7 @@ agent-browser find nth 2 "a" hover
 ```bash
 agent-browser set viewport 1920 1080          # Set viewport size
 agent-browser set viewport 1920 1080 2        # 2x retina (same CSS size, higher res screenshots)
+agent-browser set viewport auto               # Clear emulation and follow browser window resizing
 agent-browser set device "iPhone 14"          # Emulate device
 agent-browser set geo 37.7749 -122.4194       # Set geolocation (alias: geolocation)
 agent-browser set offline on                  # Toggle offline mode
@@ -170,6 +171,8 @@ agent-browser set credentials user pass       # HTTP basic auth (alias: auth)
 agent-browser set media dark                  # Emulate color scheme
 agent-browser set media light reduced-motion  # Light mode + reduced motion
 ```
+
+Fixed viewport dimensions remain emulated until changed. In headed mode, use `set viewport auto` when the page should follow manual window resizing.
 
 ## Cookies and Storage
 

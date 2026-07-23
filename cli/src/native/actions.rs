@@ -5948,6 +5948,30 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 }
 
 async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    if cmd.get("auto").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let dimensions = {
+            let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+            mgr.clear_viewport().await?;
+            mgr.evaluate("[window.innerWidth,window.innerHeight]", None)
+                .await
+                .ok()
+                .and_then(|value| serde_json::from_value::<Vec<u32>>(value).ok())
+                .filter(|values| values.len() == 2 && values[0] > 0 && values[1] > 0)
+        };
+
+        state.viewport = None;
+
+        let mut result = json!({ "auto": true });
+        if let Some(dimensions) = dimensions {
+            result["width"] = json!(dimensions[0]);
+            result["height"] = json!(dimensions[1]);
+            if let Some(ref server) = state.stream_server {
+                server.set_viewport(dimensions[0], dimensions[1]).await;
+            }
+        }
+        return Ok(result);
+    }
+
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let width = cmd.get("width").and_then(|v| v.as_i64()).unwrap_or(1280) as i32;
     let height = cmd.get("height").and_then(|v| v.as_i64()).unwrap_or(720) as i32;

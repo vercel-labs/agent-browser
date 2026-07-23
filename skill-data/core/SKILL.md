@@ -391,6 +391,8 @@ agent-browser snapshot -i
 
 **Click does nothing / overlay swallows the click** Some modals and cookie banners block other clicks. If `click` reports `covered by <...>`, interact with that covering element first. Otherwise, snapshot, find the dismiss/close button, click it, then re-snapshot.
 
+**Headed page does not resize with the browser window** `set viewport <w> <h>` enables persistent device metrics emulation, so later manual window resizing does not change the CSS viewport. Run `agent-browser set viewport auto` to clear emulation and make the page follow the visible window again. Prefer auto mode for a headed browser shared with a human; use fixed dimensions for deterministic responsive tests and screenshots.
+
 **Fill / type doesn't work** Some custom input components intercept key events. Try:
 
 ```bash
