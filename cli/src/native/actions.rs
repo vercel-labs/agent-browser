@@ -37,7 +37,7 @@ use super::screenshot::{self, ScreenshotOptions};
 use super::snapshot::{self, SnapshotOptions};
 use super::state;
 use super::storage;
-use super::stream::{self, StreamServer};
+use super::stream::{self, IdleActivity, StreamServer};
 use super::tracing::{self as native_tracing, TracingState};
 use super::webdriver::appium::AppiumManager;
 use super::webdriver::backend::{BrowserBackend, WebDriverBackend, WEBDRIVER_UNSUPPORTED_ACTIONS};
@@ -416,6 +416,8 @@ pub struct DaemonState {
     pub stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     /// Stream server instance kept alive so the broadcast channel remains open.
     pub stream_server: Option<Arc<StreamServer>>,
+    /// Daemon-owned activity clock shared by commands and stream servers.
+    pub idle_activity: Arc<IdleActivity>,
     /// Hash of launch options used for the current browser, for relaunch detection.
     launch_hash: Option<u64>,
     /// Whether browser-level auto-attach has been enabled for the current
@@ -432,8 +434,21 @@ pub struct DaemonState {
     pub plugin_init_scripts: Vec<String>,
     /// Provider cleanup metadata for the active external browser session.
     active_provider_session: Option<ActiveProviderSession>,
+    /// True when the connected CDP browser is owned by a cloud provider.
+    ///
+    /// This is tracked separately from cleanup metadata because provider
+    /// plugins are allowed to omit a close-session payload.
+    active_provider_connection: bool,
     /// Actions already approved while replaying a confirmed command.
     confirmed_policy_actions: HashSet<String>,
+}
+
+fn default_idle_shutdown_is_blocked(
+    is_webdriver: bool,
+    provider_owned: bool,
+    browser_blocks_shutdown: bool,
+) -> bool {
+    is_webdriver || (!provider_owned && browser_blocks_shutdown)
 }
 
 impl DaemonState {
@@ -500,6 +515,7 @@ impl DaemonState {
             ),
             stream_client: None,
             stream_server: None,
+            idle_activity: Arc::new(IdleActivity::new()),
             launch_hash: None,
             network_auto_attach_installed: false,
             engine: env::var("AGENT_BROWSER_ENGINE").unwrap_or_else(|_| "chrome".to_string()),
@@ -513,8 +529,23 @@ impl DaemonState {
             viewport: None,
             plugin_init_scripts: Vec::new(),
             active_provider_session: None,
+            active_provider_connection: false,
             confirmed_policy_actions: HashSet::new(),
         }
+    }
+
+    /// True when the default idle timeout must not shut down this session.
+    /// WebDriver-backed Safari and iOS sessions are always headed, while CDP
+    /// sessions delegate the decision to BrowserManager. Provider-owned CDP
+    /// connections remain eligible because the daemon owns their lifecycle.
+    pub(crate) fn blocks_default_idle_shutdown(&self) -> bool {
+        default_idle_shutdown_is_blocked(
+            matches!(self.backend_type, BackendType::WebDriver),
+            self.active_provider_connection,
+            self.browser
+                .as_ref()
+                .is_some_and(BrowserManager::blocks_default_idle_shutdown),
+        )
     }
 
     /// Extract the timeout from a command JSON, falling back to the
@@ -536,6 +567,7 @@ impl DaemonState {
     pub fn new_with_stream(
         stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
         stream_server: Option<Arc<StreamServer>>,
+        idle_activity: Arc<IdleActivity>,
     ) -> Self {
         let mut s = Self::new();
         if stream_server.is_some() {
@@ -543,6 +575,7 @@ impl DaemonState {
         }
         s.stream_client = stream_client;
         s.stream_server = stream_server;
+        s.idle_activity = idle_activity;
         s
     }
 
@@ -1912,6 +1945,7 @@ fn remember_active_provider_session(
     session: Option<providers::ProviderSession>,
     plugins: &[crate::plugins::PluginConfig],
 ) {
+    state.active_provider_connection = true;
     state.active_provider_session = session.map(|session| ActiveProviderSession {
         session,
         plugins: plugins.to_vec(),
@@ -1922,6 +1956,7 @@ async fn close_active_provider_session(state: &mut DaemonState) {
     if let Some(active) = state.active_provider_session.take() {
         providers::close_provider_session_with_plugins(&active.session, &active.plugins).await;
     }
+    state.active_provider_connection = false;
 }
 
 pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(), String> {
@@ -1944,6 +1979,30 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
         return Err(err);
     }
     Ok(())
+}
+
+/// Close every browser backend owned by the daemon.
+///
+/// Lifecycle shutdown paths use this instead of `close_current_browser`
+/// because Safari and iOS sessions live outside `state.browser`.
+pub(crate) async fn close_all_browser_backends(state: &mut DaemonState) -> Result<(), String> {
+    let close_result = close_current_browser(state).await;
+
+    if let Some(ref mut webdriver) = state.webdriver_backend {
+        let _ = webdriver.close().await;
+    }
+    state.webdriver_backend = None;
+    if let Some(ref mut appium) = state.appium {
+        let _ = appium.close().await;
+    }
+    state.appium = None;
+    if let Some(ref mut driver) = state.safari_driver {
+        driver.kill();
+    }
+    state.safari_driver = None;
+    state.backend_type = BackendType::Cdp;
+
+    close_result
 }
 
 async fn close_after_network_control_failure(
@@ -4454,7 +4513,7 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
 
 async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     let save_result = auto_save_restore_state(state).await;
-    close_current_browser(state).await?;
+    close_all_browser_backends(state).await?;
 
     // Stop background Fetch handler
     if let Some(task) = state.fetch_handler_task.take() {
@@ -4464,21 +4523,6 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
         let mut map = state.origin_headers.write().await;
         map.clear();
     }
-
-    // Close WebDriver sessions
-    if let Some(ref mut wb) = state.webdriver_backend {
-        let _ = wb.close().await;
-    }
-    state.webdriver_backend = None;
-    if let Some(ref mut appium) = state.appium {
-        let _ = appium.close().await;
-    }
-    state.appium = None;
-    if let Some(ref mut driver) = state.safari_driver {
-        driver.kill();
-    }
-    state.safari_driver = None;
-    state.backend_type = BackendType::Cdp;
 
     if let Some(server) = state.inspect_server.take() {
         server.shutdown();
@@ -7659,8 +7703,13 @@ async fn handle_stream_enable(cmd: &Value, state: &mut DaemonState) -> Result<Va
         None => 0,
     };
 
-    let (server, client_slot) =
-        StreamServer::start_without_client(requested_port, state.session_id.clone(), false).await?;
+    let (server, client_slot) = StreamServer::start_without_client(
+        requested_port,
+        state.session_id.clone(),
+        false,
+        state.idle_activity.clone(),
+    )
+    .await?;
     let port = server.port();
     if let Err(err) = write_stream_file(&state.session_id, port) {
         server.shutdown().await;
@@ -12439,6 +12488,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         fs::set_permissions(&plugin_path, perms).unwrap();
 
         let mut state = DaemonState::new();
+        state.active_provider_connection = true;
         state.active_provider_session = Some(ActiveProviderSession {
             session: providers::ProviderSession {
                 provider: "plugin:cloud-browser".to_string(),
@@ -12456,9 +12506,30 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         close_current_browser(&mut state).await.unwrap();
 
         assert!(state.active_provider_session.is_none());
+        assert!(!state.active_provider_connection);
         let request = fs::read_to_string(request_path).unwrap();
         assert!(request.contains(r#""type":"browser.close""#));
         assert!(request.contains(r#""sessionId":"s1""#));
+    }
+
+    #[test]
+    fn test_provider_owned_cdp_connection_remains_idle_cleanup_eligible() {
+        assert!(
+            !default_idle_shutdown_is_blocked(false, true, true),
+            "provider ownership must override the attached-CDP exemption"
+        );
+        assert!(default_idle_shutdown_is_blocked(false, false, true));
+        assert!(default_idle_shutdown_is_blocked(true, true, false));
+    }
+
+    #[test]
+    fn test_provider_ownership_does_not_require_cleanup_metadata() {
+        let mut state = DaemonState::new();
+
+        remember_active_provider_session(&mut state, None, &[]);
+
+        assert!(state.active_provider_connection);
+        assert!(state.active_provider_session.is_none());
     }
 
     #[tokio::test]

@@ -58,7 +58,7 @@ Client-daemon architecture for optimal performance:
 1. **Rust CLI**: Parses commands, communicates with daemon
 2. **Native Daemon**: Pure Rust daemon using direct CDP, manages Chrome via Chrome DevTools Protocol
 
-Daemon starts automatically and persists between commands.
+The daemon starts automatically and persists between commands. By default, it saves configured restore state, closes its headless browser, and exits after one hour without commands or dashboard input. Without `--restore` or another restore key, shutdown discards transient browser state and open tabs. Headed browsers, Safari and iOS WebDriver sessions, and user-attached browsers are exempt from the default timeout; provider-owned cloud browsers are not. Use `--idle-timeout <time>` or `AGENT_BROWSER_IDLE_TIMEOUT_MS` to tune the timeout, and use `0` to disable it.
 
 ## Platforms
 

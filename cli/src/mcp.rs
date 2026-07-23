@@ -2,7 +2,9 @@
 //!
 //! The server keeps stdout exclusively for newline-delimited JSON-RPC
 //! messages. Tool calls are delegated to the current binary in `--json` mode
-//! so MCP behavior stays aligned with the normal CLI command surface.
+//! so MCP behavior stays aligned with the normal CLI command surface. Daemon
+//! lifecycle settings, including the default idle timeout, use the same CLI
+//! parser and daemon as direct commands.
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
@@ -1896,6 +1898,13 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         }),
     );
     props.insert(
+        "idleTimeout".to_string(),
+        json!({
+            "type": "string",
+            "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Defaults to 1h; 0 disables idle shutdown."
+        }),
+    );
+    props.insert(
         "extraArgs".to_string(),
         json!({
             "type": "array",
@@ -3517,6 +3526,11 @@ fn append_common_global_args(
     }
     append_session_args(args, session);
 
+    if let Some(idle_timeout) = optional_string(arguments, "idleTimeout")? {
+        args.push("--idle-timeout".to_string());
+        args.push(idle_timeout);
+    }
+
     if let Some(restore) = arguments.get("restore") {
         if let Some(enabled) = restore.as_bool() {
             if enabled {
@@ -4180,6 +4194,22 @@ mod tests {
     }
 
     #[test]
+    fn common_global_args_include_idle_timeout() {
+        let mut args = Vec::new();
+
+        append_common_global_args(
+            &mut args,
+            &json!({
+                "idleTimeout": "0"
+            }),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(args, vec!["--idle-timeout", "0"]);
+    }
+
+    #[test]
     fn tool_schema_includes_extra_args_for_cli_parity() {
         let tools = tools();
         let open = tools
@@ -4201,6 +4231,10 @@ mod tests {
         assert_eq!(
             open["inputSchema"]["properties"]["allowedDomains"]["type"],
             "array"
+        );
+        assert_eq!(
+            open["inputSchema"]["properties"]["idleTimeout"]["type"],
+            "string"
         );
     }
 

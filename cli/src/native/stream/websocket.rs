@@ -10,7 +10,7 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::native::cdp::client::CdpClient;
 
 use super::http::handle_http_request;
-use super::{is_allowed_origin, timestamp_ms};
+use super::{is_allowed_origin, timestamp_ms, IdleActivity};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn accept_loop(
@@ -19,6 +19,7 @@ pub(super) async fn accept_loop(
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
     client_notify: Arc<Notify>,
+    idle_activity: Arc<IdleActivity>,
     screencasting: Arc<Mutex<bool>>,
     cdp_session_id: Arc<RwLock<Option<String>>>,
     viewport_width: Arc<Mutex<u32>>,
@@ -46,6 +47,7 @@ pub(super) async fn accept_loop(
                 let client_count = client_count.clone();
                 let client_slot = client_slot.clone();
                 let client_notify = client_notify.clone();
+                let idle_activity = idle_activity.clone();
                 let screencasting = screencasting.clone();
                 let cdp_session_id = cdp_session_id.clone();
                 let vw = viewport_width.clone();
@@ -65,6 +67,7 @@ pub(super) async fn accept_loop(
                         client_count,
                         client_slot,
                         client_notify,
+                        idle_activity,
                         screencasting,
                         cdp_session_id,
                         vw,
@@ -103,6 +106,7 @@ async fn handle_connection(
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
     client_notify: Arc<Notify>,
+    idle_activity: Arc<IdleActivity>,
     screencasting: Arc<Mutex<bool>>,
     cdp_session_id: Arc<RwLock<Option<String>>>,
     viewport_width: Arc<Mutex<u32>>,
@@ -130,6 +134,7 @@ async fn handle_connection(
             client_count,
             client_slot,
             client_notify,
+            idle_activity,
             screencasting,
             cdp_session_id,
             viewport_width,
@@ -154,6 +159,7 @@ async fn handle_ws_client(
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
     client_notify: Arc<Notify>,
+    idle_activity: Arc<IdleActivity>,
     screencasting: Arc<Mutex<bool>>,
     cdp_session_id: Arc<RwLock<Option<String>>>,
     viewport_width: Arc<Mutex<u32>>,
@@ -258,7 +264,13 @@ async fn handle_ws_client(
                         let guard = client_slot.read().await;
                         if let Some(ref client) = *guard {
                             let sid = cdp_session_id.read().await;
-                            handle_client_message(&text, client.as_ref(), sid.as_deref()).await;
+                            handle_client_message(
+                                &text,
+                                client.as_ref(),
+                                sid.as_deref(),
+                                idle_activity.as_ref(),
+                            )
+                            .await;
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
@@ -276,13 +288,21 @@ async fn handle_ws_client(
     client_notify.notify_one();
 }
 
-async fn handle_client_message(msg: &str, client: &CdpClient, session_id: Option<&str>) {
+async fn handle_client_message(
+    msg: &str,
+    client: &CdpClient,
+    session_id: Option<&str>,
+    idle_activity: &IdleActivity,
+) {
     let parsed: Value = match serde_json::from_str(msg) {
         Ok(v) => v,
         Err(_) => return,
     };
 
     let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if is_user_input_message_type(msg_type) {
+        idle_activity.mark();
+    }
 
     match msg_type {
         "input_mouse" => {
@@ -334,5 +354,23 @@ async fn handle_client_message(msg: &str, client: &CdpClient, session_id: Option
         }
         "status" => {}
         _ => {}
+    }
+}
+
+fn is_user_input_message_type(msg_type: &str) -> bool {
+    matches!(msg_type, "input_mouse" | "input_keyboard" | "input_touch")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_user_input_message_type;
+
+    #[test]
+    fn dashboard_input_messages_count_as_user_activity() {
+        for msg_type in ["input_mouse", "input_keyboard", "input_touch"] {
+            assert!(is_user_input_message_type(msg_type));
+        }
+        assert!(!is_user_input_message_type("status"));
+        assert!(!is_user_input_message_type("frame"));
     }
 }

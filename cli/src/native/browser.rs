@@ -358,6 +358,10 @@ pub struct BrowserManager {
     /// True when the CDP WebSocket is already scoped to a page target and
     /// browser-level Target.* commands are not available.
     direct_page: bool,
+    /// Whether the daemon-spawned browser actually runs headless after
+    /// launch rules such as extension-forced headed mode. Meaningless for
+    /// attached browsers (browser_process is None).
+    headless: bool,
 }
 
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -365,6 +369,17 @@ const LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100
 const LIGHTPANDA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl BrowserManager {
+    /// True when a *default* idle timeout must not close this browser:
+    /// a headed window may be in direct human use outside the daemon's socket
+    /// commands and dashboard input, and a user-attached browser
+    /// (`connect_cdp`) was not spawned by the daemon and cannot be relaunched
+    /// on the next command. Provider connections also use `connect_cdp`, so
+    /// callers must override this result when the daemon owns the provider
+    /// lifecycle. An explicit AGENT_BROWSER_IDLE_TIMEOUT_MS applies regardless.
+    pub fn blocks_default_idle_shutdown(&self) -> bool {
+        self.browser_process.is_none() || !self.headless
+    }
+
     pub async fn launch(options: LaunchOptions, engine: Option<&str>) -> Result<Self, String> {
         let engine = engine.unwrap_or("chrome");
 
@@ -394,6 +409,7 @@ impl BrowserManager {
         let user_agent = options.user_agent.clone();
         let color_scheme = options.color_scheme.clone();
         let download_path = options.download_path.clone();
+        let headless = options.effectively_headless();
 
         let (ws_url, process) = match engine {
             "lightpanda" => {
@@ -431,6 +447,7 @@ impl BrowserManager {
                 visited_origins: HashSet::new(),
                 next_tab_id: 1,
                 direct_page: false,
+                headless,
             };
             manager.discover_and_attach_targets().await?;
             manager
@@ -521,6 +538,7 @@ impl BrowserManager {
             visited_origins: HashSet::new(),
             next_tab_id: 1,
             direct_page,
+            headless: true,
         };
 
         if direct_page {
@@ -1890,6 +1908,7 @@ async fn initialize_lightpanda_manager(
             visited_origins: HashSet::new(),
             next_tab_id: 1,
             direct_page: false,
+            headless: true,
         };
 
         match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {
