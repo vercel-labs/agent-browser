@@ -3332,7 +3332,14 @@ fn launch_options_from_env() -> LaunchOptions {
         no_xvfb: no_xvfb_from_env(),
         restrict_webrtc: env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
             .is_ok_and(|domains| !domains.trim().is_empty()),
+        no_startup_window: no_startup_window_from_env(),
     }
+}
+
+fn no_startup_window_from_env() -> bool {
+    env::var("AGENT_BROWSER_NO_STARTUP_WINDOW")
+        .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | ""))
+        .unwrap_or(true)
 }
 
 fn hide_scrollbars_from_env() -> bool {
@@ -3793,6 +3800,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         webgpu: webgpu_from_launch_cmd(cmd),
         no_xvfb: no_xvfb_from_launch_cmd(cmd),
         restrict_webrtc,
+        no_startup_window: no_startup_window_from_env(),
     };
 
     state.plugin_init_scripts.clear();
@@ -12563,6 +12571,47 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         guard.set("AGENT_BROWSER_HIDE_SCROLLBARS", "false");
         let opts = launch_options_from_env();
         assert!(!opts.hide_scrollbars);
+    }
+
+    #[test]
+    fn test_launch_options_from_env_no_startup_window_default() {
+        // Default behavior: flag is ON so headed real-Chrome launches don't
+        // strand a phantom NTP tab. See issue #1544.
+        let guard = EnvGuard::new(&["AGENT_BROWSER_NO_STARTUP_WINDOW"]);
+        guard.remove("AGENT_BROWSER_NO_STARTUP_WINDOW");
+        let opts = launch_options_from_env();
+        assert!(
+            opts.no_startup_window,
+            "no_startup_window must default to true to fix issue #1544"
+        );
+    }
+
+    #[test]
+    fn test_launch_options_from_env_no_startup_window_opt_out() {
+        // Each of these values must opt out of the auto-injection.
+        for value in ["0", "false", "no", "FALSE", "No", ""] {
+            let guard = EnvGuard::new(&["AGENT_BROWSER_NO_STARTUP_WINDOW"]);
+            guard.set("AGENT_BROWSER_NO_STARTUP_WINDOW", value);
+            let opts = launch_options_from_env();
+            assert!(
+                !opts.no_startup_window,
+                "AGENT_BROWSER_NO_STARTUP_WINDOW={value:?} must opt out",
+            );
+        }
+    }
+
+    #[test]
+    fn test_launch_options_from_env_no_startup_window_opt_in() {
+        // Explicit non-falsy values must keep the default-on behavior.
+        for value in ["1", "true", "yes", "TRUE"] {
+            let guard = EnvGuard::new(&["AGENT_BROWSER_NO_STARTUP_WINDOW"]);
+            guard.set("AGENT_BROWSER_NO_STARTUP_WINDOW", value);
+            let opts = launch_options_from_env();
+            assert!(
+                opts.no_startup_window,
+                "AGENT_BROWSER_NO_STARTUP_WINDOW={value:?} must keep the flag enabled",
+            );
+        }
     }
 
     #[test]
