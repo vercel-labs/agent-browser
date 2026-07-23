@@ -12,6 +12,7 @@ use tokio::sync::{broadcast, oneshot, RwLock};
 use crate::connection::{get_socket_dir, INTERNAL_DAEMON_SHUTDOWN_ACTION};
 use crate::validation::{is_valid_session_name, session_name_error};
 
+use super::a11y;
 use super::auth;
 use super::browser::{should_track_target, BrowserManager, WaitUntil};
 use super::cdp::chrome::LaunchOptions;
@@ -234,6 +235,25 @@ struct DrainedEvents {
     har_finished_requests: Vec<(String, Option<String>)>,
 }
 
+fn is_active_iframe_network_event(
+    method: &str,
+    session_id: Option<&str>,
+    tracking_enabled: bool,
+    active_iframe_sessions: &HashSet<String>,
+) -> bool {
+    tracking_enabled
+        && method.starts_with("Network.")
+        && session_id.is_some_and(|sid| active_iframe_sessions.contains(sid))
+}
+
+fn active_frame_scope_may_have_changed(drained: &DrainedEvents) -> bool {
+    !drained.attached_iframe_sessions.is_empty()
+        || !drained.detached_iframe_sessions.is_empty()
+        || !drained.attached_page_sessions.is_empty()
+        || !drained.new_targets.is_empty()
+        || !drained.destroyed_targets.is_empty()
+}
+
 /// Compute a hash of the [`LaunchOptions`] fields that require a browser
 /// relaunch when changed (baked into the Chrome process at startup).
 ///
@@ -362,7 +382,14 @@ pub struct DaemonState {
     pub active_frame_id: Option<String>,
     /// Cross-origin iframe frame_id → dedicated CDP session_id.
     /// Populated by Target.attachedToTarget events from Target.setAutoAttach.
+    /// Entries are retained across tab changes because Chrome does not emit a
+    /// second attachment event when returning to an already-attached tab.
+    /// Target.detachedFromTarget events remove stale sessions.
     pub iframe_sessions: HashMap<String, String>,
+    /// Dedicated iframe sessions reachable from the currently active page.
+    /// Network tracking uses this subset so background-tab iframe traffic is
+    /// not mixed into the active tab's request list or HAR capture.
+    pub active_iframe_sessions: HashSet<String>,
     /// Origin-scoped extra HTTP headers set via `--headers` on navigate.
     /// Key is the origin (scheme + host + port), value is the headers map.
     /// Wrapped in Arc<RwLock<>> so the background Fetch handler can read it.
@@ -477,6 +504,7 @@ impl DaemonState {
             request_tracking: false,
             active_frame_id: None,
             iframe_sessions: HashMap::new(),
+            active_iframe_sessions: HashSet::new(),
             origin_headers: Arc::new(RwLock::new(HashMap::new())),
             proxy_credentials: Arc::new(RwLock::new(None)),
             fetch_handler_task: None,
@@ -845,7 +873,33 @@ impl DaemonState {
         self.apply_drained_events(drained).await
     }
 
+    async fn refresh_active_iframe_sessions(&mut self) {
+        let Some(ref browser) = self.browser else {
+            self.active_iframe_sessions.clear();
+            return;
+        };
+        let Ok(top_session_id) = browser.active_session_id().map(ToString::to_string) else {
+            self.active_iframe_sessions.clear();
+            return;
+        };
+        if self.iframe_sessions.is_empty() {
+            self.active_iframe_sessions.clear();
+            return;
+        }
+
+        let client = browser.client.clone();
+        let iframe_sessions = self.iframe_sessions.clone();
+        self.active_iframe_sessions =
+            a11y::active_iframe_session_ids(&client, &top_session_id, &iframe_sessions)
+                .await
+                .unwrap_or_default();
+    }
+
     async fn apply_drained_events(&mut self, drained: DrainedEvents) -> Result<(), String> {
+        // Popups and externally closed pages can change the active top-level
+        // target without changing iframe topology. Refresh after either kind
+        // of event so network capture stays scoped to the active page.
+        let active_frame_scope_changed = active_frame_scope_may_have_changed(&drained);
         // ACK screencast frames
         if !drained.pending_acks.is_empty() {
             if let Some(ref browser) = self.browser {
@@ -1033,6 +1087,7 @@ impl DaemonState {
 
         for sid in &drained.detached_iframe_sessions {
             self.iframe_sessions.retain(|_, v| v != sid);
+            self.active_iframe_sessions.remove(sid);
         }
 
         // Attach and register new targets
@@ -1191,6 +1246,10 @@ impl DaemonState {
             }
         }
 
+        if active_frame_scope_changed {
+            self.refresh_active_iframe_sessions().await;
+        }
+
         Ok(())
     }
 
@@ -1320,12 +1379,12 @@ impl DaemonState {
                     // Allow Network events from cross-origin iframe sessions
                     // when HAR recording or request tracking is active.
                     let iframe_network_event = !session_matches
-                        && (self.har_recording || self.request_tracking)
-                        && event.method.starts_with("Network.")
-                        && event
-                            .session_id
-                            .as_ref()
-                            .is_some_and(|sid| self.iframe_sessions.values().any(|v| v == sid));
+                        && is_active_iframe_network_event(
+                            &event.method,
+                            event.session_id.as_deref(),
+                            self.har_recording || self.request_tracking,
+                            &self.active_iframe_sessions,
+                        );
 
                     if !session_matches && !iframe_network_event {
                         continue;
@@ -1908,6 +1967,8 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
     close_active_provider_session(state).await;
     state.launch_hash = None;
     state.network_auto_attach_installed = false;
+    state.iframe_sessions.clear();
+    state.active_iframe_sessions.clear();
     state.screencasting = false;
     state.reset_input_state();
     state.update_stream_client().await;
@@ -1989,6 +2050,12 @@ fn policy_actions_for_command(
     needs_implicit_launch: bool,
 ) -> Vec<String> {
     let mut actions = vec![action.to_string()];
+    // `a11y <url>` performs a real browser navigation before the audit. Keep
+    // navigation deny and confirmation policies effective for the compound
+    // command instead of treating it as a read-only audit.
+    if action == "a11y" && cmd.get("url").and_then(|v| v.as_str()).is_some() {
+        actions.push("navigate".to_string());
+    }
     if action == "auth_login" {
         if let Some(provider) = cmd.get("credentialProvider").and_then(|v| v.as_str()) {
             let plugins = plugins_from_command_or_env(cmd);
@@ -2405,6 +2472,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "react_renders_stop" => handle_react_renders_stop(cmd, state).await,
         "react_suspense" => handle_react_suspense(cmd, state).await,
         "vitals" => handle_vitals(cmd, state).await,
+        "a11y" => handle_a11y(cmd, state).await,
         "pushstate" => handle_pushstate(cmd, state).await,
         "clipboard" => handle_clipboard(cmd, state).await,
         "wheel" => handle_wheel(cmd, state).await,
@@ -4392,6 +4460,17 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         }
     }
 
+    // With one tab, every tracked iframe belongs to the page being replaced.
+    // With multiple tabs, retain the other tabs' sessions so switching back to
+    // an already-attached OOPIF does not lose its execution context.
+    let has_background_tabs = state
+        .browser
+        .as_ref()
+        .is_some_and(|browser| browser.page_count() > 1);
+    if !has_background_tabs {
+        state.iframe_sessions.clear();
+    }
+
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
 
     let wait_until = cmd
@@ -4443,9 +4522,11 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     }
 
     state.ref_map.clear();
-    state.iframe_sessions.clear();
+    state.active_iframe_sessions.clear();
     state.active_frame_id = None;
-    mgr.navigate(url, wait_until).await
+    let result = mgr.navigate(url, wait_until).await?;
+    state.refresh_active_iframe_sessions().await;
+    Ok(result)
 }
 
 async fn handle_url(state: &DaemonState) -> Result<Value, String> {
@@ -6083,7 +6164,7 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         should_defer_url_until_network_controls(domain_filter.as_ref(), has_proxy_creds, url)?;
 
     state.ref_map.clear();
-    state.iframe_sessions.clear();
+    state.active_iframe_sessions.clear();
     state.active_frame_id = None;
     let mut result = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
@@ -6111,6 +6192,8 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         }
     }
 
+    state.refresh_active_iframe_sessions().await;
+
     Ok(result)
 }
 
@@ -6124,19 +6207,31 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
         mgr.resolve_tab_ref(&tab_ref)?
     };
-    state.ref_map.clear();
-    state.iframe_sessions.clear();
-    state.active_frame_id = None;
+    let dialog_session = state
+        .pending_dialog
+        .as_ref()
+        .and_then(|d| d.session_id.clone());
     let result = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-        mgr.tab_switch_by_id(tab_id).await?
+        mgr.tab_switch_by_id(tab_id, dialog_session.as_deref())
+            .await?
     };
+    // Clear only after the switch commits, so a failed switch does not strand
+    // the user on the old tab with dead refs and frame scope.
+    state.ref_map.clear();
+    state.active_iframe_sessions.clear();
+    state.active_frame_id = None;
 
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
     install_network_controls_or_close(state, has_proxy_creds).await?;
+    state.refresh_active_iframe_sessions().await;
 
+    // A dialog-blocked tab's renderer is paused and cannot answer an eval, so
+    // skip the viewport sync; it would otherwise stall on the CDP timeout. The
+    // sync resumes on the next command once the dialog is resolved.
+    let dialog_blocked = result.get("dialogBlocked").and_then(|v| v.as_bool()) == Some(true);
     if let Some(ref server) = state.stream_server {
-        if let Some(ref mgr) = state.browser {
+        if let Some(mgr) = state.browser.as_ref().filter(|_| !dialog_blocked) {
             if let Ok(dims) = mgr
                 .evaluate(
                     "JSON.stringify([window.innerWidth,window.innerHeight])",
@@ -6159,18 +6254,32 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
 }
 
 async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    let tab_id = match cmd.get("tabId").and_then(|v| v.as_str()) {
-        Some(s) => {
-            let tab_ref = super::browser::TabRef::parse(s)?;
-            Some(mgr.resolve_tab_ref(&tab_ref)?)
+    let tab_id = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        match cmd.get("tabId").and_then(|v| v.as_str()) {
+            Some(s) => {
+                let tab_ref = super::browser::TabRef::parse(s)?;
+                Some(mgr.resolve_tab_ref(&tab_ref)?)
+            }
+            None => None,
         }
-        None => None,
     };
+    let dialog_session = state
+        .pending_dialog
+        .as_ref()
+        .and_then(|d| d.session_id.clone());
+    let result = {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        mgr.tab_close_by_id(tab_id, dialog_session.as_deref())
+            .await?
+    };
+    // Clear only after the close commits; a rejected close (last tab, bad
+    // index) must not wipe the caller's refs and frame scope.
     state.ref_map.clear();
-    state.iframe_sessions.clear();
+    state.active_iframe_sessions.clear();
     state.active_frame_id = None;
-    mgr.tab_close_by_id(tab_id).await
+    state.refresh_active_iframe_sessions().await;
+    Ok(result)
 }
 
 async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -7441,6 +7550,39 @@ async fn handle_vitals(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     Ok(data_value)
 }
 
+async fn handle_a11y(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    // Navigate first if a target URL was given, so `a11y <url>` audits a
+    // fresh load rather than whatever page is currently active.
+    if cmd.get("url").and_then(|v| v.as_str()).is_some() {
+        // Reuse canonical navigation so element refs, selected frames, domain
+        // filtering, and backend-specific behavior stay consistent.
+        let _ = handle_navigate(cmd, state).await?;
+        // Navigation can attach new out-of-process iframe sessions. Apply
+        // those events before installing axe into the complete frame tree.
+        state.drain_cdp_events_background().await?;
+    }
+
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+
+    let tags = cmd.get("tags").and_then(|v| v.as_str());
+    let selector = cmd.get("selector").and_then(|v| v.as_str());
+    // Run private partial audits throughout the frame tree, then merge their
+    // serialized results through the vendored top-frame engine.
+    let session_id = mgr.active_session_id()?;
+    let raw = a11y::run_audit(
+        &mgr.client,
+        session_id,
+        &state.iframe_sessions,
+        tags,
+        selector,
+    )
+    .await?;
+    if let Some(err) = raw.get("error").and_then(|v| v.as_str()) {
+        return Err(err.to_string());
+    }
+    Ok(raw)
+}
+
 async fn handle_pushstate(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let url = cmd
@@ -7754,6 +7896,7 @@ async fn handle_stream_enable(cmd: &Value, state: &mut DaemonState) -> Result<Va
     state.stream_client = Some(client_slot);
     state.stream_server = Some(Arc::new(server));
     state.request_tracking = true;
+    state.refresh_active_iframe_sessions().await;
     if state.screencasting {
         if let Some(ref server) = state.stream_server {
             server.set_screencasting(true).await;
@@ -9341,6 +9484,7 @@ async fn handle_har_start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         Some(s) => HarContentMode::parse(s)?,
         None => HarContentMode::default(),
     };
+    state.refresh_active_iframe_sessions().await;
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     // Larger buffers so response bodies survive until the periodic event
@@ -9358,7 +9502,7 @@ async fn handle_har_start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .await?;
     // Also enable Network on cross-origin iframe sessions so their
     // requests are captured in the HAR output.
-    for iframe_sid in state.iframe_sessions.values() {
+    for iframe_sid in &state.active_iframe_sessions {
         let _ = mgr
             .client
             .send_command(
@@ -10188,6 +10332,7 @@ async fn handle_requests(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 
     if !state.request_tracking {
         state.request_tracking = true;
+        state.refresh_active_iframe_sessions().await;
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
                 let _ = mgr
@@ -11647,6 +11792,55 @@ mod tests {
     }
 
     #[test]
+    fn test_iframe_network_events_are_scoped_to_active_page_sessions() {
+        let active_sessions = HashSet::from(["active-iframe".to_string()]);
+
+        assert!(is_active_iframe_network_event(
+            "Network.requestWillBeSent",
+            Some("active-iframe"),
+            true,
+            &active_sessions,
+        ));
+        assert!(!is_active_iframe_network_event(
+            "Network.requestWillBeSent",
+            Some("background-iframe"),
+            true,
+            &active_sessions,
+        ));
+        assert!(!is_active_iframe_network_event(
+            "Runtime.consoleAPICalled",
+            Some("active-iframe"),
+            true,
+            &active_sessions,
+        ));
+        assert!(!is_active_iframe_network_event(
+            "Network.requestWillBeSent",
+            Some("active-iframe"),
+            false,
+            &active_sessions,
+        ));
+    }
+
+    #[test]
+    fn test_active_frame_scope_tracks_top_level_and_iframe_changes() {
+        assert!(!active_frame_scope_may_have_changed(
+            &DrainedEvents::default()
+        ));
+
+        let mut destroyed_page = DrainedEvents::default();
+        destroyed_page
+            .destroyed_targets
+            .push("page-target".to_string());
+        assert!(active_frame_scope_may_have_changed(&destroyed_page));
+
+        let mut attached_iframe = DrainedEvents::default();
+        attached_iframe
+            .attached_iframe_sessions
+            .push(("frame".to_string(), "session".to_string()));
+        assert!(active_frame_scope_may_have_changed(&attached_iframe));
+    }
+
+    #[test]
     fn test_restore_validation_is_deferred_after_launch() {
         assert!(!should_validate_restore_after_action("launch"));
         assert!(should_validate_restore_after_action("navigate"));
@@ -11941,6 +12135,28 @@ mod tests {
     }
 
     #[test]
+    fn test_a11y_url_policy_actions_include_navigation() {
+        let with_url = json!({
+            "action": "a11y",
+            "id": "a11y-policy-url",
+            "url": "https://example.com"
+        });
+        let current_page = json!({
+            "action": "a11y",
+            "id": "a11y-policy-current"
+        });
+
+        assert_eq!(
+            policy_actions_for_command(&with_url, "a11y", false),
+            vec!["a11y".to_string(), "navigate".to_string()]
+        );
+        assert_eq!(
+            policy_actions_for_command(&current_page, "a11y", false),
+            vec!["a11y".to_string()]
+        );
+    }
+
+    #[test]
     fn test_policy_actions_use_command_plugins_for_provider_auto_launch() {
         let guard = EnvGuard::new(&["AGENT_BROWSER_PROVIDER"]);
         guard.set("AGENT_BROWSER_PROVIDER", "browserbox");
@@ -12076,6 +12292,27 @@ mod tests {
 
         assert_eq!(resp["success"], false);
         assert!(resp["error"].as_str().unwrap().contains("read"));
+        assert!(state.browser.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_policy_denies_a11y_url_as_navigation_before_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("policy.json");
+        fs::write(&policy_path, r#"{"deny":["navigate"]}"#).unwrap();
+
+        let mut state = DaemonState::new();
+        state.policy = Some(ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
+        let cmd = json!({
+            "action": "a11y",
+            "id": "a11y-navigation-denied",
+            "url": "https://example.com"
+        });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(resp["success"], false);
+        assert!(resp["error"].as_str().unwrap().contains("navigate"));
         assert!(state.browser.is_none());
     }
 
@@ -12454,6 +12691,20 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         let request = fs::read_to_string(request_path).unwrap();
         assert!(request.contains(r#""type":"browser.close""#));
         assert!(request.contains(r#""sessionId":"s1""#));
+    }
+
+    #[tokio::test]
+    async fn test_close_current_browser_clears_iframe_sessions() {
+        let mut state = DaemonState::new();
+        state
+            .iframe_sessions
+            .insert("frame-1".to_string(), "session-1".to_string());
+        state.active_iframe_sessions.insert("session-1".to_string());
+
+        close_current_browser(&mut state).await.unwrap();
+
+        assert!(state.iframe_sessions.is_empty());
+        assert!(state.active_iframe_sessions.is_empty());
     }
 
     #[tokio::test]

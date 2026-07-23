@@ -68,7 +68,7 @@ agent-browser mcp --tools all
 agent-browser mcp --tools core,network,react
 ```
 
-Configure the MCP client to launch `agent-browser` with `["mcp"]`. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization. The default tools profile is `core`, which keeps MCP context small for everyday browser automation. Use `--tools all` for the full typed CLI parity surface, or combine profiles with commas, such as `--tools core,network,react`. Profiles are `core`, `network`, `state`, `debug`, `tabs`, `react`, `mobile`, and `all`; the `debug` profile includes plugin registry and command.run tools. Each tool accepts typed arguments plus `extraArgs` for advanced CLI flags and exact CLI parity. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the tool `session` argument or `AGENT_BROWSER_SESSION` to isolate browser sessions.
+Configure the MCP client to launch `agent-browser` with `["mcp"]`. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization. The default tools profile is `core`, which keeps MCP context small for everyday browser automation. Use `--tools all` for the full typed CLI parity surface, or combine profiles with commas, such as `--tools core,network,react`. Profiles are `core`, `network`, `state`, `debug`, `tabs`, `react`, `mobile`, and `all`; the `debug` profile includes accessibility audits, plugin registry, and command.run tools. Each tool accepts typed arguments plus `extraArgs` for advanced CLI flags and exact CLI parity. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the tool `session` argument or `AGENT_BROWSER_SESSION` to isolate browser sessions.
 
 ## eve agent integration
 
@@ -299,6 +299,11 @@ agent-browser tab close t2             # close tab t2
 
 Stable `tabId`s mean `t2` points at the same tab across commands even when other tabs open or close. After switching, refs from a prior snapshot on a different tab no longer apply — re-snapshot. `tab list --json` also reports each tab's CDP `targetId`, accepted anywhere a tab ref is accepted; target ids stay stable across daemon restarts, unlike `t<N>` ids.
 
+Switching has two special cases worth knowing:
+
+- **Discarded tab (Chrome Memory Saver).** A backgrounded tab may have its renderer dropped. Switching to it reactivates the tab, which reloads the page and discards unsaved state (form input, scroll position). The switch result then includes `"revived": true`, so treat prior in-page state as gone and re-snapshot. Closing the active tab onto a discarded successor reports `"activeTabRevived": true` for the same reason.
+- **Tab blocked by a dialog.** If the target tab has an open dialog (`confirm`/`prompt`, or `alert`/`beforeunload` under `--no-auto-dialog`) its renderer is paused, not discarded, so the switch leaves it untouched and reports `"dialogBlocked": true`. Resolve the dialog with `dialog accept`/`dialog dismiss` before interacting with the page.
+
 ### Run multiple browsers in parallel
 
 Each `--session <name>` is an isolated browser with its own cookies, tabs, and refs. For agent skills, derive stable names with `agent-browser session id --scope worktree --prefix <skill>`. Useful for testing multi-user flows or parallel scraping:
@@ -452,6 +457,20 @@ EOF
 - **Exploratory testing / QA / bug hunts**: `agent-browser skills get dogfood`
 - **Vercel Sandbox microVMs**: `agent-browser skills get vercel-sandbox`
 - **AWS Bedrock AgentCore cloud browser**: `agent-browser skills get agentcore`
+
+## Accessibility audits
+
+Use the embedded axe-core engine to audit the current page or navigate and audit in one command. The audit works under strict page CSP, includes same-origin and cross-origin iframe findings, and leaves page-owned `window.axe` and AMD loader state unchanged. It requires a CDP browser and is not available with Safari or iOS WebDriver sessions.
+
+```bash
+agent-browser a11y                                  # Audit the current page
+agent-browser a11y https://example.com              # Navigate, then audit
+agent-browser a11y --tags wcag2a,wcag2aa            # Filter by axe rule tags
+agent-browser a11y --selector "#main"               # Scope to one subtree
+agent-browser a11y --json                           # Structured automation output
+```
+
+The default output lists violations and incomplete checks with failing selector paths. Use the MCP `debug` or `all` tools profile for the typed `agent_browser_a11y` tool. See `references/commands.md` for the full result schema.
 
 ## React / Web Vitals (built-in, any React app)
 

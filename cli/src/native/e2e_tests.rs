@@ -7087,6 +7087,468 @@ async fn e2e_vitals_reports_metrics() {
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }
 
+async fn start_a11y_frame_server() -> (u16, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let handle = tokio::spawn(async move {
+        for _ in 0..100 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+
+                let (status, content_type, body) = match path {
+                    "/top" => (
+                        "200 OK",
+                        "text/html",
+                        format!(
+                            r#"<!doctype html><html lang="en"><head><title>Top</title></head>
+<body><main aria-label="Top"><h1>Top</h1>
+<iframe id="outer" title="Outer" src="http://127.0.0.1:{port}/outer"></iframe>
+</main></body></html>"#
+                        ),
+                    ),
+                    "/outer" => (
+                        "200 OK",
+                        "text/html",
+                        r#"<!doctype html><html lang="en"><head><title>Outer</title></head>
+<body><main aria-label="Outer"><h1>Outer</h1><img id="outer-image" src="/missing-outer.png">
+<iframe id="inner" title="Inner" src="/inner"></iframe></main></body></html>"#
+                            .to_string(),
+                    ),
+                    "/inner" => (
+                        "200 OK",
+                        "text/html",
+                        r#"<!doctype html><html lang="en"><head><title>Inner</title></head>
+<body><main aria-label="Inner"><h1>Inner</h1><img id="inner-image" src="/missing-inner.png"></main></body></html>"#
+                            .to_string(),
+                    ),
+                    "/siblings" => (
+                        "200 OK",
+                        "text/html",
+                        format!(
+                            r#"<!doctype html><html lang="en"><head><title>Siblings</title></head>
+<body><main><h1>Siblings</h1>
+<iframe id="first-frame" title="First" src="http://127.0.0.1:{port}/first-frame"></iframe>
+<iframe id="second-frame" title="Second" src="http://127.0.0.1:{port}/second-frame"></iframe>
+</main></body></html>"#
+                        ),
+                    ),
+                    "/first-frame" => (
+                        "200 OK",
+                        "text/html",
+                        r#"<!doctype html><html lang="en"><head><title>First</title></head>
+<body><main><h1>First</h1><img id="first-image" src="/missing-first.png"></main></body></html>"#
+                            .to_string(),
+                    ),
+                    "/second-frame" => (
+                        "200 OK",
+                        "text/html",
+                        r#"<!doctype html><html lang="en"><head><title>Second</title></head>
+<body><main><h1>Second</h1><img id="second-image" src="/missing-second.png"></main></body></html>"#
+                            .to_string(),
+                    ),
+                    "/background" => (
+                        "200 OK",
+                        "text/html",
+                        format!(
+                            r#"<!doctype html><html lang="en"><head><title>Background</title></head>
+<body><main><h1>Background</h1>
+<iframe id="background-frame" title="Background frame" src="http://127.0.0.1:{port}/background-frame"></iframe>
+</main></body></html>"#
+                        ),
+                    ),
+                    "/background-frame" => (
+                        "200 OK",
+                        "text/html",
+                        r#"<!doctype html><html lang="en"><head><title>Background frame</title></head>
+<body><main><h1>Background frame</h1><img id="background-image" src="/missing-background.png"></main></body></html>"#
+                            .to_string(),
+                    ),
+                    _ => ("404 Not Found", "text/plain", "not found".to_string()),
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    (port, handle)
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_a11y_uses_vendored_engine_and_preserves_shadow_targets() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"<!doctype html>
+<html lang="en">
+<head><title>Accessibility audit fixture</title></head>
+<body>
+  <main>
+    <h1>Accessibility audit fixture</h1>
+    <img id="light-image" src="missing.png">
+    <div id="shadow-host"></div>
+    <iframe id="audit-frame" title="Audit frame" tabindex="-1" srcdoc="
+      <!doctype html><html lang='en'><head><title>Frame</title></head>
+      <body><main><h1>Frame</h1><a href='https://example.com'>Frame link</a><img id='frame-image' src='missing.png'></main>
+      <script>
+        window.frameAxe = { version: 'frame-spoofed' };
+        window.frameAxeSetterCalls = 0;
+        Object.defineProperty(window, 'axe', {
+          configurable: false,
+          get() { return window.frameAxe; },
+          set() {
+            window.frameAxeSetterCalls += 1;
+            throw new Error('frame axe setter must not run');
+          }
+        });
+      </script></body></html>
+    "></iframe>
+  </main>
+  <script>
+    window.pageAxe = {
+      version: 'spoofed',
+      run: () => Promise.resolve({
+        url: 'spoofed',
+        testEngine: { version: 'spoofed' },
+        violations: [],
+        incomplete: [],
+        passes: [],
+        inapplicable: []
+      })
+    };
+    window.axeSetterCalls = 0;
+    Object.defineProperty(window, 'axe', {
+      configurable: false,
+      get() { return window.pageAxe; },
+      set() {
+        window.axeSetterCalls += 1;
+        throw new Error('page axe setter must not run');
+      }
+    });
+    window.amdCalls = 0;
+    window.define = () => { window.amdCalls += 1; };
+    window.define.amd = {};
+    document.getElementById('shadow-host').attachShadow({ mode: 'open' }).innerHTML =
+      '<img id="shadow-image" src="missing.png">';
+  </script>
+</body>
+</html>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "a11y" }), &mut state).await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["axeVersion"], "4.12.1");
+    let image_alt = data["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|violation| violation["id"] == "image-alt")
+        .expect("vendored axe should report missing image alternatives");
+    assert_eq!(image_alt["nodeCount"], 3);
+    let nodes = image_alt["nodes"].as_array().unwrap();
+    assert!(nodes
+        .iter()
+        .any(|node| node["target"] == json!(["#light-image"])));
+    assert!(nodes
+        .iter()
+        .any(|node| node["target"] == json!([["#shadow-host", "#shadow-image"]])));
+    assert!(nodes
+        .iter()
+        .any(|node| node["target"] == json!(["#audit-frame", "#frame-image"])));
+    let frame_focusable_content = data["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|violation| violation["id"] == "frame-focusable-content")
+        .expect("audit should preserve the child context for non-focusable frames");
+    assert!(frame_focusable_content["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["target"] == json!(["#audit-frame", "html"])));
+
+    let resp = execute_command(
+        &json!({ "id": "3-selector", "action": "a11y", "selector": "#shadow-host" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let scoped_image_alt = get_data(&resp)["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|violation| violation["id"] == "image-alt")
+        .expect("scoped audit should report the shadow image");
+    assert_eq!(scoped_image_alt["nodeCount"], 1);
+
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "evaluate",
+            "script": "[window.axe.version, document.querySelector('#audit-frame').contentWindow.axe.version, window.axeSetterCalls, document.querySelector('#audit-frame').contentWindow.frameAxeSetterCalls, window.amdCalls]"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        json!(["spoofed", "frame-spoofed", 0, 0, 0])
+    );
+
+    state
+        .ref_map
+        .add("e999".to_string(), Some(999), "button", "stale", None);
+    state.active_frame_id = Some("stale-frame".to_string());
+    state
+        .iframe_sessions
+        .insert("stale-frame".to_string(), "stale-session".to_string());
+    let fresh_url = format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode(
+            "<!doctype html><html lang='en'><head><title>Fresh audit</title></head><body><main><h1>Fresh audit</h1></main></body></html>"
+        )
+    );
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "a11y", "url": fresh_url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(state.ref_map.get("e999").is_none());
+    assert!(state.active_frame_id.is_none());
+    assert!(!state.iframe_sessions.contains_key("stale-frame"));
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_a11y_preserves_nested_frame_sessions_across_tab_switches() {
+    let (port, server) = start_a11y_frame_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": format!("http://localhost:{port}/top")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        !state.iframe_sessions.is_empty(),
+        "cross-origin frame should have an attached target session"
+    );
+    let top_iframe_sessions = state.active_iframe_sessions.clone();
+    assert!(
+        !top_iframe_sessions.is_empty(),
+        "active frame sessions should include the top tab's cross-origin frame"
+    );
+
+    let assert_frame_violations = |resp: &Value| {
+        assert_success(resp);
+        let image_alt = get_data(resp)["violations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|violation| violation["id"] == "image-alt")
+            .unwrap_or_else(|| {
+                panic!(
+                    "audit should include images in nested cross-origin frames: {}",
+                    serde_json::to_string_pretty(resp).unwrap_or_default()
+                )
+            });
+        assert_eq!(image_alt["nodeCount"], 2);
+        let nodes = image_alt["nodes"].as_array().unwrap();
+        assert!(nodes
+            .iter()
+            .any(|node| node["target"] == json!(["#outer", "#outer-image"])));
+        assert!(nodes
+            .iter()
+            .any(|node| node["target"] == json!(["#outer", "#inner", "#inner-image"])));
+    };
+
+    let resp = execute_command(&json!({ "id": "3", "action": "a11y" }), &mut state).await;
+    assert_frame_violations(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3-selector", "action": "a11y", "selector": "main" }),
+        &mut state,
+    )
+    .await;
+    assert_frame_violations(&resp);
+
+    // Simulate a popup created outside the tab commands. Target lifecycle
+    // events must move active iframe scoping to the popup and back when it is
+    // externally closed.
+    let browser_client = state.browser.as_ref().unwrap().client.clone();
+    let created = browser_client
+        .send_command(
+            "Target.createTarget",
+            Some(json!({
+                "url": format!("http://localhost:{port}/background")
+            })),
+            None,
+        )
+        .await
+        .unwrap();
+    let external_target_id = created["targetId"].as_str().unwrap().to_string();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let resp = execute_command(
+        &json!({ "id": "external-open", "action": "tab_list" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let resp = execute_command(
+        &json!({ "id": "external-loaded", "action": "tab_list" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let external_iframe_sessions = state.active_iframe_sessions.clone();
+    assert!(!external_iframe_sessions.is_empty());
+    assert!(top_iframe_sessions.is_disjoint(&external_iframe_sessions));
+
+    browser_client
+        .send_command(
+            "Target.closeTarget",
+            Some(json!({ "targetId": external_target_id })),
+            None,
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let resp = execute_command(
+        &json!({ "id": "external-close", "action": "tab_list" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(state.active_iframe_sessions, top_iframe_sessions);
+
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "tab_new",
+            "url": format!("http://localhost:{port}/background")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let background_iframe_sessions = state.active_iframe_sessions.clone();
+    assert!(
+        !background_iframe_sessions.is_empty(),
+        "active frame sessions should follow the newly opened tab"
+    );
+    assert!(top_iframe_sessions.is_disjoint(&background_iframe_sessions));
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "tab_switch", "tabId": "t1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(state.active_iframe_sessions, top_iframe_sessions);
+
+    let resp = execute_command(&json!({ "id": "6", "action": "a11y" }), &mut state).await;
+    assert_frame_violations(&resp);
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_a11y_preserves_sibling_frame_dom_order() {
+    let (port, server) = start_a11y_frame_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": format!("http://localhost:{port}/siblings")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "a11y" }), &mut state).await;
+    assert_success(&resp);
+    let image_alt = get_data(&resp)["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|violation| violation["id"] == "image-alt")
+        .expect("audit should report both sibling frame images");
+    assert_eq!(image_alt["nodeCount"], 2);
+    let targets: Vec<_> = image_alt["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["target"].clone())
+        .collect();
+    assert_eq!(
+        targets,
+        vec![
+            json!(["#first-frame", "#first-image"]),
+            json!(["#second-frame", "#second-image"]),
+        ]
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    server.abort();
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_pushstate_changes_url() {

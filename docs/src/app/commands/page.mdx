@@ -259,6 +259,10 @@ agent-browser snapshot          # refs for docs
 agent-browser click @e3         # uses docs's refs
 ```
 
+### Discarded tab revival
+
+Browsers discard background tabs to save memory, leaving a tab with no renderer to drive. Switching to a discarded tab reactivates it, which reloads the page and resets its unsaved state; the switch result adds `"revived": true` so the reload is visible rather than silent. A tab whose page is paused by a JavaScript dialog is alive rather than discarded: the switch leaves it untouched and adds `"dialogBlocked": true`. Resolve the dialog with `dialog accept` or `dialog dismiss` and the tab keeps its state. Closing the active tab onto a discarded successor revives it the same way and reports `"activeTabRevived": true`.
+
 ### Iframe support
 
 Iframes are detected automatically during snapshots. `Iframe` nodes are resolved and their content is inlined beneath the iframe element in the snapshot output. Refs assigned to elements inside iframes carry frame context, so `click`, `fill`, and other interactions work without manually switching frames.
@@ -519,6 +523,20 @@ Works on any React app (Next.js, Remix, Vite+React, CRA, TanStack Start, React N
 
 See [React & Web Vitals](/react) for full command details and examples.
 
+## Accessibility audits
+
+Run an embedded axe-core audit against the current page or navigate to a URL first. The vendored engine works without a CDN request and runs under strict page CSP. It runs private partial audits across the page's frame tree and merges serialized results without page messaging, so page-provided `window.axe` values remain intact and iframe violations retain their frame selector paths. Accessibility audits require a CDP browser and are not available with Safari or iOS WebDriver sessions.
+
+```bash
+agent-browser a11y                                 # Audit the current page
+agent-browser a11y https://example.com             # Navigate, then audit
+agent-browser a11y --tags wcag2a,wcag2aa           # Filter by axe rule tags
+agent-browser a11y --selector "#main"              # Scope to a subtree
+agent-browser a11y https://example.com --json      # Structured results
+```
+
+The default output lists violations and incomplete checks with impact, rule ID, fix guidance, and failing-node paths. JSON output preserves axe's `target` selector path arrays, including nested arrays for shadow DOM boundaries and multiple entries for frame boundaries.
+
 ## Init scripts
 
 ```bash
@@ -628,7 +646,7 @@ Profiles:
 - `core` - Default. Navigation, snapshots, interaction, waits, reads, screenshots, JavaScript eval, close, tab basics, and profile discovery
 - `network` - Network routes, request inspection, HAR, headers, credentials, offline
 - `state` - Cookies, storage, auth, saved state, sessions, profiles, skills
-- `debug` - Console/errors, tracing, profiling, recording, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
+- `debug` - Console/errors, tracing, profiling, recording, accessibility audits, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
 - `tabs` - Back/forward/reload, tabs, windows, frames, dialogs
 - `react` - React tree/inspect/renders/suspense, vitals, pushstate
 - `mobile` - Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
@@ -647,7 +665,7 @@ Example MCP client config:
 }
 ```
 
-With `--tools all`, the server exposes typed tools across the CLI command surface, including navigation, snapshots, input, waits, screenshots/PDF, get/is/find, mouse, network, storage, cookies, tabs, windows, frames, dialogs, tracing, recording, clipboard, auth, state, iOS, diff, React, vitals, sessions, skills, plugins, doctor, dashboard, install, upgrade, chat, eval, and close.
+With `--tools all`, the server exposes typed tools across the CLI command surface, including navigation, snapshots, input, waits, screenshots/PDF, get/is/find, mouse, network, storage, cookies, tabs, windows, frames, dialogs, tracing, recording, accessibility audits, clipboard, auth, state, iOS, diff, React, vitals, sessions, skills, plugins, doctor, dashboard, install, upgrade, chat, eval, and close.
 
 Common tools include:
 
