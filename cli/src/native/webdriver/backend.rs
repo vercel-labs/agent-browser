@@ -113,6 +113,8 @@ impl BrowserBackend for WebDriverBackend {
 
 /// CDP-backed backend constants for unsupported actions on WebDriver
 pub const WEBDRIVER_UNSUPPORTED_ACTIONS: &[&str] = &[
+    // axe-core frame injection currently relies on CDP execution contexts.
+    "a11y",
     "screencast_start",
     "screencast_stop",
     "trace_start",
@@ -135,6 +137,7 @@ mod tests {
 
     #[test]
     fn test_unsupported_actions() {
+        assert!(WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&"a11y"));
         assert!(WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&"screencast_start"));
         assert!(WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&"trace_start"));
         assert!(!WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&"navigate"));

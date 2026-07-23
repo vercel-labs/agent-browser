@@ -1,8 +1,31 @@
 # agent-browser
 
-## 0.32.3
+## 0.33.0
 
 <!-- release:start -->
+### New Features
+
+- Added **axe-core accessibility audits** with `agent-browser a11y [url]`, WCAG tag filtering, selector scoping, iframe-aware text and JSON results, an embedded offline and CSP-safe audit engine, and a matching MCP tool (#1596)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.32.4
+
+### Bug Fixes
+
+- Fixed **find role** to match implicit ARIA roles and browser-computed accessible names through the accessibility tree, so semantic elements like `<h2>` (heading) and `<ul>` (list) resolve, with case-insensitive substring name matching that mirrors Playwright's `getByRole` (#1552)
+- Fixed **element-not-found errors** to preserve the locator detail (selector, role, name, or index) instead of flattening every miss into one generic message, and aligned the advertised `find` actions with the set the dispatcher actually accepts (#1553)
+
+### Contributors
+
+- @Railly
+- @cooleryu
+
+## 0.32.3
+
 ### New Features
 
 - Added **HAR response body capture** with text bodies embedded by default and configurable `all`, `text`, and `none` content modes across the CLI and MCP surfaces (#1578)
@@ -11,7 +34,6 @@
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.32.2
 

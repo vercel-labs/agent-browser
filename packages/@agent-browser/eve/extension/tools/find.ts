@@ -7,9 +7,14 @@ export default defineTool({
   description:
     'Find an element semantically (by ARIA role, text, label, placeholder, alt text, title, or test id) and act on it in one step. Useful when you know what the element is without taking a snapshot, e.g. find the "Email" label and fill it.',
   inputSchema: z.object({
-    action: z.enum(["click", "fill", "type", "hover", "focus", "check", "uncheck", "text"]),
+    action: z.enum(["click", "fill", "check", "hover", "text"]),
     by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testid", "first", "last"]),
-    exact: z.boolean().default(false).describe("Require an exact text match."),
+    exact: z
+      .boolean()
+      .default(false)
+      .describe(
+        'Exact, case-sensitive match. For "role" it applies to the accessible name, whose default is a case-insensitive substring.',
+      ),
     name: z
       .string()
       .optional()
@@ -17,10 +22,10 @@ export default defineTool({
     query: z
       .string()
       .describe('What to match: the role name, text, label, etc. For "first"/"last", a CSS selector.'),
-    value: z.string().optional().describe('Text to enter for "fill" and "type" actions.'),
+    value: z.string().optional().describe('Text to enter for the "fill" action.'),
   }),
   async execute({ action, by, exact, name, query, value }, ctx) {
-    if ((action === "fill" || action === "type") && value === undefined) {
+    if (action === "fill" && value === undefined) {
       throw new Error(`The "${action}" action requires a value.`);
     }
     const args = ["find", by, query, action];

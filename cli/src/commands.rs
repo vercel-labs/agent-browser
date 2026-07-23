@@ -71,6 +71,24 @@ pub fn gen_id() -> String {
     )
 }
 
+/// Normalize browser navigation inputs while preserving schemes Chrome can
+/// open directly. Bare hostnames use HTTPS, matching the `open` command.
+fn normalize_navigation_url(url: &str) -> String {
+    let url_lower = url.to_lowercase();
+    if url_lower.starts_with("http://")
+        || url_lower.starts_with("https://")
+        || url_lower.starts_with("about:")
+        || url_lower.starts_with("data:")
+        || url_lower.starts_with("file:")
+        || url_lower.starts_with("chrome-extension://")
+        || url_lower.starts_with("chrome://")
+    {
+        url.to_string()
+    } else {
+        format!("https://{}", url)
+    }
+}
+
 pub fn is_top_level_command(value: &str) -> bool {
     matches!(
         value,
@@ -143,6 +161,7 @@ pub fn is_top_level_command(value: &str) -> bool {
             | "react"
             | "vitals"
             | "web-vitals"
+            | "a11y"
             | "pushstate"
             | "removeinitscript"
             | "session"
@@ -366,19 +385,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     });
                 }
             };
-            let url_lower = url.to_lowercase();
-            let url = if url_lower.starts_with("http://")
-                || url_lower.starts_with("https://")
-                || url_lower.starts_with("about:")
-                || url_lower.starts_with("data:")
-                || url_lower.starts_with("file:")
-                || url_lower.starts_with("chrome-extension://")
-                || url_lower.starts_with("chrome://")
-            {
-                url.to_string()
-            } else {
-                format!("https://{}", url)
-            };
+            let url = normalize_navigation_url(url);
             let mut nav_cmd = json!({ "id": id, "action": "navigate", "url": url });
             if flags.provider.is_some() {
                 nav_cmd["waitUntil"] = json!("none");
@@ -1929,6 +1936,65 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             Ok(cmd)
         }
 
+        // === Accessibility audit (axe-core) ===
+        "a11y" => {
+            const A11Y_USAGE: &str = "a11y [url] [--tags <tag1,tag2>] [--selector <css>] [--json]";
+            let mut cmd = json!({ "id": id, "action": "a11y" });
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i] {
+                    "--tags" => {
+                        i += 1;
+                        let value = rest
+                            .get(i)
+                            .copied()
+                            .filter(|value| {
+                                !matches!(*value, "--tags" | "--selector" | "-s" | "--json")
+                            })
+                            .ok_or(ParseError::MissingArguments {
+                                context: "a11y --tags".to_string(),
+                                usage: A11Y_USAGE,
+                            })?;
+                        cmd["tags"] = json!(value);
+                    }
+                    "--selector" | "-s" => {
+                        i += 1;
+                        let value = rest
+                            .get(i)
+                            .copied()
+                            .filter(|value| {
+                                !matches!(*value, "--tags" | "--selector" | "-s" | "--json")
+                            })
+                            .ok_or(ParseError::MissingArguments {
+                                context: "a11y --selector".to_string(),
+                                usage: A11Y_USAGE,
+                            })?;
+                        cmd["selector"] = json!(value);
+                    }
+                    "--json" => {
+                        cmd["json"] = json!(true);
+                    }
+                    other if !other.starts_with('-') => {
+                        if cmd.get("url").is_some() {
+                            return Err(ParseError::InvalidValue {
+                                message: format!("Unexpected argument: {}", other),
+                                usage: A11Y_USAGE,
+                            });
+                        }
+                        cmd["url"] = json!(normalize_navigation_url(other));
+                    }
+                    other => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unknown flag: {}", other),
+                            usage: A11Y_USAGE,
+                        });
+                    }
+                }
+                i += 1;
+            }
+            Ok(cmd)
+        }
+
         // === SPA client-side navigation ===
         "pushstate" => {
             let url = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -2556,11 +2622,11 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 context: format!("find {}", locator),
                 usage: match *locator {
                     "role" => "find role <role> [action] [--name <name>] [--exact]",
-                    "text" => "find text <text> [action] [--exact]",
+                    "text" => "find text <text> [action] [value] [--exact]",
                     "label" => "find label <label> [action] [text] [--exact]",
                     "placeholder" => "find placeholder <text> [action] [text] [--exact]",
-                    "alt" => "find alt <text> [action] [--exact]",
-                    "title" => "find title <text> [action] [--exact]",
+                    "alt" => "find alt <text> [action] [value] [--exact]",
+                    "title" => "find title <text> [action] [value] [--exact]",
                     "testid" => "find testid <id> [action] [text]",
                     "first" => "find first <selector> [action] [text]",
                     "last" => "find last <selector> [action] [text]",
@@ -2613,9 +2679,13 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     }
                     Ok(cmd)
                 }
-                "text" => Ok(
-                    json!({ "id": id, "action": "getbytext", "text": value, "subaction": subaction, "exact": exact }),
-                ),
+                "text" => {
+                    let mut cmd = json!({ "id": id, "action": "getbytext", "text": value, "subaction": subaction, "exact": exact });
+                    if let Some(v) = fill_value {
+                        cmd["value"] = json!(v);
+                    }
+                    Ok(cmd)
+                }
                 "label" => {
                     let mut cmd = json!({ "id": id, "action": "getbylabel", "label": value, "subaction": subaction, "exact": exact });
                     if let Some(v) = fill_value {
@@ -2630,12 +2700,20 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     }
                     Ok(cmd)
                 }
-                "alt" => Ok(
-                    json!({ "id": id, "action": "getbyalttext", "text": value, "subaction": subaction, "exact": exact }),
-                ),
-                "title" => Ok(
-                    json!({ "id": id, "action": "getbytitle", "text": value, "subaction": subaction, "exact": exact }),
-                ),
+                "alt" => {
+                    let mut cmd = json!({ "id": id, "action": "getbyalttext", "text": value, "subaction": subaction, "exact": exact });
+                    if let Some(v) = fill_value {
+                        cmd["value"] = json!(v);
+                    }
+                    Ok(cmd)
+                }
+                "title" => {
+                    let mut cmd = json!({ "id": id, "action": "getbytitle", "text": value, "subaction": subaction, "exact": exact });
+                    if let Some(v) = fill_value {
+                        cmd["value"] = json!(v);
+                    }
+                    Ok(cmd)
+                }
                 "testid" => {
                     let mut cmd = json!({ "id": id, "action": "getbytestid", "testId": value, "subaction": subaction });
                     if let Some(v) = fill_value {
@@ -3364,6 +3442,52 @@ mod tests {
     }
 
     #[test]
+    fn test_a11y_command() {
+        let cmd = parse_command(&args("a11y"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "a11y");
+        assert!(cmd.get("url").is_none());
+
+        let cmd = parse_command(
+            &args("a11y http://localhost:3000 --tags wcag2a,wcag2aa --selector #main --json"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "a11y");
+        assert_eq!(cmd["url"], "http://localhost:3000");
+        assert_eq!(cmd["tags"], "wcag2a,wcag2aa");
+        assert_eq!(cmd["selector"], "#main");
+        assert_eq!(cmd["json"], true);
+
+        let cmd = parse_command(&args("a11y example.com"), &default_flags()).unwrap();
+        assert_eq!(cmd["url"], "https://example.com");
+
+        let cmd = parse_command(&args("a11y about:blank"), &default_flags()).unwrap();
+        assert_eq!(cmd["url"], "about:blank");
+
+        assert!(parse_command(&args("a11y --tags"), &default_flags()).is_err());
+        assert!(matches!(
+            parse_command(
+                &args("a11y --tags --selector #main"),
+                &default_flags()
+            ),
+            Err(ParseError::MissingArguments { context, .. }) if context == "a11y --tags"
+        ));
+        assert!(matches!(
+            parse_command(
+                &args("a11y --selector --tags wcag2a"),
+                &default_flags()
+            ),
+            Err(ParseError::MissingArguments { context, .. }) if context == "a11y --selector"
+        ));
+        assert!(parse_command(&args("a11y --bogus"), &default_flags()).is_err());
+        assert!(parse_command(
+            &args("a11y https://first.example https://second.example"),
+            &default_flags()
+        )
+        .is_err());
+    }
+
+    #[test]
     fn test_pushstate_command() {
         let cmd = parse_command(&args("pushstate /foo"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "pushstate");
@@ -3923,6 +4047,26 @@ mod tests {
         assert_eq!(cmd["action"], "type");
         assert_eq!(cmd["selector"], "#input");
         assert_eq!(cmd["text"], "some text");
+    }
+
+    #[test]
+    fn test_find_fill_value_survives_for_all_locators() {
+        // fill is advertised for these locators, so the value must reach dispatch.
+        // Force-red: drop the value block from the text/alt/title arms and these
+        // assertions fail (value missing).
+        for (loc, action) in [
+            ("text", "getbytext"),
+            ("alt", "getbyalttext"),
+            ("title", "getbytitle"),
+        ] {
+            let cmd = parse_command(
+                &args(&format!("find {loc} Label fill hello")),
+                &default_flags(),
+            )
+            .unwrap();
+            assert_eq!(cmd["action"], action, "{loc}");
+            assert_eq!(cmd["value"], "hello", "{loc} dropped the fill value");
+        }
     }
 
     #[test]
