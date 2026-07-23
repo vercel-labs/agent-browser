@@ -1675,6 +1675,49 @@ When enabled, agent-browser connects to a Browserbase session instead of launchi
 
 Get your API key from the [Browserbase Dashboard](https://browserbase.com/overview).
 
+### Browser Cloud
+
+[Browser Cloud](https://testmuai.com) by TestMu AI provides remote Chrome sessions on a managed grid, with video, console, and network capture for every run. Use it when running agent-browser somewhere a local browser isn't feasible, or when you want a replayable recording of what the agent did.
+
+To enable Browser Cloud, use the `-p` flag:
+
+```bash
+export LT_USERNAME="your-username"
+export LT_ACCESS_KEY="your-access-key"
+agent-browser -p browsercloud open https://example.com
+```
+
+Or use environment variables for CI/scripts:
+
+```bash
+export AGENT_BROWSER_PROVIDER=browsercloud
+export LT_USERNAME="your-username"
+export LT_ACCESS_KEY="your-access-key"
+agent-browser open https://example.com
+```
+
+Optional configuration via environment variables:
+
+| Variable                        | Description                                              | Default              |
+| ------------------------------- | -------------------------------------------------------- | -------------------- |
+| `BROWSER_CLOUD_ENDPOINT`        | CDP host (bare host or full URL)                          | `cdp.lambdatest.com` |
+| `BROWSER_CLOUD_BROWSER_NAME`    | Browser to launch                                         | `Chrome`             |
+| `BROWSER_CLOUD_BROWSER_VERSION` | Browser version                                           | `latest`             |
+| `BROWSER_CLOUD_PLATFORM`        | Operating system for the session                          | `Windows 10`         |
+| `BROWSER_CLOUD_PROJECT`         | Project name in the dashboard                             | `agent-browser`      |
+| `BROWSER_CLOUD_BUILD`           | Build name in the dashboard                               | `agent-browser`      |
+| `BROWSER_CLOUD_SESSION_NAME`    | Session name in the dashboard                             | —                    |
+| `BROWSER_CLOUD_RESOLUTION`      | Viewport, e.g. `1920x1080`                                | —                    |
+| `BROWSER_CLOUD_REGION`          | Region to run in, e.g. `us`, `eu`                         | —                    |
+| `BROWSER_CLOUD_GEO_LOCATION`    | Two-letter country code for geolocation                   | —                    |
+| `BROWSER_CLOUD_STEALTH`         | Humanize interactions and randomize the user agent        | `false`              |
+| `BROWSER_CLOUD_TUNNEL`          | Route traffic through a tunnel to reach private hosts     | `false`              |
+| `BROWSER_CLOUD_TUNNEL_NAME`     | Name of an already-running tunnel                         | —                    |
+
+When enabled, agent-browser connects to a Browser Cloud session instead of launching a local browser. All commands work identically.
+
+Get your username and access key from the [TestMu AI dashboard](https://testmuai.com) under **Account Settings**.
+
 ### Browser Use
 
 [Browser Use](https://browser-use.com) provides cloud browser infrastructure for AI agents. Use it when running agent-browser in environments where a local browser isn't available (serverless, CI/CD, etc.).

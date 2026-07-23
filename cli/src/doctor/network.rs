@@ -77,6 +77,18 @@ pub(super) fn check(checks: &mut Vec<Check>) {
                 env::var("BROWSERLESS_API_URL")
                     .unwrap_or_else(|_| "https://production-sfo.browserless.io".to_string()),
             ),
+            "browsercloud" | "browser-cloud" => {
+                let host = env::var("BROWSER_CLOUD_ENDPOINT")
+                    .unwrap_or_else(|_| "cdp.lambdatest.com".to_string());
+                let host = host
+                    .trim()
+                    .trim_start_matches("wss://")
+                    .trim_start_matches("ws://")
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .trim_end_matches('/');
+                Some(format!("https://{}", host))
+            }
             "browseruse" | "browser-use" => Some("https://api.browser-use.com".to_string()),
             "kernel" => Some(
                 env::var("KERNEL_ENDPOINT")
