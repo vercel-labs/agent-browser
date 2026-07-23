@@ -835,6 +835,8 @@ Use a browser provider plugin:
 agent-browser --provider cloud-browser open https://example.com
 ```
 
+Browser provider plugins may return opaque `metadata` from `browser.launch`. agent-browser exposes it as `providerMetadata` in the launch response and `session info --json` without interpreting provider-specific keys.
+
 Use a launch mutator plugin for stealth or local launch customization. The plugin can append Chrome args, extensions, and init scripts before the browser starts:
 
 ```bash
@@ -1304,7 +1306,7 @@ import browser from "@agent-browser/eve";
 export default browser({});
 ```
 
-This composes ~20 namespaced tools into the agent — `browser__navigate`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, `browser__screenshot`, and more — all running agent-browser inside the agent's sandbox. agent-browser installs automatically on first use; pre-install it in `agent/sandbox.ts` with the `@agent-browser/eve/sandbox` helpers to bake the cost into the sandbox template instead. Configuration (domain allowlists, output limits, session naming) and per-tool overrides are covered in the [package README](packages/@agent-browser/eve/README.md), and the [eve example](examples/eve/) is a complete app with the extension mounted.
+This composes ~20 namespaced tools into the agent — `browser__navigate`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, `browser__screenshot`, and more — all running agent-browser inside the agent's sandbox. agent-browser installs automatically on first use; pre-install it in `agent/sandbox.ts` with the `@agent-browser/eve/sandbox` helpers to bake the cost into the sandbox template instead. Configuration (domain allowlists, output limits, session naming) and per-tool overrides are covered in the [package README](packages/@agent-browser/eve/README.md). The [eve example](examples/eve/) is a complete app with the extension mounted; for Browserbase instead of sandbox Chromium, see [examples/providers/eve-browserbase](examples/providers/eve-browserbase/).
 
 ### Serverless (AWS Lambda)
 
@@ -1705,7 +1707,17 @@ agent-browser open https://example.com
 
 When enabled, agent-browser connects to a Browserbase session instead of launching a local browser. All commands work identically.
 
+Browserbase sessions expose live-view URLs through session diagnostics. These URLs are capability-bearing and should only be shown to authorized users:
+
+```bash
+agent-browser session info --json
+```
+
+While active, the JSON includes `provider: "browserbase"` and `providerMetadata` with `sessionId`. A best-effort lookup after CDP connect adds `debuggerUrl` and `debuggerFullscreenUrl`. Treat those URLs as secrets.
+
 Get your API key from the [Browserbase Dashboard](https://browserbase.com/overview).
+
+For a full Next.js eve app that uses Browserbase with Vercel Sandbox credential brokering and a live-view iframe, see [examples/providers/eve-browserbase](examples/providers/eve-browserbase/).
 
 ### Browser Use
 
@@ -1796,6 +1808,8 @@ Optional configuration via environment variables:
 **Browser profiles:** When `AGENTCORE_PROFILE_ID` is set, browser state (cookies, localStorage) is persisted across sessions automatically.
 
 When enabled, agent-browser connects to an AgentCore cloud browser session instead of launching a local browser. All commands work identically.
+
+AgentCore launch and session diagnostics expose generic `providerMetadata` containing `sessionId`, `browserIdentifier`, `region`, and `liveViewUrl`. Existing `agentCoreSessionId` and `agentCoreLiveViewUrl` launch fields remain available for compatibility.
 
 ## License
 

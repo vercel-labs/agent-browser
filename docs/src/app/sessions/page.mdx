@@ -23,9 +23,11 @@ agent-browser session
 # Generate a stable worktree-scoped session id
 agent-browser session id --scope worktree --prefix next-dev-loop
 
-# Inspect daemon, launch, and restore status
+# Inspect daemon, launch, provider, and restore status
 agent-browser session info --json
 ```
+
+For an active browser provider, diagnostics include a canonical `provider` name and may include an opaque `providerMetadata` object. Each provider owns its metadata schema. Treat capability-bearing URLs or tokens in provider metadata as secrets.
 
 ## Session isolation
 

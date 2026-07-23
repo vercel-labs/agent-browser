@@ -59,6 +59,8 @@ export default browser({
   // Output
   inlineScreenshots: true, // embed screenshots in tool output as data URLs for channels/UIs
   // (hidden from the model via toModelOutput; capped at 4 MB per image)
+  includeProviderMetadata: false, // attach active provider metadata to navigation channel output
+  // (hidden from the model; capability URLs must only be rendered to authorized users)
 
   // Install behavior
   autoInstall: true, // install agent-browser on first use when missing
@@ -133,9 +135,11 @@ export default disableTool();
 
 Each tool shells out to the `agent-browser` CLI inside the sandbox from `ctx.getSandbox()`, using an isolated browser session named after the sandbox id, and returns the parsed `--json` payload. The browser and its state live entirely in the sandbox; the app runtime only relays commands.
 
+When `includeProviderMetadata` is enabled, `goto` navigation performs a best-effort `session info` lookup and attaches the active provider name and opaque provider-owned metadata to the channel result. History actions (`back` / `forward` / `reload`) skip that lookup. The metadata is removed from model-visible output via `toModelOutput`; any other tool that attaches `provider` or `providerMetadata` must do the same. Authenticate any UI that renders capability-bearing metadata.
+
 ## Example
 
-See [`examples/eve`](https://github.com/vercel-labs/agent-browser/tree/main/examples/eve) for a complete Next.js eve app with this extension mounted.
+See [`examples/eve`](https://github.com/vercel-labs/agent-browser/tree/main/examples/eve) for a complete Next.js eve app with this extension mounted. For Browserbase instead of sandbox Chromium, see [`examples/providers/eve-browserbase`](https://github.com/vercel-labs/agent-browser/tree/main/examples/providers/eve-browserbase).
 
 ## License
 
