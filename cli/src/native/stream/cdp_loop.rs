@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 use crate::native::cdp::client::CdpClient;
+use crate::native::cdp::types::{EvaluateParams, EvaluateResult};
 use crate::native::network;
 
 use super::timestamp_ms;
@@ -57,6 +58,12 @@ pub(super) async fn cdp_event_loop(
 
                 let session_id = cdp_session_id.read().await.clone();
 
+                if let Some((width, height)) =
+                    current_css_viewport(&client_arc, session_id.as_deref()).await
+                {
+                    *viewport_width.lock().await = width;
+                    *viewport_height.lock().await = height;
+                }
                 let vw = *viewport_width.lock().await;
                 let vh = *viewport_height.lock().await;
 
@@ -137,6 +144,48 @@ pub(super) async fn cdp_event_loop(
                                                     });
                                                     let _ = frame_tx.send(msg.to_string());
                                                 }
+                                            }
+                                        }
+                                    } else if evt.method == "Page.frameResized"
+                                        && is_active_page_session(
+                                            evt.session_id.as_deref(),
+                                            session_id.as_deref(),
+                                        )
+                                    {
+                                        if let Some((width, height)) =
+                                            current_css_viewport(
+                                                &client_arc,
+                                                session_id.as_deref(),
+                                            )
+                                            .await
+                                        {
+                                            let changed = {
+                                                let mut current_width = viewport_width.lock().await;
+                                                let mut current_height = viewport_height.lock().await;
+                                                if *current_width == width && *current_height == height {
+                                                    false
+                                                } else {
+                                                    *current_width = width;
+                                                    *current_height = height;
+                                                    true
+                                                }
+                                            };
+
+                                            if changed {
+                                                if supports_screencast {
+                                                    let _ = client_arc
+                                                        .send_command_no_params(
+                                                            "Page.stopScreencast",
+                                                            session_id.as_deref(),
+                                                        )
+                                                        .await;
+                                                }
+                                                {
+                                                    let mut sc = screencasting.lock().await;
+                                                    *sc = false;
+                                                }
+                                                client_notify.notify_one();
+                                                break;
                                             }
                                         }
                                     } else if evt.method == "Page.screencastFrame" {
@@ -278,6 +327,30 @@ pub(super) async fn cdp_event_loop(
     }
 }
 
+async fn current_css_viewport(client: &CdpClient, session_id: Option<&str>) -> Option<(u32, u32)> {
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.evaluate",
+            &EvaluateParams {
+                expression: "[window.innerWidth, window.innerHeight]".to_string(),
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            session_id,
+        )
+        .await
+        .ok()?;
+    let dimensions = result.result.value?.as_array()?.clone();
+    let width = u32::try_from(dimensions.first()?.as_u64()?).ok()?;
+    let height = u32::try_from(dimensions.get(1)?.as_u64()?).ok()?;
+    Some((width, height))
+}
+
+fn is_active_page_session(event_session: Option<&str>, active_session: Option<&str>) -> bool {
+    event_session.filter(|session| !session.is_empty())
+        == active_session.filter(|session| !session.is_empty())
+}
+
 pub async fn start_screencast(
     client: &CdpClient,
     session_id: &str,
@@ -322,4 +395,20 @@ pub async fn ack_screencast_frame(
         )
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_active_page_session;
+
+    #[test]
+    fn frame_resize_must_come_from_active_page_session() {
+        assert!(is_active_page_session(Some("page-1"), Some("page-1")));
+        assert!(is_active_page_session(None, None));
+        assert!(is_active_page_session(None, Some("")));
+        assert!(is_active_page_session(Some(""), Some("")));
+        assert!(!is_active_page_session(Some("page-2"), Some("page-1")));
+        assert!(!is_active_page_session(Some("oopif"), Some("page-1")));
+        assert!(!is_active_page_session(None, Some("page-1")));
+    }
 }

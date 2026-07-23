@@ -2773,25 +2773,34 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 
     match rest.first().copied() {
         Some("viewport") => {
+            if rest.get(1).copied() == Some("auto") {
+                if rest.len() != 2 {
+                    return Err(ParseError::InvalidValue {
+                        message: "Viewport auto does not accept additional arguments".to_string(),
+                        usage: "set viewport <width> <height> [scale] | auto",
+                    });
+                }
+                return Ok(json!({ "id": id, "action": "viewport", "auto": true }));
+            }
             let w_str = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "set viewport".to_string(),
-                usage: "set viewport <width> <height> [scale]",
+                usage: "set viewport <width> <height> [scale] | auto",
             })?;
             let h_str = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
                 context: "set viewport".to_string(),
-                usage: "set viewport <width> <height> [scale]",
+                usage: "set viewport <width> <height> [scale] | auto",
             })?;
             let w = w_str
                 .parse::<i32>()
                 .map_err(|_| ParseError::MissingArguments {
                     context: "set viewport".to_string(),
-                    usage: "set viewport <width> <height> [scale]",
+                    usage: "set viewport <width> <height> [scale] | auto",
                 })?;
             let h = h_str
                 .parse::<i32>()
                 .map_err(|_| ParseError::MissingArguments {
                     context: "set viewport".to_string(),
-                    usage: "set viewport <width> <height> [scale]",
+                    usage: "set viewport <width> <height> [scale] | auto",
                 })?;
             let mut cmd = json!({ "id": id, "action": "viewport", "width": w, "height": h });
             if let Some(scale_str) = rest.get(3) {
@@ -2799,7 +2808,7 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     .parse::<f64>()
                     .map_err(|_| ParseError::MissingArguments {
                         context: "set viewport".to_string(),
-                        usage: "set viewport <width> <height> [scale]",
+                        usage: "set viewport <width> <height> [scale] | auto",
                     })?;
                 cmd["deviceScaleFactor"] = json!(scale);
             }
@@ -4776,6 +4785,21 @@ mod tests {
         assert_eq!(cmd["width"], 1920);
         assert_eq!(cmd["height"], 1080);
         assert!(cmd.get("deviceScaleFactor").is_none());
+    }
+
+    #[test]
+    fn test_set_viewport_auto() {
+        let cmd = parse_command(&args("set viewport auto"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "viewport");
+        assert_eq!(cmd["auto"], true);
+        assert!(cmd.get("width").is_none());
+        assert!(cmd.get("height").is_none());
+    }
+
+    #[test]
+    fn test_set_viewport_auto_rejects_extra_arguments() {
+        let result = parse_command(&args("set viewport auto 800 600"), &default_flags());
+        assert!(result.is_err());
     }
 
     #[test]

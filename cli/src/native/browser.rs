@@ -1318,6 +1318,20 @@ impl BrowserManager {
         Ok(())
     }
 
+    /// Clear device metrics emulation so the page viewport follows the browser
+    /// content area again, including manual window resizing in headed mode.
+    pub async fn clear_viewport(&self) -> Result<(), String> {
+        let session_id = self.active_session_id()?;
+        self.client
+            .send_command(
+                "Emulation.clearDeviceMetricsOverride",
+                None,
+                Some(session_id),
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn set_user_agent(&self, user_agent: &str) -> Result<(), String> {
         let session_id = self.active_session_id()?;
         self.client

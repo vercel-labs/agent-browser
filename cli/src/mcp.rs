@@ -1071,13 +1071,7 @@ fn parity_tools() -> Vec<Value> {
             json!({ "dy": number_schema(), "dx": number_schema() }),
             &["dy"],
         ),
-        tool(
-            TOOL_SET_VIEWPORT,
-            "Set viewport",
-            "Set viewport size.",
-            json!({ "width": int_schema(), "height": int_schema(), "scale": number_schema() }),
-            &["width", "height"],
-        ),
+        viewport_tool(),
         tool(
             TOOL_SET_DEVICE,
             "Set device",
@@ -1813,6 +1807,42 @@ fn wait_timeout_schema() -> Value {
         "minimum": 1,
         "description": "Maximum time for the browser wait condition."
     })
+}
+
+fn viewport_tool() -> Value {
+    let mut viewport = tool(
+        TOOL_SET_VIEWPORT,
+        "Set viewport",
+        "Set a fixed viewport size, or clear viewport emulation so a headed page follows manual window resizing.",
+        json!({
+            "width": int_schema(),
+            "height": int_schema(),
+            "scale": number_schema(),
+            "auto": {
+                "type": "boolean",
+                "description": "Clear viewport emulation. Do not combine with width, height, or scale."
+            }
+        }),
+        &[],
+    );
+    viewport["inputSchema"]["oneOf"] = json!([
+        {
+            "properties": { "auto": { "const": true } },
+            "required": ["auto"],
+            "not": {
+                "anyOf": [
+                    { "required": ["width"] },
+                    { "required": ["height"] },
+                    { "required": ["scale"] }
+                ]
+            }
+        },
+        {
+            "not": { "required": ["auto"] },
+            "required": ["width", "height"]
+        }
+    ]);
+    viewport
 }
 
 fn tool(name: &str, title: &str, description: &str, properties: Value, required: &[&str]) -> Value {
@@ -2649,6 +2679,31 @@ fn call_mouse_wheel(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_set_viewport(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, set_viewport_args(arguments)?, None)
+}
+
+fn set_viewport_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    if let Some(auto) = optional_bool(arguments, "auto")? {
+        if !auto {
+            return Err(ProtocolError::invalid_params(
+                "auto must be true when provided",
+            ));
+        }
+        if ["width", "height", "scale"]
+            .iter()
+            .any(|key| arguments.get(key).is_some())
+        {
+            return Err(ProtocolError::invalid_params(
+                "auto cannot be combined with width, height, or scale",
+            ));
+        }
+        return Ok(vec![
+            "set".to_string(),
+            "viewport".to_string(),
+            "auto".to_string(),
+        ]);
+    }
+
     let width = required_u64(arguments, "width")?;
     let height = required_u64(arguments, "height")?;
     let mut args = vec![
@@ -2660,7 +2715,7 @@ fn call_set_viewport(arguments: &Value) -> Result<Value, ProtocolError> {
     if let Some(scale) = optional_number_string(arguments, "scale")? {
         args.push(scale);
     }
-    call_cli_tool(arguments, args, None)
+    Ok(args)
 }
 
 fn call_set_geo(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4009,6 +4064,61 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["set", "media", "dark", "reduced-motion"]);
+    }
+
+    #[test]
+    fn set_viewport_tool_exposes_auto_mode() {
+        let tools = tools();
+        let viewport = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some(TOOL_SET_VIEWPORT))
+            .unwrap();
+        let schema = &viewport["inputSchema"];
+
+        assert!(schema["properties"].get("auto").is_some());
+        assert!(schema["required"].as_array().is_none_or(|required| {
+            !required
+                .iter()
+                .any(|field| field == "width" || field == "height")
+        }));
+        assert_eq!(
+            schema["oneOf"],
+            json!([
+                {
+                    "properties": { "auto": { "const": true } },
+                    "required": ["auto"],
+                    "not": {
+                        "anyOf": [
+                            { "required": ["width"] },
+                            { "required": ["height"] },
+                            { "required": ["scale"] }
+                        ]
+                    }
+                },
+                {
+                    "not": { "required": ["auto"] },
+                    "required": ["width", "height"]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn set_viewport_args_require_exactly_one_mode() {
+        assert_eq!(
+            set_viewport_args(&json!({ "auto": true })).unwrap(),
+            vec!["set", "viewport", "auto"]
+        );
+        assert_eq!(
+            set_viewport_args(&json!({ "width": 1280, "height": 720, "scale": 2 })).unwrap(),
+            vec!["set", "viewport", "1280", "720", "2"]
+        );
+        assert!(set_viewport_args(&json!({})).is_err());
+        assert!(set_viewport_args(&json!({ "width": 1280 })).is_err());
+        assert!(set_viewport_args(&json!({ "auto": true, "width": 1280, "height": 720 })).is_err());
+        assert!(
+            set_viewport_args(&json!({ "auto": false, "width": 1280, "height": 720 })).is_err()
+        );
     }
 
     #[test]
