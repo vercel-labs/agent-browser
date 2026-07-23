@@ -457,7 +457,7 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
     }
 
     if let Some(ref proxy) = options.proxy {
-        args.push(format!("--proxy-server={}", proxy));
+        args.push(format!("--proxy-server={}", proxy.trim_end_matches('/')));
     }
 
     if let Some(ref bypass) = options.proxy_bypass {
@@ -1691,6 +1691,27 @@ mod tests {
         let dir = result.temp_user_data_dir.unwrap();
         assert!(dir.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_args_trims_trailing_slash_from_proxy() {
+        let opts = LaunchOptions {
+            proxy: Some("http://127.0.0.1:7890/".to_string()),
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        let proxy_arg = result
+            .args
+            .iter()
+            .find(|arg| arg.starts_with("--proxy-server="))
+            .cloned();
+        let dir = result.temp_user_data_dir.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            proxy_arg.as_deref(),
+            Some("--proxy-server=http://127.0.0.1:7890")
+        );
     }
 
     #[test]
