@@ -2545,7 +2545,7 @@ fn call_wait_download(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool(arguments, args, None)
 }
 
-fn call_screenshot(arguments: &Value) -> Result<Value, ProtocolError> {
+fn screenshot_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = Vec::new();
     if optional_bool(arguments, "annotate")?.unwrap_or(false) {
         args.push("--annotate".to_string());
@@ -2573,6 +2573,11 @@ fn call_screenshot(arguments: &Value) -> Result<Value, ProtocolError> {
     if optional_bool(arguments, "fullPage")?.unwrap_or(false) {
         args.push("--full".to_string());
     }
+    Ok(args)
+}
+
+fn call_screenshot(arguments: &Value) -> Result<Value, ProtocolError> {
+    let args = screenshot_args(arguments)?;
     call_cli_tool(arguments, args, None)
 }
 
@@ -3844,6 +3849,14 @@ mod tests {
         assert_eq!(
             open_args(&json!({ "headed": false })).unwrap(),
             vec!["--headed", "false", "open"]
+        );
+    }
+
+    #[test]
+    fn screenshot_args_preserve_dotfile_path() {
+        assert_eq!(
+            screenshot_args(&json!({ "path": ".capture.png" })).unwrap(),
+            vec!["screenshot", ".capture.png"]
         );
     }
 
