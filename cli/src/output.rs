@@ -3784,7 +3784,8 @@ Environment:
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM session encryption
   AGENT_BROWSER_STREAM_PORT      Override WebSocket streaming port (default: OS-assigned)
   AGENT_BROWSER_IDLE_TIMEOUT_MS  Auto-shutdown daemon after N ms of inactivity (default: 3600000 = 1h; 0 disables)
-                                 Dashboard input resets the timer; headed, Safari/iOS WebDriver, and attached browsers are exempt from the default
+                                 Dashboard input resets the timer; headed, Safari/iOS WebDriver, and user-attached browsers are exempt from the default
+                                 Provider-owned cloud browsers remain eligible for default cleanup
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
   AGENT_BROWSER_CONTENT_BOUNDARIES Wrap page output in boundary markers

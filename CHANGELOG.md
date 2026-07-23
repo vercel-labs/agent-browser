@@ -4,7 +4,7 @@
 
 ### Behavior Changes
 
-- The daemon now ships a **default idle timeout of 1 hour**: after an hour with no commands or dashboard input it saves session state, closes the browser, and exits, so integrations that die without calling `close` no longer leak the daemon and its Chrome tree indefinitely. Set `AGENT_BROWSER_IDLE_TIMEOUT_MS=0` to restore the old always-persist behavior, or any other value to tune it. Dashboard mouse, keyboard, and touch input reset the timer. The default never closes headed browsers, including Safari and iOS WebDriver sessions, or `connect`-attached browsers that may be in direct human use; an explicitly configured timeout applies to all browsers, as before.
+- The daemon now ships a **default idle timeout of 1 hour**: after an hour with no commands or dashboard input it saves configured restore state, closes the browser, and exits, so integrations that die without calling `close` no longer leak the daemon and its Chrome tree indefinitely. Sessions without `--restore` or another restore key discard transient browser state and open tabs when they shut down. Set `AGENT_BROWSER_IDLE_TIMEOUT_MS=0` to restore the old always-persist behavior, or any other value to tune it. Dashboard mouse, keyboard, and touch input reset the timer. The default never closes headed browsers, including Safari and iOS WebDriver sessions, or user-attached browsers that may be in direct human use. Provider-owned cloud browsers remain eligible for cleanup, and an explicitly configured timeout applies to all browsers, as before.
 
 ## 0.33.0
 

@@ -10,11 +10,47 @@ pub use dashboard::run_dashboard_server;
 
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, watch, Mutex, Notify, RwLock};
 
 use super::cdp::client::CdpClient;
+
+/// Shared activity clock for daemon commands and dashboard input.
+///
+/// The timestamp lets the idle-shutdown path re-check activity after waiting
+/// for a command to release the daemon state lock. The notification wakes the
+/// timer promptly for ordinary command and dashboard activity.
+pub(crate) struct IdleActivity {
+    last: std::sync::Mutex<Instant>,
+    notify: Notify,
+}
+
+impl IdleActivity {
+    pub(crate) fn new() -> Self {
+        Self {
+            last: std::sync::Mutex::new(Instant::now()),
+            notify: Notify::new(),
+        }
+    }
+
+    pub(crate) fn mark(&self) {
+        *self.last.lock().unwrap_or_else(|err| err.into_inner()) = Instant::now();
+        self.notify.notify_one();
+    }
+
+    pub(crate) fn elapsed(&self) -> Duration {
+        self.last
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .elapsed()
+    }
+
+    pub(crate) async fn notified(&self) {
+        self.notify.notified().await;
+    }
+}
 
 /// Frame metadata from CDP Page.screencastFrame events.
 #[derive(Debug, Clone)]
@@ -51,9 +87,8 @@ pub struct StreamServer {
     /// The active CDP page session ID (from Target.attachToTarget).
     cdp_session_id: Arc<RwLock<Option<String>>>,
     client_notify: Arc<Notify>,
-    /// Notifies the daemon when a dashboard user sends mouse, keyboard, or
-    /// touch input so that interactive sessions are not considered idle.
-    input_activity: Arc<Notify>,
+    /// Shared activity clock used by the daemon idle timer.
+    idle_activity: Arc<IdleActivity>,
     screencasting: Arc<Mutex<bool>>,
     viewport_width: Arc<Mutex<u32>>,
     viewport_height: Arc<Mutex<u32>>,
@@ -73,15 +108,9 @@ impl StreamServer {
         session_id: String,
     ) -> Result<Self, String> {
         let client_slot = Arc::new(RwLock::new(Some(client)));
-        let input_activity = Arc::new(Notify::new());
-        let (server, _) = Self::start_inner(
-            preferred_port,
-            client_slot,
-            session_id,
-            true,
-            input_activity,
-        )
-        .await?;
+        let idle_activity = Arc::new(IdleActivity::new());
+        let (server, _) =
+            Self::start_inner(preferred_port, client_slot, session_id, true, idle_activity).await?;
         Ok(server)
     }
 
@@ -91,12 +120,12 @@ impl StreamServer {
     /// When `allow_port_fallback` is true, binding to an occupied port falls back to an
     /// OS-assigned port (used by daemon startup). When false, the error propagates
     /// (used by the runtime `stream_enable` command).
-    /// `input_activity` is daemon-owned so replacement servers reset the same idle timer.
+    /// `idle_activity` is daemon-owned so replacement servers reset the same idle timer.
     pub async fn start_without_client(
         preferred_port: u16,
         session_id: String,
         allow_port_fallback: bool,
-        input_activity: Arc<Notify>,
+        idle_activity: Arc<IdleActivity>,
     ) -> Result<(Self, Arc<RwLock<Option<Arc<CdpClient>>>>), String> {
         let client_slot = Arc::new(RwLock::new(None::<Arc<CdpClient>>));
         Self::start_inner(
@@ -104,7 +133,7 @@ impl StreamServer {
             client_slot,
             session_id,
             allow_port_fallback,
-            input_activity,
+            idle_activity,
         )
         .await
     }
@@ -179,7 +208,7 @@ impl StreamServer {
         client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
         session_id: String,
         allow_port_fallback: bool,
-        input_activity: Arc<Notify>,
+        idle_activity: Arc<IdleActivity>,
     ) -> Result<(Self, Arc<RwLock<Option<Arc<CdpClient>>>>), String> {
         let addr = format!("127.0.0.1:{}", preferred_port);
         let listener = match TcpListener::bind(&addr).await {
@@ -214,7 +243,7 @@ impl StreamServer {
         let client_count_clone = client_count.clone();
         let client_slot_clone = client_slot.clone();
         let notify_clone = client_notify.clone();
-        let input_activity_clone = input_activity.clone();
+        let idle_activity_clone = idle_activity.clone();
         let screencasting_clone = screencasting.clone();
         let cdp_session_clone = cdp_session_id.clone();
 
@@ -233,7 +262,7 @@ impl StreamServer {
                 client_count_clone,
                 client_slot_clone,
                 notify_clone,
-                input_activity_clone,
+                idle_activity_clone,
                 screencasting_clone,
                 cdp_session_clone,
                 vw_clone,
@@ -288,7 +317,7 @@ impl StreamServer {
                 client_slot: client_slot.clone(),
                 cdp_session_id,
                 client_notify,
-                input_activity,
+                idle_activity,
                 screencasting,
                 viewport_width,
                 viewport_height,

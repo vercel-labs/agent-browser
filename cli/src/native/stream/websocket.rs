@@ -10,7 +10,7 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::native::cdp::client::CdpClient;
 
 use super::http::handle_http_request;
-use super::{is_allowed_origin, timestamp_ms};
+use super::{is_allowed_origin, timestamp_ms, IdleActivity};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn accept_loop(
@@ -19,7 +19,7 @@ pub(super) async fn accept_loop(
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
     client_notify: Arc<Notify>,
-    input_activity: Arc<Notify>,
+    idle_activity: Arc<IdleActivity>,
     screencasting: Arc<Mutex<bool>>,
     cdp_session_id: Arc<RwLock<Option<String>>>,
     viewport_width: Arc<Mutex<u32>>,
@@ -47,7 +47,7 @@ pub(super) async fn accept_loop(
                 let client_count = client_count.clone();
                 let client_slot = client_slot.clone();
                 let client_notify = client_notify.clone();
-                let input_activity = input_activity.clone();
+                let idle_activity = idle_activity.clone();
                 let screencasting = screencasting.clone();
                 let cdp_session_id = cdp_session_id.clone();
                 let vw = viewport_width.clone();
@@ -67,7 +67,7 @@ pub(super) async fn accept_loop(
                         client_count,
                         client_slot,
                         client_notify,
-                        input_activity,
+                        idle_activity,
                         screencasting,
                         cdp_session_id,
                         vw,
@@ -106,7 +106,7 @@ async fn handle_connection(
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
     client_notify: Arc<Notify>,
-    input_activity: Arc<Notify>,
+    idle_activity: Arc<IdleActivity>,
     screencasting: Arc<Mutex<bool>>,
     cdp_session_id: Arc<RwLock<Option<String>>>,
     viewport_width: Arc<Mutex<u32>>,
@@ -134,7 +134,7 @@ async fn handle_connection(
             client_count,
             client_slot,
             client_notify,
-            input_activity,
+            idle_activity,
             screencasting,
             cdp_session_id,
             viewport_width,
@@ -159,7 +159,7 @@ async fn handle_ws_client(
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
     client_notify: Arc<Notify>,
-    input_activity: Arc<Notify>,
+    idle_activity: Arc<IdleActivity>,
     screencasting: Arc<Mutex<bool>>,
     cdp_session_id: Arc<RwLock<Option<String>>>,
     viewport_width: Arc<Mutex<u32>>,
@@ -268,7 +268,7 @@ async fn handle_ws_client(
                                 &text,
                                 client.as_ref(),
                                 sid.as_deref(),
-                                input_activity.as_ref(),
+                                idle_activity.as_ref(),
                             )
                             .await;
                         }
@@ -292,7 +292,7 @@ async fn handle_client_message(
     msg: &str,
     client: &CdpClient,
     session_id: Option<&str>,
-    input_activity: &Notify,
+    idle_activity: &IdleActivity,
 ) {
     let parsed: Value = match serde_json::from_str(msg) {
         Ok(v) => v,
@@ -301,7 +301,7 @@ async fn handle_client_message(
 
     let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
     if is_user_input_message_type(msg_type) {
-        input_activity.notify_one();
+        idle_activity.mark();
     }
 
     match msg_type {
