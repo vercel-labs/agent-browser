@@ -116,12 +116,10 @@ pub async fn run_daemon(session: &str) {
         }
     }
 
-    // Auto-shutdown the daemon after this many ms of inactivity (no commands received).
-    // Disabled when unset or 0.
-    let idle_timeout_ms = env::var("AGENT_BROWSER_IDLE_TIMEOUT_MS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .filter(|&ms| ms > 0);
+    // Auto-shutdown the daemon after this many ms of inactivity (no commands
+    // received). Applies a default when AGENT_BROWSER_IDLE_TIMEOUT_MS is
+    // unset; an explicit 0 disables idle shutdown entirely.
+    let idle_timeout = resolve_idle_timeout(env::var("AGENT_BROWSER_IDLE_TIMEOUT_MS").ok());
 
     let autosave_interval_ms = autosave_interval_ms_from_env();
 
@@ -130,7 +128,7 @@ pub async fn run_daemon(session: &str) {
         session,
         stream_client,
         stream_server_instance,
-        idle_timeout_ms,
+        idle_timeout,
         autosave_interval_ms,
     )
     .await;
@@ -156,6 +154,43 @@ pub async fn run_daemon(session: &str) {
     }
 }
 
+/// Idle timeout applied when AGENT_BROWSER_IDLE_TIMEOUT_MS is unset, so an
+/// integration that dies without calling `close` cannot leak the daemon and
+/// its Chrome tree indefinitely (issue: leaked daemons observed running for
+/// days). Unlike an explicit timeout, the default never closes a headed or
+/// attached browser — those may be in direct human use, which the idle timer
+/// cannot see (only socket commands reset it).
+pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 60 * 60 * 1000;
+
+#[derive(Clone, Copy)]
+struct IdleTimeout {
+    ms: u64,
+    /// True when the value came from DEFAULT_IDLE_TIMEOUT_MS rather than an
+    /// explicit AGENT_BROWSER_IDLE_TIMEOUT_MS. Only the default exempts
+    /// headed/attached browsers from shutdown.
+    is_default: bool,
+}
+
+/// Resolve AGENT_BROWSER_IDLE_TIMEOUT_MS into an effective idle timeout:
+/// unset or unparseable → the default; explicit 0 → disabled (None);
+/// any other value → that many milliseconds.
+fn resolve_idle_timeout(raw: Option<String>) -> Option<IdleTimeout> {
+    match raw.as_deref().map(str::trim).map(str::parse::<u64>) {
+        Some(Ok(0)) => None,
+        Some(Ok(ms)) => Some(IdleTimeout {
+            ms,
+            is_default: false,
+        }),
+        // Unparseable values are validated (with a warning) at the flags
+        // layer; falling back to the default here keeps the leak backstop
+        // in place rather than silently disabling it.
+        Some(Err(_)) | None => Some(IdleTimeout {
+            ms: DEFAULT_IDLE_TIMEOUT_MS,
+            is_default: true,
+        }),
+    }
+}
+
 /// Minimum ms between periodic session autosaves while the browser is open.
 /// Defaults to 30s; 0 disables periodic autosave (save-on-close still runs).
 fn autosave_interval_ms_from_env() -> u64 {
@@ -171,10 +206,12 @@ async fn run_socket_server(
     session: &str,
     stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     stream_server: Option<Arc<StreamServer>>,
-    idle_timeout_ms: Option<u64>,
+    idle_timeout: Option<IdleTimeout>,
     autosave_interval_ms: u64,
 ) -> Result<(), String> {
     use tokio::net::UnixListener;
+
+    let idle_timeout_ms = idle_timeout.map(|t| t.ms);
 
     let listener =
         UnixListener::bind(socket_path).map_err(|e| format!("Failed to bind socket: {}", e))?;
@@ -250,6 +287,23 @@ async fn run_socket_server(
                 }
             }, if idle_timeout_ms.is_some() => {
                 let mut s = state.lock().await;
+                // The default timeout is a leak backstop, not a lifecycle
+                // policy: never pull a headed or attached browser out from
+                // under a human. Re-arm and keep waiting instead.
+                if idle_timeout.is_some_and(|t| t.is_default)
+                    && s.browser.as_ref().is_some_and(|b| b.blocks_default_idle_shutdown())
+                {
+                    idle_sleep_pin = idle_timeout_ms
+                        .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
+                    continue;
+                }
+                if idle_timeout.is_some_and(|t| t.is_default) {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "Idle for {}m with no commands; saving state and shutting down (AGENT_BROWSER_IDLE_TIMEOUT_MS=0 disables)",
+                        DEFAULT_IDLE_TIMEOUT_MS / 60_000
+                    );
+                }
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_current_browser(&mut s).await;
                 break;
@@ -283,10 +337,12 @@ async fn run_socket_server(
     session: &str,
     stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     stream_server: Option<Arc<StreamServer>>,
-    idle_timeout_ms: Option<u64>,
+    idle_timeout: Option<IdleTimeout>,
     autosave_interval_ms: u64,
 ) -> Result<(), String> {
     use tokio::net::TcpListener;
+
+    let idle_timeout_ms = idle_timeout.map(|t| t.ms);
 
     let preferred_port = get_port_for_session(session);
     // Try the hash-derived port first; if it is blocked (e.g. Windows Hyper-V
@@ -369,6 +425,23 @@ async fn run_socket_server(
                 }
             }, if idle_timeout_ms.is_some() => {
                 let mut s = state.lock().await;
+                // The default timeout is a leak backstop, not a lifecycle
+                // policy: never pull a headed or attached browser out from
+                // under a human. Re-arm and keep waiting instead.
+                if idle_timeout.is_some_and(|t| t.is_default)
+                    && s.browser.as_ref().is_some_and(|b| b.blocks_default_idle_shutdown())
+                {
+                    idle_sleep_pin = idle_timeout_ms
+                        .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
+                    continue;
+                }
+                if idle_timeout.is_some_and(|t| t.is_default) {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "Idle for {}m with no commands; saving state and shutting down (AGENT_BROWSER_IDLE_TIMEOUT_MS=0 disables)",
+                        DEFAULT_IDLE_TIMEOUT_MS / 60_000
+                    );
+                }
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_current_browser(&mut s).await;
                 let _ = fs::remove_file(&port_path);
@@ -569,6 +642,36 @@ fn get_port_for_session(session: &str) -> u16 {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+
+    #[test]
+    fn test_resolve_idle_timeout_unset_applies_default() {
+        let t = resolve_idle_timeout(None).expect("default should apply when unset");
+        assert_eq!(t.ms, DEFAULT_IDLE_TIMEOUT_MS);
+        assert!(t.is_default);
+    }
+
+    #[test]
+    fn test_resolve_idle_timeout_explicit_zero_disables() {
+        assert!(resolve_idle_timeout(Some("0".to_string())).is_none());
+        assert!(resolve_idle_timeout(Some(" 0 ".to_string())).is_none());
+    }
+
+    #[test]
+    fn test_resolve_idle_timeout_explicit_value_is_not_default() {
+        let t = resolve_idle_timeout(Some("5000".to_string())).expect("explicit value");
+        assert_eq!(t.ms, 5000);
+        assert!(!t.is_default);
+    }
+
+    #[test]
+    fn test_resolve_idle_timeout_unparseable_falls_back_to_default() {
+        for raw in ["banana", "", "-1", "30s"] {
+            let t = resolve_idle_timeout(Some(raw.to_string()))
+                .unwrap_or_else(|| panic!("{:?} should fall back to default", raw));
+            assert_eq!(t.ms, DEFAULT_IDLE_TIMEOUT_MS);
+            assert!(t.is_default);
+        }
+    }
 
     #[test]
     fn test_daemon_socket_dir_matches_client_namespace() {

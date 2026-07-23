@@ -1,5 +1,11 @@
 # agent-browser
 
+## Unreleased
+
+### Behavior Changes
+
+- The daemon now ships a **default idle timeout of 1 hour**: after an hour with no commands it saves session state, closes the browser, and exits, so integrations that die without calling `close` no longer leak the daemon and its Chrome tree indefinitely. Set `AGENT_BROWSER_IDLE_TIMEOUT_MS=0` to restore the old always-persist behavior, or any other value to tune it. The default never closes headed or `connect`-attached browsers (which may be in direct human use); an explicitly configured timeout applies to all browsers, as before.
+
 ## 0.33.0
 
 <!-- release:start -->

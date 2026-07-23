@@ -3781,7 +3781,7 @@ Environment:
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete saved states older than N days (default: 30)
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM session encryption
   AGENT_BROWSER_STREAM_PORT      Override WebSocket streaming port (default: OS-assigned)
-  AGENT_BROWSER_IDLE_TIMEOUT_MS  Auto-shutdown daemon after N ms of inactivity (disabled by default)
+  AGENT_BROWSER_IDLE_TIMEOUT_MS  Auto-shutdown daemon after N ms of inactivity (default: 3600000 = 1h; 0 disables; headed/attached browsers are only closed by an explicit value, never by the default)
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
   AGENT_BROWSER_CONTENT_BOUNDARIES Wrap page output in boundary markers

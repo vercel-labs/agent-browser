@@ -1490,7 +1490,7 @@ agent-browser uses a client-daemon architecture:
 1. **Rust CLI** - Parses commands, communicates with daemon
 2. **Rust Daemon** - Pure Rust daemon using direct CDP, no Node.js required
 
-The daemon starts automatically on first command and persists between commands for fast subsequent operations. To auto-shutdown the daemon after a period of inactivity, set `AGENT_BROWSER_IDLE_TIMEOUT_MS` (value in milliseconds). When set, the daemon closes the browser and exits after receiving no commands for the specified duration.
+The daemon starts automatically on first command and persists between commands for fast subsequent operations. After **1 hour** with no commands it saves session state, closes the browser, and exits, so an integration that dies without calling `close` cannot leak the daemon and its browser indefinitely; the next command starts a fresh daemon and state restore works as usual. Set `AGENT_BROWSER_IDLE_TIMEOUT_MS` to change the timeout (value in milliseconds) or to `0` to disable idle shutdown entirely. The default never closes a headed browser or one attached with `connect` — those may be in direct human use, which the idle timer cannot observe — but an explicitly set timeout applies to every browser.
 
 **Browser Engine:** Uses Chrome (from Chrome for Testing) by default. The `--engine` flag selects between `chrome` and `lightpanda`. Supported browsers: Chromium/Chrome (via CDP) and Safari (via WebDriver for iOS).
 
