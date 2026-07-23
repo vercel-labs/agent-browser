@@ -460,6 +460,96 @@ pub fn validate_state_file(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum StorageKind {
+    Local,
+    Session,
+}
+
+impl StorageKind {
+    fn object_name(self) -> &'static str {
+        match self {
+            Self::Local => "localStorage",
+            Self::Session => "sessionStorage",
+        }
+    }
+}
+
+fn storage_restore_error(
+    kind: StorageKind,
+    origin: &str,
+    entry_index: usize,
+    entry_count: usize,
+    entry: &StorageEntry,
+    reason: &str,
+) -> String {
+    format!(
+        "Failed to restore {} for origin '{}': {} for entry {} of {} (keyBytes={}, valueBytes={})",
+        kind.object_name(),
+        origin,
+        reason,
+        entry_index + 1,
+        entry_count,
+        entry.name.len(),
+        entry.value.len(),
+    )
+}
+
+async fn restore_storage_entries(
+    client: &CdpClient,
+    session_id: &str,
+    origin: &str,
+    kind: StorageKind,
+    entries: &[StorageEntry],
+) -> Result<(), String> {
+    for (entry_index, entry) in entries.iter().enumerate() {
+        let js = format!(
+            "{}.setItem({}, {})",
+            kind.object_name(),
+            serde_json::to_string(&entry.name).expect("storage key should serialize"),
+            serde_json::to_string(&entry.value).expect("storage value should serialize"),
+        );
+        let result = client
+            .send_command_typed::<_, super::cdp::types::EvaluateResult>(
+                "Runtime.evaluate",
+                &EvaluateParams {
+                    expression: js,
+                    return_by_value: Some(true),
+                    await_promise: Some(false),
+                },
+                Some(session_id),
+            )
+            .await
+            .map_err(|_| {
+                storage_restore_error(
+                    kind,
+                    origin,
+                    entry_index,
+                    entries.len(),
+                    entry,
+                    "CDP evaluation failed",
+                )
+            })?;
+
+        if result.exception_details.is_some() {
+            return Err(storage_restore_error(
+                kind,
+                origin,
+                entry_index,
+                entries.len(),
+                entry,
+                "page evaluation threw an exception",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Restores cookies and origin storage in file order.
+///
+/// Storage failures stop the restore and return secret-safe context. Cookies and
+/// earlier storage entries may already have been applied when an error is returned.
 pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Result<(), String> {
     let json_str = read_state_json(path)?;
 
@@ -495,43 +585,22 @@ pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Res
         // Brief wait for navigation
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-        for entry in &origin.local_storage {
-            let js = format!(
-                "localStorage.setItem({}, {})",
-                serde_json::to_string(&entry.name).unwrap_or_default(),
-                serde_json::to_string(&entry.value).unwrap_or_default(),
-            );
-            let _ = client
-                .send_command_typed::<_, super::cdp::types::EvaluateResult>(
-                    "Runtime.evaluate",
-                    &EvaluateParams {
-                        expression: js,
-                        return_by_value: Some(true),
-                        await_promise: Some(false),
-                    },
-                    Some(session_id),
-                )
-                .await;
-        }
-
-        for entry in &origin.session_storage {
-            let js = format!(
-                "sessionStorage.setItem({}, {})",
-                serde_json::to_string(&entry.name).unwrap_or_default(),
-                serde_json::to_string(&entry.value).unwrap_or_default(),
-            );
-            let _ = client
-                .send_command_typed::<_, super::cdp::types::EvaluateResult>(
-                    "Runtime.evaluate",
-                    &EvaluateParams {
-                        expression: js,
-                        return_by_value: Some(true),
-                        await_promise: Some(false),
-                    },
-                    Some(session_id),
-                )
-                .await;
-        }
+        restore_storage_entries(
+            client,
+            session_id,
+            &origin.origin,
+            StorageKind::Local,
+            &origin.local_storage,
+        )
+        .await?;
+        restore_storage_entries(
+            client,
+            session_id,
+            &origin.origin,
+            StorageKind::Session,
+            &origin.session_storage,
+        )
+        .await?;
     }
 
     Ok(())
@@ -893,6 +962,36 @@ mod tests {
         let parsed: StorageState = serde_json::from_str(&json).unwrap();
         assert!(parsed.cookies.is_empty());
         assert!(parsed.origins.is_empty());
+    }
+
+    #[test]
+    fn test_storage_restore_error_reports_context_without_secrets() {
+        let entry = StorageEntry {
+            name: "secret-key-name".to_string(),
+            value: "secret-token-value".to_string(),
+        };
+
+        for (kind, expected_name) in [
+            (StorageKind::Local, "localStorage"),
+            (StorageKind::Session, "sessionStorage"),
+        ] {
+            let error = storage_restore_error(
+                kind,
+                "https://example.test",
+                1,
+                3,
+                &entry,
+                "page evaluation threw an exception",
+            );
+
+            assert!(error.contains(expected_name));
+            assert!(error.contains("https://example.test"));
+            assert!(error.contains("entry 2 of 3"));
+            assert!(error.contains("keyBytes=15"));
+            assert!(error.contains("valueBytes=18"));
+            assert!(!error.contains(&entry.name));
+            assert!(!error.contains(&entry.value));
+        }
     }
 
     #[test]

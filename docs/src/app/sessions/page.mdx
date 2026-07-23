@@ -126,6 +126,8 @@ agent-browser state load ./my-auth.json
 agent-browser open https://app.example.com/dashboard
 ```
 
+If a `localStorage` or `sessionStorage` write fails, state loading stops and returns secret-safe context including the storage type, origin, entry position, and byte lengths. It does not include the stored key or value. Because cookies and earlier storage entries may already be applied, retry from a fresh browser context after correcting the failure.
+
 Combine with `--session <id> --restore` so the imported auth auto-persists across restarts:
 
 ```bash

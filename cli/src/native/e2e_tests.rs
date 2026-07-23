@@ -6761,6 +6761,104 @@ async fn e2e_restore_key_switch_reloads_instead_of_reusing_live_browser() {
     let _ = std::fs::remove_file(format!("{}.previous", path_b));
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_state_load_reports_storage_write_failures_without_secrets() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind storage failure server");
+    let port = listener
+        .local_addr()
+        .expect("storage failure server address")
+        .port();
+    let origin = format!("http://127.0.0.1:{port}");
+    let server = tokio::spawn(async move {
+        for _ in 0..5 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut request = vec![0u8; 4096];
+                let _ = stream.read(&mut request).await;
+                let body = r#"<script>
+                    const originalSetItem = Storage.prototype.setItem;
+                    Storage.prototype.setItem = function(name, value) {
+                        if (this === window.sessionStorage) {
+                            throw new Error('forced storage write failure');
+                        }
+                        return originalSetItem.call(this, name, value);
+                    };
+                </script>"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    let secret_name = "secret-session-key";
+    let secret_value = "secret-session-value";
+    let local_name = "restored-before-failure";
+    let local_value = "local-value";
+    let temp_dir = tempfile::tempdir().expect("create state temp directory");
+    let state_path = temp_dir.path().join("state.json");
+    std::fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&json!({
+            "cookies": [],
+            "origins": [{
+                "origin": origin,
+                "localStorage": [{ "name": local_name, "value": local_value }],
+                "sessionStorage": [{ "name": secret_name, "value": secret_value }]
+            }]
+        }))
+        .expect("serialize state fixture"),
+    )
+    .expect("write state fixture");
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let load_resp = execute_command(
+        &json!({ "id": "2", "action": "state_load", "path": state_path }),
+        &mut state,
+    )
+    .await;
+
+    let local_resp = execute_command(
+        &json!({ "id": "3", "action": "storage_get", "type": "local", "key": local_name }),
+        &mut state,
+    )
+    .await;
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    server.abort();
+
+    assert_eq!(
+        load_resp["success"], false,
+        "state load must report failure"
+    );
+    let error = load_resp["error"].as_str().expect("state load error");
+    assert!(
+        error.contains("sessionStorage"),
+        "unexpected error: {error}"
+    );
+    assert!(error.contains(&origin), "unexpected error: {error}");
+    assert!(!error.contains(secret_name), "error exposed storage key");
+    assert!(!error.contains(secret_value), "error exposed storage value");
+    assert_success(&local_resp);
+    assert_eq!(get_data(&local_resp)["value"], local_value);
+}
+
 /// Verify that explicit `state_load` restores cookies into an existing
 /// session (baseline sanity check — this path is known to work).
 #[tokio::test]
