@@ -145,6 +145,7 @@ pub async fn run_daemon(session: &str) {
     }
     let _ = fs::remove_file(&pid_path);
     let _ = fs::remove_file(&version_path);
+    let _ = fs::remove_file(socket_dir.join(format!("{}.config", session)));
     let _ = fs::remove_file(&stream_path);
     let _ = fs::remove_file(socket_dir.join(format!("{}.engine", session)));
     let _ = fs::remove_file(socket_dir.join(format!("{}.provider", session)));
