@@ -385,6 +385,12 @@ agent-browser trace start             # Start recording trace
 agent-browser trace stop [path]       # Stop and save trace
 agent-browser profiler start          # Start Chrome DevTools profiling
 agent-browser profiler stop [path]    # Stop and save profile (.json)
+agent-browser memory metrics           # Read JS heap and DOM counters
+agent-browser memory sampling start    # Start allocation sampling on this page
+agent-browser memory sampling stop     # Save allocation profile and top call sites
+agent-browser memory snapshot          # Stream a heap snapshot to a local file
+agent-browser memory status            # Show the active capture
+agent-browser memory cancel            # Cancel the active capture
 agent-browser console                 # View console messages (log, error, warn, info)
 agent-browser console --json          # JSON output with raw CDP args for programmatic access
 agent-browser console --clear         # Clear console
@@ -401,6 +407,28 @@ agent-browser state clear [name]      # Clear states for session
 agent-browser state clear --all       # Clear all saved states
 agent-browser state clean --older-than <days>  # Delete old states
 ```
+
+### Memory diagnostics
+
+Memory diagnostics reuse the current agent-browser Chrome session. No separate CDP port or address is required. They are disabled on Lightpanda, Safari, and other engines that do not provide the required Chrome memory capabilities.
+
+```bash
+agent-browser open https://example.com
+agent-browser memory metrics
+
+agent-browser memory sampling start --sampling-interval 65536
+# Repeat the page flow that may retain objects
+agent-browser memory sampling stop ./allocations.heapprofile --top 10
+
+agent-browser memory collect-garbage
+agent-browser memory snapshot ./after.heapsnapshot --timeout 120000
+```
+
+Only one memory capture can be active in a browser session. Allocation sampling stays bound to the page where it started even if another tab becomes active. `memory status` reports the capture ID, type, original page, and start time. `memory cancel` stops sampling or interrupts an in-progress snapshot and removes partial output.
+
+Heap snapshots are written one chunk at a time and are never printed to the terminal or JSON response. If no path is supplied, artifacts go to the runtime temporary directory and default artifacts older than 24 hours are cleaned when a new capture starts. Use `--max-size <bytes>` to cap artifact size, `--no-gc` to skip the default garbage collection before a snapshot, and `--json` for structured summaries and stable `errorCode` values.
+
+Heap snapshots and allocation profiles can contain page text, application data, credentials, and tokens. Keep them on trusted local storage, do not commit them, and delete them when the diagnosis is complete.
 
 ### Navigation
 

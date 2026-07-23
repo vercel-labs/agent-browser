@@ -38,8 +38,188 @@ fn native_test_fixture_html(name: &str) -> &'static str {
         "html5_drag_probe" => include_str!("test_fixtures/html5_drag_probe.html"),
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
         "upload_probe" => include_str!("test_fixtures/upload_probe.html"),
+        "memory_probe" => include_str!("test_fixtures/memory_probe.html"),
         _ => panic!("Unknown native test fixture: {}", name),
     }
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_memory_metrics_sampling_snapshot_and_tab_binding() {
+    let output_dir = tempfile::tempdir().expect("memory artifact directory");
+    let profile_path = output_dir.path().join("allocations.heapprofile");
+    let snapshot_path = output_dir.path().join("page.heapsnapshot");
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({
+            "id": "memory-1",
+            "action": "launch",
+            "headless": true,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "memory-2",
+            "action": "navigate",
+            "url": native_test_fixture_url("memory_probe")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let baseline = execute_command(
+        &json!({ "id": "memory-3", "action": "memory_metrics" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&baseline);
+    assert!(
+        get_data(&baseline)["jsHeapUsedSize"]
+            .as_f64()
+            .unwrap_or(0.0)
+            > 0.0
+    );
+    let original_target = get_data(&baseline)["targetId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let start = execute_command(
+        &json!({
+            "id": "memory-4",
+            "action": "memory_sampling_start",
+            "samplingInterval": 1024
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&start);
+    assert_eq!(get_data(&start)["targetId"], original_target);
+
+    let leak = execute_command(
+        &json!({
+            "id": "memory-5",
+            "action": "evaluate",
+            "script": "for (let i = 0; i < 8; i++) memoryProbeLeak(); 'done'"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&leak);
+
+    let new_tab = execute_command(
+        &json!({ "id": "memory-6", "action": "tab_new", "url": "about:blank" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&new_tab);
+
+    let stop = execute_command(
+        &json!({
+            "id": "memory-7",
+            "action": "memory_sampling_stop",
+            "path": profile_path.to_string_lossy(),
+            "top": 50
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&stop);
+    assert_eq!(get_data(&stop)["targetId"], original_target);
+    assert!(profile_path.exists());
+    let profile: Value = serde_json::from_slice(&std::fs::read(&profile_path).unwrap()).unwrap();
+    assert!(profile.get("head").is_some());
+    assert!(
+        get_data(&stop)["topFunctions"]
+            .as_array()
+            .is_some_and(|functions| functions.iter().any(|entry| {
+                entry["functionName"] == "memoryProbeLeak"
+                    || entry["functionName"] == "buildProbeNodes"
+                    || entry["url"]
+                        .as_str()
+                        .is_some_and(|url| url.contains("memory-probe.js"))
+            })),
+        "expected probe allocation frame in {}",
+        serde_json::to_string_pretty(get_data(&stop)).unwrap()
+    );
+
+    let switch = execute_command(
+        &json!({ "id": "memory-8", "action": "tab_switch", "tabId": "t1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&switch);
+
+    let collect = execute_command(
+        &json!({ "id": "memory-9", "action": "memory_collect_garbage" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&collect);
+    let after_leak = execute_command(
+        &json!({ "id": "memory-10", "action": "memory_metrics" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&after_leak);
+    assert!(
+        get_data(&after_leak)["nodes"].as_u64().unwrap_or(0)
+            > get_data(&baseline)["nodes"].as_u64().unwrap_or(0)
+    );
+
+    let temporary = execute_command(
+        &json!({
+            "id": "memory-11",
+            "action": "evaluate",
+            "script": "for (let i = 0; i < 8; i++) memoryProbeTemporary(); 'done'"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&temporary);
+    let collect = execute_command(
+        &json!({ "id": "memory-12", "action": "memory_collect_garbage" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&collect);
+    let after_temporary = execute_command(
+        &json!({ "id": "memory-13", "action": "memory_metrics" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&after_temporary);
+    let leak_nodes = get_data(&after_leak)["nodes"].as_u64().unwrap_or(0);
+    let temporary_nodes = get_data(&after_temporary)["nodes"].as_u64().unwrap_or(0);
+    assert!(temporary_nodes <= leak_nodes + 20);
+
+    let snapshot = execute_command(
+        &json!({
+            "id": "memory-14",
+            "action": "memory_snapshot",
+            "path": snapshot_path.to_string_lossy(),
+            "timeout": 120000
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&snapshot);
+    assert_eq!(get_data(&snapshot)["valid"], true);
+    let snapshot_json: Value =
+        serde_json::from_slice(&std::fs::read(&snapshot_path).unwrap()).unwrap();
+    assert!(snapshot_json.get("snapshot").is_some());
+    assert!(snapshot_json.get("nodes").is_some());
+    assert!(snapshot_json.get("edges").is_some());
+    assert!(snapshot_json.get("strings").is_some());
+
+    let _ = execute_command(&json!({ "id": "memory-99", "action": "close" }), &mut state).await;
 }
 
 fn native_test_fixture_url(name: &str) -> String {
@@ -207,6 +387,112 @@ async fn spawn_fake_daemon_socket(
     });
 
     rx
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_coverage_checkpoints_and_tab_binding() {
+    let output_dir = tempfile::tempdir().expect("coverage artifact directory");
+    let first_path = output_dir.path().join("first.coverage.json");
+    let final_path = output_dir.path().join("final.coverage.json");
+    let mut state = DaemonState::new();
+
+    let launch = execute_command(
+        &json!({
+            "id": "coverage-1",
+            "action": "launch",
+            "headless": true,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&launch);
+
+    let navigate = execute_command(
+        &json!({
+            "id": "coverage-2",
+            "action": "navigate",
+            "url": native_test_fixture_url("memory_probe")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&navigate);
+
+    let start = execute_command(
+        &json!({ "id": "coverage-3", "action": "coverage_start" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&start);
+    let original_target = get_data(&start)["targetId"].as_str().unwrap().to_string();
+
+    let evaluate = execute_command(
+        &json!({
+            "id": "coverage-4",
+            "action": "evaluate",
+            "script": "memoryProbeLeak(); 'covered'"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&evaluate);
+
+    let take = execute_command(
+        &json!({
+            "id": "coverage-5",
+            "action": "coverage_take",
+            "path": first_path.to_string_lossy(),
+            "label": "first"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&take);
+    assert_eq!(get_data(&take)["checkpoint"], 1);
+    assert!(first_path.exists());
+    let artifact: Value = serde_json::from_slice(&std::fs::read(&first_path).unwrap()).unwrap();
+    assert!(artifact["scripts"].as_array().is_some_and(|scripts| {
+        scripts.iter().any(|script| {
+            script["url"]
+                .as_str()
+                .is_some_and(|url| url.contains("memory-probe.js"))
+                && script["functions"].as_array().is_some_and(|functions| {
+                    functions.iter().any(|function| {
+                        function["ranges"].as_array().is_some_and(|ranges| {
+                            ranges
+                                .iter()
+                                .any(|range| range["count"].as_u64().unwrap_or(0) > 0)
+                        })
+                    })
+                })
+        })
+    }));
+
+    let new_tab = execute_command(
+        &json!({ "id": "coverage-6", "action": "tab_new", "url": "about:blank" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&new_tab);
+
+    let stop = execute_command(
+        &json!({
+            "id": "coverage-7",
+            "action": "coverage_stop",
+            "path": final_path.to_string_lossy(),
+            "label": "final"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&stop);
+    assert_eq!(get_data(&stop)["targetId"], original_target);
+    assert_eq!(get_data(&stop)["checkpoint"], 2);
+    assert!(final_path.exists());
+
+    close_current_browser(&mut state).await.unwrap();
 }
 
 // ---------------------------------------------------------------------------

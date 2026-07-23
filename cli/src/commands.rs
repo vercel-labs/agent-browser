@@ -129,6 +129,8 @@ pub fn is_top_level_command(value: &str) -> bool {
             | "dialog"
             | "trace"
             | "profiler"
+            | "memory"
+            | "coverage"
             | "record"
             | "console"
             | "errors"
@@ -1646,6 +1648,12 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             }
         }
 
+        // === Page memory diagnostics (Chrome only) ===
+        "memory" => parse_memory(&rest, &id),
+
+        // === JavaScript code coverage (Chrome only) ===
+        "coverage" => parse_coverage(&rest, &id),
+
         // === Recording (browser video recording) ===
         "record" => {
             const VALID: &[&str] = &["start", "stop", "restart"];
@@ -1949,6 +1957,250 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         _ => Err(ParseError::UnknownCommand {
             command: cmd.to_string(),
+        }),
+    }
+}
+
+fn parse_positive_u64(value: &str, flag: &str, usage: &'static str) -> Result<u64, ParseError> {
+    let parsed = value.parse::<u64>().map_err(|_| ParseError::InvalidValue {
+        message: format!("Invalid value for {}: {}", flag, value),
+        usage,
+    })?;
+    if parsed == 0 {
+        return Err(ParseError::InvalidValue {
+            message: format!("{} must be greater than zero", flag),
+            usage,
+        });
+    }
+    Ok(parsed)
+}
+
+fn parse_memory(rest: &[&str], id: &str) -> Result<Value, ParseError> {
+    const MEMORY_USAGE: &str =
+        "memory <metrics|status|sampling|snapshot|collect-garbage|cancel> ...";
+    const SAMPLING_START_USAGE: &str = "memory sampling start [--sampling-interval <bytes>]";
+    const SAMPLING_STOP_USAGE: &str =
+        "memory sampling stop [path] [--top <count>] [--max-size <bytes>]";
+    const SNAPSHOT_USAGE: &str =
+        "memory snapshot [path] [--no-gc] [--timeout <ms>] [--max-size <bytes>]";
+
+    match rest.first().copied() {
+        Some("metrics") => Ok(json!({ "id": id, "action": "memory_metrics" })),
+        Some("status") => Ok(json!({ "id": id, "action": "memory_status" })),
+        Some("collect-garbage") => Ok(json!({ "id": id, "action": "memory_collect_garbage" })),
+        Some("cancel") => Ok(json!({ "id": id, "action": "memory_cancel" })),
+        Some("sampling") => match rest.get(1).copied() {
+            Some("start") => {
+                let mut command = json!({ "id": id, "action": "memory_sampling_start" });
+                let mut index = 2;
+                while index < rest.len() {
+                    match rest[index] {
+                        "--sampling-interval" => {
+                            let value = rest.get(index + 1).ok_or_else(|| {
+                                ParseError::MissingArguments {
+                                    context: "memory sampling start --sampling-interval"
+                                        .to_string(),
+                                    usage: SAMPLING_START_USAGE,
+                                }
+                            })?;
+                            command["samplingInterval"] = json!(parse_positive_u64(
+                                value,
+                                "--sampling-interval",
+                                SAMPLING_START_USAGE,
+                            )?);
+                            index += 2;
+                        }
+                        option => {
+                            return Err(ParseError::InvalidValue {
+                                message: format!(
+                                    "Unknown memory sampling start option: {}",
+                                    option
+                                ),
+                                usage: SAMPLING_START_USAGE,
+                            });
+                        }
+                    }
+                }
+                Ok(command)
+            }
+            Some("stop") => {
+                let mut command = json!({ "id": id, "action": "memory_sampling_stop" });
+                let mut index = 2;
+                while index < rest.len() {
+                    match rest[index] {
+                        "--top" | "--max-size" => {
+                            let flag = rest[index];
+                            let value = rest.get(index + 1).ok_or_else(|| {
+                                ParseError::MissingArguments {
+                                    context: format!("memory sampling stop {}", flag),
+                                    usage: SAMPLING_STOP_USAGE,
+                                }
+                            })?;
+                            let parsed = parse_positive_u64(value, flag, SAMPLING_STOP_USAGE)?;
+                            if flag == "--top" {
+                                command["top"] = json!(parsed);
+                            } else {
+                                command["maxSize"] = json!(parsed);
+                            }
+                            index += 2;
+                        }
+                        path if !path.starts_with("--") && command.get("path").is_none() => {
+                            command["path"] = json!(path);
+                            index += 1;
+                        }
+                        option => {
+                            return Err(ParseError::InvalidValue {
+                                message: format!("Unknown memory sampling stop option: {}", option),
+                                usage: SAMPLING_STOP_USAGE,
+                            });
+                        }
+                    }
+                }
+                Ok(command)
+            }
+            Some(subcommand) => Err(ParseError::UnknownSubcommand {
+                subcommand: subcommand.to_string(),
+                valid_options: &["start", "stop"],
+            }),
+            None => Err(ParseError::MissingArguments {
+                context: "memory sampling".to_string(),
+                usage: "memory sampling <start|stop> [options]",
+            }),
+        },
+        Some("snapshot") => {
+            let mut command = json!({
+                "id": id,
+                "action": "memory_snapshot",
+                "collectGarbage": true,
+                "timeout": 120000_u64,
+            });
+            let mut index = 1;
+            while index < rest.len() {
+                match rest[index] {
+                    "--no-gc" => {
+                        command["collectGarbage"] = json!(false);
+                        index += 1;
+                    }
+                    "--timeout" | "--max-size" => {
+                        let flag = rest[index];
+                        let value =
+                            rest.get(index + 1)
+                                .ok_or_else(|| ParseError::MissingArguments {
+                                    context: format!("memory snapshot {}", flag),
+                                    usage: SNAPSHOT_USAGE,
+                                })?;
+                        let parsed = parse_positive_u64(value, flag, SNAPSHOT_USAGE)?;
+                        if flag == "--timeout" {
+                            command["timeout"] = json!(parsed);
+                        } else {
+                            command["maxSize"] = json!(parsed);
+                        }
+                        index += 2;
+                    }
+                    path if !path.starts_with("--") && command.get("path").is_none() => {
+                        command["path"] = json!(path);
+                        index += 1;
+                    }
+                    option => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unknown memory snapshot option: {}", option),
+                            usage: SNAPSHOT_USAGE,
+                        });
+                    }
+                }
+            }
+            Ok(command)
+        }
+        Some(subcommand) => Err(ParseError::UnknownSubcommand {
+            subcommand: subcommand.to_string(),
+            valid_options: &[
+                "metrics",
+                "status",
+                "sampling",
+                "snapshot",
+                "collect-garbage",
+                "cancel",
+            ],
+        }),
+        None => Err(ParseError::MissingArguments {
+            context: "memory".to_string(),
+            usage: MEMORY_USAGE,
+        }),
+    }
+}
+
+fn parse_coverage(rest: &[&str], id: &str) -> Result<Value, ParseError> {
+    const COVERAGE_USAGE: &str =
+        "coverage <status|start|take|stop|cancel> [path] [--label <name>] [--max-size <bytes>]";
+    match rest.first().copied() {
+        Some("status") => Ok(json!({ "id": id, "action": "coverage_status" })),
+        Some("cancel") => Ok(json!({ "id": id, "action": "coverage_cancel" })),
+        Some("start") => {
+            let mut command = json!({ "id": id, "action": "coverage_start" });
+            for option in &rest[1..] {
+                if *option == "--call-count" {
+                    command["callCount"] = json!(true);
+                } else {
+                    return Err(ParseError::InvalidValue {
+                        message: format!("Unknown coverage start option: {}", option),
+                        usage: "coverage start [--call-count]",
+                    });
+                }
+            }
+            Ok(command)
+        }
+        Some("take" | "stop") => {
+            let action = if rest[0] == "take" {
+                "coverage_take"
+            } else {
+                "coverage_stop"
+            };
+            let mut command = json!({ "id": id, "action": action });
+            let mut index = 1;
+            while index < rest.len() {
+                match rest[index] {
+                    "--label" => {
+                        let value =
+                            rest.get(index + 1)
+                                .ok_or_else(|| ParseError::MissingArguments {
+                                    context: format!("coverage {} --label", rest[0]),
+                                    usage: COVERAGE_USAGE,
+                                })?;
+                        command["label"] = json!(value);
+                        index += 2;
+                    }
+                    "--max-size" => {
+                        let value =
+                            rest.get(index + 1)
+                                .ok_or_else(|| ParseError::MissingArguments {
+                                    context: format!("coverage {} --max-size", rest[0]),
+                                    usage: COVERAGE_USAGE,
+                                })?;
+                        command["maxSize"] =
+                            json!(parse_positive_u64(value, "--max-size", COVERAGE_USAGE,)?);
+                        index += 2;
+                    }
+                    path if !path.starts_with("--") && command.get("path").is_none() => {
+                        command["path"] = json!(path);
+                        index += 1;
+                    }
+                    option => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unknown coverage {} option: {}", rest[0], option),
+                            usage: COVERAGE_USAGE,
+                        });
+                    }
+                }
+            }
+            Ok(command)
+        }
+        Some(subcommand) => Err(ParseError::UnknownSubcommand {
+            subcommand: subcommand.to_string(),
+            valid_options: &["status", "start", "take", "stop", "cancel"],
+        }),
+        None => Err(ParseError::MissingArguments {
+            context: "coverage".to_string(),
+            usage: COVERAGE_USAGE,
         }),
     }
 }
@@ -4641,6 +4893,106 @@ mod tests {
             result.unwrap_err(),
             ParseError::MissingArguments { .. }
         ));
+    }
+
+    // === Memory Tests ===
+
+    #[test]
+    fn test_memory_metrics() {
+        let cmd = parse_command(&args("memory metrics"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "memory_metrics");
+    }
+
+    #[test]
+    fn test_memory_sampling_start_options() {
+        let cmd = parse_command(
+            &args("memory sampling start --sampling-interval 65536"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "memory_sampling_start");
+        assert_eq!(cmd["samplingInterval"], 65_536);
+    }
+
+    #[test]
+    fn test_memory_sampling_stop_options() {
+        let cmd = parse_command(
+            &args("memory sampling stop result.heapprofile --top 10 --max-size 4096"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "memory_sampling_stop");
+        assert_eq!(cmd["path"], "result.heapprofile");
+        assert_eq!(cmd["top"], 10);
+        assert_eq!(cmd["maxSize"], 4096);
+    }
+
+    #[test]
+    fn test_memory_snapshot_options_and_timeout() {
+        let cmd = parse_command(
+            &args("memory snapshot result.heapsnapshot --no-gc --timeout 5000 --max-size 9999"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "memory_snapshot");
+        assert_eq!(cmd["path"], "result.heapsnapshot");
+        assert_eq!(cmd["collectGarbage"], false);
+        assert_eq!(cmd["timeout"], 5000);
+        assert_eq!(cmd["maxSize"], 9999);
+    }
+
+    #[test]
+    fn test_memory_rejects_zero_and_unknown_options() {
+        let zero = parse_command(
+            &args("memory sampling start --sampling-interval 0"),
+            &default_flags(),
+        );
+        assert!(matches!(zero, Err(ParseError::InvalidValue { .. })));
+
+        let unknown = parse_command(&args("memory snapshot --output foo"), &default_flags());
+        assert!(matches!(unknown, Err(ParseError::InvalidValue { .. })));
+    }
+
+    // === JavaScript Coverage Tests ===
+
+    #[test]
+    fn test_coverage_start_and_status() {
+        let start = parse_command(&args("coverage start --call-count"), &default_flags()).unwrap();
+        assert_eq!(start["action"], "coverage_start");
+        assert_eq!(start["callCount"], true);
+
+        let status = parse_command(&args("coverage status"), &default_flags()).unwrap();
+        assert_eq!(status["action"], "coverage_status");
+    }
+
+    #[test]
+    fn test_coverage_take_and_stop_options() {
+        let take = parse_command(
+            &args("coverage take first-screen.json --label first-screen --max-size 4096"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(take["action"], "coverage_take");
+        assert_eq!(take["path"], "first-screen.json");
+        assert_eq!(take["label"], "first-screen");
+        assert_eq!(take["maxSize"], 4096);
+
+        let stop = parse_command(&args("coverage stop --label orders"), &default_flags()).unwrap();
+        assert_eq!(stop["action"], "coverage_stop");
+        assert_eq!(stop["label"], "orders");
+        assert!(stop.get("path").is_none());
+    }
+
+    #[test]
+    fn test_coverage_cancel_and_invalid_options() {
+        let cancel = parse_command(&args("coverage cancel"), &default_flags()).unwrap();
+        assert_eq!(cancel["action"], "coverage_cancel");
+
+        let zero = parse_command(&args("coverage take --max-size 0"), &default_flags());
+        assert!(matches!(zero, Err(ParseError::InvalidValue { .. })));
+
+        let unknown = parse_command(&args("coverage start --detailed"), &default_flags());
+        assert!(matches!(unknown, Err(ParseError::InvalidValue { .. })));
     }
 
     // === Eval Tests ===

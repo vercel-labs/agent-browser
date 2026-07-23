@@ -23,10 +23,12 @@ use super::cdp::types::{
     TargetInfoChangedEvent,
 };
 use super::cookies;
+use super::coverage::{self, CoverageState};
 use super::diff;
 use super::element::RefMap;
 use super::inspect_server::InspectServer;
 use super::interaction;
+use super::memory::{self, MemoryState};
 use super::network::{self, DomainFilter, EventTracker};
 use super::policy::{ActionPolicy, ConfirmActions, PolicyResult};
 use super::providers;
@@ -342,6 +344,12 @@ pub struct DaemonState {
     pub last_autosave_attempt: Option<std::time::Instant>,
     pub session_id: String,
     pub tracing_state: TracingState,
+    /// Shared lifecycle state for allocation sampling and heap snapshots.
+    /// It is independent from the active tab so a capture remains bound to
+    /// the page where it started.
+    pub memory_state: MemoryState,
+    /// Shared lifecycle state for JavaScript precise coverage checkpoints.
+    pub coverage_state: CoverageState,
     pub recording_state: RecordingState,
     event_rx: Option<broadcast::Receiver<CdpEvent>>,
     pub screencasting: bool,
@@ -443,6 +451,8 @@ impl DaemonState {
             last_autosave_attempt: None,
             session_id: env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string()),
             tracing_state: TracingState::new(),
+            memory_state: MemoryState::new(),
+            coverage_state: CoverageState::new(),
             recording_state: RecordingState::new(),
             event_rx: None,
             screencasting: false,
@@ -840,6 +850,8 @@ impl DaemonState {
 
         // Remove destroyed targets
         for target_id in &drained.destroyed_targets {
+            self.memory_state.cancel_target(target_id);
+            self.coverage_state.cancel_target(target_id);
             if let Some(ref mut mgr) = self.browser {
                 mgr.remove_page_by_target_id(target_id);
             }
@@ -1639,6 +1651,8 @@ impl DaemonState {
 
 impl Drop for DaemonState {
     fn drop(&mut self) {
+        self.memory_state.cancel_all();
+        self.coverage_state.cancel_all();
         // The background fetch handler sits in rx.recv().await indefinitely.
         // Without aborting it, the tokio runtime won't shut down (tests hang).
         if let Some(task) = self.fetch_handler_task.take() {
@@ -1866,6 +1880,39 @@ async fn close_active_provider_session(state: &mut DaemonState) {
 }
 
 pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(), String> {
+    if let (Some(capture), Some(mgr)) =
+        (state.memory_state.active_capture(), state.browser.as_ref())
+    {
+        if capture.kind == memory::CaptureKind::Sampling && mgr.has_target(&capture.target_id) {
+            let _ = mgr
+                .client
+                .send_command_no_params("HeapProfiler.stopSampling", Some(&capture.cdp_session_id))
+                .await;
+            let _ = mgr
+                .client
+                .send_command_no_params("HeapProfiler.disable", Some(&capture.cdp_session_id))
+                .await;
+        }
+    }
+    state.memory_state.cancel_all();
+    if let (Some(capture), Some(mgr)) = (
+        state.coverage_state.active_capture(),
+        state.browser.as_ref(),
+    ) {
+        let _ = mgr
+            .client
+            .send_command_no_params(
+                "Profiler.stopPreciseCoverage",
+                Some(&capture.cdp_session_id),
+            )
+            .await;
+        let _ = mgr
+            .client
+            .send_command_no_params("Profiler.disable", Some(&capture.cdp_session_id))
+            .await;
+    }
+    state.coverage_state.cancel_all();
+
     let close_error = if let Some(mut mgr) = state.browser.take() {
         mgr.close().await.err()
     } else {
@@ -1943,6 +1990,9 @@ fn skip_launch_action(action: &str) -> bool {
             | "stream_disable"
             | "stream_status"
             | "session_info"
+            | "memory_status"
+            | "memory_sampling_stop"
+            | "memory_cancel"
     )
 }
 
@@ -2292,6 +2342,18 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "trace_stop" => handle_trace_stop(cmd, state).await,
         "profiler_start" => handle_profiler_start(cmd, state).await,
         "profiler_stop" => handle_profiler_stop(cmd, state).await,
+        "memory_metrics" => handle_memory_metrics(state).await,
+        "memory_status" => Ok(state.memory_state.status()),
+        "memory_sampling_start" => handle_memory_sampling_start(cmd, state).await,
+        "memory_sampling_stop" => handle_memory_sampling_stop(cmd, state).await,
+        "memory_snapshot" => handle_memory_snapshot(cmd, state).await,
+        "memory_collect_garbage" => handle_memory_collect_garbage(state).await,
+        "memory_cancel" => handle_memory_cancel(state).await,
+        "coverage_status" => Ok(state.coverage_state.status()),
+        "coverage_start" => handle_coverage_start(cmd, state).await,
+        "coverage_take" => handle_coverage_take(cmd, state).await,
+        "coverage_stop" => handle_coverage_stop(cmd, state).await,
+        "coverage_cancel" => handle_coverage_cancel(state).await,
         "recording_start" => handle_recording_start(cmd, state).await,
         "recording_stop" => handle_recording_stop(state).await,
         "recording_restart" => handle_recording_restart(cmd, state).await,
@@ -2418,8 +2480,29 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     }
 
     let mut resp = match result {
-        Ok(data) => success_response(&id, data),
-        Err(e) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
+        Ok(data) => success_response(
+            &id,
+            if action.starts_with("memory_") {
+                memory::with_api_version(data)
+            } else if action.starts_with("coverage_") {
+                coverage::with_api_version(data)
+            } else {
+                data
+            },
+        ),
+        Err(e) => {
+            let mut response = error_response(&id, &super::browser::to_ai_friendly_error(&e));
+            if action.starts_with("memory_") {
+                if let Some(object) = response.as_object_mut() {
+                    object.insert("errorCode".to_string(), json!(memory::error_code(&e)));
+                }
+            } else if action.starts_with("coverage_") {
+                if let Some(object) = response.as_object_mut() {
+                    object.insert("errorCode".to_string(), json!(coverage::error_code(&e)));
+                }
+            }
+            response
+        }
     };
     inject_lifecycle(
         &mut resp,
@@ -6203,6 +6286,178 @@ async fn handle_profiler_stop(cmd: &Value, state: &mut DaemonState) -> Result<Va
     let session_id = mgr.active_session_id()?.to_string();
     let path = cmd.get("path").and_then(|v| v.as_str());
     native_tracing::profiler_stop(&mgr.client, &session_id, &mut state.tracing_state, path).await
+}
+
+fn ensure_memory_supported(state: &DaemonState) -> Result<(), String> {
+    if !matches!(state.backend_type, BackendType::Cdp) || state.engine != "chrome" {
+        return Err(format!(
+            "Memory diagnostics are only supported with the Chrome engine; current engine is {}",
+            state.engine
+        ));
+    }
+    Ok(())
+}
+
+async fn handle_memory_metrics(state: &DaemonState) -> Result<Value, String> {
+    ensure_memory_supported(state)?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    memory::metrics(mgr, &state.session_id).await
+}
+
+async fn handle_memory_collect_garbage(state: &DaemonState) -> Result<Value, String> {
+    ensure_memory_supported(state)?;
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    memory::collect_garbage(mgr, &state.session_id).await
+}
+
+async fn handle_memory_sampling_start(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    ensure_memory_supported(state)?;
+    if state.coverage_state.active_capture().is_some() {
+        return Err("Stop code coverage before starting memory allocation sampling".to_string());
+    }
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    memory::sampling_start(
+        mgr,
+        &state.memory_state,
+        &state.session_id,
+        cmd.get("samplingInterval").and_then(Value::as_u64),
+    )
+    .await
+}
+
+async fn handle_memory_sampling_stop(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    ensure_memory_supported(state)?;
+    let mgr = state.browser.as_ref().ok_or_else(|| {
+        state.memory_state.cancel_all();
+        "The target bound to the memory capture has left or closed".to_string()
+    })?;
+    memory::sampling_stop(
+        mgr,
+        &state.memory_state,
+        cmd.get("path").and_then(Value::as_str),
+        cmd.get("top")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize),
+        cmd.get("maxSize").and_then(Value::as_u64),
+    )
+    .await
+}
+
+async fn handle_memory_snapshot(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    ensure_memory_supported(state)?;
+    if state.coverage_state.active_capture().is_some() {
+        return Err("Stop code coverage before taking a memory snapshot".to_string());
+    }
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    memory::snapshot(
+        mgr,
+        &state.memory_state,
+        &state.session_id,
+        cmd.get("path").and_then(Value::as_str),
+        cmd.get("collectGarbage")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        cmd.get("timeout").and_then(Value::as_u64),
+        cmd.get("maxSize").and_then(Value::as_u64),
+    )
+    .await
+}
+
+async fn handle_memory_cancel(state: &DaemonState) -> Result<Value, String> {
+    let capture = state
+        .memory_state
+        .active_capture()
+        .ok_or_else(|| "No memory capture is active".to_string())?;
+    if capture.kind == memory::CaptureKind::Snapshot {
+        return memory::snapshot_cancel_response(&state.memory_state);
+    }
+    if let Some(mgr) = state.browser.as_ref() {
+        memory::cancel_sampling(mgr, &state.memory_state).await
+    } else {
+        state.memory_state.request_cancel()?;
+        state.memory_state.finish(&capture.capture_id);
+        Ok(json!({
+            "cancelled": true,
+            "captureId": capture.capture_id,
+            "captureType": capture.kind.as_str(),
+        }))
+    }
+}
+
+fn ensure_coverage_supported(state: &DaemonState) -> Result<(), String> {
+    if !matches!(state.backend_type, BackendType::Cdp) || state.engine != "chrome" {
+        return Err(format!(
+            "Code coverage is only supported with the Chrome engine; current engine is {}",
+            state.engine
+        ));
+    }
+    Ok(())
+}
+
+async fn handle_coverage_start(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    ensure_coverage_supported(state)?;
+    if state.memory_state.active_capture().is_some() {
+        return Err("Stop the active memory capture before starting code coverage".to_string());
+    }
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    coverage::start(
+        mgr,
+        &state.coverage_state,
+        &state.session_id,
+        cmd.get("callCount")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    )
+    .await
+}
+
+async fn handle_coverage_take(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    ensure_coverage_supported(state)?;
+    let mgr = state.browser.as_ref().ok_or_else(|| {
+        state.coverage_state.cancel_all();
+        "The target bound to the code coverage capture has left or closed".to_string()
+    })?;
+    coverage::take(
+        mgr,
+        &state.coverage_state,
+        cmd.get("path").and_then(Value::as_str),
+        cmd.get("label").and_then(Value::as_str),
+        cmd.get("maxSize").and_then(Value::as_u64),
+    )
+    .await
+}
+
+async fn handle_coverage_stop(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    ensure_coverage_supported(state)?;
+    let mgr = state.browser.as_ref().ok_or_else(|| {
+        state.coverage_state.cancel_all();
+        "The target bound to the code coverage capture has left or closed".to_string()
+    })?;
+    coverage::stop(
+        mgr,
+        &state.coverage_state,
+        cmd.get("path").and_then(Value::as_str),
+        cmd.get("label").and_then(Value::as_str),
+        cmd.get("maxSize").and_then(Value::as_u64),
+    )
+    .await
+}
+
+async fn handle_coverage_cancel(state: &DaemonState) -> Result<Value, String> {
+    let capture = state
+        .coverage_state
+        .active_capture()
+        .ok_or_else(|| "No code coverage capture is active".to_string())?;
+    if let Some(mgr) = state.browser.as_ref() {
+        coverage::cancel(mgr, &state.coverage_state).await
+    } else {
+        state.coverage_state.finish(&capture.capture_id);
+        Ok(json!({
+            "cancelled": true,
+            "captureId": capture.capture_id,
+            "targetId": capture.target_id,
+        }))
+    }
 }
 
 async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -14176,5 +14431,27 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             let auto_handled = auto_dialog && matches!(*dialog_type, "beforeunload" | "alert");
             assert!(!auto_handled, "{dialog_type} should NOT be auto-handled");
         }
+    }
+
+    #[tokio::test]
+    async fn memory_status_exposes_api_version_without_launching_browser() {
+        let mut state = DaemonState::new();
+        let response = execute_command(
+            &json!({ "id": "memory-status", "action": "memory_status" }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(response["success"], true);
+        assert_eq!(response["data"]["active"], false);
+        assert_eq!(response["data"]["memoryApiVersion"], memory::API_VERSION);
+        assert!(state.browser.is_none());
+    }
+
+    #[test]
+    fn memory_rejects_unsupported_engine_with_stable_code() {
+        let mut state = DaemonState::new();
+        state.engine = "lightpanda".to_string();
+        let error = ensure_memory_supported(&state).unwrap_err();
+        assert_eq!(memory::error_code(&error), memory::ERROR_UNSUPPORTED_ENGINE);
     }
 }

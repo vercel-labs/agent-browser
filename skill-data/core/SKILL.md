@@ -362,6 +362,21 @@ agent-browser dialog accept "text"    # accept with prompt input
 agent-browser dialog dismiss          # cancel
 ```
 
+## Capturing page memory evidence
+
+Use the Chrome-only `memory` commands when a page appears to retain JavaScript objects or DOM nodes across a repeatable flow. They reuse the current browser session and do not need a separate CDP address.
+
+```bash
+agent-browser memory metrics
+agent-browser memory sampling start
+# Repeat the suspected flow several times and verify each loop completes
+agent-browser memory sampling stop ./allocations.heapprofile --top 20
+agent-browser memory collect-garbage
+agent-browser memory snapshot ./after.heapsnapshot
+```
+
+Only one capture can be active per session. Sampling remains bound to the page where it started even if another tab becomes active. Use `memory status` to inspect the current capture and `memory cancel` to stop it safely. Keep `.heapprofile` and `.heapsnapshot` files local because they can contain page text, application data, credentials, and tokens. See [references/commands.md](references/commands.md#memory-diagnostics) for every option and output field.
+
 ## Diagnosing install issues
 
 If a command fails unexpectedly (`Unknown command`, `Failed to connect`, stale daemons, version mismatches after `upgrade`, missing Chrome, etc.) run `doctor` before anything else:

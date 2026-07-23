@@ -104,6 +104,13 @@ const TOOL_TRACE_START: &str = "agent_browser_trace_start";
 const TOOL_TRACE_STOP: &str = "agent_browser_trace_stop";
 const TOOL_PROFILER_START: &str = "agent_browser_profiler_start";
 const TOOL_PROFILER_STOP: &str = "agent_browser_profiler_stop";
+const TOOL_MEMORY_METRICS: &str = "agent_browser_memory_metrics";
+const TOOL_MEMORY_STATUS: &str = "agent_browser_memory_status";
+const TOOL_MEMORY_SAMPLING_START: &str = "agent_browser_memory_sampling_start";
+const TOOL_MEMORY_SAMPLING_STOP: &str = "agent_browser_memory_sampling_stop";
+const TOOL_MEMORY_SNAPSHOT: &str = "agent_browser_memory_snapshot";
+const TOOL_MEMORY_COLLECT_GARBAGE: &str = "agent_browser_memory_collect_garbage";
+const TOOL_MEMORY_CANCEL: &str = "agent_browser_memory_cancel";
 const TOOL_RECORD_START: &str = "agent_browser_record_start";
 const TOOL_RECORD_STOP: &str = "agent_browser_record_stop";
 const TOOL_RECORD_RESTART: &str = "agent_browser_record_restart";
@@ -253,7 +260,7 @@ impl ToolProfile {
             Self::Core => "Everyday browser automation with navigation, snapshots, common interaction, waits, screenshots, basic reads, tab basics, JavaScript eval, close, and profile discovery.",
             Self::Network => "Network interception, request inspection, HAR capture, headers, credentials, and offline mode.",
             Self::State => "Cookies, storage, auth profiles, saved browser state, sessions, Chrome profiles, and bundled skills.",
-            Self::Debug => "Console/errors, highlighting, DevTools, tracing, profiling, PDF, downloads/uploads, recording, clipboard, plugin registry and plugin command.run, doctor, dashboard, install, upgrade, and chat.",
+            Self::Debug => "Console/errors, highlighting, DevTools, tracing, profiling, memory diagnostics, PDF, downloads/uploads, recording, clipboard, plugin registry and plugin command.run, doctor, dashboard, install, upgrade, and chat.",
             Self::Tabs => "Tab, window, frame, and JavaScript dialog management.",
             Self::React => "React tree inspection, render recording, Suspense inspection, Web Vitals, SPA pushstate, and init-script removal.",
             Self::Mobile => "Viewport/device/geolocation/media emulation plus touch, swipe, and lower-level mouse tools.",
@@ -405,6 +412,13 @@ const DEBUG_PROFILE_TOOLS: &[&str] = &[
     TOOL_TRACE_STOP,
     TOOL_PROFILER_START,
     TOOL_PROFILER_STOP,
+    TOOL_MEMORY_METRICS,
+    TOOL_MEMORY_STATUS,
+    TOOL_MEMORY_SAMPLING_START,
+    TOOL_MEMORY_SAMPLING_STOP,
+    TOOL_MEMORY_SNAPSHOT,
+    TOOL_MEMORY_COLLECT_GARBAGE,
+    TOOL_MEMORY_CANCEL,
     TOOL_RECORD_START,
     TOOL_RECORD_STOP,
     TOOL_RECORD_RESTART,
@@ -1304,6 +1318,66 @@ fn parity_tools() -> Vec<Value> {
             &[],
         ),
         tool(
+            TOOL_MEMORY_METRICS,
+            "Memory metrics",
+            "Read lightweight JavaScript heap and DOM counters for the current page.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            TOOL_MEMORY_STATUS,
+            "Memory capture status",
+            "Show the allocation sampling or heap snapshot capture bound to this browser session.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            TOOL_MEMORY_SAMPLING_START,
+            "Memory sampling start",
+            "Start allocation sampling on the current page.",
+            json!({
+                "samplingInterval": { "type": "integer", "minimum": 1, "description": "Average number of allocated bytes between samples." }
+            }),
+            &[],
+        ),
+        tool(
+            TOOL_MEMORY_SAMPLING_STOP,
+            "Memory sampling stop",
+            "Stop allocation sampling on its original page and save the profile.",
+            json!({
+                "path": { "type": "string" },
+                "top": { "type": "integer", "minimum": 1 },
+                "maxSize": { "type": "integer", "minimum": 1, "description": "Maximum artifact size in bytes." }
+            }),
+            &[],
+        ),
+        tool(
+            TOOL_MEMORY_SNAPSHOT,
+            "Memory heap snapshot",
+            "Stream a heap snapshot from the current page directly to a local file.",
+            json!({
+                "path": { "type": "string" },
+                "collectGarbage": { "type": "boolean", "default": true },
+                "timeoutMs": { "type": "integer", "minimum": 1, "default": 120000 },
+                "maxSize": { "type": "integer", "minimum": 1, "description": "Maximum artifact size in bytes." }
+            }),
+            &[],
+        ),
+        tool(
+            TOOL_MEMORY_COLLECT_GARBAGE,
+            "Memory collect garbage",
+            "Request garbage collection on the current page.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            TOOL_MEMORY_CANCEL,
+            "Memory capture cancel",
+            "Cancel the current memory capture and clean up partial output.",
+            json!({}),
+            &[],
+        ),
+        tool(
             TOOL_RECORD_START,
             "Record start",
             "Start video recording.",
@@ -1953,6 +2027,8 @@ fn is_read_only_tool(name: &str) -> bool {
             | TOOL_COOKIES_GET
             | TOOL_TAB_LIST
             | TOOL_DIALOG_STATUS
+            | TOOL_MEMORY_METRICS
+            | TOOL_MEMORY_STATUS
             | TOOL_CLIPBOARD_READ
             | TOOL_AUTH_LIST
             | TOOL_AUTH_SHOW
@@ -2156,6 +2232,13 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_TRACE_STOP => call_optional_one(arguments, &["trace", "stop"], "path"),
         TOOL_PROFILER_START => call_profiler_start(arguments),
         TOOL_PROFILER_STOP => call_optional_one(arguments, &["profiler", "stop"], "path"),
+        TOOL_MEMORY_METRICS => call_literal(arguments, &["memory", "metrics"]),
+        TOOL_MEMORY_STATUS => call_literal(arguments, &["memory", "status"]),
+        TOOL_MEMORY_SAMPLING_START => call_memory_sampling_start(arguments),
+        TOOL_MEMORY_SAMPLING_STOP => call_memory_sampling_stop(arguments),
+        TOOL_MEMORY_SNAPSHOT => call_memory_snapshot(arguments),
+        TOOL_MEMORY_COLLECT_GARBAGE => call_literal(arguments, &["memory", "collect-garbage"]),
+        TOOL_MEMORY_CANCEL => call_literal(arguments, &["memory", "cancel"]),
         TOOL_RECORD_START => call_record_start(arguments, "start"),
         TOOL_RECORD_STOP => call_literal(arguments, &["record", "stop"]),
         TOOL_RECORD_RESTART => call_record_start(arguments, "restart"),
@@ -2879,6 +2962,58 @@ fn call_profiler_start(arguments: &Value) -> Result<Value, ProtocolError> {
     if let Some(categories) = optional_string(arguments, "categories")? {
         args.push("--categories".to_string());
         args.push(categories);
+    }
+    call_cli_tool(arguments, args, None)
+}
+
+fn call_memory_sampling_start(arguments: &Value) -> Result<Value, ProtocolError> {
+    let mut args = vec![
+        "memory".to_string(),
+        "sampling".to_string(),
+        "start".to_string(),
+    ];
+    if let Some(interval) = optional_u64(arguments, "samplingInterval")? {
+        args.push("--sampling-interval".to_string());
+        args.push(interval.to_string());
+    }
+    call_cli_tool(arguments, args, None)
+}
+
+fn call_memory_sampling_stop(arguments: &Value) -> Result<Value, ProtocolError> {
+    let mut args = vec![
+        "memory".to_string(),
+        "sampling".to_string(),
+        "stop".to_string(),
+    ];
+    if let Some(path) = optional_string(arguments, "path")? {
+        args.push(path);
+    }
+    if let Some(top) = optional_u64(arguments, "top")? {
+        args.push("--top".to_string());
+        args.push(top.to_string());
+    }
+    if let Some(max_size) = optional_u64(arguments, "maxSize")? {
+        args.push("--max-size".to_string());
+        args.push(max_size.to_string());
+    }
+    call_cli_tool(arguments, args, None)
+}
+
+fn call_memory_snapshot(arguments: &Value) -> Result<Value, ProtocolError> {
+    let mut args = vec!["memory".to_string(), "snapshot".to_string()];
+    if let Some(path) = optional_string(arguments, "path")? {
+        args.push(path);
+    }
+    if optional_bool(arguments, "collectGarbage")? == Some(false) {
+        args.push("--no-gc".to_string());
+    }
+    if let Some(timeout) = optional_u64(arguments, "timeoutMs")? {
+        args.push("--timeout".to_string());
+        args.push(timeout.to_string());
+    }
+    if let Some(max_size) = optional_u64(arguments, "maxSize")? {
+        args.push("--max-size".to_string());
+        args.push(max_size.to_string());
     }
     call_cli_tool(arguments, args, None)
 }
@@ -3759,6 +3894,13 @@ mod tests {
         assert!(names.contains(&TOOL_GET_CDP_URL));
         assert!(names.contains(&TOOL_NETWORK_HAR_START));
         assert!(names.contains(&TOOL_REACT_SUSPENSE));
+        assert!(names.contains(&TOOL_MEMORY_METRICS));
+        assert!(names.contains(&TOOL_MEMORY_STATUS));
+        assert!(names.contains(&TOOL_MEMORY_SAMPLING_START));
+        assert!(names.contains(&TOOL_MEMORY_SAMPLING_STOP));
+        assert!(names.contains(&TOOL_MEMORY_SNAPSHOT));
+        assert!(names.contains(&TOOL_MEMORY_COLLECT_GARBAGE));
+        assert!(names.contains(&TOOL_MEMORY_CANCEL));
         assert!(names.contains(&TOOL_SKILLS_GET));
         assert!(names.contains(&TOOL_PLUGIN_ADD));
         assert!(names.contains(&TOOL_PLUGIN_LIST));
@@ -3927,6 +4069,18 @@ mod tests {
         assert!(config.allows(TOOL_READ));
         assert!(config.allows(TOOL_NETWORK_HAR_START));
         assert!(config.allows(TOOL_REACT_TREE));
+    }
+
+    #[test]
+    fn debug_profile_contains_memory_tools() {
+        let config = McpConfig::from_profiles(vec![ToolProfile::Debug]);
+        assert!(config.allows(TOOL_MEMORY_METRICS));
+        assert!(config.allows(TOOL_MEMORY_STATUS));
+        assert!(config.allows(TOOL_MEMORY_SAMPLING_START));
+        assert!(config.allows(TOOL_MEMORY_SAMPLING_STOP));
+        assert!(config.allows(TOOL_MEMORY_SNAPSHOT));
+        assert!(config.allows(TOOL_MEMORY_COLLECT_GARBAGE));
+        assert!(config.allows(TOOL_MEMORY_CANCEL));
     }
 
     #[test]

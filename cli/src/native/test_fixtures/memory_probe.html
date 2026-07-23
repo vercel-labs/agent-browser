@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Memory diagnostics probe</title>
+  </head>
+  <body>
+    <main id="root">Memory diagnostics probe</main>
+    <script>
+      window.__memoryProbeLeaks = [];
+
+      function buildProbeNodes() {
+        const nodes = [];
+        for (let index = 0; index < 250; index += 1) {
+          const node = document.createElement("div");
+          node.textContent = `probe-${index}-${"x".repeat(256)}`;
+          nodes.push(node);
+        }
+        return nodes;
+      }
+
+      function memoryProbeLeak() {
+        const nodes = buildProbeNodes();
+        window.__memoryProbeLeaks.push(nodes);
+        return nodes.length;
+      }
+
+      function memoryProbeTemporary() {
+        return buildProbeNodes().length;
+      }
+
+      //# sourceURL=memory-probe.js
+    </script>
+  </body>
+</html>
