@@ -12,8 +12,8 @@ use tokio::signal;
 use tokio::sync::{mpsc, Notify, RwLock};
 
 use super::actions::{
-    auto_save_restore_state, close_current_browser, execute_command, maybe_autosave_restore_state,
-    DaemonState,
+    auto_save_restore_state, close_all_browser_backends, close_current_browser, execute_command,
+    maybe_autosave_restore_state, DaemonState,
 };
 use super::cdp::client::CdpClient;
 use super::state;
@@ -99,11 +99,19 @@ pub async fn run_daemon(session: &str) {
 
     let mut stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>> = None;
     let mut stream_server_instance: Option<Arc<StreamServer>> = None;
+    let stream_input_activity = Arc::new(Notify::new());
     let preferred_port = env::var("AGENT_BROWSER_STREAM_PORT")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(0);
-    match StreamServer::start_without_client(preferred_port, session.to_string(), true).await {
+    match StreamServer::start_without_client(
+        preferred_port,
+        session.to_string(),
+        true,
+        stream_input_activity.clone(),
+    )
+    .await
+    {
         Ok((stream_server, client_slot)) => {
             stream_client = Some(client_slot.clone());
             if let Err(e) = fs::write(&stream_path, stream_server.port().to_string()) {
@@ -117,8 +125,9 @@ pub async fn run_daemon(session: &str) {
     }
 
     // Auto-shutdown the daemon after this many ms of inactivity (no commands
-    // received). Applies a default when AGENT_BROWSER_IDLE_TIMEOUT_MS is
-    // unset; an explicit 0 disables idle shutdown entirely.
+    // or dashboard input received). Applies a default when
+    // AGENT_BROWSER_IDLE_TIMEOUT_MS is unset; an explicit 0 disables idle
+    // shutdown entirely.
     let idle_timeout = resolve_idle_timeout(env::var("AGENT_BROWSER_IDLE_TIMEOUT_MS").ok());
 
     let autosave_interval_ms = autosave_interval_ms_from_env();
@@ -128,6 +137,7 @@ pub async fn run_daemon(session: &str) {
         session,
         stream_client,
         stream_server_instance,
+        stream_input_activity,
         idle_timeout,
         autosave_interval_ms,
     )
@@ -157,9 +167,10 @@ pub async fn run_daemon(session: &str) {
 /// Idle timeout applied when AGENT_BROWSER_IDLE_TIMEOUT_MS is unset, so an
 /// integration that dies without calling `close` cannot leak the daemon and
 /// its Chrome tree indefinitely (issue: leaked daemons observed running for
-/// days). Unlike an explicit timeout, the default never closes a headed or
-/// attached browser — those may be in direct human use, which the idle timer
-/// cannot see (only socket commands reset it).
+/// days). Socket commands and dashboard input reset the timer. Unlike an
+/// explicit timeout, the default never closes a headed browser (including
+/// Safari and iOS WebDriver sessions) or an attached browser because those may
+/// be in direct human use that the daemon cannot observe.
 pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 
 #[derive(Clone, Copy)]
@@ -206,6 +217,7 @@ async fn run_socket_server(
     session: &str,
     stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     stream_server: Option<Arc<StreamServer>>,
+    stream_input_activity: Arc<Notify>,
     idle_timeout: Option<IdleTimeout>,
     autosave_interval_ms: u64,
 ) -> Result<(), String> {
@@ -222,10 +234,12 @@ async fn run_socket_server(
     } else {
         None
     };
-
-    let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> = std::sync::Arc::new(
-        tokio::sync::Mutex::new(DaemonState::new_with_stream(stream_client, stream_server)),
-    );
+    let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(DaemonState::new_with_stream(
+            stream_client,
+            stream_server,
+            stream_input_activity.clone(),
+        )));
 
     let (reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
     let reset_tx = idle_timeout_ms.map(|_| Arc::new(reset_tx));
@@ -288,10 +302,10 @@ async fn run_socket_server(
             }, if idle_timeout_ms.is_some() => {
                 let mut s = state.lock().await;
                 // The default timeout is a leak backstop, not a lifecycle
-                // policy: never pull a headed or attached browser out from
-                // under a human. Re-arm and keep waiting instead.
+                // policy: never pull a headed, WebDriver, or attached browser
+                // out from under a human. Re-arm and keep waiting instead.
                 if idle_timeout.is_some_and(|t| t.is_default)
-                    && s.browser.as_ref().is_some_and(|b| b.blocks_default_idle_shutdown())
+                    && s.blocks_default_idle_shutdown()
                 {
                     idle_sleep_pin = idle_timeout_ms
                         .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
@@ -300,15 +314,20 @@ async fn run_socket_server(
                 if idle_timeout.is_some_and(|t| t.is_default) {
                     let _ = writeln!(
                         std::io::stderr(),
-                        "Idle for {}m with no commands; saving state and shutting down (AGENT_BROWSER_IDLE_TIMEOUT_MS=0 disables)",
+                        "Idle for {}m with no commands or dashboard input; saving state and shutting down (AGENT_BROWSER_IDLE_TIMEOUT_MS=0 disables)",
                         DEFAULT_IDLE_TIMEOUT_MS / 60_000
                     );
                 }
                 let _ = auto_save_restore_state(&mut s).await;
-                let _ = close_current_browser(&mut s).await;
+                let _ = close_all_browser_backends(&mut s).await;
                 break;
             }
             _ = reset_rx.recv(), if idle_timeout_ms.is_some() => {
+                idle_sleep_pin = idle_timeout_ms
+                    .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
+                continue;
+            }
+            _ = wait_for_stream_input(&stream_input_activity), if idle_timeout_ms.is_some() => {
                 idle_sleep_pin = idle_timeout_ms
                     .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
                 continue;
@@ -322,7 +341,7 @@ async fn run_socket_server(
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
                 let _ = auto_save_restore_state(&mut s).await;
-                let _ = close_current_browser(&mut s).await;
+                let _ = close_all_browser_backends(&mut s).await;
                 break;
             }
         }
@@ -337,6 +356,7 @@ async fn run_socket_server(
     session: &str,
     stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     stream_server: Option<Arc<StreamServer>>,
+    stream_input_activity: Arc<Notify>,
     idle_timeout: Option<IdleTimeout>,
     autosave_interval_ms: u64,
 ) -> Result<(), String> {
@@ -367,10 +387,12 @@ async fn run_socket_server(
     } else {
         None
     };
-
-    let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> = std::sync::Arc::new(
-        tokio::sync::Mutex::new(DaemonState::new_with_stream(stream_client, stream_server)),
-    );
+    let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(DaemonState::new_with_stream(
+            stream_client,
+            stream_server,
+            stream_input_activity.clone(),
+        )));
 
     let (reset_tx, mut reset_rx) = mpsc::channel::<()>(64);
     let reset_tx = idle_timeout_ms.map(|_| Arc::new(reset_tx));
@@ -426,10 +448,10 @@ async fn run_socket_server(
             }, if idle_timeout_ms.is_some() => {
                 let mut s = state.lock().await;
                 // The default timeout is a leak backstop, not a lifecycle
-                // policy: never pull a headed or attached browser out from
-                // under a human. Re-arm and keep waiting instead.
+                // policy: never pull a headed, WebDriver, or attached browser
+                // out from under a human. Re-arm and keep waiting instead.
                 if idle_timeout.is_some_and(|t| t.is_default)
-                    && s.browser.as_ref().is_some_and(|b| b.blocks_default_idle_shutdown())
+                    && s.blocks_default_idle_shutdown()
                 {
                     idle_sleep_pin = idle_timeout_ms
                         .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
@@ -438,16 +460,21 @@ async fn run_socket_server(
                 if idle_timeout.is_some_and(|t| t.is_default) {
                     let _ = writeln!(
                         std::io::stderr(),
-                        "Idle for {}m with no commands; saving state and shutting down (AGENT_BROWSER_IDLE_TIMEOUT_MS=0 disables)",
+                        "Idle for {}m with no commands or dashboard input; saving state and shutting down (AGENT_BROWSER_IDLE_TIMEOUT_MS=0 disables)",
                         DEFAULT_IDLE_TIMEOUT_MS / 60_000
                     );
                 }
                 let _ = auto_save_restore_state(&mut s).await;
-                let _ = close_current_browser(&mut s).await;
+                let _ = close_all_browser_backends(&mut s).await;
                 let _ = fs::remove_file(&port_path);
                 break;
             }
             _ = reset_rx.recv(), if idle_timeout_ms.is_some() => {
+                idle_sleep_pin = idle_timeout_ms
+                    .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
+                continue;
+            }
+            _ = wait_for_stream_input(&stream_input_activity), if idle_timeout_ms.is_some() => {
                 idle_sleep_pin = idle_timeout_ms
                     .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
                 continue;
@@ -459,7 +486,7 @@ async fn run_socket_server(
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
                 let _ = auto_save_restore_state(&mut s).await;
-                let _ = close_current_browser(&mut s).await;
+                let _ = close_all_browser_backends(&mut s).await;
                 let _ = fs::remove_file(&port_path);
                 break;
             }
@@ -467,6 +494,10 @@ async fn run_socket_server(
     }
 
     Ok(())
+}
+
+async fn wait_for_stream_input(activity: &Arc<Notify>) {
+    activity.notified().await;
 }
 
 async fn handle_connection<S>(
@@ -671,6 +702,25 @@ mod tests {
             assert_eq!(t.ms, DEFAULT_IDLE_TIMEOUT_MS);
             assert!(t.is_default);
         }
+    }
+
+    #[test]
+    fn test_default_idle_timeout_does_not_close_webdriver_sessions() {
+        let mut state = DaemonState::new();
+        assert!(!state.blocks_default_idle_shutdown());
+
+        state.backend_type = crate::native::actions::BackendType::WebDriver;
+        assert!(state.blocks_default_idle_shutdown());
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_stream_input_receives_dashboard_activity() {
+        let activity = Arc::new(Notify::new());
+        activity.notify_one();
+
+        tokio::time::timeout(Duration::from_millis(100), wait_for_stream_input(&activity))
+            .await
+            .expect("dashboard input notification should wake the idle loop");
     }
 
     #[test]

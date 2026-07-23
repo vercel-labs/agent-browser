@@ -46,7 +46,7 @@ agent-browser click @e5                        # click a result
 agent-browser screenshot result.png
 ```
 
-The browser stays running across commands so these feel like a single session. Use `agent-browser close` (or `close --all`) when you're done.
+The browser stays running across commands so these feel like a single session. By default, an inactive daemon saves configured restore state, closes its headless browser, and exits after one hour; the next command starts it again. Dashboard mouse, keyboard, and touch input count as activity. Headed browsers, Safari and iOS WebDriver sessions, and browsers attached with `connect` are exempt from the default. Use `--idle-timeout <time>` or `AGENT_BROWSER_IDLE_TIMEOUT_MS` to tune the timeout, and use `0` to disable it. Still run `agent-browser close` (or `close --all`) when you're done.
 
 ## MCP integration
 
@@ -58,7 +58,7 @@ agent-browser mcp --tools all
 agent-browser mcp --tools core,network,react
 ```
 
-Configure the MCP client to launch `agent-browser` with `["mcp"]`. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization. The default tools profile is `core`, which keeps MCP context small for everyday browser automation. Use `--tools all` for the full typed CLI parity surface, or combine profiles with commas, such as `--tools core,network,react`. Profiles are `core`, `network`, `state`, `debug`, `tabs`, `react`, `mobile`, and `all`; the `debug` profile includes accessibility audits, plugin registry, and command.run tools. Each tool accepts typed arguments plus `extraArgs` for advanced CLI flags and exact CLI parity. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the tool `session` argument or `AGENT_BROWSER_SESSION` to isolate browser sessions.
+Configure the MCP client to launch `agent-browser` with `["mcp"]`. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization. The default tools profile is `core`, which keeps MCP context small for everyday browser automation. Use `--tools all` for the full typed CLI parity surface, or combine profiles with commas, such as `--tools core,network,react`. Profiles are `core`, `network`, `state`, `debug`, `tabs`, `react`, `mobile`, and `all`; the `debug` profile includes accessibility audits, plugin registry, and command.run tools. Each tool accepts typed arguments plus `extraArgs` for advanced CLI flags and exact CLI parity. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions, while `idleTimeout` maps to `--idle-timeout`. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the tool `session` argument or `AGENT_BROWSER_SESSION` to isolate browser sessions.
 
 ## eve agent integration
 

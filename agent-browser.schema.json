@@ -196,7 +196,7 @@
     },
     "idleTimeout": {
       "type": "string",
-      "description": "Auto-shutdown the daemon after inactivity (e.g., '30s', '5m', '1h', or raw milliseconds like '60000'). Defaults to '1h'; '0' disables idle shutdown. The default never closes headed or attached browsers; an explicit value applies to all browsers."
+      "description": "Auto-shutdown the daemon after inactivity (e.g., '30s', '5m', '1h', or raw milliseconds like '60000'). Defaults to '1h'; '0' disables idle shutdown. Dashboard input resets the timer. The default never closes headed browsers, including Safari and iOS WebDriver sessions, or attached browsers; an explicit value applies to all browsers."
     },
     "model": {
       "type": "string",

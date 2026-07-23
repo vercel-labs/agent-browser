@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
-use tokio::sync::{broadcast, oneshot, RwLock};
+use tokio::sync::{broadcast, oneshot, Notify, RwLock};
 
 use crate::connection::{get_socket_dir, INTERNAL_DAEMON_SHUTDOWN_ACTION};
 use crate::validation::{is_valid_session_name, session_name_error};
@@ -416,6 +416,8 @@ pub struct DaemonState {
     pub stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     /// Stream server instance kept alive so the broadcast channel remains open.
     pub stream_server: Option<Arc<StreamServer>>,
+    /// Daemon-owned activity signal shared by replacement stream servers.
+    pub stream_input_activity: Arc<Notify>,
     /// Hash of launch options used for the current browser, for relaunch detection.
     launch_hash: Option<u64>,
     /// Whether browser-level auto-attach has been enabled for the current
@@ -500,6 +502,7 @@ impl DaemonState {
             ),
             stream_client: None,
             stream_server: None,
+            stream_input_activity: Arc::new(Notify::new()),
             launch_hash: None,
             network_auto_attach_installed: false,
             engine: env::var("AGENT_BROWSER_ENGINE").unwrap_or_else(|_| "chrome".to_string()),
@@ -515,6 +518,17 @@ impl DaemonState {
             active_provider_session: None,
             confirmed_policy_actions: HashSet::new(),
         }
+    }
+
+    /// True when the default idle timeout must not shut down this session.
+    /// WebDriver-backed Safari and iOS sessions are always headed, while CDP
+    /// sessions delegate the decision to BrowserManager.
+    pub(crate) fn blocks_default_idle_shutdown(&self) -> bool {
+        matches!(self.backend_type, BackendType::WebDriver)
+            || self
+                .browser
+                .as_ref()
+                .is_some_and(BrowserManager::blocks_default_idle_shutdown)
     }
 
     /// Extract the timeout from a command JSON, falling back to the
@@ -536,6 +550,7 @@ impl DaemonState {
     pub fn new_with_stream(
         stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
         stream_server: Option<Arc<StreamServer>>,
+        stream_input_activity: Arc<Notify>,
     ) -> Self {
         let mut s = Self::new();
         if stream_server.is_some() {
@@ -543,6 +558,7 @@ impl DaemonState {
         }
         s.stream_client = stream_client;
         s.stream_server = stream_server;
+        s.stream_input_activity = stream_input_activity;
         s
     }
 
@@ -1944,6 +1960,30 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
         return Err(err);
     }
     Ok(())
+}
+
+/// Close every browser backend owned by the daemon.
+///
+/// Lifecycle shutdown paths use this instead of `close_current_browser`
+/// because Safari and iOS sessions live outside `state.browser`.
+pub(crate) async fn close_all_browser_backends(state: &mut DaemonState) -> Result<(), String> {
+    let close_result = close_current_browser(state).await;
+
+    if let Some(ref mut webdriver) = state.webdriver_backend {
+        let _ = webdriver.close().await;
+    }
+    state.webdriver_backend = None;
+    if let Some(ref mut appium) = state.appium {
+        let _ = appium.close().await;
+    }
+    state.appium = None;
+    if let Some(ref mut driver) = state.safari_driver {
+        driver.kill();
+    }
+    state.safari_driver = None;
+    state.backend_type = BackendType::Cdp;
+
+    close_result
 }
 
 async fn close_after_network_control_failure(
@@ -4454,7 +4494,7 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
 
 async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     let save_result = auto_save_restore_state(state).await;
-    close_current_browser(state).await?;
+    close_all_browser_backends(state).await?;
 
     // Stop background Fetch handler
     if let Some(task) = state.fetch_handler_task.take() {
@@ -4464,21 +4504,6 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
         let mut map = state.origin_headers.write().await;
         map.clear();
     }
-
-    // Close WebDriver sessions
-    if let Some(ref mut wb) = state.webdriver_backend {
-        let _ = wb.close().await;
-    }
-    state.webdriver_backend = None;
-    if let Some(ref mut appium) = state.appium {
-        let _ = appium.close().await;
-    }
-    state.appium = None;
-    if let Some(ref mut driver) = state.safari_driver {
-        driver.kill();
-    }
-    state.safari_driver = None;
-    state.backend_type = BackendType::Cdp;
 
     if let Some(server) = state.inspect_server.take() {
         server.shutdown();
@@ -7659,8 +7684,13 @@ async fn handle_stream_enable(cmd: &Value, state: &mut DaemonState) -> Result<Va
         None => 0,
     };
 
-    let (server, client_slot) =
-        StreamServer::start_without_client(requested_port, state.session_id.clone(), false).await?;
+    let (server, client_slot) = StreamServer::start_without_client(
+        requested_port,
+        state.session_id.clone(),
+        false,
+        state.stream_input_activity.clone(),
+    )
+    .await?;
     let port = server.port();
     if let Err(err) = write_stream_file(&state.session_id, port) {
         server.shutdown().await;

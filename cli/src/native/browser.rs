@@ -369,8 +369,8 @@ const LIGHTPANDA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl BrowserManager {
     /// True when a *default* idle timeout must not close this browser:
-    /// a headed window may be in direct human use (which never resets the
-    /// idle timer — only socket commands do), and an attached browser
+    /// a headed window may be in direct human use outside the daemon's socket
+    /// commands and dashboard input, and an attached browser
     /// (connect_cdp) was not spawned by the daemon and cannot be relaunched
     /// on the next command. An explicit AGENT_BROWSER_IDLE_TIMEOUT_MS
     /// applies regardless.

@@ -950,6 +950,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--confirm-actions <list>` | Action categories requiring confirmation (or `AGENT_BROWSER_CONFIRM_ACTIONS` env) |
 | `--confirm-interactive` | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |
 | `--engine <name>` | Browser engine: `chrome` (default), `lightpanda` (or `AGENT_BROWSER_ENGINE` env) |
+| `--idle-timeout <time>` | Shut down the daemon after inactivity (`10s`, `3m`, `1h`, or raw ms). Defaults to `1h`; use `0` to disable (or `AGENT_BROWSER_IDLE_TIMEOUT_MS` env) |
 | `--no-auto-dialog` | Disable automatic dismissal of `alert`/`beforeunload` dialogs (or `AGENT_BROWSER_NO_AUTO_DIALOG` env) |
 | `--model <name>` | AI model for chat command (or `AI_GATEWAY_MODEL` env) |
 | `-v`, `--verbose` | Show tool commands and their raw output (chat) |
@@ -1490,7 +1491,7 @@ agent-browser uses a client-daemon architecture:
 1. **Rust CLI** - Parses commands, communicates with daemon
 2. **Rust Daemon** - Pure Rust daemon using direct CDP, no Node.js required
 
-The daemon starts automatically on first command and persists between commands for fast subsequent operations. After **1 hour** with no commands it saves session state, closes the browser, and exits, so an integration that dies without calling `close` cannot leak the daemon and its browser indefinitely; the next command starts a fresh daemon and state restore works as usual. Set `AGENT_BROWSER_IDLE_TIMEOUT_MS` to change the timeout (value in milliseconds) or to `0` to disable idle shutdown entirely. The default never closes a headed browser or one attached with `connect` — those may be in direct human use, which the idle timer cannot observe — but an explicitly set timeout applies to every browser.
+The daemon starts automatically on first command and persists between commands for fast subsequent operations. After **1 hour** with no commands or dashboard input it saves session state, closes the browser, and exits, so an integration that dies without calling `close` cannot leak the daemon and its browser indefinitely; the next command starts a fresh daemon and state restore works as usual. Set `--idle-timeout` to a duration such as `30s`, `5m`, or `1h`, or set `AGENT_BROWSER_IDLE_TIMEOUT_MS` to a value in milliseconds. Use `0` to disable idle shutdown entirely. The default never closes a headed browser, including Safari and iOS WebDriver sessions, or one attached with `connect` because those may be in direct human use. An explicitly set timeout applies to every browser.
 
 **Browser Engine:** Uses Chrome (from Chrome for Testing) by default. The `--engine` flag selects between `chrome` and `lightpanda`. Supported browsers: Chromium/Chrome (via CDP) and Safari (via WebDriver for iOS).
 
