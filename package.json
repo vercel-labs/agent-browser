@@ -28,7 +28,16 @@
     "build:docker": "docker build --platform linux/amd64 -t agent-browser-builder -f docker/Dockerfile.build .",
     "release": "npm run version:sync && npm run build:all-platforms && npm publish",
     "postinstall": "node scripts/postinstall.js",
-    "build:dashboard": "cd packages/dashboard && pnpm build"
+    "build:dashboard": "cd packages/dashboard && pnpm build",
+    "test": "pnpm -r --if-present run test",
+    "test:rust": "cargo test --manifest-path cli/Cargo.toml",
+    "test:e2e": "cargo test e2e --manifest-path cli/Cargo.toml -- --ignored --test-threads=1",
+    "lint": "pnpm -r --if-present run lint",
+    "lint:rust": "cargo clippy --manifest-path cli/Cargo.toml -- -D warnings",
+    "format:check": "cargo fmt --manifest-path cli/Cargo.toml -- --check",
+    "format:fix": "cargo fmt --manifest-path cli/Cargo.toml",
+    "typecheck": "pnpm -r --if-present run typecheck",
+    "validate": "pnpm run format:check && pnpm run lint:rust && pnpm run test:rust && pnpm run typecheck && pnpm run lint && pnpm run test"
   },
   "keywords": [
     "browser",
