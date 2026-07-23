@@ -1517,7 +1517,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_BATCH,
             "Batch",
-            "Run multiple commands sequentially.",
+            "Run multiple commands sequentially through one daemon request and connection.",
             json!({ "commands": { "type": "array", "items": { "type": "array", "items": { "type": "string" }, "minItems": 1 }, "minItems": 1 }, "bail": { "type": "boolean" } }),
             &["commands"],
         ),
@@ -3069,7 +3069,7 @@ fn call_diff_url(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool(arguments, args, None)
 }
 
-fn call_batch(arguments: &Value) -> Result<Value, ProtocolError> {
+fn batch_cli_invocation(arguments: &Value) -> Result<(Vec<String>, String), ProtocolError> {
     let commands_value = optional_value(arguments, "commands")?
         .ok_or_else(|| ProtocolError::invalid_params("commands must be an array"))?;
     let commands = commands_value
@@ -3101,6 +3101,11 @@ fn call_batch(arguments: &Value) -> Result<Value, ProtocolError> {
     }
     let stdin = serde_json::to_string(&parsed_commands)
         .map_err(|e| ProtocolError::invalid_params(format!("commands encode error: {}", e)))?;
+    Ok((args, stdin))
+}
+
+fn call_batch(arguments: &Value) -> Result<Value, ProtocolError> {
+    let (args, stdin) = batch_cli_invocation(arguments)?;
     call_cli_tool(arguments, args, Some(stdin))
 }
 
@@ -3990,6 +3995,35 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["click", "@e1", "--new-tab"]);
+    }
+
+    #[test]
+    fn batch_mcp_tool_delegates_one_canonical_cli_batch() {
+        let (args, stdin) = batch_cli_invocation(&json!({
+            "commands": [
+                ["open", "https://example.com"],
+                ["snapshot", "-i"]
+            ],
+            "bail": true
+        }))
+        .unwrap();
+
+        assert_eq!(args, vec!["batch", "--bail"]);
+        assert_eq!(
+            serde_json::from_str::<Value>(&stdin).unwrap(),
+            json!([["open", "https://example.com"], ["snapshot", "-i"]])
+        );
+    }
+
+    #[test]
+    fn batch_mcp_tool_rejects_non_string_child_arguments() {
+        let error = batch_cli_invocation(&json!({
+            "commands": [["click", 42]]
+        }))
+        .unwrap_err();
+
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains("commands[0][1] must be a string"));
     }
 
     #[test]

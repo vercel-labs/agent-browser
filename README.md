@@ -236,7 +236,9 @@ agent-browser wait "#spinner" --state hidden
 
 ### Batch Execution
 
-Execute multiple commands in a single invocation. Commands can be passed as quoted arguments or piped as JSON via stdin. This avoids per-command process startup overhead when running multi-step workflows.
+Execute multiple commands in a single CLI invocation and a single daemon request. Commands are parsed client-side, then the daemon acquires the session once and executes them in order without reconnecting between steps. This avoids per-command process startup and socket lifecycle overhead in multi-step workflows.
+
+`--bail` stops on the first parse or execution error. A confirmation request or successful `close` always stops the remaining commands safely. Nested batches are rejected. The client does not replay a submitted batch after a transport failure because earlier commands may already have changed the page. The daemon performs one final CDP event drain before replying, but it does not add an implicit network-idle wait because no single settle condition is correct for every command; include an explicit `wait` child when the workflow requires one.
 
 ```bash
 # Argument mode: each quoted argument is a full command
@@ -414,7 +416,7 @@ agent-browser pushstate <url>         # SPA client-side nav; auto-detects window
 
 ### Pre-navigation setup
 
-Some flows (SSR debug, auth cookies for protected origins, init scripts) need state set up *before* the first navigation. Use `open` with no URL to launch the browser, then stage cookies / routes / init scripts, then navigate. `batch` sends it all in one CLI call:
+Some flows (SSR debug, auth cookies for protected origins, init scripts) need state set up *before* the first navigation. Use `open` with no URL to launch the browser, then stage cookies / routes / init scripts, then navigate. `batch` sends it all in one CLI call and one daemon request:
 
 ```bash
 agent-browser batch \
@@ -549,6 +551,8 @@ Full parity MCP client config:
 ```
 
 Tool invocations use the same config files and environment variables as the CLI. Use `session` in the tool arguments, or set `AGENT_BROWSER_SESSION`, to isolate browser state.
+
+The `agent_browser_batch` tool delegates to the canonical CLI batch parser and uses the same single daemon request, ordered results, bail, confirmation, close, and no-replay behavior.
 
 ## Authentication
 

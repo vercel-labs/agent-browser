@@ -581,7 +581,9 @@ See [Configuration](/configuration) for config files and environment variables. 
 
 ## Batch execution
 
-Execute multiple commands in a single invocation. Commands can be passed as quoted arguments or piped as JSON via stdin.
+Execute multiple commands in a single CLI invocation and one daemon request. Commands are parsed client-side, then the daemon acquires the session once and executes them in order without reconnecting between steps. Commands can be passed as quoted arguments or piped as JSON via stdin.
+
+`--bail` stops on the first parse or execution error. A confirmation request or successful `close` always stops the remaining commands safely. Nested batches are rejected. The client does not replay a submitted batch after a transport failure because earlier commands may already have changed the page. The daemon performs one final CDP event drain before replying, but it does not add an implicit network-idle wait because no single settle condition is correct for every command; include an explicit `wait` child when the workflow requires one.
 
 ```bash
 # Argument mode: each quoted argument is a full command
@@ -665,6 +667,8 @@ Common tools include:
 Each tool has typed fields such as `url`, `selector`, `text`, `key`, `session`, and `allowedDomains`, so MCP clients show meaningful approval prompts instead of raw command arrays. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. Each tool also accepts `extraArgs` for advanced CLI flags and exact CLI parity. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.
 
 Tool invocations use the same config files and environment variables as the CLI. Use `session` in the tool arguments, or set `AGENT_BROWSER_SESSION`, to isolate browser state.
+
+The `agent_browser_batch` tool delegates to the canonical CLI batch parser and uses the same single daemon request, ordered results, bail, confirmation, close, and no-replay behavior.
 
 ## Command chaining
 

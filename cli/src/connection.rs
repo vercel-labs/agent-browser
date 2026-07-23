@@ -1032,6 +1032,16 @@ pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
     ))
 }
 
+/// Send a command exactly once.
+///
+/// Batch requests use this path because retrying a partially completed batch
+/// could repeat browser side effects. The caller may still recover from an
+/// initial connection failure, which happens before any request bytes are
+/// written, but must not replay read, EOF, or reset failures.
+pub fn send_command_no_retry(cmd: Value, session: &str) -> Result<Response, String> {
+    send_command_once(&cmd, session)
+}
+
 /// Check if an error is transient and worth retrying against the SAME daemon.
 /// Transient errors include:
 /// - EAGAIN/EWOULDBLOCK (os error 35 on macOS, 11 on Linux)
@@ -1086,7 +1096,26 @@ fn has_os_error(error: &str, code: u32) -> bool {
 /// instead of 30s. Only commands that actually carry a `timeout` field get
 /// the extended budget, and that field is set client-side per invocation,
 /// avoiding the daemon's spawn-time env snapshot drifting from the client.
+///
+/// A daemon-side batch is one socket request containing sequential child
+/// requests. Its read budget is therefore the saturating sum of the child
+/// budgets rather than the budget of the outer envelope. This lets the daemon
+/// finish a legitimate long batch without making ordinary commands wait
+/// longer before surfacing an unresponsive daemon.
 fn read_timeout_for(cmd: &Value) -> Duration {
+    if cmd.get("action").and_then(|v| v.as_str()) == Some("batch") {
+        let batch_ms = cmd
+            .get("entries")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.get("request"))
+            .map(|request| read_timeout_for(request).as_millis() as u64)
+            .fold(0_u64, u64::saturating_add)
+            .max(30_000);
+        return Duration::from_millis(batch_ms);
+    }
+
     let op_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(0);
     Duration::from_millis(op_ms.saturating_add(10_000).max(30_000))
 }
@@ -1117,6 +1146,27 @@ fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
 mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
+
+    #[test]
+    fn test_batch_read_timeout_sums_child_budgets() {
+        let command = json!({
+            "action": "batch",
+            "entries": [
+                { "request": { "action": "url" } },
+                { "parseError": "bad command" },
+                { "request": { "action": "wait", "timeout": 45_000 } }
+            ]
+        });
+
+        assert_eq!(read_timeout_for(&command), Duration::from_secs(85));
+    }
+
+    #[test]
+    fn test_empty_batch_read_timeout_keeps_normal_floor() {
+        let command = json!({ "action": "batch", "entries": [] });
+
+        assert_eq!(read_timeout_for(&command), Duration::from_secs(30));
+    }
 
     #[test]
     fn test_get_socket_dir_explicit_override() {

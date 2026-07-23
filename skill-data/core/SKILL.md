@@ -48,6 +48,8 @@ agent-browser screenshot result.png
 
 The browser stays running across commands so these feel like a single session. Use `agent-browser close` (or `close --all`) when you're done.
 
+For a known multi-step sequence, use `agent-browser batch "open https://example.com" "snapshot -i" "screenshot"`. Batch parses the child commands client-side and executes them through one daemon request, avoiding a socket connection per step. Add `--bail` to stop on the first error. Confirmation requests and `close` stop the remaining commands automatically; nested batches are not supported. Batch performs a final CDP event drain but does not add an implicit network-idle wait, so include a `wait` child when the workflow needs a specific settle condition.
+
 ## MCP integration
 
 For tools that support Model Context Protocol servers, start the stdio server:
@@ -59,6 +61,8 @@ agent-browser mcp --tools core,network,react
 ```
 
 Configure the MCP client to launch `agent-browser` with `["mcp"]`. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization. The default tools profile is `core`, which keeps MCP context small for everyday browser automation. Use `--tools all` for the full typed CLI parity surface, or combine profiles with commas, such as `--tools core,network,react`. Profiles are `core`, `network`, `state`, `debug`, `tabs`, `react`, `mobile`, and `all`; the `debug` profile includes plugin registry and command.run tools. Each tool accepts typed arguments plus `extraArgs` for advanced CLI flags and exact CLI parity. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the tool `session` argument or `AGENT_BROWSER_SESSION` to isolate browser sessions.
+
+The `agent_browser_batch` tool delegates through the canonical CLI parser and uses the same single daemon request, ordered results, bail, confirmation, close, and no-replay behavior as `agent-browser batch`.
 
 ## eve agent integration
 
