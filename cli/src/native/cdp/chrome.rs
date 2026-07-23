@@ -162,11 +162,7 @@ fn write_xauth_file(path: &Path) -> std::io::Result<()> {
 /// `--headless=new` (content scripts are not injected headless), so a
 /// nominally headless launch with extensions is headed in practice.
 fn xvfb_applicable(options: &LaunchOptions) -> bool {
-    let has_extensions = options
-        .extensions
-        .as_ref()
-        .is_some_and(|exts| !exts.is_empty());
-    !options.headless || has_extensions
+    !options.effectively_headless()
 }
 
 #[cfg(target_os = "linux")]
@@ -331,6 +327,20 @@ pub struct LaunchOptions {
     pub restrict_webrtc: bool,
 }
 
+impl LaunchOptions {
+    /// Whether Chrome will actually run headless after applying launch rules.
+    ///
+    /// Extensions force headed mode because Chrome does not inject their
+    /// content scripts under `--headless=new`.
+    pub(crate) fn effectively_headless(&self) -> bool {
+        self.headless
+            && !self
+                .extensions
+                .as_ref()
+                .is_some_and(|exts| !exts.is_empty())
+    }
+}
+
 impl Default for LaunchOptions {
     fn default() -> Self {
         Self {
@@ -433,14 +443,11 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push("--use-mock-keychain".to_string());
     }
 
-    let has_extensions = options
-        .extensions
-        .as_ref()
-        .is_some_and(|exts| !exts.is_empty());
+    let effectively_headless = options.effectively_headless();
 
     // Extensions require headed mode in native Chrome (content scripts are not
     // injected in headless mode).  Skip --headless when extensions are loaded.
-    if options.headless && !has_extensions {
+    if effectively_headless {
         args.push("--headless=new".to_string());
         // Linux paints native scrollbars into viewport screenshots unless
         // Chrome is launched with this flag. `--hide-scrollbars` is
@@ -500,7 +507,7 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         .iter()
         .any(|a| a.starts_with("--start-maximized") || a.starts_with("--window-size="));
 
-    if !has_window_size && options.headless && !has_extensions {
+    if !has_window_size && effectively_headless {
         let (w, h) = options.viewport_size.unwrap_or((1280, 720));
         args.push(format!("--window-size={},{}", w, h));
     }
@@ -1914,6 +1921,28 @@ mod tests {
             extensions: Some(Vec::new()),
             ..Default::default()
         }));
+    }
+
+    #[test]
+    fn test_effectively_headless_tracks_extension_forced_headed_mode() {
+        assert!(LaunchOptions::default().effectively_headless());
+        assert!(!LaunchOptions {
+            headless: false,
+            ..Default::default()
+        }
+        .effectively_headless());
+        assert!(!LaunchOptions {
+            headless: true,
+            extensions: Some(vec!["/tmp/ext".to_string()]),
+            ..Default::default()
+        }
+        .effectively_headless());
+        assert!(LaunchOptions {
+            headless: true,
+            extensions: Some(Vec::new()),
+            ..Default::default()
+        }
+        .effectively_headless());
     }
 
     #[test]

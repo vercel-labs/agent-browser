@@ -358,7 +358,8 @@ pub struct BrowserManager {
     /// True when the CDP WebSocket is already scoped to a page target and
     /// browser-level Target.* commands are not available.
     direct_page: bool,
-    /// Whether the daemon-spawned browser runs headless. Meaningless for
+    /// Whether the daemon-spawned browser actually runs headless after
+    /// launch rules such as extension-forced headed mode. Meaningless for
     /// attached browsers (browser_process is None).
     headless: bool,
 }
@@ -408,7 +409,7 @@ impl BrowserManager {
         let user_agent = options.user_agent.clone();
         let color_scheme = options.color_scheme.clone();
         let download_path = options.download_path.clone();
-        let headless = options.headless;
+        let headless = options.effectively_headless();
 
         let (ws_url, process) = match engine {
             "lightpanda" => {
