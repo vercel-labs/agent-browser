@@ -86,15 +86,15 @@ agent-browser is checked <sel>        # Check if checked
 
 ## Find elements
 
-Semantic locators with actions (`click`, `fill`, `type`, `hover`, `focus`, `check`, `uncheck`, `text`):
+Semantic locators with actions (`click`, `fill`, `check`, `hover`, `text`):
 
 ```bash
 agent-browser find role <role> <action> [value]
-agent-browser find text <text> <action>
+agent-browser find text <text> <action> [value]
 agent-browser find label <label> <action> [value]
 agent-browser find placeholder <ph> <action> [value]
-agent-browser find alt <text> <action>
-agent-browser find title <text> <action>
+agent-browser find alt <text> <action> [value]
+agent-browser find title <text> <action> [value]
 agent-browser find testid <id> <action> [value]
 agent-browser find first <sel> <action> [value]
 agent-browser find last <sel> <action> [value]
@@ -104,12 +104,13 @@ agent-browser find nth <n> <sel> <action> [value]
 Options:
 
 - `--name <name>`: filter role by accessible name
-- `--exact`: require exact text match
+- `--exact`: exact, case-sensitive match. For `role` it applies to the accessible name, whose default is a case-insensitive substring.
 
 Examples:
 
 ```bash
 agent-browser find role button click --name "Submit"
+agent-browser find role heading text --name "Skills"     # implicit roles work: <h2>=heading, <ul>=list, top-level <header>=banner
 agent-browser find label "Email" fill "test@test.com"
 agent-browser find alt "Logo" click
 agent-browser find first ".item" click
@@ -210,7 +211,9 @@ agent-browser network requests --type xhr,fetch  # Filter by resource type
 agent-browser network requests --method POST   # Filter by HTTP method
 agent-browser network requests --status 2xx    # Filter by status (200, 2xx, 400-499)
 agent-browser network request <requestId>      # View full request/response detail
-agent-browser network har start                # Start HAR recording
+agent-browser network har start                # Start HAR recording (embeds text response bodies)
+agent-browser network har start --content all  # Embed all response bodies (binary as base64)
+agent-browser network har start --content none # Metadata only, no bodies
 agent-browser network har stop [output.har]    # Stop and save HAR (temp path if omitted)
 ```
 
@@ -253,6 +256,10 @@ agent-browser tab docs          # switch first
 agent-browser snapshot          # refs for docs
 agent-browser click @e3         # uses docs's refs
 ```
+
+### Discarded tab revival
+
+Browsers discard background tabs to save memory, leaving a tab with no renderer to drive. Switching to a discarded tab reactivates it, which reloads the page and resets its unsaved state; the switch result adds `"revived": true` so the reload is visible rather than silent. A tab whose page is paused by a JavaScript dialog is alive rather than discarded: the switch leaves it untouched and adds `"dialogBlocked": true`. Resolve the dialog with `dialog accept` or `dialog dismiss` and the tab keeps its state. Closing the active tab onto a discarded successor revives it the same way and reports `"activeTabRevived": true`.
 
 ### Iframe support
 
@@ -445,6 +452,7 @@ Diagnose your install, auto-clean stale daemon files, and optionally repair comm
 agent-browser doctor                     # Full diagnosis (env, Chrome, daemons, config, providers, network, launch test)
 agent-browser doctor --offline --quick   # Local-only, fastest
 agent-browser doctor --fix               # Also run destructive repairs (reinstall Chrome, purge old state, ...)
+agent-browser doctor --webgpu            # Also run a live WebGPU render probe (see the WebGPU page)
 agent-browser doctor --json              # Structured JSON output for agents
 ```
 
@@ -513,6 +521,20 @@ Works on any React app (Next.js, Remix, Vite+React, CRA, TanStack Start, React N
 
 See [React & Web Vitals](/react) for full command details and examples.
 
+## Accessibility audits
+
+Run an embedded axe-core audit against the current page or navigate to a URL first. The vendored engine works without a CDN request and runs under strict page CSP. It runs private partial audits across the page's frame tree and merges serialized results without page messaging, so page-provided `window.axe` values remain intact and iframe violations retain their frame selector paths. Accessibility audits require a CDP browser and are not available with Safari or iOS WebDriver sessions.
+
+```bash
+agent-browser a11y                                 # Audit the current page
+agent-browser a11y https://example.com             # Navigate, then audit
+agent-browser a11y --tags wcag2a,wcag2aa           # Filter by axe rule tags
+agent-browser a11y --selector "#main"              # Scope to a subtree
+agent-browser a11y https://example.com --json      # Structured results
+```
+
+The default output lists violations and incomplete checks with impact, rule ID, fix guidance, and failing-node paths. JSON output preserves axe's `target` selector path arrays, including nested arrays for shadow DOM boundaries and multiple entries for frame boundaries.
+
 ## Init scripts
 
 ```bash
@@ -552,13 +574,14 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime 
 --screenshot-quality <n>  # JPEG quality 0-100 (or AGENT_BROWSER_SCREENSHOT_QUALITY)
 --screenshot-format <fmt> # Format: png (default), jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)
 --headed                 # Show browser window (not headless)
+--webgpu                 # Enable WebGPU (software Vulkan on Linux, no GPU needed)
 --cdp <port|url>         # Connect via Chrome DevTools Protocol (port or WebSocket URL)
 --auto-connect           # Auto-discover and connect to running Chrome
 --color-scheme <scheme>  # Color scheme: dark, light, no-preference
 --download-path <path>   # Default download directory
 --content-boundaries     # Wrap page output in boundary markers for LLM safety
 --max-output <chars>     # Truncate page output to N characters
---allowed-domains <list> # Comma-separated allowed domain patterns
+--allowed-domains <list> # Allowed domains; rejects restore/state replay, profile/session startup args, and direct-page providers
 --action-policy <path>   # Path to action policy JSON file
 --confirm-actions <list> # Action categories requiring confirmation
 --confirm-interactive    # Interactive confirmation prompts (auto-denies if stdin is not a TTY)
@@ -621,7 +644,7 @@ Profiles:
 - `core` - Default. Navigation, snapshots, interaction, waits, reads, screenshots, JavaScript eval, close, tab basics, and profile discovery
 - `network` - Network routes, request inspection, HAR, headers, credentials, offline
 - `state` - Cookies, storage, auth, saved state, sessions, profiles, skills
-- `debug` - Console/errors, tracing, profiling, recording, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
+- `debug` - Console/errors, tracing, profiling, recording, accessibility audits, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
 - `tabs` - Back/forward/reload, tabs, windows, frames, dialogs
 - `react` - React tree/inspect/renders/suspense, vitals, pushstate
 - `mobile` - Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
@@ -640,7 +663,7 @@ Example MCP client config:
 }
 ```
 
-With `--tools all`, the server exposes typed tools across the CLI command surface, including navigation, snapshots, input, waits, screenshots/PDF, get/is/find, mouse, network, storage, cookies, tabs, windows, frames, dialogs, tracing, recording, clipboard, auth, state, iOS, diff, React, vitals, sessions, skills, plugins, doctor, dashboard, install, upgrade, chat, eval, and close.
+With `--tools all`, the server exposes typed tools across the CLI command surface, including navigation, snapshots, input, waits, screenshots/PDF, get/is/find, mouse, network, storage, cookies, tabs, windows, frames, dialogs, tracing, recording, accessibility audits, clipboard, auth, state, iOS, diff, React, vitals, sessions, skills, plugins, doctor, dashboard, install, upgrade, chat, eval, and close.
 
 Common tools include:
 
@@ -657,7 +680,7 @@ Common tools include:
 - `agent_browser_eval`
 - `agent_browser_close`
 
-Each tool has typed fields such as `url`, `selector`, `text`, `key`, and `session`, so MCP clients show meaningful approval prompts instead of raw command arrays. Each tool also accepts `extraArgs` for advanced CLI flags and exact CLI parity. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.
+Each tool has typed fields such as `url`, `selector`, `text`, `key`, `session`, and `allowedDomains`, so MCP clients show meaningful approval prompts instead of raw command arrays. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. Each tool also accepts `extraArgs` for advanced CLI flags and exact CLI parity. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.
 
 Tool invocations use the same config files and environment variables as the CLI. Use `session` in the tool arguments, or set `AGENT_BROWSER_SESSION`, to isolate browser state.
 

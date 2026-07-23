@@ -167,10 +167,69 @@ pub async fn install_domain_filter_script(
         return Ok(());
     }
 
+    let script = domain_filter_script(allowed_domains);
+
+    client
+        .send_command(
+            "Page.addScriptToEvaluateOnNewDocument",
+            Some(json!({ "source": &script })),
+            Some(session_id),
+        )
+        .await?;
+
+    install_domain_filter_runtime_script(client, session_id, allowed_domains).await?;
+
+    Ok(())
+}
+
+async fn install_domain_filter_runtime_script(
+    client: &CdpClient,
+    session_id: &str,
+    allowed_domains: &[String],
+) -> Result<(), String> {
+    if allowed_domains.is_empty() {
+        return Ok(());
+    }
+
+    let script = domain_filter_script(allowed_domains);
+    let evaluation = client
+        .send_command(
+            "Runtime.evaluate",
+            Some(json!({ "expression": &script })),
+            Some(session_id),
+        )
+        .await?;
+    if let Some(details) = evaluation.get("exceptionDetails") {
+        let message = details
+            .get("exception")
+            .and_then(|exception| exception.get("description"))
+            .and_then(Value::as_str)
+            .or_else(|| details.get("text").and_then(Value::as_str))
+            .unwrap_or("unknown JavaScript error");
+        return Err(format!(
+            "Failed to apply domain filter to the current execution context: {}",
+            message
+        ));
+    }
+
+    Ok(())
+}
+
+fn domain_filter_script(allowed_domains: &[String]) -> String {
     let domains_json = serde_json::to_string(allowed_domains).unwrap_or("[]".to_string());
-    let script = format!(
+    format!(
         r#"(() => {{
             const _allowed = {};
+            function _agentBrowserInstallDomainFilter(_allowed, _baseOverride) {{
+            const _global = globalThis;
+            function _securityError(message) {{
+                if (typeof DOMException === 'function') {{
+                    return new DOMException(message, 'SecurityError');
+                }}
+                const error = new Error(message);
+                error.name = 'SecurityError';
+                return error;
+            }}
             function _isDomainAllowed(hostname) {{
                 hostname = hostname.toLowerCase();
                 for (const p of _allowed) {{
@@ -181,49 +240,196 @@ pub async fn install_domain_filter_script(
                 }}
                 return false;
             }}
-            const OrigWS = window.WebSocket;
-            window.WebSocket = function(url, protocols) {{
+            const _baseHref = _baseOverride || (_global.location && _global.location.href ? _global.location.href : 'about:blank');
+            function _checkedUrl(url, apiName) {{
+                const u = new URL(url, _baseHref);
+                if (['http:', 'https:', 'ws:', 'wss:'].includes(u.protocol) && !_isDomainAllowed(u.hostname)) {{
+                    throw _securityError(apiName + ' blocked: ' + u.hostname);
+                }}
+                return u.href;
+            }}
+            function _assertAllowedUrl(url, apiName) {{
+                _checkedUrl(url, apiName);
+            }}
+            function _checkedWebSocketUrl(url, apiName) {{
+                const u = new URL(url, _baseHref);
+                if (u.protocol === 'http:') u.protocol = 'ws:';
+                if (u.protocol === 'https:') u.protocol = 'wss:';
+                if (['ws:', 'wss:'].includes(u.protocol) && !_isDomainAllowed(u.hostname)) {{
+                    throw _securityError(apiName + ' blocked: ' + u.hostname);
+                }}
+                return u.href;
+            }}
+            function _requestUrl(input) {{
+                if (typeof input === 'string') return input;
+                if (typeof URL === 'function' && input instanceof URL) return input.href;
+                if (input && typeof input.url === 'string') return input.url;
+                return String(input);
+            }}
+            const _workerUrlCache = typeof Map === 'function' ? new Map() : null;
+            function _checkedWorkerScriptUrl(scriptURL, apiName) {{
+                let absolute;
                 try {{
-                    const u = new URL(url, location.href);
-                    if (!_isDomainAllowed(u.hostname)) throw new DOMException('WebSocket blocked: ' + u.hostname, 'SecurityError');
-                }} catch(e) {{ if (e instanceof DOMException) throw e; }}
-                return new OrigWS(url, protocols);
-            }};
-            window.WebSocket.prototype = OrigWS.prototype;
-            const OrigES = window.EventSource;
+                    const u = new URL(scriptURL, _baseHref);
+                    absolute = u.href;
+                    if (u.protocol === 'blob:') {{
+                        try {{
+                            const inner = new URL(u.pathname);
+                            if (inner.hostname && !_isDomainAllowed(inner.hostname)) {{
+                                throw _securityError(apiName + ' blocked: ' + inner.hostname);
+                            }}
+                        }} catch(e) {{ if (e && e.name === 'SecurityError') throw e; }}
+                    }} else if (u.hostname && !_isDomainAllowed(u.hostname)) {{
+                        throw _securityError(apiName + ' blocked: ' + u.hostname);
+                    }}
+                }} catch(e) {{
+                    if (e && e.name === 'SecurityError') throw e;
+                    throw e;
+                }}
+                return absolute;
+            }}
+            function _workerScriptUrl(scriptURL, options, apiName) {{
+                if (!_global.Blob || !_global.URL || typeof _global.URL.createObjectURL !== 'function') {{
+                    throw _securityError(apiName + ' blocked: worker bootstrap APIs are unavailable');
+                }}
+                const absolute = _checkedWorkerScriptUrl(scriptURL, apiName);
+                const isModule = options && typeof options === 'object' && options.type === 'module';
+                const cacheKey = apiName + '|' + (isModule ? 'module' : 'classic') + '|' + absolute;
+                if (_workerUrlCache && _workerUrlCache.has(cacheKey)) return _workerUrlCache.get(cacheKey);
+                const installSource = '(' + _agentBrowserInstallDomainFilter.toString() + ')(' + JSON.stringify(_allowed) + ', ' + JSON.stringify(absolute) + ');\n';
+                const source = installSource + (isModule
+                    ? 'await import(' + JSON.stringify(absolute) + ');\n'
+                    : 'importScripts(' + JSON.stringify(absolute) + ');\n');
+                const wrapped = _global.URL.createObjectURL(new Blob([source], {{ type: 'application/javascript' }}));
+                if (_workerUrlCache) _workerUrlCache.set(cacheKey, wrapped);
+                return wrapped;
+            }}
+            function _constructWorker(OrigCtor, scriptURL, options, apiName) {{
+                const checkedUrl = _checkedWorkerScriptUrl(scriptURL, apiName);
+                try {{
+                    const bootstrapUrl = _workerScriptUrl(checkedUrl, options, apiName);
+                    const worker = new OrigCtor(bootstrapUrl, options);
+                    return worker;
+                }} catch (error) {{
+                    // Fail closed if the guarded bootstrap cannot be created.
+                    throw error;
+                }}
+            }}
+            const OrigWorker = _global.Worker;
+            if (typeof OrigWorker === 'function') {{
+                _global.Worker = function(scriptURL, options) {{
+                    return _constructWorker(OrigWorker, scriptURL, options, 'Worker');
+                }};
+                _global.Worker.prototype = OrigWorker.prototype;
+            }}
+            const OrigSharedWorker = _global.SharedWorker;
+            if (typeof OrigSharedWorker === 'function') {{
+                _global.SharedWorker = function(scriptURL, options) {{
+                    return _constructWorker(OrigSharedWorker, scriptURL, options, 'SharedWorker');
+                }};
+                _global.SharedWorker.prototype = OrigSharedWorker.prototype;
+            }}
+            const OrigImportScripts = _global.importScripts;
+            if (typeof OrigImportScripts === 'function') {{
+                _global.importScripts = function() {{
+                    const urls = Array.prototype.slice.call(arguments).map((url) => {{
+                        try {{
+                            return _checkedUrl(url, 'importScripts');
+                        }} catch(e) {{
+                            if (e && e.name === 'SecurityError') throw e;
+                            return url;
+                        }}
+                    }});
+                    return OrigImportScripts.apply(this, urls);
+                }};
+            }}
+            const OrigFetch = _global.fetch;
+            if (typeof OrigFetch === 'function') {{
+                _global.fetch = function(input, init) {{
+                    try {{
+                        if (typeof input === 'string') {{
+                            return OrigFetch.call(this, _checkedUrl(input, 'Fetch'), init);
+                        }}
+                        _assertAllowedUrl(_requestUrl(input), 'Fetch');
+                    }} catch(e) {{
+                        if (e && e.name === 'SecurityError') return Promise.reject(e);
+                    }}
+                    return OrigFetch.apply(this, arguments);
+                }};
+            }}
+            const OrigXHR = _global.XMLHttpRequest;
+            if (typeof OrigXHR === 'function' && OrigXHR.prototype && OrigXHR.prototype.open) {{
+                const origOpen = OrigXHR.prototype.open;
+                OrigXHR.prototype.open = function(method, url) {{
+                    let checkedUrl = url;
+                    try {{
+                        checkedUrl = _checkedUrl(url, 'XMLHttpRequest');
+                    }} catch(e) {{
+                        if (e && e.name === 'SecurityError') throw e;
+                    }}
+                    const args = Array.prototype.slice.call(arguments);
+                    args[1] = checkedUrl;
+                    return origOpen.apply(this, args);
+                }};
+            }}
+            const OrigWS = _global.WebSocket;
+            if (typeof OrigWS === 'function') {{
+                _global.WebSocket = function(url, protocols) {{
+                    let checkedUrl = url;
+                    try {{
+                        checkedUrl = _checkedWebSocketUrl(url, 'WebSocket');
+                    }} catch(e) {{ if (e && e.name === 'SecurityError') throw e; }}
+                    return new OrigWS(checkedUrl, protocols);
+                }};
+                _global.WebSocket.prototype = OrigWS.prototype;
+            }}
+            const OrigES = _global.EventSource;
             if (OrigES) {{
-                window.EventSource = function(url, opts) {{
+                _global.EventSource = function(url, opts) {{
+                    let checkedUrl = url;
                     try {{
-                        const u = new URL(url, location.href);
-                        if (!_isDomainAllowed(u.hostname)) throw new DOMException('EventSource blocked: ' + u.hostname, 'SecurityError');
-                    }} catch(e) {{ if (e instanceof DOMException) throw e; }}
-                    return new OrigES(url, opts);
+                        checkedUrl = _checkedUrl(url, 'EventSource');
+                    }} catch(e) {{ if (e && e.name === 'SecurityError') throw e; }}
+                    return new OrigES(checkedUrl, opts);
                 }};
-                window.EventSource.prototype = OrigES.prototype;
+                _global.EventSource.prototype = OrigES.prototype;
             }}
-            const origBeacon = navigator.sendBeacon;
+            const origBeacon = _global.navigator && _global.navigator.sendBeacon;
             if (origBeacon) {{
-                navigator.sendBeacon = function(url, data) {{
+                _global.navigator.sendBeacon = function(url, data) {{
+                    let checkedUrl = url;
                     try {{
-                        const u = new URL(url, location.href);
-                        if (!_isDomainAllowed(u.hostname)) return false;
+                        checkedUrl = _checkedUrl(url, 'Beacon');
                     }} catch(e) {{ return false; }}
-                    return origBeacon.call(navigator, url, data);
+                    return origBeacon.call(_global.navigator, checkedUrl, data);
                 }};
             }}
+            function _blockPeerConnection(name) {{
+                if (typeof _global[name] !== 'function') return;
+                const BlockedPeerConnection = function() {{
+                    throw _securityError('RTCPeerConnection blocked while domain filtering is active');
+                }};
+                Object.defineProperty(BlockedPeerConnection, 'prototype', {{
+                    value: Object.freeze(Object.create(null)),
+                    writable: false
+                }});
+                try {{
+                    Object.defineProperty(_global, name, {{
+                        value: BlockedPeerConnection,
+                        writable: false,
+                        configurable: false
+                    }});
+                }} catch (_) {{
+                    _global[name] = BlockedPeerConnection;
+                }}
+            }}
+            _blockPeerConnection('RTCPeerConnection');
+            _blockPeerConnection('webkitRTCPeerConnection');
+            }}
+            _agentBrowserInstallDomainFilter(_allowed);
         }})()"#,
         domains_json,
-    );
-
-    client
-        .send_command(
-            "Page.addScriptToEvaluateOnNewDocument",
-            Some(json!({ "source": script })),
-            Some(session_id),
-        )
-        .await?;
-
-    Ok(())
+    )
 }
 
 /// Enable Fetch-based network interception for domain filtering.
@@ -248,16 +454,17 @@ pub async fn install_domain_filter_fetch(
 }
 
 /// Install both layers of domain filtering on a session:
-/// 1. JS patching (WebSocket, EventSource, sendBeacon)
-/// 2. Fetch-based network interception
+/// 1. Fetch-based network interception
+/// 2. JS patching for APIs outside Fetch interception, including workers,
+///    WebSocket, EventSource, sendBeacon, and RTCPeerConnection.
 pub async fn install_domain_filter(
     client: &CdpClient,
     session_id: &str,
     allowed_domains: &[String],
     handle_auth_requests: bool,
 ) -> Result<(), String> {
-    install_domain_filter_script(client, session_id, allowed_domains).await?;
     install_domain_filter_fetch(client, session_id, handle_auth_requests).await?;
+    install_domain_filter_script(client, session_id, allowed_domains).await?;
     Ok(())
 }
 
@@ -491,6 +698,26 @@ mod tests {
     fn test_parse_domain_list() {
         let domains = parse_domain_list("A.com, B.com , *.C.com");
         assert_eq!(domains, vec!["a.com", "b.com", "*.c.com"]);
+    }
+
+    #[test]
+    fn test_domain_filter_script_blocks_peer_connection_constructors() {
+        let script = domain_filter_script(&["example.com".to_string()]);
+        assert!(script.contains("_blockPeerConnection('RTCPeerConnection')"));
+        assert!(script.contains("_blockPeerConnection('webkitRTCPeerConnection')"));
+        assert!(script.contains("RTCPeerConnection blocked while domain filtering is active"));
+        assert!(script.contains("configurable: false"));
+    }
+
+    #[test]
+    fn test_domain_filter_script_fails_closed_when_worker_blob_is_csp_blocked() {
+        let script = domain_filter_script(&["example.com".to_string()]);
+        assert!(script.contains("createObjectURL(new Blob"));
+        assert!(script.contains("'await import(' + JSON.stringify(absolute)"));
+        assert!(script.contains("const worker = new OrigCtor(bootstrapUrl, options)"));
+        assert!(script.contains("return worker"));
+        assert!(!script.contains("_wrapWorkerWithCspFallback"));
+        assert!(!script.contains("return new OrigCtor(checkedUrl, options)"));
     }
 
     #[test]

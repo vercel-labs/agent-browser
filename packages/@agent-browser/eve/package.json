@@ -1,0 +1,72 @@
+{
+  "name": "@agent-browser/eve",
+  "version": "0.33.0",
+  "description": "eve extension that gives agents a full browser automation tool set backed by agent-browser",
+  "type": "module",
+  "sideEffects": false,
+  "eve": {
+    "extension": {
+      "source": "./extension",
+      "dist": "./dist/extension"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.mjs"
+    },
+    "./tools": {
+      "types": "./dist/tools/index.d.ts",
+      "default": "./dist/tools/index.mjs"
+    },
+    "./sandbox": {
+      "types": "./dist/sandbox/sandbox.d.ts",
+      "default": "./dist/sandbox/sandbox.js"
+    }
+  },
+  "scripts": {
+    "build": "eve extension build && tsc -p tsconfig.sandbox.json",
+    "prepare": "pnpm -C ../sandbox run build && pnpm run build",
+    "test": "pnpm -C ../sandbox run build && pnpm run build && node --test test/*.test.mjs",
+    "typecheck": "tsc"
+  },
+  "keywords": [
+    "agent-browser",
+    "eve",
+    "eve-extension",
+    "browser-automation",
+    "sandbox"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vercel-labs/agent-browser",
+    "directory": "packages/@agent-browser/eve"
+  },
+  "bugs": {
+    "url": "https://github.com/vercel-labs/agent-browser/issues"
+  },
+  "homepage": "https://agent-browser.dev",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@agent-browser/sandbox": "workspace:^",
+    "zod": "4.4.3"
+  },
+  "peerDependencies": {
+    "eve": ">=0.25.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.x",
+    "eve": "^0.25.1",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

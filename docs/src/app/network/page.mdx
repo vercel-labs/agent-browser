@@ -66,7 +66,20 @@ agent-browser click @e4
 agent-browser network har stop ./trace.har
 ```
 
-HAR files can include request headers, response headers, and response bodies. Treat them as sensitive when pages use cookies, bearer tokens, or API keys.
+Text response bodies (JSON, HTML, JavaScript, form data) are embedded in the HAR as `content.text` by default, captured while the browser still has them buffered so they survive navigation. The `--content` flag on `har start` controls this:
+
+<table>
+  <thead>
+    <tr><th>Mode</th><th>Behavior</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>--content text</code></td><td>Default. Embed text-like bodies (JSON, XML, HTML, JS, form data), up to 2&nbsp;MB per body.</td></tr>
+    <tr><td><code>--content all</code></td><td>Embed every body; binary content is base64-encoded with <code>encoding: "base64"</code>.</td></tr>
+    <tr><td><code>--content none</code></td><td>Sizes and MIME types only, no bodies.</td></tr>
+  </tbody>
+</table>
+
+HAR files include request headers, response headers, cookies, POST data, and response bodies. Treat them as sensitive when pages use cookies, bearer tokens, or API keys.
 
 ## SSR and no-JavaScript debugging
 

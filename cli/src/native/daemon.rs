@@ -232,8 +232,15 @@ async fn run_socket_server(
                 if process_exited {
                     let _ = close_current_browser(&mut s).await;
                 } else if s.browser.is_some() {
-                    s.drain_cdp_events_background().await;
-                    maybe_autosave_restore_state(&mut s, autosave_interval_ms).await;
+                    if let Err(error) = s.drain_cdp_events_background().await {
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "Failed to apply browser network controls: {}",
+                            error
+                        );
+                    } else {
+                        maybe_autosave_restore_state(&mut s, autosave_interval_ms).await;
+                    }
                 }
             }
             _ = async {

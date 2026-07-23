@@ -1,6 +1,6 @@
 {
   "name": "@agent-browser/sandbox",
-  "version": "0.31.1",
+  "version": "0.33.0",
   "description": "Helpers for running agent-browser inside sandbox runtimes",
   "type": "module",
   "sideEffects": false,
@@ -12,10 +12,6 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    },
-    "./eve": {
-      "types": "./dist/eve.d.ts",
-      "import": "./dist/eve.js"
     },
     "./vercel": {
       "types": "./dist/vercel.d.ts",

@@ -442,6 +442,7 @@ pub struct DaemonOptions<'a> {
     pub ignore_https_errors: bool,
     pub allow_file_access: bool,
     pub hide_scrollbars: bool,
+    pub webgpu: bool,
     pub profile: Option<&'a str>,
     pub state: Option<&'a str>,
     pub provider: Option<&'a str>,
@@ -514,6 +515,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
         "AGENT_BROWSER_HIDE_SCROLLBARS",
         if opts.hide_scrollbars { "1" } else { "0" },
     );
+    if opts.webgpu {
+        cmd.env("AGENT_BROWSER_WEBGPU", "1");
+    }
     if let Some(prof) = opts.profile {
         cmd.env("AGENT_BROWSER_PROFILE", prof);
     }
@@ -581,7 +585,6 @@ fn daemon_config_fingerprint(opts: &DaemonOptions) -> String {
     opts.debug.hash(&mut hasher);
     opts.action_policy.hash(&mut hasher);
     opts.confirm_actions.hash(&mut hasher);
-    opts.allowed_domains.hash(&mut hasher);
     opts.idle_timeout.hash(&mut hasher);
     opts.default_timeout.hash(&mut hasher);
     opts.no_auto_dialog.hash(&mut hasher);
@@ -1247,6 +1250,7 @@ mod tests {
             ignore_https_errors: false,
             allow_file_access: false,
             hide_scrollbars: true,
+            webgpu: false,
             profile: None,
             state: None,
             provider: None,
@@ -1286,9 +1290,10 @@ mod tests {
             daemon_config_fingerprint(&base),
             daemon_config_fingerprint(&dialog_changed)
         );
-        assert_ne!(
+        assert_eq!(
             daemon_config_fingerprint(&base),
-            daemon_config_fingerprint(&domains_changed)
+            daemon_config_fingerprint(&domains_changed),
+            "allowed domains are browser launch state, not daemon identity"
         );
     }
 

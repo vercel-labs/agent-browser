@@ -249,6 +249,21 @@ pub async fn take_snapshot(
                 )
                 .await?;
 
+            // A throwing evaluation (e.g. an invalid CSS selector like a
+            // snapshot ref "@e1") still yields an objectId — for the
+            // exception object. Passing that to DOM.describeNode produces the
+            // cryptic "Object id doesn't reference a Node"; fail clearly
+            // instead, and only accept results that are actually DOM nodes.
+            if let Some(exception) = result.exception_details {
+                let detail = exception
+                    .exception
+                    .and_then(|e| e.description)
+                    .unwrap_or(exception.text);
+                return Err(format!("Invalid selector '{}': {}", selector, detail));
+            }
+            if result.result.subtype.as_deref() != Some("node") {
+                return Err(format!("Selector '{}' did not match any element", selector));
+            }
             let object_id = result
                 .result
                 .object_id

@@ -140,6 +140,7 @@ const TOOL_REACT_RENDERS_START: &str = "agent_browser_react_renders_start";
 const TOOL_REACT_RENDERS_STOP: &str = "agent_browser_react_renders_stop";
 const TOOL_REACT_SUSPENSE: &str = "agent_browser_react_suspense";
 const TOOL_VITALS: &str = "agent_browser_vitals";
+const TOOL_A11Y: &str = "agent_browser_a11y";
 const TOOL_PUSHSTATE: &str = "agent_browser_pushstate";
 const TOOL_REMOVE_INIT_SCRIPT: &str = "agent_browser_remove_init_script";
 const TOOL_CONFIRM: &str = "agent_browser_confirm";
@@ -253,7 +254,7 @@ impl ToolProfile {
             Self::Core => "Everyday browser automation with navigation, snapshots, common interaction, waits, screenshots, basic reads, tab basics, JavaScript eval, close, and profile discovery.",
             Self::Network => "Network interception, request inspection, HAR capture, headers, credentials, and offline mode.",
             Self::State => "Cookies, storage, auth profiles, saved browser state, sessions, Chrome profiles, and bundled skills.",
-            Self::Debug => "Console/errors, highlighting, DevTools, tracing, profiling, PDF, downloads/uploads, recording, clipboard, plugin registry and plugin command.run, doctor, dashboard, install, upgrade, and chat.",
+            Self::Debug => "Console/errors, highlighting, DevTools, tracing, profiling, accessibility audits, PDF, downloads/uploads, recording, clipboard, plugin registry and plugin command.run, doctor, dashboard, install, upgrade, and chat.",
             Self::Tabs => "Tab, window, frame, and JavaScript dialog management.",
             Self::React => "React tree inspection, render recording, Suspense inspection, Web Vitals, SPA pushstate, and init-script removal.",
             Self::Mobile => "Viewport/device/geolocation/media emulation plus touch, swipe, and lower-level mouse tools.",
@@ -408,6 +409,7 @@ const DEBUG_PROFILE_TOOLS: &[&str] = &[
     TOOL_RECORD_START,
     TOOL_RECORD_STOP,
     TOOL_RECORD_RESTART,
+    TOOL_A11Y,
     TOOL_CONSOLE,
     TOOL_ERRORS,
     TOOL_HIGHLIGHT,
@@ -749,7 +751,8 @@ fn tools() -> Vec<Value> {
             "Launch the browser and optionally navigate to a URL.",
             json!({
                 "url": { "type": "string", "description": "URL to open. Omit to launch about:blank." },
-                "headed": { "type": "boolean", "default": false, "description": "Show the browser window." }
+                "headed": { "type": "boolean", "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults." },
+                "webgpu": { "type": "boolean", "description": "Enable WebGPU (SwiftShader software Vulkan on Linux; no GPU required). Explicit true/false overrides AGENT_BROWSER_WEBGPU and config; omit to use those defaults." }
             }),
             &[],
         ),
@@ -1034,11 +1037,11 @@ fn parity_tools() -> Vec<Value> {
             json!({
                 "locator": { "type": "string", "enum": ["role", "text", "label", "placeholder", "alt", "title", "testid", "first", "last", "nth"] },
                 "value": { "type": "string", "description": "Role, text, label, selector, or test id." },
-                "action": { "type": "string", "description": "Optional action: click, fill, type, hover, focus, check, uncheck, text." },
-                "text": { "type": "string", "description": "Optional text/value for fill or type actions." },
+                "action": { "type": "string", "description": "Optional action: click, fill, check, hover, text." },
+                "text": { "type": "string", "description": "Optional value for the fill action." },
                 "index": { "type": "integer", "description": "Index for nth locator." },
                 "name": { "type": "string", "description": "Accessible name filter for role locator." },
-                "exact": { "type": "boolean", "default": false }
+                "exact": { "type": "boolean", "description": "Exact, case-sensitive match. For the role locator it applies to the accessible name, whose default is a case-insensitive substring. The role value itself always matches case-insensitively, with or without exact.", "default": false }
             }),
             &["locator", "value"],
         ),
@@ -1150,8 +1153,8 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_NETWORK_HAR_START,
             "HAR start",
-            "Start HAR capture.",
-            json!({}),
+            "Start HAR capture. Embeds text response bodies by default; content controls which bodies are embedded.",
+            json!({ "content": { "type": "string", "enum": ["all", "text", "none"] } }),
             &[],
         ),
         tool(
@@ -1563,6 +1566,18 @@ fn parity_tools() -> Vec<Value> {
             &[],
         ),
         tool(
+            TOOL_A11Y,
+            "Accessibility audit",
+            "Run an axe-core accessibility audit and report WCAG violations, optionally navigating to a URL first.",
+            json!({
+                "url": { "type": "string" },
+                "tags": { "type": "string" },
+                "selector": { "type": "string" },
+                "json": { "type": "boolean" }
+            }),
+            &[],
+        ),
+        tool(
             TOOL_PUSHSTATE,
             "Push state",
             "Perform SPA client-side navigation.",
@@ -1719,7 +1734,7 @@ fn parity_tools() -> Vec<Value> {
             TOOL_DOCTOR,
             "Doctor",
             "Diagnose the installation.",
-            json!({ "offline": { "type": "boolean" }, "quick": { "type": "boolean" }, "fix": { "type": "boolean" } }),
+            json!({ "offline": { "type": "boolean" }, "quick": { "type": "boolean" }, "fix": { "type": "boolean" }, "webgpu": { "type": "boolean", "description": "Also run a live WebGPU render probe (launches a second Chrome)." }, "headed": { "type": "boolean", "description": "Run the WebGPU probe headed to validate the capture path (auto-Xvfb on displayless Linux). Explicit true/false overrides AGENT_BROWSER_HEADED/config." }, "debug": { "type": "boolean", "description": "Verbose diagnostics from the probes' scratch daemons." } }),
             &[],
         ),
         tool(
@@ -1870,6 +1885,14 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         json!({
             "type": "string",
             "description": "Optional JavaScript expression that must evaluate truthy after restore."
+        }),
+    );
+    props.insert(
+        "allowedDomains".to_string(),
+        json!({
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active."
         }),
     );
     props.insert(
@@ -2112,7 +2135,19 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_NETWORK_UNROUTE => call_optional_one(arguments, &["network", "unroute"], "url"),
         TOOL_NETWORK_REQUESTS => call_network_requests(arguments),
         TOOL_NETWORK_REQUEST => call_one_string(arguments, "network request", "requestId"),
-        TOOL_NETWORK_HAR_START => call_literal(arguments, &["network", "har", "start"]),
+        TOOL_NETWORK_HAR_START => {
+            let mut args: Vec<String> = ["network", "har", "start"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            if let Some(content) = optional_string(arguments, "content")? {
+                if !content.is_empty() {
+                    args.push("--content".to_string());
+                    args.push(content);
+                }
+            }
+            call_cli_tool(arguments, args, None)
+        }
         TOOL_NETWORK_HAR_STOP => call_optional_one(arguments, &["network", "har", "stop"], "path"),
         TOOL_STORAGE_GET => call_storage_get(arguments),
         TOOL_STORAGE_SET => call_storage_set(arguments),
@@ -2171,6 +2206,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_REACT_RENDERS_STOP => call_react_renders_stop(arguments),
         TOOL_REACT_SUSPENSE => call_react_suspense(arguments),
         TOOL_VITALS => call_vitals(arguments),
+        TOOL_A11Y => call_a11y(arguments),
         TOOL_PUSHSTATE => call_one_string(arguments, "pushstate", "url"),
         TOOL_REMOVE_INIT_SCRIPT => call_one_string(arguments, "removeinitscript", "id"),
         TOOL_CONFIRM => call_one_string(arguments, "confirm", "id"),
@@ -2306,10 +2342,19 @@ fn call_keyboard(arguments: &Value, subcommand: &str) -> Result<Value, ProtocolE
     )
 }
 
-fn call_open(arguments: &Value) -> Result<Value, ProtocolError> {
+/// Build the CLI args for the open tool. Explicit booleans are forwarded as
+/// `--flag true|false` so an MCP caller can override env/config defaults
+/// (e.g. webgpu: false with AGENT_BROWSER_WEBGPU=1 set); an absent field
+/// sends nothing and leaves the env/config resolution to the CLI.
+fn open_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = Vec::new();
-    if optional_bool(arguments, "headed")?.unwrap_or(false) {
+    if let Some(headed) = optional_bool(arguments, "headed")? {
         args.push("--headed".to_string());
+        args.push(headed.to_string());
+    }
+    if let Some(webgpu) = optional_bool(arguments, "webgpu")? {
+        args.push("--webgpu".to_string());
+        args.push(webgpu.to_string());
     }
     args.push("open".to_string());
     if let Some(url) = optional_string(arguments, "url")? {
@@ -2317,6 +2362,11 @@ fn call_open(arguments: &Value) -> Result<Value, ProtocolError> {
             args.push(url);
         }
     }
+    Ok(args)
+}
+
+fn call_open(arguments: &Value) -> Result<Value, ProtocolError> {
+    let args = open_args(arguments)?;
     call_cli_tool(arguments, args, None)
 }
 
@@ -3132,6 +3182,25 @@ fn call_vitals(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool(arguments, args, None)
 }
 
+fn call_a11y(arguments: &Value) -> Result<Value, ProtocolError> {
+    let mut args = vec!["a11y".to_string()];
+    if let Some(url) = optional_string(arguments, "url")? {
+        args.push(url);
+    }
+    if let Some(tags) = optional_string(arguments, "tags")? {
+        args.push("--tags".to_string());
+        args.push(tags);
+    }
+    if let Some(selector) = optional_string(arguments, "selector")? {
+        args.push("--selector".to_string());
+        args.push(selector);
+    }
+    if optional_bool(arguments, "json")?.unwrap_or(false) {
+        args.push("--json".to_string());
+    }
+    call_cli_tool(arguments, args, None)
+}
+
 fn call_stream_enable(arguments: &Value) -> Result<Value, ProtocolError> {
     let mut args = vec!["stream".to_string(), "enable".to_string()];
     if let Some(port) = optional_u64(arguments, "port")? {
@@ -3198,7 +3267,11 @@ fn plugin_run_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     Ok(args)
 }
 
-fn call_doctor(arguments: &Value) -> Result<Value, ProtocolError> {
+/// Build the CLI args for the doctor tool. offline/quick/fix are parsed by
+/// doctor as bare presence flags, so they are only sent when true; the
+/// value-taking booleans are forwarded explicitly so callers can override
+/// env/config defaults (e.g. headed: false with AGENT_BROWSER_HEADED=1).
+fn doctor_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = vec!["doctor".to_string()];
     for (key, flag) in [
         ("offline", "--offline"),
@@ -3209,6 +3282,21 @@ fn call_doctor(arguments: &Value) -> Result<Value, ProtocolError> {
             args.push(flag.to_string());
         }
     }
+    for (key, flag) in [
+        ("webgpu", "--webgpu"),
+        ("headed", "--headed"),
+        ("debug", "--debug"),
+    ] {
+        if let Some(value) = optional_bool(arguments, key)? {
+            args.push(flag.to_string());
+            args.push(value.to_string());
+        }
+    }
+    Ok(args)
+}
+
+fn call_doctor(arguments: &Value) -> Result<Value, ProtocolError> {
+    let args = doctor_args(arguments)?;
     call_cli_tool(arguments, args, None)
 }
 
@@ -3459,6 +3547,12 @@ fn append_common_global_args(
         args.push("--restore-check-fn".to_string());
         args.push(check);
     }
+    if let Some(domains) = optional_string_array(arguments, "allowedDomains")? {
+        if !domains.is_empty() {
+            args.push("--allowed-domains".to_string());
+            args.push(domains.join(","));
+        }
+    }
 
     Ok(())
 }
@@ -3620,6 +3714,17 @@ fn response_text(value: &Value) -> Option<String> {
         }
 
         if let Some(data) = obj.get("data") {
+            // Accessibility reports carry a URL alongside their findings. Use
+            // the same report formatter as the CLI before the generic string
+            // field fallback turns the MCP text content into only that URL.
+            if data.get("axeVersion").is_some()
+                && data
+                    .get("violations")
+                    .and_then(|value| value.as_array())
+                    .is_some()
+            {
+                return Some(crate::output::format_a11y_text(data));
+            }
             for key in [
                 "snapshot", "text", "html", "report", "value", "content", "title", "url", "path",
             ] {
@@ -3707,6 +3812,75 @@ mod tests {
         assert!(names.contains(&TOOL_SESSION_ID));
         assert!(names.contains(&TOOL_SESSION_INFO));
         assert!(!names.contains(&"agent_browser_frame_list"));
+    }
+
+    #[test]
+    fn open_tool_exposes_launch_options() {
+        let tools = tools();
+        let open = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some(TOOL_OPEN))
+            .unwrap();
+        let props = &open["inputSchema"]["properties"];
+        assert!(props.get("headed").is_some());
+        assert!(props.get("webgpu").is_some());
+    }
+
+    #[test]
+    fn open_args_forwards_explicit_booleans() {
+        // Absent fields send nothing (env/config resolution stays with the CLI).
+        assert_eq!(open_args(&json!({})).unwrap(), vec!["open"]);
+
+        // Explicit true and false are both forwarded, so MCP callers can
+        // override AGENT_BROWSER_WEBGPU/config just like `--webgpu false`.
+        assert_eq!(
+            open_args(&json!({ "webgpu": false, "url": "https://example.com" })).unwrap(),
+            vec!["--webgpu", "false", "open", "https://example.com"]
+        );
+        assert_eq!(
+            open_args(&json!({ "headed": true, "webgpu": true })).unwrap(),
+            vec!["--headed", "true", "--webgpu", "true", "open"]
+        );
+        assert_eq!(
+            open_args(&json!({ "headed": false })).unwrap(),
+            vec!["--headed", "false", "open"]
+        );
+    }
+
+    #[test]
+    fn doctor_tool_exposes_webgpu_option() {
+        let tools = tools();
+        let doctor = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some(TOOL_DOCTOR))
+            .unwrap();
+        let props = &doctor["inputSchema"]["properties"];
+        assert!(props.get("offline").is_some());
+        assert!(props.get("quick").is_some());
+        assert!(props.get("fix").is_some());
+        assert!(props.get("webgpu").is_some());
+        assert!(props.get("headed").is_some());
+        assert!(props.get("debug").is_some());
+    }
+
+    #[test]
+    fn doctor_args_forwards_explicit_booleans() {
+        assert_eq!(doctor_args(&json!({})).unwrap(), vec!["doctor"]);
+        // Presence flags only sent when true.
+        assert_eq!(
+            doctor_args(&json!({ "offline": true, "quick": false })).unwrap(),
+            vec!["doctor", "--offline"]
+        );
+        // Value-taking booleans forwarded both ways so env/config can be
+        // overridden.
+        assert_eq!(
+            doctor_args(&json!({ "webgpu": true, "headed": false })).unwrap(),
+            vec!["doctor", "--webgpu", "true", "--headed", "false"]
+        );
+        assert_eq!(
+            doctor_args(&json!({ "debug": true })).unwrap(),
+            vec!["doctor", "--debug", "true"]
+        );
     }
 
     #[test]
@@ -3836,6 +4010,17 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("agent-browser mcp --tools all"));
+        let debug_profile = result["structuredContent"]["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|profile| profile["name"] == "debug")
+            .unwrap();
+        assert!(debug_profile["description"]
+            .as_str()
+            .unwrap()
+            .contains("accessibility audits"));
+        assert!(McpConfig::from_profiles(vec![ToolProfile::Debug]).allows(TOOL_A11Y));
     }
 
     #[test]
@@ -3850,6 +4035,37 @@ mod tests {
         .unwrap();
 
         assert_eq!(text, "# Docs\n\nReadable content.");
+    }
+
+    #[test]
+    fn response_text_formats_a11y_findings_before_url_metadata() {
+        let text = response_text(&json!({
+            "success": true,
+            "data": {
+                "url": "https://example.com",
+                "axeVersion": "4.12.1",
+                "counts": {
+                    "violations": 1,
+                    "incomplete": 0,
+                    "passes": 12,
+                    "inapplicable": 20
+                },
+                "violations": [{
+                    "id": "image-alt",
+                    "impact": "critical",
+                    "help": "Images must have alternative text",
+                    "nodeCount": 1,
+                    "nodes": [{ "target": ["#hero"] }]
+                }],
+                "incomplete": []
+            }
+        }))
+        .unwrap();
+
+        assert!(text.contains("violations: 1"));
+        assert!(text.contains("[critical] image-alt"));
+        assert!(text.contains("  - #hero"));
+        assert_ne!(text, "https://example.com");
     }
 
     #[test]
@@ -3948,6 +4164,22 @@ mod tests {
     }
 
     #[test]
+    fn common_global_args_include_allowed_domains() {
+        let mut args = Vec::new();
+
+        append_common_global_args(
+            &mut args,
+            &json!({
+                "allowedDomains": ["example.com", "*.example.org"]
+            }),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(args, vec!["--allowed-domains", "example.com,*.example.org"]);
+    }
+
+    #[test]
     fn tool_schema_includes_extra_args_for_cli_parity() {
         let tools = tools();
         let open = tools
@@ -3966,6 +4198,24 @@ mod tests {
             open["inputSchema"]["properties"]["namespace"]["type"],
             "string"
         );
+        assert_eq!(
+            open["inputSchema"]["properties"]["allowedDomains"]["type"],
+            "array"
+        );
+    }
+
+    #[test]
+    fn tool_schema_har_start_content_matches_cli_modes() {
+        let tools = tools();
+        let har_start = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some(TOOL_NETWORK_HAR_START))
+            .unwrap();
+        let modes = har_start["inputSchema"]["properties"]["content"]["enum"]
+            .as_array()
+            .unwrap();
+        // Must stay in sync with the CLI parser's accepted --content values.
+        assert_eq!(modes, &vec![json!("all"), json!("text"), json!("none")]);
     }
 
     #[test]
@@ -3983,6 +4233,10 @@ mod tests {
             .iter()
             .find(|t| t["name"].as_str() == Some(TOOL_READ))
             .unwrap();
+        let a11y = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some(TOOL_A11Y))
+            .unwrap();
         let skills_get = tools
             .iter()
             .find(|t| t["name"].as_str() == Some(TOOL_SKILLS_GET))
@@ -3991,6 +4245,7 @@ mod tests {
         assert_eq!(open["annotations"]["readOnlyHint"], false);
         assert_eq!(open["annotations"]["openWorldHint"], true);
         assert_eq!(read["annotations"]["readOnlyHint"], true);
+        assert_eq!(a11y["annotations"]["readOnlyHint"], false);
         assert_eq!(read["annotations"]["openWorldHint"], true);
         assert_eq!(get_url["annotations"]["readOnlyHint"], true);
         assert_eq!(get_url["annotations"]["openWorldHint"], true);
