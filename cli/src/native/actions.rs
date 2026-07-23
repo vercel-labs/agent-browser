@@ -5981,20 +5981,31 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
         mgr.resolve_tab_ref(&tab_ref)?
     };
+    let dialog_session = state
+        .pending_dialog
+        .as_ref()
+        .and_then(|d| d.session_id.clone());
+    let result = {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        mgr.tab_switch_by_id(tab_id, dialog_session.as_deref())
+            .await?
+    };
+    // Clear only after the switch commits, so a failed switch does not strand
+    // the user on the old tab with dead refs and frame scope.
     state.ref_map.clear();
     state.active_iframe_sessions.clear();
     state.active_frame_id = None;
-    let result = {
-        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-        mgr.tab_switch_by_id(tab_id).await?
-    };
 
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
     install_network_controls_or_close(state, has_proxy_creds).await?;
     state.refresh_active_iframe_sessions().await;
 
+    // A dialog-blocked tab's renderer is paused and cannot answer an eval, so
+    // skip the viewport sync; it would otherwise stall on the CDP timeout. The
+    // sync resumes on the next command once the dialog is resolved.
+    let dialog_blocked = result.get("dialogBlocked").and_then(|v| v.as_bool()) == Some(true);
     if let Some(ref server) = state.stream_server {
-        if let Some(ref mgr) = state.browser {
+        if let Some(mgr) = state.browser.as_ref().filter(|_| !dialog_blocked) {
             if let Ok(dims) = mgr
                 .evaluate(
                     "JSON.stringify([window.innerWidth,window.innerHeight])",
@@ -6027,13 +6038,20 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             None => None,
         }
     };
+    let dialog_session = state
+        .pending_dialog
+        .as_ref()
+        .and_then(|d| d.session_id.clone());
+    let result = {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        mgr.tab_close_by_id(tab_id, dialog_session.as_deref())
+            .await?
+    };
+    // Clear only after the close commits; a rejected close (last tab, bad
+    // index) must not wipe the caller's refs and frame scope.
     state.ref_map.clear();
     state.active_iframe_sessions.clear();
     state.active_frame_id = None;
-    let result = {
-        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-        mgr.tab_close_by_id(tab_id).await?
-    };
     state.refresh_active_iframe_sessions().await;
     Ok(result)
 }
