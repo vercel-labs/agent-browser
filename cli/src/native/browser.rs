@@ -155,6 +155,26 @@ fn active_page_index_after_removal(
     active_page_index
 }
 
+/// Decides the active page index after a page is appended.
+///
+/// A freshly appended page becomes active only when the caller explicitly
+/// activates it (an explicit user command such as `tab new` / `window new`) or
+/// when it is the first page (so a non-empty manager always has a valid active
+/// index). Event-discovered / human-opened tabs are appended with
+/// `activate = false` and must not steal the active pointer.
+fn active_page_index_after_add(
+    active_page_index: usize,
+    new_index: usize,
+    was_empty: bool,
+    activate: bool,
+) -> usize {
+    if was_empty || activate {
+        new_index
+    } else {
+        active_page_index
+    }
+}
+
 /// Converts common error messages into AI-friendly, actionable descriptions.
 pub fn to_ai_friendly_error(error: &str) -> String {
     let lower = error.to_lowercase();
@@ -230,11 +250,21 @@ pub fn format_tab_id(tab_id: u32) -> String {
 }
 
 /// A tab reference as parsed from CLI/JSON input. Either a stable id like
-/// `t2` or a user-assigned label like `docs`.
+/// `t2`, a user-assigned label like `docs`, or a CDP target id like
+/// `4A0B...C3`. Target ids are stable across daemon restarts, unlike `t<N>`
+/// ids which are per-daemon counters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TabRef {
     Id(u32),
     Label(String),
+    Target(String),
+}
+
+/// Heuristic for CDP target ids: long hex strings (Chrome uses 32 uppercase
+/// hex chars). Only used for inputs that are not valid labels; label-shaped
+/// hex strings resolve label-first with a target-id fallback.
+fn looks_like_target_id(s: &str) -> bool {
+    s.len() >= 16 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 impl TabRef {
@@ -262,6 +292,9 @@ impl TabRef {
                 }
                 return Ok(TabRef::Id(id));
             }
+        }
+        if looks_like_target_id(input) && !is_valid_label(input) {
+            return Ok(TabRef::Target(input.to_string()));
         }
         if input.chars().all(|c| c.is_ascii_digit()) {
             return Err(format!(
@@ -358,6 +391,36 @@ pub struct BrowserManager {
     /// True when the CDP WebSocket is already scoped to a page target and
     /// browser-level Target.* commands are not available.
     direct_page: bool,
+    /// Strict session-to-tab binding (`--pin-tab`). When enabled, the session
+    /// never silently adopts another tab: if the bound tab goes away, page
+    /// commands fail with a `tab_gone` error until the agent re-binds via
+    /// `tab new` or `tab <ref>`.
+    pin_tab: bool,
+    /// CDP target id of the tab this session is bound to. Updated whenever
+    /// the session creates a tab or explicitly switches tabs; persisted by
+    /// the daemon so re-attach selects the same tab instead of index 0.
+    bound_target_id: Option<String>,
+    /// Set when `pin_tab` is enabled and the bound tab was destroyed
+    /// (externally, or found missing at attach time): `(target_id, last_url)`.
+    /// While set, commands that need the active page fail with `tab_gone`.
+    bound_target_gone: Option<(String, String)>,
+}
+
+/// Stable machine-readable prefix for "the bound tab no longer exists"
+/// errors, so scripts using `--json` can match on it.
+pub const TAB_GONE_PREFIX: &str = "tab_gone:";
+
+fn tab_gone_error(target_id: &str, last_url: &str) -> String {
+    let url_part = if last_url.is_empty() {
+        String::new()
+    } else {
+        format!(", last url {}", last_url)
+    };
+    format!(
+        "{} bound tab is gone (target {}{}). Run `agent-browser tab new <url>` to bind a new \
+         tab, or `agent-browser tab list` to pick an existing one",
+        TAB_GONE_PREFIX, target_id, url_part
+    )
 }
 
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -431,6 +494,9 @@ impl BrowserManager {
                 visited_origins: HashSet::new(),
                 next_tab_id: 1,
                 direct_page: false,
+                pin_tab: false,
+                bound_target_id: None,
+                bound_target_gone: None,
             };
             manager.discover_and_attach_targets().await?;
             manager
@@ -521,6 +587,9 @@ impl BrowserManager {
             visited_origins: HashSet::new(),
             next_tab_id: 1,
             direct_page,
+            pin_tab: false,
+            bound_target_id: None,
+            bound_target_gone: None,
         };
 
         if direct_page {
@@ -604,6 +673,7 @@ impl BrowserManager {
                 target_type: "page".to_string(),
             });
             self.active_page_index = 0;
+            self.bind_active_target();
             self.enable_domains(&attach_result.session_id).await?;
         } else {
             for target in &page_targets {
@@ -805,10 +875,101 @@ impl BrowserManager {
     }
 
     pub fn active_session_id(&self) -> Result<&str, String> {
+        self.check_bound()?;
         self.pages
             .get(self.active_page_index)
             .map(|p| p.session_id.as_str())
             .ok_or_else(|| "No active page".to_string())
+    }
+
+    // -----------------------------------------------------------------------
+    // Session-to-tab binding
+    // -----------------------------------------------------------------------
+
+    /// Enable or disable strict pin-tab semantics for this session.
+    /// Enabling binds the currently active tab immediately, so a session that
+    /// turns pinning on at runtime enforces on the live tab instead of leaving
+    /// `bound_target_id` unset until a restart re-derives it from the persisted
+    /// snapshot (the "pinning applied too late / without binding" gap).
+    /// Disabling clears a pending `tab_gone` state (which only exists under pin
+    /// semantics) so the session falls back to legacy selection instead of
+    /// staying stuck on errors for a pin it no longer has.
+    pub fn set_pin_tab(&mut self, pin: bool) {
+        self.pin_tab = pin;
+        if pin {
+            self.bind_active_target();
+        } else {
+            self.bound_target_gone = None;
+        }
+    }
+
+    pub fn pin_tab(&self) -> bool {
+        self.pin_tab
+    }
+
+    /// The target id this session is bound to, if any.
+    pub fn bound_target_id(&self) -> Option<&str> {
+        self.bound_target_id.as_deref()
+    }
+
+    /// Returns the `tab_gone` error when the bound tab no longer exists.
+    /// Commands that operate on the active page call this (via
+    /// `active_session_id` / `active_target_id`) so they fail loudly instead
+    /// of acting on a neighboring tab. Recovery commands (`tab list`,
+    /// `tab new`, `tab <ref>`) do not.
+    fn check_bound(&self) -> Result<(), String> {
+        match self.bound_target_gone {
+            Some((ref target_id, ref last_url)) => Err(tab_gone_error(target_id, last_url)),
+            None => Ok(()),
+        }
+    }
+
+    /// True when the bound tab is gone and the session needs an explicit
+    /// re-bind (`tab new` / `tab <ref>`) before page commands can proceed.
+    pub fn bound_target_is_gone(&self) -> bool {
+        self.bound_target_gone.is_some()
+    }
+
+    /// Bind this session to the currently active tab. Called whenever the
+    /// session creates a tab or explicitly switches tabs; clears any
+    /// `tab_gone` state.
+    fn bind_active_target(&mut self) {
+        self.bound_target_id = self
+            .pages
+            .get(self.active_page_index)
+            .map(|p| p.target_id.clone());
+        self.bound_target_gone = None;
+    }
+
+    /// Restore a persisted binding after (re)attach. If the bound target is
+    /// still alive, make it the active page and return `true`. If it is
+    /// gone, return `false`: with `pin_tab` the manager enters the `tab_gone`
+    /// state, otherwise the legacy selection (index 0) is kept unchanged.
+    pub fn restore_target_binding(&mut self, target_id: &str, last_url: &str) -> bool {
+        if let Some(index) = self.pages.iter().position(|p| p.target_id == target_id) {
+            self.active_page_index = index;
+            self.bound_target_id = Some(target_id.to_string());
+            self.bound_target_gone = None;
+            return true;
+        }
+        self.bound_target_id = None;
+        if self.pin_tab {
+            self.bound_target_gone = Some((target_id.to_string(), last_url.to_string()));
+        }
+        false
+    }
+
+    /// React to the bound tab disappearing (closed externally, or closed by
+    /// this session). With `pin_tab`, enter the `tab_gone` state so nothing
+    /// silently retargets; otherwise just drop the stale binding.
+    fn handle_bound_target_removed(&mut self, target_id: &str, last_url: &str) {
+        if self.bound_target_id.as_deref() != Some(target_id) {
+            return;
+        }
+        self.bound_target_id = None;
+        if self.pin_tab {
+            self.bound_target_gone = Some((target_id.to_string(), last_url.to_string()));
+        }
     }
 
     pub async fn navigate(&mut self, url: &str, wait_until: WaitUntil) -> Result<Value, String> {
@@ -855,7 +1016,11 @@ impl BrowserManager {
             page.title = title.clone();
         }
 
-        Ok(json!({ "url": page_url, "title": title }))
+        let target_id = self
+            .pages
+            .get(self.active_page_index)
+            .map(|p| p.target_id.clone());
+        Ok(json!({ "url": page_url, "title": title, "targetId": target_id }))
     }
 
     async fn wait_for_lifecycle(
@@ -1072,6 +1237,7 @@ impl BrowserManager {
     }
 
     pub fn active_target_id(&self) -> Result<&str, String> {
+        self.check_bound()?;
         self.pages
             .get(self.active_page_index)
             .map(|p| p.target_id.as_str())
@@ -1129,6 +1295,7 @@ impl BrowserManager {
             target_type: "page".to_string(),
         });
         self.active_page_index = 0;
+        self.bind_active_target();
         self.enable_domains(&attach_result.session_id).await?;
 
         Ok(())
@@ -1165,11 +1332,12 @@ impl BrowserManager {
             .map(|(i, p)| {
                 json!({
                     "tabId": format_tab_id(p.tab_id),
+                    "targetId": p.target_id,
                     "label": p.label,
                     "title": p.title,
                     "url": p.url,
                     "type": p.target_type,
-                    "active": i == self.active_page_index,
+                    "active": i == self.active_page_index && !self.bound_target_is_gone(),
                 })
             })
             .collect()
@@ -1194,13 +1362,38 @@ impl BrowserManager {
                 .iter()
                 .find(|p| p.label.as_deref() == Some(name.as_str()))
                 .map(|p| p.tab_id)
+                // A label-shaped hex string may actually be a CDP target id
+                // (target ids can start with a letter); fall back to an
+                // exact target-id match before giving up.
+                .or_else(|| {
+                    if looks_like_target_id(name) {
+                        self.find_tab_id_by_target(name)
+                    } else {
+                        None
+                    }
+                })
                 .ok_or_else(|| {
                     format!(
                         "No tab with label `{}`; run `agent-browser tab` to list open tabs",
                         name
                     )
                 }),
+            TabRef::Target(target_id) => self.find_tab_id_by_target(target_id).ok_or_else(|| {
+                format!(
+                    "No tab with target id `{}`; run `agent-browser tab list --json` to \
+                         list open tabs with their target ids",
+                    target_id
+                )
+            }),
         }
+    }
+
+    /// Exact, case-insensitive match of a CDP target id to a stable tab id.
+    fn find_tab_id_by_target(&self, target_id: &str) -> Option<u32> {
+        self.pages
+            .iter()
+            .find(|p| p.target_id.eq_ignore_ascii_case(target_id))
+            .map(|p| p.tab_id)
     }
 
     /// Returns true iff a tab already carries the given label.
@@ -1261,6 +1454,7 @@ impl BrowserManager {
         self.next_tab_id += 1;
         let index = self.pages.len();
         let label = label.map(|s| s.to_string());
+        let target_id = result.target_id.clone();
         self.pages.push(PageInfo {
             tab_id,
             label: label.clone(),
@@ -1271,9 +1465,11 @@ impl BrowserManager {
             target_type: "page".to_string(),
         });
         self.active_page_index = index;
+        self.bind_active_target();
 
         Ok(json!({
             "tabId": format_tab_id(tab_id),
+            "targetId": target_id,
             "label": label,
             "url": target_url,
             "total": self.pages.len(),
@@ -1309,6 +1505,10 @@ impl BrowserManager {
             })?;
         self.enable_domains(&session_id).await?;
         self.active_page_index = index;
+        // An explicit tab switch re-binds the session (and clears any
+        // tab_gone state), so a pinned session follows the tab the agent
+        // deliberately moved to.
+        self.bind_active_target();
 
         // Bring tab to front
         let _ = self
@@ -1337,6 +1537,7 @@ impl BrowserManager {
         let page = &self.pages[index];
         let mut result = json!({
             "tabId": format_tab_id(page.tab_id),
+            "targetId": page.target_id,
             "label": page.label,
             "url": url,
             "title": title,
@@ -1359,6 +1560,11 @@ impl BrowserManager {
         index: Option<usize>,
         dialog_session: Option<&str>,
     ) -> Result<Value, String> {
+        if index.is_none() {
+            // "Close the current tab" must not silently close a fallback tab
+            // when the bound tab is already gone.
+            self.check_bound()?;
+        }
         let target_index = index.unwrap_or(self.active_page_index);
 
         if target_index >= self.pages.len() {
@@ -1373,6 +1579,8 @@ impl BrowserManager {
         self.update_active_page_after_removal(target_index);
         let closed_tab_id = page.tab_id;
         let closed_label = page.label.clone();
+        let closed_target_id = page.target_id.clone();
+        self.handle_bound_target_removed(&page.target_id, &page.url);
         let _ = self
             .client
             .send_command_typed::<_, Value>(
@@ -1386,26 +1594,32 @@ impl BrowserManager {
 
         let mut result = json!({
             "tabId": format_tab_id(closed_tab_id),
+            "targetId": closed_target_id,
             "label": closed_label,
             "closed": true,
         });
 
-        // The close has already committed. The tab that becomes active may
-        // itself be discarded, which would hang enable_domains; revive it
-        // first. A successor that cannot revive must not turn the completed
-        // close into a reported failure, so its error is not propagated.
-        let session_id = self.pages[self.active_page_index].session_id.clone();
-        let target_id = self.pages[self.active_page_index].target_id.clone();
-        if let Ok(state) = self
-            .ensure_renderer_alive(&session_id, &target_id, dialog_session)
-            .await
-        {
-            // Best-effort: enabling domains on the successor must not turn the
-            // completed close into a reported failure either.
-            let _ = self.enable_domains(&session_id).await;
-            // Surface a reload of the newly active tab, mirroring tab switch.
-            if matches!(state, RendererState::Revived) {
-                result["activeTabRevived"] = json!(true);
+        // With pin-tab, closing the bound tab leaves the session unbound (page
+        // commands return `tab_gone` until an explicit re-bind), so don't touch
+        // the neighboring tab that inherited the active slot.
+        if !self.bound_target_is_gone() {
+            // The close has already committed. The tab that becomes active may
+            // itself be discarded, which would hang enable_domains; revive it
+            // first. A successor that cannot revive must not turn the completed
+            // close into a reported failure, so its error is not propagated.
+            let session_id = self.pages[self.active_page_index].session_id.clone();
+            let target_id = self.pages[self.active_page_index].target_id.clone();
+            if let Ok(state) = self
+                .ensure_renderer_alive(&session_id, &target_id, dialog_session)
+                .await
+            {
+                // Best-effort: enabling domains on the successor must not turn
+                // the completed close into a reported failure either.
+                let _ = self.enable_domains(&session_id).await;
+                // Surface a reload of the newly active tab, mirroring tab switch.
+                if matches!(state, RendererState::Revived) {
+                    result["activeTabRevived"] = json!(true);
+                }
             }
         }
 
@@ -1698,10 +1912,53 @@ impl BrowserManager {
         id
     }
 
+    /// Append a page and make it active (and bound). Use for explicit user
+    /// commands (`window new`, recording setup) where the new page should
+    /// become active.
     pub fn add_page(&mut self, page: PageInfo) {
-        let index = self.pages.len();
+        self.add_page_with_activation(page, true);
+    }
+
+    /// Append a page WITHOUT activating it. Use for event-discovered targets
+    /// (`Target.targetCreated` drained from the shared Chrome) so a tab the
+    /// human opens never steals the agent's active tab or its binding.
+    pub fn add_page_without_activation(&mut self, page: PageInfo) {
+        self.add_page_with_activation(page, false);
+    }
+
+    fn add_page_with_activation(&mut self, page: PageInfo, activate: bool) {
+        let new_index = self.pages.len();
+        // A pinned session whose bound tab is gone must not silently adopt a
+        // discovered (non-activated) tab: activating it here would clear the
+        // `tab_gone` state and re-bind the session to a tab it never opened,
+        // exactly the hijack `tab_gone` exists to prevent. The empty-pages
+        // branch of the activation policy would otherwise force this. Recovery
+        // stays explicit (`tab new` / `tab <ref>` pass `activate = true`).
+        if !activate && self.pin_tab && self.bound_target_gone.is_some() {
+            self.pages.push(page);
+            return;
+        }
+        let was_empty = self.pages.is_empty();
         self.pages.push(page);
-        self.active_page_index = index;
+        self.active_page_index =
+            active_page_index_after_add(self.active_page_index, new_index, was_empty, activate);
+        // Only pages that actually became active update the session binding;
+        // background-registered pages must never overwrite it.
+        if self.active_page_index == new_index {
+            self.bind_active_target();
+        }
+    }
+
+    /// The active page's `(target_id, url)` for binding persistence, or
+    /// `None` when there is no page or the bound tab is gone (a stale
+    /// binding must not be overwritten by the fallback tab).
+    pub fn binding_snapshot(&self) -> Option<(String, String)> {
+        if self.bound_target_is_gone() {
+            return None;
+        }
+        self.pages
+            .get(self.active_page_index)
+            .map(|p| (p.target_id.clone(), p.url.clone()))
     }
 
     pub fn update_page_target_info(&mut self, target: &TargetInfo) -> bool {
@@ -1710,13 +1967,56 @@ impl BrowserManager {
 
     pub fn remove_page_by_target_id(&mut self, target_id: &str) {
         if let Some(pos) = self.pages.iter().position(|p| p.target_id == target_id) {
-            self.pages.remove(pos);
+            let page = self.pages.remove(pos);
             self.update_active_page_after_removal(pos);
+            // If the destroyed target was the bound tab (closed externally,
+            // e.g. by another session sharing this browser), fail loudly
+            // under pin-tab instead of silently pointing at a neighbor.
+            self.handle_bound_target_removed(&page.target_id, &page.url);
         }
     }
 
     pub fn has_target(&self, target_id: &str) -> bool {
         self.pages.iter().any(|p| p.target_id == target_id)
+    }
+
+    /// Single decision point for both CDP-event-discovered target drains
+    /// (`Target.attachedToTarget` and `Target.targetCreated` handlers in
+    /// actions.rs). If the target is already tracked, only its metadata is
+    /// refreshed in place. Otherwise a new page is appended WITHOUT
+    /// activation: event-discovered targets (a tab the human opened in the
+    /// shared Chrome, or a JS-opened popup) must never steal the agent's
+    /// active tab or overwrite the pin binding. Explicit agent commands
+    /// (`tab new`, `window new`, `click --new-tab`) register their own page
+    /// via `add_page` on their own path and never go through this function.
+    /// Both drain handlers call this one function so the activation policy
+    /// can't diverge between them; a regression here breaks both handlers
+    /// at once and is caught by `test_register_discovered_page_*` below.
+    pub fn register_discovered_page(
+        &mut self,
+        target_id: &str,
+        session_id: &str,
+        url: String,
+        title: String,
+        target_type: String,
+    ) -> bool {
+        if let Some(p) = self.pages.iter_mut().find(|p| p.target_id == target_id) {
+            p.url = url;
+            p.title = title;
+            p.target_type = target_type;
+            return false;
+        }
+        let tab_id = self.assign_tab_id();
+        self.add_page_without_activation(PageInfo {
+            tab_id,
+            label: None,
+            target_id: target_id.to_string(),
+            session_id: session_id.to_string(),
+            url,
+            title,
+            target_type,
+        });
+        true
     }
 
     pub fn page_count(&self) -> usize {
@@ -1890,6 +2190,9 @@ async fn initialize_lightpanda_manager(
             visited_origins: HashSet::new(),
             next_tab_id: 1,
             direct_page: false,
+            pin_tab: false,
+            bound_target_id: None,
+            bound_target_gone: None,
         };
 
         match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {
@@ -2135,6 +2438,27 @@ mod tests {
     #[test]
     fn test_active_page_index_after_removal_resets_when_last_page_disappears() {
         assert_eq!(active_page_index_after_removal(0, 0, 0), 0);
+    }
+
+    #[test]
+    fn test_active_page_index_after_add_first_page_always_activates() {
+        // The first page must become active even without explicit activation,
+        // so a manager that has pages always has a valid active index.
+        assert_eq!(active_page_index_after_add(0, 0, true, false), 0);
+        assert_eq!(active_page_index_after_add(0, 0, true, true), 0);
+    }
+
+    #[test]
+    fn test_active_page_index_after_add_discovered_tab_does_not_steal_active() {
+        // Event-discovered / human-opened tabs are appended without activation and
+        // must NOT move the active pointer (the active-tab steal fix).
+        assert_eq!(active_page_index_after_add(2, 5, false, false), 2);
+    }
+
+    #[test]
+    fn test_active_page_index_after_add_explicit_activation_moves_active() {
+        // Explicit user commands (`tab new`, `window new`) activate the new page.
+        assert_eq!(active_page_index_after_add(2, 5, false, true), 5);
     }
 
     #[test]
@@ -2510,6 +2834,447 @@ mod tests {
             "should wait for idle after second request, got {:?}",
             elapsed
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Session-to-tab binding tests
+    // -----------------------------------------------------------------------
+
+    fn page(tab_id: u32, target_id: &str, url: &str) -> PageInfo {
+        PageInfo {
+            tab_id,
+            label: None,
+            target_id: target_id.to_string(),
+            session_id: format!("session-{}", tab_id),
+            url: url.to_string(),
+            title: String::new(),
+            target_type: "page".to_string(),
+        }
+    }
+
+    /// Build a `BrowserManager` backed by a dummy WebSocket server that
+    /// accepts the connection and then stays silent. Enough for the binding
+    /// logic, which never awaits a CDP response in these tests.
+    async fn test_manager(pages: Vec<PageInfo>) -> BrowserManager {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                if let Ok(_ws) = tokio_tungstenite::accept_async(stream).await {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
+            }
+        });
+        let client = CdpClient::connect(&format!("ws://{}", addr)).await.unwrap();
+        BrowserManager {
+            client: Arc::new(client),
+            browser_process: None,
+            ws_url: format!("ws://{}", addr),
+            pages,
+            active_page_index: 0,
+            default_timeout_ms: 25_000,
+            download_path: None,
+            ignore_https_errors: false,
+            visited_origins: HashSet::new(),
+            next_tab_id: 100,
+            direct_page: false,
+            pin_tab: false,
+            bound_target_id: None,
+            bound_target_gone: None,
+        }
+    }
+
+    const TARGET_A: &str = "AAAA0000BBBB1111CCCC2222DDDD3333";
+    const TARGET_B: &str = "4F0A1111BBBB2222CCCC3333DDDD4444";
+
+    #[tokio::test]
+    async fn test_restore_target_binding_selects_bound_target() {
+        let mut mgr = test_manager(vec![
+            page(1, TARGET_B, "https://other.example"),
+            page(2, TARGET_A, "https://mine.example"),
+        ])
+        .await;
+
+        assert!(mgr.restore_target_binding(TARGET_A, "https://mine.example"));
+        assert_eq!(mgr.active_target_id().unwrap(), TARGET_A);
+        assert_eq!(mgr.bound_target_id(), Some(TARGET_A));
+        assert!(!mgr.bound_target_is_gone());
+    }
+
+    #[tokio::test]
+    async fn test_restore_target_binding_missing_with_pin_enters_tab_gone() {
+        let mut mgr = test_manager(vec![page(1, TARGET_B, "https://other.example")]).await;
+        mgr.set_pin_tab(true);
+
+        assert!(!mgr.restore_target_binding(TARGET_A, "https://mine.example/checkout"));
+        assert!(mgr.bound_target_is_gone());
+
+        let err = mgr.active_session_id().unwrap_err();
+        assert!(
+            err.starts_with(TAB_GONE_PREFIX),
+            "unexpected error: {}",
+            err
+        );
+        assert!(err.contains(TARGET_A));
+        assert!(err.contains("https://mine.example/checkout"));
+        assert!(err.contains("tab new"));
+
+        // active_target_id is guarded the same way
+        assert!(mgr
+            .active_target_id()
+            .unwrap_err()
+            .starts_with(TAB_GONE_PREFIX));
+        // No tab is reported active while the binding is unresolved.
+        assert!(mgr.tab_list().iter().all(|t| t["active"] == false));
+    }
+
+    #[tokio::test]
+    async fn test_restore_target_binding_missing_without_pin_keeps_legacy_selection() {
+        let mut mgr = test_manager(vec![page(1, TARGET_B, "https://other.example")]).await;
+
+        assert!(!mgr.restore_target_binding(TARGET_A, "https://mine.example"));
+        assert!(!mgr.bound_target_is_gone());
+        // Legacy behavior: first target stays selected and commands work.
+        assert_eq!(mgr.active_target_id().unwrap(), TARGET_B);
+    }
+
+    #[tokio::test]
+    async fn test_external_removal_of_bound_tab_with_pin_enters_tab_gone() {
+        let mut mgr = test_manager(vec![
+            page(1, TARGET_A, "https://mine.example"),
+            page(2, TARGET_B, "https://other.example"),
+        ])
+        .await;
+        mgr.set_pin_tab(true);
+        assert!(mgr.restore_target_binding(TARGET_A, "https://mine.example"));
+
+        mgr.remove_page_by_target_id(TARGET_A);
+
+        assert!(mgr.bound_target_is_gone());
+        let err = mgr.active_session_id().unwrap_err();
+        assert!(err.starts_with(TAB_GONE_PREFIX));
+        // Recovery data is intact: the other tab is still listed.
+        assert_eq!(mgr.tab_list().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_external_removal_of_bound_tab_without_pin_falls_back() {
+        let mut mgr = test_manager(vec![
+            page(1, TARGET_A, "https://mine.example"),
+            page(2, TARGET_B, "https://other.example"),
+        ])
+        .await;
+        assert!(mgr.restore_target_binding(TARGET_A, "https://mine.example"));
+
+        mgr.remove_page_by_target_id(TARGET_A);
+
+        assert!(!mgr.bound_target_is_gone());
+        assert_eq!(mgr.bound_target_id(), None);
+        assert_eq!(mgr.active_target_id().unwrap(), TARGET_B);
+    }
+
+    #[tokio::test]
+    async fn test_removal_of_other_tab_does_not_affect_binding() {
+        let mut mgr = test_manager(vec![
+            page(1, TARGET_B, "https://other.example"),
+            page(2, TARGET_A, "https://mine.example"),
+        ])
+        .await;
+        mgr.set_pin_tab(true);
+        assert!(mgr.restore_target_binding(TARGET_A, "https://mine.example"));
+
+        mgr.remove_page_by_target_id(TARGET_B);
+
+        assert!(!mgr.bound_target_is_gone());
+        assert_eq!(mgr.active_target_id().unwrap(), TARGET_A);
+        assert_eq!(mgr.bound_target_id(), Some(TARGET_A));
+    }
+
+    #[tokio::test]
+    async fn test_tab_close_current_in_tab_gone_state_errors() {
+        let mut mgr = test_manager(vec![
+            page(1, TARGET_A, "https://mine.example"),
+            page(2, TARGET_B, "https://other.example"),
+        ])
+        .await;
+        mgr.set_pin_tab(true);
+        assert!(mgr.restore_target_binding(TARGET_A, "https://mine.example"));
+        mgr.remove_page_by_target_id(TARGET_A);
+
+        // "Close the current tab" must not close the fallback neighbor.
+        let err = mgr.tab_close(None, None).await.unwrap_err();
+        assert!(err.starts_with(TAB_GONE_PREFIX));
+        assert_eq!(mgr.tab_list().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_binding_snapshot_reflects_active_page_and_gone_state() {
+        let mut mgr = test_manager(vec![
+            page(1, TARGET_A, "https://mine.example"),
+            page(2, TARGET_B, "https://other.example"),
+        ])
+        .await;
+        mgr.set_pin_tab(true);
+        assert!(mgr.restore_target_binding(TARGET_A, "https://mine.example"));
+        assert_eq!(
+            mgr.binding_snapshot(),
+            Some((TARGET_A.to_string(), "https://mine.example".to_string()))
+        );
+
+        mgr.remove_page_by_target_id(TARGET_A);
+        // A stale binding must not be overwritten by the fallback tab.
+        assert_eq!(mgr.binding_snapshot(), None);
+    }
+
+    #[tokio::test]
+    async fn test_add_page_without_activation_does_not_steal_active_slot_or_binding() {
+        let mut mgr = test_manager(vec![page(1, TARGET_A, "https://mine.example")]).await;
+        mgr.set_pin_tab(true);
+        assert!(mgr.restore_target_binding(TARGET_A, "https://mine.example"));
+
+        mgr.add_page_without_activation(page(2, TARGET_B, "https://other.example"));
+
+        assert_eq!(mgr.active_target_id().unwrap(), TARGET_A);
+        assert_eq!(mgr.bound_target_id(), Some(TARGET_A));
+        assert_eq!(mgr.tab_list().len(), 2);
+    }
+
+    /// Calls the REAL production function `BrowserManager::register_discovered_page`
+    /// that both `apply_drained_events` drain handlers in cli/src/native/actions.rs
+    /// call (the `Target.attachedToTarget` handler ~line 945 and the
+    /// `Target.targetCreated` handler ~line 1082) — not a duplicated copy. This
+    /// is the single decision point for finding #3: a foreign target discovered
+    /// via a CDP event drain, while untracked, must never steal the active tab
+    /// or overwrite the pin binding. If `register_discovered_page`'s internal
+    /// call is reverted from `add_page_without_activation` to `add_page`, this
+    /// test fails, and BOTH actions.rs call sites are broken simultaneously
+    /// since there is no other path to diverge through.
+    #[tokio::test]
+    async fn test_register_discovered_page_untracked_target_does_not_steal_pinned_tab() {
+        let mut mgr = test_manager(vec![page(1, TARGET_A, "https://mine.example")]).await;
+        mgr.set_pin_tab(true);
+        assert!(mgr.restore_target_binding(TARGET_A, "https://mine.example"));
+
+        assert!(
+            !mgr.has_target(TARGET_B),
+            "target must be untracked to exercise the vulnerable branch"
+        );
+        let newly_added = mgr.register_discovered_page(
+            TARGET_B,
+            "session-b",
+            "https://foreign.example".to_string(),
+            String::new(),
+            "page".to_string(),
+        );
+
+        assert!(newly_added, "an untracked target must be registered");
+        assert_eq!(
+            mgr.active_target_id().unwrap(),
+            TARGET_A,
+            "the pinned session's active tab must not be stolen by the foreign auto-attached tab"
+        );
+        assert_eq!(
+            mgr.bound_target_id(),
+            Some(TARGET_A),
+            "the pin binding must not be overwritten by the foreign auto-attached tab"
+        );
+        assert_eq!(
+            mgr.tab_list().len(),
+            2,
+            "the foreign tab must still be registered so it shows in `tab list`"
+        );
+    }
+
+    /// Enabling pin at runtime must bind the currently active tab immediately.
+    /// The attach-to-existing path leaves `bound_target_id` unset, so a session
+    /// that turns `--pin-tab` on later would otherwise be pinned-but-unbound
+    /// until a restart re-derived the binding from disk. Force-red: revert
+    /// `set_pin_tab` to only flip the flag and `bound_target_id` stays `None`.
+    #[tokio::test]
+    async fn test_enabling_pin_binds_active_tab_immediately() {
+        let mut mgr = test_manager(vec![
+            page(1, TARGET_A, "https://a.example"),
+            page(2, TARGET_B, "https://b.example"),
+        ])
+        .await;
+        assert_eq!(
+            mgr.bound_target_id(),
+            None,
+            "no binding exists before pin is enabled (attach-to-existing path)"
+        );
+
+        mgr.set_pin_tab(true);
+
+        assert_eq!(
+            mgr.bound_target_id(),
+            Some(TARGET_A),
+            "enabling pin must bind the active tab (index 0) right away"
+        );
+        assert_eq!(
+            mgr.binding_snapshot(),
+            Some((TARGET_A.to_string(), "https://a.example".to_string())),
+            "the live binding must be persistable immediately, not only after restart"
+        );
+    }
+
+    /// A pinned session whose only tracked tab is closed enters the
+    /// `tab_gone` state; a subsequently discovered (auto-attached,
+    /// non-activated) tab must NOT silently re-bind the session and clear
+    /// `tab_gone`. Before the fix, `add_page_with_activation`'s empty-pages
+    /// branch forced activation and `bind_active_target` cleared
+    /// `bound_target_gone`, hijacking the session onto a tab it never opened.
+    /// Force-red: drop the `pin_tab && bound_target_gone` guard in
+    /// `add_page_with_activation` and `active_target_id` becomes `Ok` /
+    /// `bound_target_is_gone` becomes false here.
+    #[tokio::test]
+    async fn test_discovered_tab_does_not_recover_gone_pinned_session() {
+        let mut mgr = test_manager(vec![page(1, TARGET_A, "https://mine.example")]).await;
+        mgr.set_pin_tab(true);
+        assert!(mgr.restore_target_binding(TARGET_A, "https://mine.example"));
+
+        // The bound tab is closed externally: the session's only tracked page
+        // is removed, draining the list to empty and entering tab_gone.
+        mgr.remove_page_by_target_id(TARGET_A);
+        assert!(
+            mgr.bound_target_is_gone(),
+            "closing the bound tab must enter tab_gone"
+        );
+        assert_eq!(
+            mgr.page_count(),
+            0,
+            "the session tracks no pages after the close"
+        );
+
+        // A foreign tab appears and is discovered via a CDP event drain while
+        // the session is gone.
+        let newly_added = mgr.register_discovered_page(
+            TARGET_B,
+            "session-b",
+            "https://foreign.example".to_string(),
+            String::new(),
+            "page".to_string(),
+        );
+        assert!(
+            newly_added,
+            "the foreign tab is still registered so it shows in `tab list`"
+        );
+
+        assert!(
+            mgr.bound_target_is_gone(),
+            "a discovered tab must not clear the tab_gone state"
+        );
+        assert!(
+            mgr.active_target_id().is_err(),
+            "page commands must still fail with tab_gone, not act on the foreign tab"
+        );
+        assert_eq!(
+            mgr.bound_target_id(),
+            None,
+            "the session must not silently re-bind to a tab it never opened"
+        );
+    }
+
+    /// The already-tracked branch: `register_discovered_page` must refresh
+    /// metadata in place rather than pushing a duplicate page or touching
+    /// activation/binding at all.
+    #[tokio::test]
+    async fn test_register_discovered_page_tracked_target_updates_metadata_only() {
+        let mut mgr = test_manager(vec![page(1, TARGET_A, "https://mine.example")]).await;
+        mgr.set_pin_tab(true);
+        assert!(mgr.restore_target_binding(TARGET_A, "https://mine.example"));
+
+        let newly_added = mgr.register_discovered_page(
+            TARGET_A,
+            "session-a",
+            "https://mine.example/updated".to_string(),
+            "Updated Title".to_string(),
+            "page".to_string(),
+        );
+
+        assert!(
+            !newly_added,
+            "an already-tracked target must not be re-added"
+        );
+        assert_eq!(
+            mgr.tab_list().len(),
+            1,
+            "no duplicate page should be created"
+        );
+        assert_eq!(
+            mgr.bound_target_id(),
+            Some(TARGET_A),
+            "binding must be unaffected by a metadata-only update"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_add_page_activates_and_binds() {
+        let mut mgr = test_manager(vec![page(1, TARGET_A, "https://mine.example")]).await;
+        mgr.add_page(page(2, TARGET_B, "https://new.example"));
+
+        assert_eq!(mgr.active_target_id().unwrap(), TARGET_B);
+        assert_eq!(mgr.bound_target_id(), Some(TARGET_B));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_tab_ref_by_target_id() {
+        let mgr = test_manager(vec![
+            page(1, TARGET_A, "https://mine.example"),
+            page(2, TARGET_B, "https://other.example"),
+        ])
+        .await;
+
+        // Digit-leading target ids parse as TabRef::Target.
+        let tab_ref = TabRef::parse(TARGET_B).unwrap();
+        assert_eq!(tab_ref, TabRef::Target(TARGET_B.to_string()));
+        assert_eq!(mgr.resolve_tab_ref(&tab_ref).unwrap(), 2);
+
+        // Letter-leading target ids parse as labels and fall back to a
+        // target-id match.
+        let tab_ref = TabRef::parse(TARGET_A).unwrap();
+        assert_eq!(mgr.resolve_tab_ref(&tab_ref).unwrap(), 1);
+
+        // Case-insensitive.
+        let lower = TARGET_B.to_lowercase();
+        assert_eq!(
+            mgr.resolve_tab_ref(&TabRef::parse(&lower).unwrap())
+                .unwrap(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_tab_ref_unknown_target_id_errors() {
+        let mgr = test_manager(vec![page(1, TARGET_A, "https://mine.example")]).await;
+        let err = mgr
+            .resolve_tab_ref(&TabRef::Target("0123456789ABCDEF".to_string()))
+            .unwrap_err();
+        assert!(err.contains("target id"));
+    }
+
+    #[tokio::test]
+    async fn test_tab_list_includes_target_id() {
+        let mgr = test_manager(vec![page(1, TARGET_A, "https://mine.example")]).await;
+        let tabs = mgr.tab_list();
+        assert_eq!(tabs[0]["targetId"], TARGET_A);
+    }
+
+    #[test]
+    fn test_parse_tab_ref_short_hex_is_label_not_target() {
+        // Short hex strings stay labels (or errors), not target ids.
+        assert_eq!(
+            TabRef::parse("deadbeef"),
+            Ok(TabRef::Label("deadbeef".to_string()))
+        );
+        assert!(TabRef::parse("1234").is_err());
+    }
+
+    #[test]
+    fn test_tab_gone_error_without_url_omits_url_part() {
+        let err = tab_gone_error("ABCD", "");
+        assert!(err.starts_with(TAB_GONE_PREFIX));
+        assert!(err.contains("(target ABCD)"));
+        assert!(!err.contains("last url"));
     }
 
     /// When the overall timeout expires before idle is reached, the function
