@@ -331,17 +331,23 @@ pub struct BrowserManager {
     pub download_path: Option<String>,
     /// Whether to ignore HTTPS certificate errors, re-applied to new contexts (e.g., recording)
     pub ignore_https_errors: bool,
+    launch_user_agent: Option<String>,
+    launch_color_scheme: Option<String>,
     /// Origins visited during this session, used by save_state to collect cross-origin localStorage.
     visited_origins: HashSet<String>,
     next_tab_id: u32,
     /// True when the CDP WebSocket is already scoped to a page target and
     /// browser-level Target.* commands are not available.
     direct_page: bool,
+    /// True after browser-level Target.setAutoAttach becomes the canonical
+    /// owner of new page sessions.
+    browser_auto_attach_enabled: bool,
 }
 
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const LIGHTPANDA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
+const CHROME_ATTACHED_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl BrowserManager {
     pub async fn launch(options: LaunchOptions, engine: Option<&str>) -> Result<Self, String> {
@@ -394,7 +400,7 @@ impl BrowserManager {
             }
         };
 
-        let manager = if engine == "lightpanda" {
+        let mut manager = if engine == "lightpanda" {
             initialize_lightpanda_manager(ws_url, process).await?
         } else {
             let client = Arc::new(CdpClient::connect(&ws_url).await?);
@@ -407,48 +413,25 @@ impl BrowserManager {
                 default_timeout_ms: 25_000,
                 download_path: download_path.clone(),
                 ignore_https_errors,
+                launch_user_agent: user_agent.clone(),
+                launch_color_scheme: color_scheme.clone(),
                 visited_origins: HashSet::new(),
                 next_tab_id: 1,
                 direct_page: false,
+                browser_auto_attach_enabled: false,
             };
             manager.discover_and_attach_targets().await?;
             manager
         };
+        manager.download_path = download_path.clone();
+        manager.ignore_https_errors = ignore_https_errors;
+        manager.launch_user_agent = user_agent;
+        manager.launch_color_scheme = color_scheme;
 
         let session_id = manager.active_session_id()?.to_string();
-
-        if ignore_https_errors {
-            let _ = manager
-                .client
-                .send_command(
-                    "Security.setIgnoreCertificateErrors",
-                    Some(json!({ "ignore": true })),
-                    Some(&session_id),
-                )
-                .await;
-        }
-
-        if let Some(ref ua) = user_agent {
-            let _ = manager
-                .client
-                .send_command(
-                    "Emulation.setUserAgentOverride",
-                    Some(json!({ "userAgent": ua })),
-                    Some(&session_id),
-                )
-                .await;
-        }
-
-        if let Some(ref scheme) = color_scheme {
-            let _ = manager
-                .client
-                .send_command(
-                    "Emulation.setEmulatedMedia",
-                    Some(json!({ "features": [{ "name": "prefers-color-scheme", "value": scheme }] })),
-                    Some(&session_id),
-                )
-                .await;
-        }
+        let _ = manager
+            .apply_launch_session_configuration_pub(&session_id)
+            .await;
 
         if let Some(ref path) = download_path {
             let _ = manager
@@ -497,9 +480,12 @@ impl BrowserManager {
             default_timeout_ms: 25_000,
             download_path: None,
             ignore_https_errors: false,
+            launch_user_agent: None,
+            launch_color_scheme: None,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
             direct_page,
+            browser_auto_attach_enabled: false,
         };
 
         if direct_page {
@@ -583,7 +569,8 @@ impl BrowserManager {
                 target_type: "page".to_string(),
             });
             self.active_page_index = 0;
-            self.enable_domains(&attach_result.session_id).await?;
+            self.enable_initial_attached_page_domains(&attach_result.session_id)
+                .await?;
         } else {
             for target in &page_targets {
                 let attach_result: AttachToTargetResult = self
@@ -596,6 +583,8 @@ impl BrowserManager {
                         },
                         None,
                     )
+                    .await?;
+                self.enable_initial_attached_page_domains(&attach_result.session_id)
                     .await?;
 
                 let tab_id = self.next_tab_id;
@@ -612,11 +601,24 @@ impl BrowserManager {
             }
 
             self.active_page_index = 0;
-            let session_id = self.pages[0].session_id.clone();
-            self.enable_domains(&session_id).await?;
         }
 
         Ok(())
+    }
+
+    async fn enable_initial_attached_page_domains(&self, session_id: &str) -> Result<(), String> {
+        match tokio::time::timeout(
+            CHROME_ATTACHED_TARGET_INIT_TIMEOUT,
+            self.enable_domains(session_id),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(format!(
+                "Timed out after {}ms initializing an attached page. A pre-existing JavaScript dialog may be blocking it; resolve the dialog in Chrome and retry. The dialog was not accepted automatically.",
+                CHROME_ATTACHED_TARGET_INIT_TIMEOUT.as_millis(),
+            )),
+        }
     }
 
     pub async fn enable_domains_pub(&self, session_id: &str) -> Result<(), String> {
@@ -631,7 +633,46 @@ impl BrowserManager {
         self.resume_if_waiting(session_id).await
     }
 
-    pub async fn enable_browser_auto_attach_pub(&self) -> Result<(), String> {
+    pub async fn apply_launch_session_configuration_pub(
+        &self,
+        session_id: &str,
+    ) -> Result<(), String> {
+        if self.ignore_https_errors {
+            self.client
+                .send_command(
+                    "Security.setIgnoreCertificateErrors",
+                    Some(json!({ "ignore": true })),
+                    Some(session_id),
+                )
+                .await?;
+        }
+        if let Some(ref user_agent) = self.launch_user_agent {
+            self.client
+                .send_command(
+                    "Emulation.setUserAgentOverride",
+                    Some(json!({ "userAgent": user_agent })),
+                    Some(session_id),
+                )
+                .await?;
+        }
+        if let Some(ref color_scheme) = self.launch_color_scheme {
+            self.client
+                .send_command(
+                    "Emulation.setEmulatedMedia",
+                    Some(json!({
+                        "features": [{
+                            "name": "prefers-color-scheme",
+                            "value": color_scheme,
+                        }]
+                    })),
+                    Some(session_id),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn enable_browser_auto_attach_pub(&mut self) -> Result<(), String> {
         self.client
             .send_command(
                 "Target.setAutoAttach",
@@ -643,6 +684,7 @@ impl BrowserManager {
                 None,
             )
             .await?;
+        self.browser_auto_attach_enabled = true;
         Ok(())
     }
 
@@ -963,6 +1005,79 @@ impl BrowserManager {
         }
     }
 
+    pub async fn create_target_session(
+        &self,
+        params: Value,
+    ) -> Result<(CreateTargetResult, String, bool), String> {
+        let mut events = self.client.subscribe();
+        let target: CreateTargetResult = self
+            .client
+            .send_command_typed("Target.createTarget", &params, None)
+            .await?;
+
+        if self.browser_auto_attach_enabled {
+            let target_id = target.target_id.clone();
+            let attached_session = async {
+                loop {
+                    match events.recv().await {
+                        Ok(event) if event.method == "Target.attachedToTarget" => {
+                            let matches_target = event.params["targetInfo"]["targetId"].as_str()
+                                == Some(target_id.as_str());
+                            if matches_target {
+                                if let Some(session_id) =
+                                    event.params["sessionId"].as_str().map(ToString::to_string)
+                                {
+                                    return Ok(session_id);
+                                }
+                            }
+                        }
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed) => {
+                            return Err(
+                                "CDP event stream closed while waiting for the new page target"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+            };
+
+            return match tokio::time::timeout(CHROME_ATTACHED_TARGET_INIT_TIMEOUT, attached_session)
+                .await
+            {
+                Ok(Ok(session_id)) => Ok((target, session_id, true)),
+                Ok(Err(error)) => Err(error),
+                Err(_) => {
+                    let _ = self
+                        .client
+                        .send_command_no_wait(
+                            "Target.closeTarget",
+                            Some(json!({ "targetId": target.target_id })),
+                            None,
+                        )
+                        .await;
+                    Err(format!(
+                        "Timed out after {}ms waiting for the auto-attached page target; the target was closed so later commands can continue",
+                        CHROME_ATTACHED_TARGET_INIT_TIMEOUT.as_millis(),
+                    ))
+                }
+            };
+        }
+
+        let attach: AttachToTargetResult = self
+            .client
+            .send_command_typed(
+                "Target.attachToTarget",
+                &AttachToTargetParams {
+                    target_id: target.target_id.clone(),
+                    flatten: true,
+                },
+                None,
+            )
+            .await?;
+        Ok((target, attach.session_id, false))
+    }
+
     pub fn get_cdp_url(&self) -> &str {
         &self.ws_url
     }
@@ -994,50 +1109,36 @@ impl BrowserManager {
     }
 
     /// Ensures the browser has at least one page. If `pages` is empty, creates a new
-    /// about:blank page and attaches to it.
-    pub async fn ensure_page(&mut self) -> Result<(), String> {
+    /// about:blank page and attaches to it. Returns the auto-attached session, when
+    /// applicable, so the command lane can wait for background initialization.
+    pub async fn ensure_page(&mut self) -> Result<Option<(String, String)>, String> {
         if !self.pages.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
 
-        let result: CreateTargetResult = self
-            .client
-            .send_command_typed(
-                "Target.createTarget",
-                &CreateTargetParams {
-                    url: "about:blank".to_string(),
-                },
-                None,
-            )
-            .await?;
-
-        let attach_result: AttachToTargetResult = self
-            .client
-            .send_command_typed(
-                "Target.attachToTarget",
-                &AttachToTargetParams {
-                    target_id: result.target_id.clone(),
-                    flatten: true,
-                },
-                None,
-            )
+        let (result, session_id, auto_attached) = self
+            .create_target_session(json!({ "url": "about:blank" }))
             .await?;
 
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
+        let target_id = result.target_id;
         self.pages.push(PageInfo {
             tab_id,
             label: None,
-            target_id: result.target_id,
-            session_id: attach_result.session_id.clone(),
+            target_id: target_id.clone(),
+            session_id: session_id.clone(),
             url: "about:blank".to_string(),
             title: String::new(),
             target_type: "page".to_string(),
         });
         self.active_page_index = 0;
-        self.enable_domains(&attach_result.session_id).await?;
+        if !auto_attached {
+            self.enable_initial_attached_page_domains(&session_id)
+                .await?;
+        }
 
-        Ok(())
+        Ok(auto_attached.then_some((session_id, target_id)))
     }
 
     // -----------------------------------------------------------------------
@@ -1138,30 +1239,14 @@ impl BrowserManager {
 
         let target_url = url.unwrap_or("about:blank");
 
-        let result: CreateTargetResult = self
-            .client
-            .send_command_typed(
-                "Target.createTarget",
-                &CreateTargetParams {
-                    url: target_url.to_string(),
-                },
-                None,
-            )
+        let (result, session_id, auto_attached) = self
+            .create_target_session(json!({ "url": target_url }))
             .await?;
 
-        let attach: AttachToTargetResult = self
-            .client
-            .send_command_typed(
-                "Target.attachToTarget",
-                &AttachToTargetParams {
-                    target_id: result.target_id.clone(),
-                    flatten: true,
-                },
-                None,
-            )
-            .await?;
-
-        self.enable_domains(&attach.session_id).await?;
+        if !auto_attached {
+            self.enable_initial_attached_page_domains(&session_id)
+                .await?;
+        }
 
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
@@ -1171,7 +1256,7 @@ impl BrowserManager {
             tab_id,
             label: label.clone(),
             target_id: result.target_id,
-            session_id: attach.session_id,
+            session_id,
             url: target_url.to_string(),
             title: String::new(),
             target_type: "page".to_string(),
@@ -1197,7 +1282,8 @@ impl BrowserManager {
 
         self.active_page_index = index;
         let session_id = self.pages[index].session_id.clone();
-        self.enable_domains(&session_id).await?;
+        self.enable_initial_attached_page_domains(&session_id)
+            .await?;
 
         // Bring tab to front
         let _ = self
@@ -1249,7 +1335,8 @@ impl BrowserManager {
             .await;
 
         let session_id = self.pages[self.active_page_index].session_id.clone();
-        self.enable_domains(&session_id).await?;
+        self.enable_initial_attached_page_domains(&session_id)
+            .await?;
 
         Ok(json!({
             "tabId": format_tab_id(closed_tab_id),
@@ -1421,8 +1508,12 @@ impl BrowserManager {
         &self,
         accept: bool,
         prompt_text: Option<&str>,
+        session_id: Option<&str>,
     ) -> Result<(), String> {
-        let session_id = self.active_session_id()?;
+        let session_id = match session_id {
+            Some(session_id) => session_id,
+            None => self.active_session_id()?,
+        };
         let mut params = json!({ "accept": accept });
         if let Some(text) = prompt_text {
             params["promptText"] = Value::String(text.to_string());
@@ -1544,6 +1635,29 @@ impl BrowserManager {
 
     pub fn update_page_target_info(&mut self, target: &TargetInfo) -> bool {
         update_page_target_info_in_pages(&mut self.pages, target)
+    }
+
+    /// Makes a browser-auto-attached session canonical for an already tracked page.
+    /// Returns the superseded session so the caller can detach it.
+    pub fn replace_page_session(
+        &mut self,
+        target: &TargetInfo,
+        session_id: &str,
+    ) -> Option<String> {
+        let page = self
+            .pages
+            .iter_mut()
+            .find(|page| page.target_id == target.target_id)?;
+        page.url = target.url.clone();
+        page.title = target.title.clone();
+        page.target_type = target.target_type.clone();
+        if page.session_id == session_id {
+            return None;
+        }
+        Some(std::mem::replace(
+            &mut page.session_id,
+            session_id.to_string(),
+        ))
     }
 
     pub fn remove_page_by_target_id(&mut self, target_id: &str) {
@@ -1725,9 +1839,12 @@ async fn initialize_lightpanda_manager(
             default_timeout_ms: 25_000,
             download_path: None,
             ignore_https_errors: false,
+            launch_user_agent: None,
+            launch_color_scheme: None,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
             direct_page: false,
+            browser_auto_attach_enabled: false,
         };
 
         match discover_and_attach_lightpanda_targets(&mut manager, deadline).await {

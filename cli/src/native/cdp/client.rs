@@ -45,6 +45,13 @@ pub struct CdpClient {
     _keepalive_handle: tokio::task::JoinHandle<()>,
 }
 
+impl Drop for CdpClient {
+    fn drop(&mut self) {
+        self._reader_handle.abort();
+        self._keepalive_handle.abort();
+    }
+}
+
 impl CdpClient {
     pub async fn connect(url: &str) -> Result<Self, String> {
         Self::connect_with_headers(url, None).await

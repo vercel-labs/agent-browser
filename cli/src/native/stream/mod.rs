@@ -100,6 +100,11 @@ impl StreamServer {
         *guard = session_id;
     }
 
+    #[cfg(test)]
+    pub async fn cdp_session_id_for_test(&self) -> Option<String> {
+        self.cdp_session_id.read().await.clone()
+    }
+
     /// Check whether the server currently has active screencast running.
     pub async fn is_screencasting(&self) -> bool {
         *self.screencasting.lock().await

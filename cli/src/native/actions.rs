@@ -18,10 +18,9 @@ use super::browser::{should_track_target, BrowserManager, WaitUntil};
 use super::cdp::chrome::LaunchOptions;
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
-    AttachToTargetParams, AttachToTargetResult, CdpEvent, CreateTargetResult,
-    DispatchMouseEventParams, ExceptionThrownEvent, GetFullAXTreeResult,
-    JavascriptDialogOpeningEvent, TargetCreatedEvent, TargetDestroyedEvent, TargetInfo,
-    TargetInfoChangedEvent,
+    AttachToTargetParams, AttachToTargetResult, CdpEvent, DispatchMouseEventParams,
+    ExceptionThrownEvent, GetFullAXTreeResult, JavascriptDialogOpeningEvent, TargetCreatedEvent,
+    TargetDestroyedEvent, TargetInfo, TargetInfoChangedEvent,
 };
 use super::cookies;
 use super::diff;
@@ -60,6 +59,8 @@ const AUTH_LOGIN_SELECTOR_POLL_INTERVAL_MS: u64 = 100;
 /// Time spent trying targeted username selectors before broad text-input
 /// fallback selectors are allowed.
 const AUTH_LOGIN_PREFERRED_SELECTOR_WINDOW_MS: u64 = 5_000;
+const AUTO_ATTACHED_DIALOG_OBSERVATION_MS: u64 = 500;
+const AUTO_ATTACHED_TARGET_INIT_MS: u64 = 2_000;
 
 pub struct PendingConfirmation {
     pub action: String,
@@ -71,6 +72,13 @@ pub struct PendingConfirmation {
 struct ActiveProviderSession {
     session: providers::ProviderSession,
     plugins: Vec<crate::plugins::PluginConfig>,
+}
+
+#[derive(Clone)]
+enum AutoAttachedTargetState {
+    Preparing,
+    Ready,
+    Failed(String),
 }
 
 /// Captured request/response metadata used to export HAR 1.2 files.
@@ -400,12 +408,17 @@ pub struct DaemonState {
     /// handling domain filtering, route interception, and origin-scoped headers
     /// without deadlocking navigation/evaluate.
     fetch_handler_task: Option<tokio::task::JoinHandle<()>>,
+    /// Preparation state for page targets claimed by the background CDP
+    /// handler. The command lane registers these pages and waits only for this
+    /// bounded handoff instead of trying to initialize them after an opener
+    /// command has already become blocked.
+    auto_attached_target_states: Arc<RwLock<HashMap<String, AutoAttachedTargetState>>>,
     /// Background task that auto-accepts `alert` and `beforeunload` dialogs
     /// so they never block the agent.
     dialog_handler_task: Option<tokio::task::JoinHandle<()>>,
     pub mouse_state: MouseState,
     /// Tracks the currently open JavaScript dialog (alert/confirm/prompt), if any.
-    pub pending_dialog: Option<PendingDialog>,
+    pub pending_dialogs: Vec<PendingDialog>,
     /// A mouse button left logically down because a dialog opened between
     /// mousePressed and mouseReleased; released when the dialog is resolved.
     pub pending_pointer_release: Option<super::interaction::PendingRelease>,
@@ -490,9 +503,10 @@ impl DaemonState {
             origin_headers: Arc::new(RwLock::new(HashMap::new())),
             proxy_credentials: Arc::new(RwLock::new(None)),
             fetch_handler_task: None,
+            auto_attached_target_states: Arc::new(RwLock::new(HashMap::new())),
             dialog_handler_task: None,
             mouse_state: MouseState::default(),
-            pending_dialog: None,
+            pending_dialogs: Vec::new(),
             pending_pointer_release: None,
             auto_dialog: !matches!(
                 env::var("AGENT_BROWSER_NO_AUTO_DIALOG").as_deref(),
@@ -546,6 +560,41 @@ impl DaemonState {
         s
     }
 
+    fn track_pending_dialog(&mut self, dialog: PendingDialog) {
+        if let Some(existing) = self
+            .pending_dialogs
+            .iter_mut()
+            .find(|existing| existing.session_id == dialog.session_id)
+        {
+            *existing = dialog;
+        } else {
+            self.pending_dialogs.push(dialog);
+        }
+    }
+
+    fn pending_dialog_for_active_page(&self) -> Option<&PendingDialog> {
+        let active_session = self
+            .browser
+            .as_ref()
+            .and_then(|manager| manager.active_session_id().ok());
+        self.pending_dialogs.iter().find(|dialog| {
+            matches!(
+                (dialog.session_id.as_deref(), active_session),
+                (Some(dialog_session), Some(active_session)) if dialog_session == active_session
+            ) || dialog.session_id.is_none()
+        })
+    }
+
+    fn pending_dialog_for_command(&self) -> Option<&PendingDialog> {
+        self.pending_dialog_for_active_page()
+            .or_else(|| self.pending_dialogs.first())
+    }
+
+    fn remove_pending_dialog_for_session(&mut self, session_id: Option<&str>) {
+        self.pending_dialogs
+            .retain(|dialog| dialog.session_id.as_deref() != session_id);
+    }
+
     fn subscribe_to_browser_events(&mut self) {
         if let Some(ref browser) = self.browser {
             self.event_rx = Some(browser.client.subscribe());
@@ -572,6 +621,7 @@ impl DaemonState {
         let routes = self.routes.clone();
         let origin_headers = self.origin_headers.clone();
         let proxy_credentials = self.proxy_credentials.clone();
+        let auto_attached_target_states = self.auto_attached_target_states.clone();
 
         self.fetch_handler_task = Some(tokio::spawn(async move {
             loop {
@@ -630,10 +680,88 @@ impl DaemonState {
                         let target_needs_controls = target_info
                             .as_ref()
                             .is_some_and(target_supports_network_controls);
+                        let target_needs_registration =
+                            target_info.as_ref().is_some_and(should_track_target);
 
                         let df = domain_filter.read().await.clone();
                         let has_proxy_creds = proxy_credentials.read().await.is_some();
                         let controls_active = df.is_some() || has_proxy_creds;
+
+                        if target_needs_registration {
+                            auto_attached_target_states
+                                .write()
+                                .await
+                                .insert(sid.clone(), AutoAttachedTargetState::Preparing);
+
+                            let preparation = tokio::time::timeout(
+                                std::time::Duration::from_millis(AUTO_ATTACHED_TARGET_INIT_MS),
+                                async {
+                                    if controls_active {
+                                        if let Some(ref target) = target_info {
+                                            prepare_network_control_target_session(
+                                                &client, &sid, target,
+                                            )
+                                            .await?;
+                                        }
+                                        install_network_controls_for_session(
+                                            &client,
+                                            &sid,
+                                            df.as_ref(),
+                                            has_proxy_creds,
+                                        )
+                                        .await?;
+                                    } else {
+                                        prime_auto_attached_session(&client, &sid).await?;
+                                    }
+                                    if let (Some(filter), Some(target)) =
+                                        (df.as_ref(), target_info.as_ref())
+                                    {
+                                        if should_blank_existing_url(&target.url, filter) {
+                                            client
+                                                .send_command_no_wait(
+                                                    "Page.navigate",
+                                                    Some(json!({ "url": "about:blank" })),
+                                                    Some(&sid),
+                                                )
+                                                .await?;
+                                        }
+                                    }
+                                    client
+                                        .send_command_no_wait(
+                                            "Runtime.runIfWaitingForDebugger",
+                                            None,
+                                            Some(&sid),
+                                        )
+                                        .await
+                                },
+                            )
+                            .await;
+
+                            let state = match preparation {
+                                Ok(Ok(())) => AutoAttachedTargetState::Ready,
+                                Ok(Err(error)) => AutoAttachedTargetState::Failed(error),
+                                Err(_) => AutoAttachedTargetState::Failed(format!(
+                                    "Timed out after {}ms preparing the target",
+                                    AUTO_ATTACHED_TARGET_INIT_MS
+                                )),
+                            };
+                            if matches!(state, AutoAttachedTargetState::Failed(_)) {
+                                if let Some(target_id) =
+                                    target_info.as_ref().map(|target| target.target_id.as_str())
+                                {
+                                    let _ = client
+                                        .send_command_no_wait(
+                                            "Target.closeTarget",
+                                            Some(json!({ "targetId": target_id })),
+                                            None,
+                                        )
+                                        .await;
+                                }
+                            }
+                            auto_attached_target_states.write().await.insert(sid, state);
+                            continue;
+                        }
+
                         let controls_result = if controls_active && target_needs_controls {
                             async {
                                 if let Some(ref target) = target_info {
@@ -880,6 +1008,7 @@ impl DaemonState {
         // target without changing iframe topology. Refresh after either kind
         // of event so network capture stays scoped to the active page.
         let active_frame_scope_changed = active_frame_scope_may_have_changed(&drained);
+        let mut replaced_page_session = false;
         // ACK screencast frames
         if !drained.pending_acks.is_empty() {
             if let Some(ref browser) = self.browser {
@@ -894,8 +1023,19 @@ impl DaemonState {
 
         // Remove destroyed targets
         for target_id in &drained.destroyed_targets {
-            if let Some(ref mut mgr) = self.browser {
+            let removed_session = if let Some(ref mut mgr) = self.browser {
+                let session_id = mgr
+                    .pages_list()
+                    .into_iter()
+                    .find(|page| page.target_id == *target_id)
+                    .map(|page| page.session_id);
                 mgr.remove_page_by_target_id(target_id);
+                session_id
+            } else {
+                None
+            };
+            if let Some(session_id) = removed_session {
+                self.remove_pending_dialog_for_session(Some(&session_id));
             }
         }
 
@@ -946,66 +1086,88 @@ impl DaemonState {
         // Register top-level pages that browser-level auto-attach paused before
         // their first request. Controls must be installed before resuming.
         for (target_info, page_sid) in &drained.attached_page_sessions {
+            if drained
+                .destroyed_targets
+                .iter()
+                .any(|target_id| target_id == &target_info.target_id)
+            {
+                self.auto_attached_target_states
+                    .write()
+                    .await
+                    .remove(page_sid);
+                self.remove_pending_dialog_for_session(Some(page_sid));
+                continue;
+            }
+
             let filter = self.domain_filter.read().await.clone();
-            let has_proxy_creds = self.proxy_credentials.read().await.is_some();
-            let controls_active = filter.is_some() || has_proxy_creds;
-            let setup_result = if let Some(ref mut mgr) = self.browser {
-                async {
-                    mgr.prepare_domains_pub(page_sid).await?;
-                    if controls_active {
-                        install_network_controls_for_session(
-                            &mgr.client,
-                            page_sid,
-                            filter.as_ref(),
-                            has_proxy_creds,
+            let auto_dialog = self.auto_dialog;
+            let mut initial_events = self.browser.as_ref().map(|mgr| mgr.client.subscribe());
+
+            let replaced_session = if let Some(ref mut mgr) = self.browser {
+                let page_url = if filter
+                    .as_ref()
+                    .is_some_and(|filter| should_blank_existing_url(&target_info.url, filter))
+                {
+                    "about:blank".to_string()
+                } else {
+                    target_info.url.clone()
+                };
+                if mgr.has_target(&target_info.target_id) {
+                    mgr.replace_page_session(target_info, page_sid)
+                } else {
+                    let tab_id = mgr.assign_tab_id();
+                    mgr.add_page(super::browser::PageInfo {
+                        tab_id,
+                        label: None,
+                        target_id: target_info.target_id.clone(),
+                        session_id: page_sid.clone(),
+                        url: page_url,
+                        title: target_info.title.clone(),
+                        target_type: target_info.target_type.clone(),
+                    });
+                    None
+                }
+            } else {
+                None
+            };
+            let replaced_existing_session = replaced_session.is_some();
+
+            if let Err(error) =
+                wait_for_auto_attached_target(&self.auto_attached_target_states, page_sid, true)
+                    .await
+            {
+                discard_failed_attached_page(self, &target_info.target_id).await;
+                return Err(format!(
+                    "Failed to initialize new page target {}; it was closed so later browser commands can continue: {}",
+                    target_info.target_id, error
+                ));
+            }
+
+            if let Some(ref mgr) = self.browser {
+                if let Some(replaced_session) = replaced_session {
+                    mgr.client
+                        .send_command(
+                            "Target.detachFromTarget",
+                            Some(json!({ "sessionId": replaced_session })),
+                            None,
                         )
                         .await?;
-                    }
-
-                    let mut page_url = target_info.url.clone();
-                    if let Some(ref filter) = filter {
-                        if should_blank_existing_url(&page_url, filter) {
-                            let _ = mgr
-                                .client
-                                .send_command(
-                                    "Page.navigate",
-                                    Some(json!({ "url": "about:blank" })),
-                                    Some(page_sid),
-                                )
-                                .await;
-                            page_url = "about:blank".to_string();
-                        }
-                    }
-
-                    if mgr.has_target(&target_info.target_id) {
-                        mgr.update_page_target_info(target_info);
-                    } else {
-                        let tab_id = mgr.assign_tab_id();
-                        mgr.add_page(super::browser::PageInfo {
-                            tab_id,
-                            label: None,
-                            target_id: target_info.target_id.clone(),
-                            session_id: page_sid.clone(),
-                            url: page_url,
-                            title: target_info.title.clone(),
-                            target_type: target_info.target_type.clone(),
-                        });
-                    }
-
-                    mgr.resume_if_waiting_pub(page_sid).await
+                    replaced_page_session = true;
                 }
-                .await
-            } else {
-                Ok(())
-            };
-            if let Err(error) = setup_result {
-                if controls_active {
-                    return close_after_network_control_failure(self, error).await;
+                // Detaching the discovery session can reset target-scoped
+                // emulation overrides, so make the canonical session's
+                // configuration the final write.
+                mgr.apply_launch_session_configuration_pub(page_sid).await?;
+            }
+
+            if !replaced_existing_session {
+                if let Some(ref mut events) = initial_events {
+                    if let Some(dialog) =
+                        observe_auto_attached_dialog(events, page_sid, auto_dialog).await?
+                    {
+                        self.track_pending_dialog(dialog);
+                    }
                 }
-                eprintln!(
-                    "Warning: failed to prepare attached page session: {}",
-                    error
-                );
             }
         }
 
@@ -1061,6 +1223,7 @@ impl DaemonState {
         for sid in &drained.detached_iframe_sessions {
             self.iframe_sessions.retain(|_, v| v != sid);
             self.active_iframe_sessions.remove(sid);
+            self.remove_pending_dialog_for_session(Some(sid));
         }
 
         // Attach and register new targets
@@ -1216,6 +1379,9 @@ impl DaemonState {
         if active_frame_scope_changed {
             self.refresh_active_iframe_sessions().await;
         }
+        if replaced_page_session {
+            self.update_stream_client().await;
+        }
 
         Ok(())
     }
@@ -1233,6 +1399,7 @@ impl DaemonState {
         let mut destroyed_targets: Vec<String> = Vec::new();
         let mut attached_page_sessions: Vec<(TargetInfo, String)> = Vec::new();
         let mut attached_page_target_ids: HashSet<String> = HashSet::new();
+        let mut attached_page_session_ids: HashSet<String> = HashSet::new();
         let mut attached_iframe_sessions: Vec<(String, String)> = Vec::new();
         let mut attached_worker_sessions: Vec<(TargetInfo, String)> = Vec::new();
         let mut attached_other_sessions: Vec<String> = Vec::new();
@@ -1313,6 +1480,7 @@ impl DaemonState {
                                     Ok(target_info) if should_track_target(&target_info) => {
                                         attached_page_target_ids
                                             .insert(target_info.target_id.clone());
+                                        attached_page_session_ids.insert(sid.to_string());
                                         attached_page_sessions.push((target_info, sid.to_string()));
                                     }
                                     Ok(target_info) if target_is_worker_like(&target_info) => {
@@ -1339,6 +1507,10 @@ impl DaemonState {
 
                     let session_matches = if let Some(ref browser) = self.browser {
                         event.session_id.as_deref() == browser.active_session_id().ok()
+                            || event
+                                .session_id
+                                .as_ref()
+                                .is_some_and(|sid| attached_page_session_ids.contains(sid))
                     } else {
                         false
                     };
@@ -1647,18 +1819,29 @@ impl DaemonState {
                                         "beforeunload" | "alert"
                                     );
                                 if !auto_handled {
-                                    self.pending_dialog = Some(PendingDialog {
+                                    let dialog = PendingDialog {
                                         dialog_type: dialog_event.dialog_type,
                                         message: dialog_event.message,
                                         url: dialog_event.url,
                                         default_prompt: dialog_event.default_prompt,
                                         session_id: event.session_id.clone(),
-                                    });
+                                    };
+                                    if let Some(existing) = self
+                                        .pending_dialogs
+                                        .iter_mut()
+                                        .find(|existing| existing.session_id == dialog.session_id)
+                                    {
+                                        *existing = dialog;
+                                    } else {
+                                        self.pending_dialogs.push(dialog);
+                                    }
                                 }
                             }
                         }
                         "Page.javascriptDialogClosed" => {
-                            self.pending_dialog = None;
+                            self.pending_dialogs.retain(|dialog| {
+                                dialog.session_id.as_deref() != event.session_id.as_deref()
+                            });
                         }
                         // Fetch.requestPaused is handled by the background
                         // fetch_handler_task — no need to collect here.
@@ -1677,7 +1860,13 @@ impl DaemonState {
             }
         }
 
-        if !attached_page_target_ids.is_empty() {
+        if self.network_auto_attach_installed {
+            // Browser-level auto-attach is canonical once installed.
+            // Target.targetCreated can be drained one tick before the matching
+            // Target.attachedToTarget; retaining it in that gap would create a
+            // second flat session and route dialog state to the wrong one.
+            new_targets.clear();
+        } else if !attached_page_target_ids.is_empty() {
             new_targets.retain(|te| !attached_page_target_ids.contains(&te.target_info.target_id));
         }
 
@@ -1925,6 +2114,14 @@ async fn close_active_provider_session(state: &mut DaemonState) {
 }
 
 pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(), String> {
+    if let Some(task) = state.fetch_handler_task.take() {
+        task.abort();
+    }
+    if let Some(task) = state.dialog_handler_task.take() {
+        task.abort();
+    }
+    state.event_rx = None;
+
     let close_error = if let Some(mut mgr) = state.browser.take() {
         mgr.close().await.err()
     } else {
@@ -1934,6 +2131,8 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
     close_active_provider_session(state).await;
     state.launch_hash = None;
     state.network_auto_attach_installed = false;
+    state.auto_attached_target_states.write().await.clear();
+    state.pending_dialogs.clear();
     state.iframe_sessions.clear();
     state.active_iframe_sessions.clear();
     state.screencasting = false;
@@ -2237,9 +2436,54 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             lifecycle_reused = true;
         }
 
-        if let Some(ref mut mgr) = state.browser {
+        let ensured_auto_session = if let Some(ref mut mgr) = state.browser {
             if mgr.page_count() == 0 {
-                let _ = mgr.ensure_page().await;
+                match mgr.ensure_page().await {
+                    Ok(session_id) => session_id,
+                    Err(error) => {
+                        return error_response(
+                            &id,
+                            &format!("Failed to create a replacement page: {error}"),
+                        );
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some((session_id, target_id)) = ensured_auto_session {
+            if let Err(error) = wait_for_auto_attached_target(
+                &state.auto_attached_target_states,
+                &session_id,
+                false,
+            )
+            .await
+            {
+                state
+                    .auto_attached_target_states
+                    .write()
+                    .await
+                    .remove(&session_id);
+                if let Some(ref mut mgr) = state.browser {
+                    let _ = mgr
+                        .client
+                        .send_command_no_wait(
+                            "Target.closeTarget",
+                            Some(json!({ "targetId": target_id })),
+                            None,
+                        )
+                        .await;
+                    mgr.remove_page_by_target_id(&target_id);
+                }
+                return error_response(
+                    &id,
+                    &format!("Failed to initialize the replacement page: {error}"),
+                );
+            }
+            if let Err(error) = state.drain_cdp_events_background().await {
+                return error_response(&id, &super::browser::to_ai_friendly_error(&error));
             }
         }
     }
@@ -2263,16 +2507,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     // never touch the page; dialog/screenshot/url/title are browser-side.
     // Only a dialog on the ACTIVE tab blocks: one on a background tab leaves
     // the active tab's renderer responsive.
-    if let Some(ref dialog) = state.pending_dialog {
-        let active_session = state
-            .browser
-            .as_ref()
-            .and_then(|m| m.active_session_id().ok().map(|s| s.to_string()));
-        let on_active_tab = match (&dialog.session_id, &active_session) {
-            (Some(dialog_sid), Some(active_sid)) => dialog_sid == active_sid,
-            // No session on the event = top-level page dialog; no browser = be safe.
-            _ => true,
-        };
+    if let Some(dialog) = state.pending_dialog_for_active_page() {
         // Tab and session management must stay usable: switching or closing
         // tabs is exactly how an agent escapes a tab blocked by a dialog.
         let read_touches_active_tab = action == "read"
@@ -2294,7 +2529,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                     | "tab_switch"
                     | "tab_close"
             );
-        if on_active_tab && !safe_during_dialog {
+        if !safe_during_dialog {
             return error_response(
                 &id,
                 &format!(
@@ -2512,7 +2747,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 
     // Auto-report pending JavaScript dialog so agents know why commands may hang
     if action != "dialog" {
-        if let Some(ref dialog) = state.pending_dialog {
+        if let Some(dialog) = state.pending_dialog_for_command() {
             if let Some(obj) = resp.as_object_mut() {
                 obj.insert(
                     "warning".to_string(),
@@ -2841,6 +3076,130 @@ async fn prepare_auto_attached_session(client: &CdpClient, session_id: &str) -> 
     Ok(())
 }
 
+async fn prime_auto_attached_session(client: &CdpClient, session_id: &str) -> Result<(), String> {
+    for method in ["Page.enable", "Runtime.enable", "Network.enable"] {
+        client
+            .send_command_no_wait(method, None, Some(session_id))
+            .await?;
+    }
+    client
+        .send_command_no_wait(
+            "Target.setAutoAttach",
+            Some(json!({
+                "autoAttach": true,
+                "waitForDebuggerOnStart": true,
+                "flatten": true
+            })),
+            Some(session_id),
+        )
+        .await
+}
+
+async fn wait_for_auto_attached_target(
+    states: &Arc<RwLock<HashMap<String, AutoAttachedTargetState>>>,
+    session_id: &str,
+    consume: bool,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_millis(AUTO_ATTACHED_TARGET_INIT_MS);
+    loop {
+        let current = states.read().await.get(session_id).cloned();
+        match current {
+            Some(AutoAttachedTargetState::Ready) => {
+                if consume {
+                    states.write().await.remove(session_id);
+                }
+                return Ok(());
+            }
+            Some(AutoAttachedTargetState::Failed(error)) => {
+                if consume {
+                    states.write().await.remove(session_id);
+                }
+                return Err(error);
+            }
+            Some(AutoAttachedTargetState::Preparing) | None => {}
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            states.write().await.remove(session_id);
+            return Err(format!(
+                "Timed out after {}ms waiting for target preparation",
+                AUTO_ATTACHED_TARGET_INIT_MS
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+async fn discard_failed_attached_page(state: &mut DaemonState, target_id: &str) {
+    if let Some(ref mut mgr) = state.browser {
+        let _ = mgr
+            .client
+            .send_command_no_wait(
+                "Target.closeTarget",
+                Some(json!({ "targetId": target_id })),
+                None,
+            )
+            .await;
+        mgr.remove_page_by_target_id(target_id);
+    }
+}
+
+async fn observe_auto_attached_dialog(
+    events: &mut broadcast::Receiver<CdpEvent>,
+    session_id: &str,
+    auto_dialog: bool,
+) -> Result<Option<PendingDialog>, String> {
+    let observation = async {
+        loop {
+            match events.recv().await {
+                Ok(event)
+                    if event.method == "Page.javascriptDialogOpening"
+                        && event.session_id.as_deref() == Some(session_id) =>
+                {
+                    let dialog =
+                        serde_json::from_value::<JavascriptDialogOpeningEvent>(event.params)
+                            .map_err(|_| {
+                                "A new page opened a JavaScript dialog whose type could not be determined safely"
+                                    .to_string()
+                            })?;
+                    if auto_dialog
+                        && matches!(dialog.dialog_type.as_str(), "alert" | "beforeunload")
+                    {
+                        return Ok(None);
+                    }
+                    return Ok(Some(PendingDialog {
+                        dialog_type: dialog.dialog_type,
+                        message: dialog.message,
+                        url: dialog.url,
+                        default_prompt: dialog.default_prompt,
+                        session_id: Some(session_id.to_string()),
+                    }));
+                }
+                Ok(event)
+                    if event.method == "Page.loadEventFired"
+                        && event.session_id.as_deref() == Some(session_id) =>
+                {
+                    return Ok(None);
+                }
+                Ok(_) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return Ok(None),
+            }
+        }
+    };
+
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(AUTO_ATTACHED_DIALOG_OBSERVATION_MS),
+        observation,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Ok(None),
+    }
+}
+
 fn target_is_worker_like(target: &TargetInfo) -> bool {
     matches!(
         target.target_type.as_str(),
@@ -2912,10 +3271,6 @@ async fn install_active_network_controls(
     handle_auth_requests: bool,
 ) -> Result<(), String> {
     let filter = state.domain_filter.read().await.clone();
-    if !network_controls_required(filter.as_ref(), handle_auth_requests) {
-        return Ok(());
-    }
-
     let direct_page = {
         let mgr = state
             .browser
@@ -2927,15 +3282,23 @@ async fn install_active_network_controls(
         return Err(direct_page_allowed_domains_error());
     }
 
-    if !state.network_auto_attach_installed && !direct_page {
+    if !state.network_auto_attach_installed && !direct_page && state.engine == "chrome" {
         {
             let mgr = state
                 .browser
-                .as_ref()
+                .as_mut()
                 .ok_or("Browser is not available for network control installation")?;
             mgr.enable_browser_auto_attach_pub().await?;
         }
         state.network_auto_attach_installed = true;
+        // Chrome also auto-attaches existing targets. Apply those events now so
+        // the first command after launch cannot retain and route through the
+        // superseded manual discovery session.
+        state.drain_cdp_events_background().await?;
+    }
+
+    if !network_controls_required(filter.as_ref(), handle_auth_requests) {
+        return Ok(());
     }
 
     let mgr = state
@@ -3565,7 +3928,7 @@ fn autosave_due(state: &DaemonState, interval_ms: u64) -> bool {
     }
     // A JS dialog blocks the renderer's main thread, so the storage-collection
     // evaluate would hang until its CDP timeout. Wait for the dialog instead.
-    if state.pending_dialog.is_some() {
+    if !state.pending_dialogs.is_empty() {
         return false;
     }
     let now = std::time::Instant::now();
@@ -6017,15 +6380,24 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
 }
 
 async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let tab_id = {
+    let (tab_id, closing_session) = {
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-        match cmd.get("tabId").and_then(|v| v.as_str()) {
+        let tab_id = match cmd.get("tabId").and_then(|v| v.as_str()) {
             Some(s) => {
                 let tab_ref = super::browser::TabRef::parse(s)?;
                 Some(mgr.resolve_tab_ref(&tab_ref)?)
             }
             None => None,
-        }
+        };
+        let session_id = match tab_id {
+            Some(tab_id) => mgr
+                .pages_list()
+                .into_iter()
+                .find(|page| page.tab_id == tab_id)
+                .map(|page| page.session_id),
+            None => mgr.active_session_id().ok().map(ToString::to_string),
+        };
+        (tab_id, session_id)
     };
     state.ref_map.clear();
     state.active_iframe_sessions.clear();
@@ -6034,6 +6406,9 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         mgr.tab_close_by_id(tab_id).await?
     };
+    if let Some(session_id) = closing_session {
+        state.remove_pending_dialog_for_session(Some(&session_id));
+    }
     state.refresh_active_iframe_sessions().await;
     Ok(result)
 }
@@ -6312,6 +6687,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
     if let Some(url) = recording_url {
         check_url_allowed_by_filter(domain_filter.as_ref(), url)?;
     }
+    let auto_attached_target_states = state.auto_attached_target_states.clone();
 
     let (client, new_session_id, nav_url) = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
@@ -6346,29 +6722,18 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
             .to_string();
 
         // Create page in new context
-        let create_result: CreateTargetResult = mgr
-            .client
-            .send_command_typed(
-                "Target.createTarget",
-                &json!({ "url": "about:blank", "browserContextId": context_id }),
-                None,
-            )
+        let (create_result, new_session_id, auto_attached) = mgr
+            .create_target_session(json!({
+                "url": "about:blank",
+                "browserContextId": context_id
+            }))
             .await?;
-
-        let attach_result: AttachToTargetResult = mgr
-            .client
-            .send_command_typed(
-                "Target.attachToTarget",
-                &AttachToTargetParams {
-                    target_id: create_result.target_id.clone(),
-                    flatten: true,
-                },
-                None,
-            )
-            .await?;
-
-        let new_session_id = attach_result.session_id.clone();
-        mgr.prepare_domains_pub(&new_session_id).await?;
+        if auto_attached {
+            wait_for_auto_attached_target(&auto_attached_target_states, &new_session_id, false)
+                .await?;
+        } else {
+            mgr.prepare_domains_pub(&new_session_id).await?;
+        }
 
         // Re-apply download behavior to the recording context.
         // Without this, downloads in the recording context are silently dropped
@@ -6924,7 +7289,7 @@ async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     // dialog status — return pending dialog info
     if response == Some("status") {
-        return Ok(match &state.pending_dialog {
+        return Ok(match state.pending_dialog_for_command() {
             Some(dialog) => {
                 let mut obj = json!({
                     "hasDialog": true,
@@ -6940,6 +7305,9 @@ async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         });
     }
 
+    let dialog_session = state
+        .pending_dialog_for_command()
+        .and_then(|dialog| dialog.session_id.clone());
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let accept = response
         .map(|r| r == "accept")
@@ -6947,12 +7315,9 @@ async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .unwrap_or(true);
     let prompt_text = cmd.get("promptText").and_then(|v| v.as_str());
 
-    // Clear tracked state even if Chrome reports no dialog (e.g. it was
-    // already resolved and the closed event was missed); otherwise a stale
-    // pending_dialog would make every page command fail fast forever.
-    let result = mgr.handle_dialog(accept, prompt_text).await;
-    state.pending_dialog = None;
-    result?;
+    mgr.handle_dialog(accept, prompt_text, dialog_session.as_deref())
+        .await?;
+    state.remove_pending_dialog_for_session(dialog_session.as_deref());
 
     // If a click's mousedown opened this dialog, the button is still logically
     // down. Release it now that the page is unblocked so the next click does
@@ -9048,6 +9413,7 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
 }
 
 async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let auto_attached_target_states = state.auto_attached_target_states.clone();
     let (tab_id, session_id) = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
 
@@ -9062,40 +9428,29 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
             .ok_or("Failed to create browser context")?
             .to_string();
 
-        let create_result: super::cdp::types::CreateTargetResult = mgr
-            .client
-            .send_command_typed(
-                "Target.createTarget",
-                &json!({ "url": "about:blank", "browserContextId": context_id }),
-                None,
-            )
+        let (create_result, session_id, auto_attached) = mgr
+            .create_target_session(json!({
+                "url": "about:blank",
+                "browserContextId": context_id
+            }))
             .await?;
-
-        let attach: super::cdp::types::AttachToTargetResult = mgr
-            .client
-            .send_command_typed(
-                "Target.attachToTarget",
-                &super::cdp::types::AttachToTargetParams {
-                    target_id: create_result.target_id.clone(),
-                    flatten: true,
-                },
-                None,
-            )
-            .await?;
-
-        mgr.prepare_domains_pub(&attach.session_id).await?;
+        if auto_attached {
+            wait_for_auto_attached_target(&auto_attached_target_states, &session_id, false).await?;
+        } else {
+            mgr.prepare_domains_pub(&session_id).await?;
+        }
 
         let tab_id = mgr.assign_tab_id();
         mgr.add_page(super::browser::PageInfo {
             tab_id,
             label: None,
             target_id: create_result.target_id,
-            session_id: attach.session_id.clone(),
+            session_id: session_id.clone(),
             url: "about:blank".to_string(),
             title: String::new(),
             target_type: "page".to_string(),
         });
-        (tab_id, attach.session_id)
+        (tab_id, session_id)
     };
 
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
@@ -11637,7 +11992,7 @@ mod tests {
     #[test]
     fn test_autosave_blocked_while_dialog_open() {
         let mut state = DaemonState::new();
-        state.pending_dialog = Some(PendingDialog {
+        state.pending_dialogs.push(PendingDialog {
             dialog_type: "confirm".to_string(),
             message: "Are you sure?".to_string(),
             url: "https://example.com".to_string(),
@@ -14409,5 +14764,34 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             let auto_handled = auto_dialog && matches!(*dialog_type, "beforeunload" | "alert");
             assert!(!auto_handled, "{dialog_type} should NOT be auto-handled");
         }
+    }
+
+    #[test]
+    fn browser_auto_attach_suppresses_split_batch_manual_target_attachment() {
+        let mut state = DaemonState::new();
+        state.network_auto_attach_installed = true;
+        let (events, receiver) = broadcast::channel(4);
+        state.event_rx = Some(receiver);
+        events
+            .send(CdpEvent {
+                method: "Target.targetCreated".to_string(),
+                params: json!({
+                    "targetInfo": {
+                        "targetId": "popup-target",
+                        "type": "page",
+                        "title": "",
+                        "url": ""
+                    }
+                }),
+                session_id: None,
+            })
+            .unwrap();
+
+        let drained = state.drain_cdp_events();
+
+        assert!(
+            drained.new_targets.is_empty(),
+            "Target.attachedToTarget must remain the sole registration owner even when its event arrives in a later drain"
+        );
     }
 }
