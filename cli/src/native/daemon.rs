@@ -223,25 +223,7 @@ async fn run_socket_server(
                 }
             }
             _ = drain_interval.tick() => {
-                let mut s = state.lock().await;
-                let process_exited = s
-                    .browser
-                    .as_mut()
-                    .map(|mgr| mgr.has_process_exited())
-                    .unwrap_or(false);
-                if process_exited {
-                    let _ = close_current_browser(&mut s).await;
-                } else if s.browser.is_some() {
-                    if let Err(error) = s.drain_cdp_events_background().await {
-                        let _ = writeln!(
-                            std::io::stderr(),
-                            "Failed to apply browser network controls: {}",
-                            error
-                        );
-                    } else {
-                        maybe_autosave_restore_state(&mut s, autosave_interval_ms).await;
-                    }
-                }
+                spawn_background_tick_if_idle(state.clone(), autosave_interval_ms);
             }
             _ = async {
                 match idle_sleep_pin {
@@ -349,18 +331,7 @@ async fn run_socket_server(
                 }
             }
             _ = drain_interval.tick() => {
-                let mut s = state.lock().await;
-                let process_exited = s
-                    .browser
-                    .as_mut()
-                    .map(|mgr| mgr.has_process_exited())
-                    .unwrap_or(false);
-                if process_exited {
-                    let _ = close_current_browser(&mut s).await;
-                } else if s.browser.is_some() {
-                    s.drain_cdp_events_background().await;
-                    maybe_autosave_restore_state(&mut s, autosave_interval_ms).await;
-                }
+                spawn_background_tick_if_idle(state.clone(), autosave_interval_ms);
             }
             _ = async {
                 match idle_sleep_pin {
@@ -394,6 +365,48 @@ async fn run_socket_server(
     }
 
     Ok(())
+}
+
+/// Start periodic maintenance only when session state is immediately available.
+/// Admission happens before spawning so busy ticks cannot accumulate behind a
+/// command. Skipped ticks are safe because CDP events remain buffered and the
+/// autosave interval is checked again on the next successful tick.
+fn spawn_background_tick_if_idle(
+    state: Arc<tokio::sync::Mutex<DaemonState>>,
+    autosave_interval_ms: u64,
+) -> bool {
+    let Ok(state) = state.try_lock_owned() else {
+        return false;
+    };
+
+    tokio::spawn(run_background_tick(state, autosave_interval_ms));
+    true
+}
+
+/// Run an admitted maintenance tick away from the listener loop so renderer
+/// cleanup or autosave cannot prevent the daemon from accepting connections.
+async fn run_background_tick(
+    mut state: tokio::sync::OwnedMutexGuard<DaemonState>,
+    autosave_interval_ms: u64,
+) {
+    let process_exited = state
+        .browser
+        .as_mut()
+        .map(|mgr| mgr.has_process_exited())
+        .unwrap_or(false);
+    if process_exited {
+        let _ = close_current_browser(&mut state).await;
+    } else if state.browser.is_some() {
+        if let Err(error) = state.drain_cdp_events_background().await {
+            let _ = writeln!(
+                std::io::stderr(),
+                "Failed to apply browser network controls: {}",
+                error
+            );
+        } else {
+            maybe_autosave_restore_state(&mut state, autosave_interval_ms).await;
+        }
+    }
 }
 
 async fn handle_connection<S>(
@@ -642,6 +655,37 @@ mod tests {
             &direct
         ));
         assert!(close_completed_response("confirm", &confirmed));
+    }
+
+    #[tokio::test]
+    async fn test_background_tick_skips_busy_state_without_backlog() {
+        let state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
+        let held = state.lock().await;
+
+        for _ in 0..1_000 {
+            assert!(
+                !spawn_background_tick_if_idle(state.clone(), 30_000),
+                "a busy maintenance tick must be skipped synchronously"
+            );
+        }
+        assert_eq!(
+            Arc::strong_count(&state),
+            1,
+            "skipped ticks must not retain state clones in queued tasks"
+        );
+
+        drop(held);
+        assert!(spawn_background_tick_if_idle(state.clone(), 30_000));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if state.try_lock().is_ok() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the admitted maintenance tick should finish");
     }
 
     /// Guard against re-introducing `waitpid(-1)` in daemon code.
