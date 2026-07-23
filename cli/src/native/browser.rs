@@ -2762,8 +2762,8 @@ mod tests {
     }
 
     /// Regression test for #1036: connecting to a browser with many live tabs
-    /// must stay fast (it was never a raw tab-count problem — the hang came from
-    /// enabling domains on a discarded tab). The common all-live case probes the
+    /// must stay fast. It was never a raw tab-count problem; the hang came from
+    /// enabling domains on a discarded tab. The common all-live case probes the
     /// conventional active tab once and is done.
     #[tokio::test]
     async fn test_connect_many_live_tabs_stays_fast() {
