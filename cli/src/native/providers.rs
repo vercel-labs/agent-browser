@@ -122,7 +122,7 @@ pub async fn close_provider_session_with_plugins(
     }
 
     let client = reqwest::Client::new();
-    match session.provider.as_str() {
+    match session.provider.to_lowercase().as_str() {
         "browserbase" => {
             if let Ok(api_key) = env::var("BROWSERBASE_API_KEY") {
                 let _ = client
@@ -137,18 +137,9 @@ pub async fn close_provider_session_with_plugins(
                     .await;
             }
         }
-        "browser-use" => {
+        "browser-use" | "browseruse" => {
             if let Ok(api_key) = env::var("BROWSER_USE_API_KEY") {
-                let _ = client
-                    .patch(format!(
-                        "https://api.browser-use.com/api/v2/browsers/{}",
-                        session.session_id
-                    ))
-                    .header("X-Browser-Use-API-Key", &api_key)
-                    .header("Content-Type", "application/json")
-                    .json(&json!({ "action": "stop" }))
-                    .send()
-                    .await;
+                stop_browser_use_session(&client, &api_key, &session.session_id).await;
             }
         }
         "browserless" => {
@@ -381,13 +372,111 @@ async fn connect_browserless() -> Result<(String, Option<ProviderSession>), Stri
     ))
 }
 
+async fn stop_browser_use_session(client: &reqwest::Client, api_key: &str, session_id: &str) {
+    let _ = client
+        .patch(format!(
+            "https://api.browser-use.com/api/v4/browsers/{}",
+            session_id
+        ))
+        .header("X-Browser-Use-API-Key", api_key)
+        .header("Content-Type", "application/json")
+        .json(&json!({ "action": "stop" }))
+        .send()
+        .await;
+}
+
+async fn finish_browser_use_session(
+    client: &reqwest::Client,
+    json: &Value,
+) -> Result<String, String> {
+    let cdp_url = json
+        .get("cdpUrl")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| "Browser Use response missing cdpUrl".to_string())?;
+
+    let version_url = format!("{}/json/version", cdp_url.trim_end_matches('/'));
+    let version_response = client
+        .get(&version_url)
+        .send()
+        .await
+        .map_err(|e| format!("Browser Use CDP version request failed: {}", e))?;
+
+    let version_status = version_response.status();
+    let version_body = version_response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read Browser Use CDP version response: {}", e))?;
+
+    if !version_status.is_success() {
+        return Err(format!(
+            "Browser Use CDP version error ({}): {}",
+            version_status.as_u16(),
+            version_body
+        ));
+    }
+
+    let version_json: Value = serde_json::from_str(&version_body)
+        .map_err(|e| format!("Invalid Browser Use CDP version response: {}", e))?;
+
+    version_json
+        .get("webSocketDebuggerUrl")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| "Browser Use CDP version response missing webSocketDebuggerUrl".to_string())
+}
+
 async fn connect_browser_use() -> Result<(String, Option<ProviderSession>), String> {
     let api_key = env::var("BROWSER_USE_API_KEY")
         .map_err(|_| "BROWSER_USE_API_KEY environment variable is not set")?;
 
-    let ws_url = format!("wss://connect.browser-use.com?apiKey={}", api_key);
+    let client = reqwest::Client::new();
 
-    Ok((ws_url, None))
+    let response = client
+        .post("https://api.browser-use.com/api/v4/browsers")
+        .header("X-Browser-Use-API-Key", &api_key)
+        .header("Content-Type", "application/json")
+        .json(&json!({}))
+        .send()
+        .await
+        .map_err(|e| format!("Browser Use request failed: {}", e))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read Browser Use response: {}", e))?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "Browser Use API error ({}): {}",
+            status.as_u16(),
+            body
+        ));
+    }
+
+    let json: Value =
+        serde_json::from_str(&body).map_err(|e| format!("Invalid Browser Use response: {}", e))?;
+
+    let session_id = json
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    match finish_browser_use_session(&client, &json).await {
+        Ok(ws_url) => Ok((
+            ws_url,
+            Some(ProviderSession {
+                provider: "browser-use".to_string(),
+                session_id,
+            }),
+        )),
+        Err(e) => {
+            stop_browser_use_session(&client, &api_key, &session_id).await;
+            Err(e)
+        }
+    }
 }
 
 async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {

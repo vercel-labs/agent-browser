@@ -3156,6 +3156,9 @@ async fn auto_launch(
                     state.start_dialog_handler();
                     state.update_stream_client().await;
                     write_provider_file(&state.session_id, &p);
+                    if let Some(ref ps) = conn.session {
+                        write_provider_session_file(&state.session_id, &ps.session_id);
+                    }
                     install_network_controls_or_close(state, has_proxy_auth).await?;
                     apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
                     try_auto_restore_state(state).await;
@@ -4051,6 +4054,9 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                         state.start_dialog_handler();
                         state.update_stream_client().await;
                         write_provider_file(&state.session_id, provider);
+                        if let Some(ref ps) = conn.session {
+                            write_provider_session_file(&state.session_id, &ps.session_id);
+                        }
                         install_network_controls_or_close(state, has_proxy_auth).await?;
                         apply_launch_init_scripts(state, &enable_features, &init_script_paths)
                             .await;
@@ -7578,8 +7584,29 @@ fn write_provider_file(session_id: &str, provider: &str) {
     let _ = fs::write(provider_file_path(session_id), provider);
 }
 
+fn write_provider_session_file(session_id: &str, provider_session_id: &str) {
+    let path = get_socket_dir().join(format!("{}.provider-session", session_id));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .and_then(|mut f| f.write_all(provider_session_id.as_bytes()));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fs::write(&path, provider_session_id);
+    }
+}
+
 fn remove_provider_file(session_id: &str) {
     let _ = fs::remove_file(provider_file_path(session_id));
+    let path = get_socket_dir().join(format!("{}.provider-session", session_id));
+    let _ = fs::remove_file(path);
 }
 
 fn extensions_file_path(session_id: &str) -> PathBuf {
