@@ -10,9 +10,12 @@ use super::timestamp_ms;
 
 /// Background task that subscribes to CDP events and broadcasts screencast frames in real-time.
 /// Also handles auto-start/stop of screencast based on WebSocket client count.
+/// Frames go through `frame_watch` (latest value wins) while every other
+/// message type stays on the ordered `frame_tx` broadcast channel.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn cdp_event_loop(
     frame_tx: broadcast::Sender<String>,
+    frame_watch: watch::Sender<Option<Arc<String>>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
     client_notify: Arc<tokio::sync::Notify>,
     screencasting: Arc<Mutex<bool>>,
@@ -20,7 +23,6 @@ pub(super) async fn cdp_event_loop(
     cdp_session_id: Arc<RwLock<Option<String>>>,
     viewport_width: Arc<Mutex<u32>>,
     viewport_height: Arc<Mutex<u32>>,
-    last_frame: Arc<RwLock<Option<String>>>,
     last_tabs: Arc<RwLock<Vec<Value>>>,
     last_engine: Arc<RwLock<String>>,
     recording: Arc<Mutex<bool>>,
@@ -163,12 +165,7 @@ pub(super) async fn cdp_event_loop(
                                                     "timestamp": meta.and_then(|m| m.get("timestamp")).and_then(|v| v.as_u64()).unwrap_or(0),
                                                 }
                                             });
-                                            let msg_str = msg.to_string();
-                                            {
-                                                let mut lf = last_frame.write().await;
-                                                *lf = Some(msg_str.clone());
-                                            }
-                                            let _ = frame_tx.send(msg_str);
+                                            frame_watch.send_replace(Some(Arc::new(msg.to_string())));
                                         }
                                     } else if evt.method == "Runtime.consoleAPICalled" {
                                         let level = evt.params.get("type")

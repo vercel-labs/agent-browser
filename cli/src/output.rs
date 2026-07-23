@@ -3032,6 +3032,11 @@ available localhost port automatically and reports it back.
 Notes:
   - 'stream enable' creates the WebSocket server.
   - WebSocket clients trigger frame streaming automatically.
+  - Frames are delivered latest-first: clients that fall behind skip stale
+    frames instead of draining a backlog. Input events dispatch immediately,
+    independent of frame delivery.
+  - Clients can cap their own frame rate by sending
+    {"type":"config","maxFps":N} (1-120, 0 = uncapped, per client).
   - 'screencast_start' and 'screencast_stop' still control explicit CDP screencasts.
   - Streaming is always enabled. Set AGENT_BROWSER_STREAM_PORT to bind to a
     specific port instead of the default OS-assigned port.

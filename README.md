@@ -1483,6 +1483,17 @@ Connect to `ws://localhost:9223` to receive frames and send input:
 }
 ```
 
+**Cap the frame rate (per client):**
+
+```json
+{
+  "type": "config",
+  "maxFps": 10
+}
+```
+
+Frames are delivered latest-first: a client that falls behind skips stale frames and always receives the newest one. `maxFps` (1 to 120, `0` = uncapped) limits delivery for that client only. Input events are read on a dedicated task per connection, so clicks and keystrokes dispatch immediately even while frames are mid-write to a slow client.
+
 ## Architecture
 
 agent-browser uses a client-daemon architecture:
