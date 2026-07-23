@@ -5,25 +5,133 @@
 
 use serde_json::{json, Value};
 use std::env;
+use std::time::{Duration, Instant};
 
-/// Provider session info for cleanup on failure.
+const BROWSERBASE_LIVE_VIEW_TIMEOUT: Duration = Duration::from_secs(5);
+const BROWSERBASE_LIVE_VIEW_RETRY_DELAY: Duration = Duration::from_secs(30);
+
+/// Provider-owned cleanup data retained for connection failures and shutdown.
 #[derive(Debug, Clone)]
-pub struct ProviderSession {
-    pub provider: String,
-    pub session_id: String,
+pub enum ProviderCleanup {
+    Browserbase {
+        session_id: String,
+    },
+    Browserless {
+        stop_url: String,
+    },
+    BrowserUse {
+        session_id: String,
+    },
+    Kernel {
+        session_id: String,
+    },
+    AgentCore {
+        session_id: String,
+        region: String,
+        browser_identifier: String,
+    },
+    Plugin {
+        provider: String,
+        data: Value,
+    },
+}
+
+#[derive(Debug)]
+enum PostConnectMetadata {
+    Browserbase {
+        session_id: String,
+        retry_after: Option<Instant>,
+    },
+}
+
+/// Provider state retained for the lifetime of an active browser connection.
+#[derive(Debug)]
+pub struct ActiveProvider {
+    pub name: String,
+    pub metadata: Option<Value>,
+    cleanup: Option<ProviderCleanup>,
+    post_connect_metadata: Option<PostConnectMetadata>,
+}
+
+impl ActiveProvider {
+    pub fn new(name: impl Into<String>, metadata: Option<Value>) -> Self {
+        Self {
+            name: name.into(),
+            metadata,
+            cleanup: None,
+            post_connect_metadata: None,
+        }
+    }
+
+    pub fn with_cleanup(mut self, cleanup: ProviderCleanup) -> Self {
+        self.cleanup = Some(cleanup);
+        self
+    }
+
+    /// Best-effort metadata enrichment that must run only after CDP event
+    /// handlers have been installed. Provider failures never fail browsing.
+    pub async fn enrich_metadata_after_connect(&mut self) {
+        let session_id = match &self.post_connect_metadata {
+            Some(PostConnectMetadata::Browserbase {
+                session_id,
+                retry_after,
+            }) if retry_after.is_none_or(|deadline| Instant::now() >= deadline) => {
+                session_id.clone()
+            }
+            _ => return,
+        };
+
+        match browserbase_live_view_metadata(&session_id).await {
+            Some(metadata) => {
+                self.metadata = Some(metadata);
+                self.post_connect_metadata = None;
+            }
+            None => {
+                if let Some(PostConnectMetadata::Browserbase { retry_after, .. }) =
+                    self.post_connect_metadata.as_mut()
+                {
+                    *retry_after = Some(Instant::now() + BROWSERBASE_LIVE_VIEW_RETRY_DELAY);
+                }
+            }
+        }
+    }
+
+    pub async fn close(self, plugins: &[crate::plugins::PluginConfig]) {
+        if let Some(cleanup) = self.cleanup {
+            close_provider_cleanup_with_plugins(&cleanup, plugins).await;
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct ProviderConnection {
+    pub provider: String,
     pub ws_url: String,
-    pub session: Option<ProviderSession>,
+    pub ws_headers: Option<Vec<(String, String)>>,
+    pub cleanup: Option<ProviderCleanup>,
     /// If true, the WebSocket IS the page session (no Target.* commands).
     pub direct_page: bool,
     pub metadata: Option<Value>,
+    post_connect_metadata: Option<PostConnectMetadata>,
 }
 
-/// Connects to the specified browser provider and returns a CDP WebSocket URL
-/// along with session info for cleanup on failure.
+impl ProviderConnection {
+    pub fn into_active(self) -> ActiveProvider {
+        ActiveProvider {
+            name: self.provider,
+            metadata: self.metadata,
+            cleanup: self.cleanup,
+            post_connect_metadata: self.post_connect_metadata,
+        }
+    }
+
+    pub async fn close(self, plugins: &[crate::plugins::PluginConfig]) {
+        self.into_active().close(plugins).await;
+    }
+}
+
+/// Connects to the specified browser provider and returns a CDP connection
+/// (WebSocket URL, optional headers, metadata, and cleanup state).
 pub async fn connect_provider(provider_name: &str) -> Result<ProviderConnection, String> {
     let plugins = crate::plugins::plugins_from_env();
     connect_provider_with_plugins(provider_name, &plugins).await
@@ -49,51 +157,44 @@ pub async fn connect_provider_with_plugins_and_options(
     launch_options: Option<Value>,
 ) -> Result<ProviderConnection, String> {
     match provider_name.to_lowercase().as_str() {
-        "browserbase" => {
-            let (url, session) = connect_browserbase().await?;
-            Ok(ProviderConnection {
-                ws_url: url,
-                session,
-                direct_page: false,
-                metadata: None,
-            })
-        }
+        "browserbase" => connect_browserbase().await,
         "browserless" => {
-            let (url, session) = connect_browserless().await?;
+            let (url, cleanup) = connect_browserless().await?;
             Ok(ProviderConnection {
+                provider: "browserless".to_string(),
                 ws_url: url,
-                session,
+                ws_headers: None,
+                cleanup,
                 direct_page: false,
                 metadata: None,
+                post_connect_metadata: None,
             })
         }
         "browser-use" | "browseruse" => {
-            let (url, session) = connect_browser_use().await?;
+            let (url, cleanup) = connect_browser_use().await?;
             Ok(ProviderConnection {
+                provider: "browser-use".to_string(),
                 ws_url: url,
-                session,
+                ws_headers: None,
+                cleanup,
                 direct_page: false,
                 metadata: None,
+                post_connect_metadata: None,
             })
         }
         "kernel" => {
-            let (url, session) = connect_kernel().await?;
+            let (url, cleanup) = connect_kernel().await?;
             Ok(ProviderConnection {
+                provider: "kernel".to_string(),
                 ws_url: url,
-                session,
+                ws_headers: None,
+                cleanup,
                 direct_page: false,
                 metadata: None,
+                post_connect_metadata: None,
             })
         }
-        "agentcore" => {
-            let (url, session) = connect_agentcore().await?;
-            Ok(ProviderConnection {
-                ws_url: url,
-                session,
-                direct_page: false,
-                metadata: None,
-            })
-        }
+        "agentcore" => connect_agentcore().await,
         _ => {
             connect_plugin_provider_with_plugins_and_options(provider_name, plugins, launch_options)
                 .await
@@ -101,34 +202,18 @@ pub async fn connect_provider_with_plugins_and_options(
     }
 }
 
-/// Close a provider session (call on CDP connect failure).
-pub async fn close_provider_session(session: &ProviderSession) {
-    let plugins = crate::plugins::plugins_from_env();
-    close_provider_session_with_plugins(session, &plugins).await;
-}
-
-/// Close a provider session with the plugin registry that created it.
-pub async fn close_provider_session_with_plugins(
-    session: &ProviderSession,
+/// Close provider-owned resources with the plugin registry that created them.
+pub async fn close_provider_cleanup_with_plugins(
+    cleanup: &ProviderCleanup,
     plugins: &[crate::plugins::PluginConfig],
 ) {
-    if let Some(plugin_name) = session.provider.strip_prefix("plugin:") {
-        if let Ok(cleanup) = serde_json::from_str::<Value>(&session.session_id) {
-            let _ =
-                crate::plugins::close_browser_provider_with_plugins(plugin_name, plugins, cleanup)
-                    .await;
-        }
-        return;
-    }
-
     let client = reqwest::Client::new();
-    match session.provider.as_str() {
-        "browserbase" => {
+    match cleanup {
+        ProviderCleanup::Browserbase { session_id } => {
             if let Ok(api_key) = env::var("BROWSERBASE_API_KEY") {
                 let _ = client
                     .post(format!(
-                        "https://api.browserbase.com/v1/sessions/{}",
-                        session.session_id
+                        "https://api.browserbase.com/v1/sessions/{session_id}"
                     ))
                     .header("Content-Type", "application/json")
                     .header("X-BB-API-Key", &api_key)
@@ -137,12 +222,14 @@ pub async fn close_provider_session_with_plugins(
                     .await;
             }
         }
-        "browser-use" => {
+        ProviderCleanup::Browserless { stop_url } => {
+            let _ = client.delete(stop_url).send().await;
+        }
+        ProviderCleanup::BrowserUse { session_id } => {
             if let Ok(api_key) = env::var("BROWSER_USE_API_KEY") {
                 let _ = client
                     .patch(format!(
-                        "https://api.browser-use.com/api/v2/browsers/{}",
-                        session.session_id
+                        "https://api.browser-use.com/api/v2/browsers/{session_id}"
                     ))
                     .header("X-Browser-Use-API-Key", &api_key)
                     .header("Content-Type", "application/json")
@@ -151,11 +238,7 @@ pub async fn close_provider_session_with_plugins(
                     .await;
             }
         }
-        "browserless" => {
-            // session_id holds the stop URL for browserless
-            let _ = client.delete(&session.session_id).send().await;
-        }
-        "kernel" => {
+        ProviderCleanup::Kernel { session_id } => {
             if let Ok(api_key) = env::var("KERNEL_API_KEY") {
                 let endpoint = env::var("KERNEL_ENDPOINT")
                     .unwrap_or_else(|_| "https://api.onkernel.com".to_string());
@@ -163,18 +246,28 @@ pub async fn close_provider_session_with_plugins(
                     .delete(format!(
                         "{}/browsers/{}",
                         endpoint.trim_end_matches('/'),
-                        session.session_id
+                        session_id
                     ))
                     .header("Authorization", format!("Bearer {}", api_key))
                     .send()
                     .await;
             }
         }
-        "agentcore" => {
-            // AgentCore session cleanup is handled via signed DELETE request
-            let _ = close_agentcore_session(&session.session_id).await;
+        ProviderCleanup::AgentCore {
+            session_id,
+            region,
+            browser_identifier,
+        } => {
+            let _ = close_agentcore_session(session_id, region, browser_identifier).await;
         }
-        _ => {}
+        ProviderCleanup::Plugin { provider, data } => {
+            let _ = crate::plugins::close_browser_provider_with_plugins(
+                provider,
+                plugins,
+                data.clone(),
+            )
+            .await;
+        }
     }
 }
 
@@ -229,15 +322,18 @@ pub async fn connect_plugin_provider_with_plugins_and_options(
     let browser =
         crate::plugins::connect_browser_provider_with_plugins(provider_name, plugins, request)
             .await?;
-    let session = browser.cleanup.as_ref().map(|cleanup| ProviderSession {
-        provider: format!("plugin:{}", provider_name),
-        session_id: serde_json::to_string(cleanup).unwrap_or_else(|_| "{}".to_string()),
+    let cleanup = browser.cleanup.map(|data| ProviderCleanup::Plugin {
+        provider: provider_name.to_string(),
+        data,
     });
     Ok(ProviderConnection {
+        provider: provider_name.to_string(),
         ws_url: browser.cdp_url,
-        session,
+        ws_headers: None,
+        cleanup,
         direct_page: browser.direct_page,
         metadata: browser.metadata,
+        post_connect_metadata: None,
     })
 }
 
@@ -248,7 +344,7 @@ fn env_var_is_truthy(name: &str) -> bool {
     }
 }
 
-async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), String> {
+async fn connect_browserbase() -> Result<ProviderConnection, String> {
     let api_key = env::var("BROWSERBASE_API_KEY")
         .map_err(|_| "BROWSERBASE_API_KEY environment variable is not set")?;
 
@@ -256,7 +352,7 @@ async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), Stri
     let response = client
         .post("https://api.browserbase.com/v1/sessions")
         .header("content-type", "application/json")
-        .header("x-bb-api-key", &api_key)
+        .header("X-BB-API-Key", &api_key)
         .body("{}")
         .send()
         .await
@@ -279,28 +375,106 @@ async fn connect_browserbase() -> Result<(String, Option<ProviderSession>), Stri
     let json: Value =
         serde_json::from_str(&body).map_err(|e| format!("Invalid Browserbase response: {}", e))?;
 
-    let session_id = json
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let ws_url = json
-        .get("connectUrl")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .ok_or_else(|| "Browserbase response missing connectUrl".to_string())?;
-
-    Ok((
+    let (session_id, ws_url) = parse_browserbase_session(&json)?;
+    // Browserbase requires connecting to connectUrl promptly after session
+    // create (sessions time out if unused). Live-view URLs come from a separate
+    // GET /v1/sessions/{id}/debug call after CDP connect succeeds.
+    Ok(ProviderConnection {
+        provider: "browserbase".to_string(),
         ws_url,
-        Some(ProviderSession {
-            provider: "browserbase".to_string(),
-            session_id,
+        ws_headers: None,
+        cleanup: Some(ProviderCleanup::Browserbase {
+            session_id: session_id.clone(),
         }),
-    ))
+        direct_page: false,
+        metadata: Some(json!({ "sessionId": session_id.clone() })),
+        post_connect_metadata: Some(PostConnectMetadata::Browserbase {
+            session_id,
+            retry_after: None,
+        }),
+    })
 }
 
-async fn connect_browserless() -> Result<(String, Option<ProviderSession>), String> {
+/// Best-effort Browserbase live-view metadata from `GET /v1/sessions/{id}/debug`.
+///
+/// Returns only the session-scoped `debuggerUrl` / `debuggerFullscreenUrl` fields
+/// (plus `sessionId`). Omits `wsUrl` and per-page URLs from the SessionLiveUrls
+/// response because those are additional capability-bearing surfaces.
+pub async fn browserbase_live_view_metadata(session_id: &str) -> Option<Value> {
+    let api_key = env::var("BROWSERBASE_API_KEY").ok()?;
+    let client = reqwest::Client::new();
+    fetch_browserbase_debug_metadata(&client, &api_key, session_id)
+        .await
+        .ok()
+}
+
+fn parse_browserbase_session(json: &Value) -> Result<(String, String), String> {
+    let session_id = json
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Browserbase response missing id".to_string())?;
+    let connect_url = json
+        .get("connectUrl")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Browserbase response missing connectUrl".to_string())?;
+    Ok((session_id.to_string(), connect_url.to_string()))
+}
+
+async fn fetch_browserbase_debug_metadata(
+    client: &reqwest::Client,
+    api_key: &str,
+    session_id: &str,
+) -> Result<Value, String> {
+    let response = client
+        .get(format!(
+            "https://api.browserbase.com/v1/sessions/{}/debug",
+            urlencoding::encode(session_id)
+        ))
+        .header("X-BB-API-Key", api_key)
+        .timeout(BROWSERBASE_LIVE_VIEW_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| format!("Browserbase live-view request failed: {}", e))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read Browserbase live-view response: {}", e))?;
+    if !status.is_success() {
+        return Err(format!(
+            "Browserbase live-view API error ({}): {}",
+            status.as_u16(),
+            body
+        ));
+    }
+    let json: Value = serde_json::from_str(&body)
+        .map_err(|e| format!("Invalid Browserbase live-view response: {}", e))?;
+    parse_browserbase_debug_metadata(session_id, &json)
+}
+
+fn parse_browserbase_debug_metadata(session_id: &str, json: &Value) -> Result<Value, String> {
+    let debugger_url = json
+        .get("debuggerUrl")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Browserbase live-view response missing debuggerUrl".to_string())?;
+    let debugger_fullscreen_url = json
+        .get("debuggerFullscreenUrl")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "Browserbase live-view response missing debuggerFullscreenUrl".to_string()
+        })?;
+    Ok(json!({
+        "sessionId": session_id,
+        "debuggerUrl": debugger_url,
+        "debuggerFullscreenUrl": debugger_fullscreen_url,
+    }))
+}
+
+async fn connect_browserless() -> Result<(String, Option<ProviderCleanup>), String> {
     let api_key = env::var("BROWSERLESS_API_KEY")
         .map_err(|_| "BROWSERLESS_API_KEY environment variable is not set")?;
 
@@ -371,17 +545,10 @@ async fn connect_browserless() -> Result<(String, Option<ProviderSession>), Stri
         .map(String::from)
         .ok_or_else(|| "Browserless response missing 'stop' URL".to_string())?;
 
-    Ok((
-        connect_url,
-        Some(ProviderSession {
-            provider: "browserless".to_string(),
-            // Store the stop URL as the session_id for cleanup
-            session_id: stop_url,
-        }),
-    ))
+    Ok((connect_url, Some(ProviderCleanup::Browserless { stop_url })))
 }
 
-async fn connect_browser_use() -> Result<(String, Option<ProviderSession>), String> {
+async fn connect_browser_use() -> Result<(String, Option<ProviderCleanup>), String> {
     let api_key = env::var("BROWSER_USE_API_KEY")
         .map_err(|_| "BROWSER_USE_API_KEY environment variable is not set")?;
 
@@ -390,7 +557,7 @@ async fn connect_browser_use() -> Result<(String, Option<ProviderSession>), Stri
     Ok((ws_url, None))
 }
 
-async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
+async fn connect_kernel() -> Result<(String, Option<ProviderCleanup>), String> {
     let api_key = env::var("KERNEL_API_KEY").ok();
     let endpoint =
         env::var("KERNEL_ENDPOINT").unwrap_or_else(|_| "https://api.onkernel.com".to_string());
@@ -470,13 +637,7 @@ async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
                 .to_string()
         })?;
 
-    Ok((
-        ws_url,
-        Some(ProviderSession {
-            provider: "kernel".to_string(),
-            session_id,
-        }),
-    ))
+    Ok((ws_url, Some(ProviderCleanup::Kernel { session_id })))
 }
 
 // ============================================================================
@@ -486,43 +647,7 @@ async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
 mod agentcore {
     use super::*;
 
-    /// AgentCore-specific session info for Live View URL
-    pub struct AgentCoreSessionInfo {
-        pub session_id: String,
-        pub browser_identifier: String,
-        pub region: String,
-        pub live_view_url: String,
-    }
-
-    thread_local! {
-        static AGENTCORE_INFO: std::cell::RefCell<Option<AgentCoreSessionInfo>> = const { std::cell::RefCell::new(None) };
-        static AGENTCORE_WS_HEADERS: std::cell::RefCell<Option<Vec<(String, String)>>> = const { std::cell::RefCell::new(None) };
-    }
-
-    pub fn set_agentcore_info(info: AgentCoreSessionInfo) {
-        AGENTCORE_INFO.with(|cell| *cell.borrow_mut() = Some(info));
-    }
-
-    pub fn get_agentcore_info() -> Option<AgentCoreSessionInfo> {
-        AGENTCORE_INFO.with(|cell| {
-            cell.borrow().as_ref().map(|i| AgentCoreSessionInfo {
-                session_id: i.session_id.clone(),
-                browser_identifier: i.browser_identifier.clone(),
-                region: i.region.clone(),
-                live_view_url: i.live_view_url.clone(),
-            })
-        })
-    }
-
-    pub fn set_agentcore_ws_headers(headers: Vec<(String, String)>) {
-        AGENTCORE_WS_HEADERS.with(|cell| *cell.borrow_mut() = Some(headers));
-    }
-
-    pub fn take_agentcore_ws_headers() -> Option<Vec<(String, String)>> {
-        AGENTCORE_WS_HEADERS.with(|cell| cell.borrow_mut().take())
-    }
-
-    pub async fn connect() -> Result<(String, Option<ProviderSession>), String> {
+    pub async fn connect() -> Result<ProviderConnection, String> {
         let region = env::var("AGENTCORE_REGION")
             .or_else(|_| env::var("AWS_REGION"))
             .or_else(|_| env::var("AWS_DEFAULT_REGION"))
@@ -606,13 +731,6 @@ mod agentcore {
             region, browser_identifier, session_id
         );
 
-        set_agentcore_info(AgentCoreSessionInfo {
-            session_id: session_id.clone(),
-            browser_identifier: browser_identifier.clone(),
-            region: region.clone(),
-            live_view_url: live_view_url.clone(),
-        });
-
         eprintln!("Session: {}", session_id);
         eprintln!("Live View: {}", live_view_url);
 
@@ -629,15 +747,25 @@ mod agentcore {
             None,
         )
         .await?;
-        set_agentcore_ws_headers(ws_headers);
 
-        Ok((
+        Ok(ProviderConnection {
+            provider: "agentcore".to_string(),
             ws_url,
-            Some(ProviderSession {
-                provider: "agentcore".to_string(),
-                session_id,
+            ws_headers: Some(ws_headers),
+            cleanup: Some(ProviderCleanup::AgentCore {
+                session_id: session_id.clone(),
+                region: region.clone(),
+                browser_identifier: browser_identifier.clone(),
             }),
-        ))
+            direct_page: false,
+            metadata: Some(json!({
+                "sessionId": session_id,
+                "browserIdentifier": browser_identifier,
+                "region": region,
+                "liveViewUrl": live_view_url,
+            })),
+            post_connect_metadata: None,
+        })
     }
 
     /// Get AWS credentials from environment variables or AWS CLI
@@ -816,32 +944,22 @@ mod agentcore {
         Ok(headers)
     }
 
-    pub async fn close_session(session_id: &str) -> Result<(), String> {
-        let info = get_agentcore_info();
-        let (region, browser_id) = match &info {
-            Some(i) => (i.region.clone(), i.browser_identifier.clone()),
-            None => {
-                let region = env::var("AGENTCORE_REGION")
-                    .or_else(|_| env::var("AWS_REGION"))
-                    .or_else(|_| env::var("AWS_DEFAULT_REGION"))
-                    .unwrap_or_else(|_| "us-east-1".to_string());
-                let browser_id = env::var("AGENTCORE_BROWSER_ID")
-                    .unwrap_or_else(|_| "aws.browser.v1".to_string());
-                (region, browser_id)
-            }
-        };
-
+    pub async fn close_session(
+        session_id: &str,
+        region: &str,
+        browser_id: &str,
+    ) -> Result<(), String> {
         let host = format!("bedrock-agentcore.{}.amazonaws.com", region);
         let path = format!(
             "/browsers/{}/sessions/stop",
-            urlencoding::encode(&browser_id)
+            urlencoding::encode(browser_id)
         );
         let url = format!("https://{}{}", host, path);
 
         let body = serde_json::to_string(&json!({ "sessionId": session_id }))
             .map_err(|e| format!("Failed to serialize close request: {}", e))?;
 
-        let signed_headers = sign_request("PUT", &url, &region, Some(&body)).await?;
+        let signed_headers = sign_request("PUT", &url, region, Some(&body)).await?;
 
         let client = reqwest::Client::new();
         let mut req = client.put(&url).body(body);
@@ -854,14 +972,16 @@ mod agentcore {
     }
 }
 
-pub use agentcore::{get_agentcore_info, take_agentcore_ws_headers};
-
-async fn connect_agentcore() -> Result<(String, Option<ProviderSession>), String> {
+async fn connect_agentcore() -> Result<ProviderConnection, String> {
     agentcore::connect().await
 }
 
-async fn close_agentcore_session(session_id: &str) -> Result<(), String> {
-    agentcore::close_session(session_id).await
+async fn close_agentcore_session(
+    session_id: &str,
+    region: &str,
+    browser_identifier: &str,
+) -> Result<(), String> {
+    agentcore::close_session(session_id, region, browser_identifier).await
 }
 
 #[cfg(test)]
@@ -896,6 +1016,75 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_browserbase_session_requires_id_and_connect_url() {
+        let parsed = parse_browserbase_session(&json!({
+            "id": "sess_123",
+            "connectUrl": "wss://connect.browserbase.com/session"
+        }))
+        .unwrap();
+        assert_eq!(parsed.0, "sess_123");
+        assert_eq!(parsed.1, "wss://connect.browserbase.com/session");
+
+        assert!(parse_browserbase_session(&json!({ "connectUrl": "wss://example.com" })).is_err());
+        assert!(parse_browserbase_session(&json!({ "id": "sess_123" })).is_err());
+    }
+
+    #[test]
+    fn test_parse_browserbase_debug_metadata_keeps_only_safe_live_view_fields() {
+        let metadata = parse_browserbase_debug_metadata(
+            "sess_123",
+            &json!({
+                "debuggerUrl": "https://debugger.browserbase.com/session",
+                "debuggerFullscreenUrl": "https://debugger.browserbase.com/session/fullscreen",
+                "wsUrl": "wss://api.browserbase.com/private-capability",
+                "pages": []
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(metadata["sessionId"], "sess_123");
+        assert_eq!(
+            metadata["debuggerFullscreenUrl"],
+            "https://debugger.browserbase.com/session/fullscreen"
+        );
+        assert!(metadata.get("wsUrl").is_none());
+        assert!(metadata.get("pages").is_none());
+    }
+
+    #[test]
+    fn test_parse_browserbase_debug_metadata_requires_both_debugger_urls() {
+        let result = parse_browserbase_debug_metadata(
+            "sess_123",
+            &json!({ "debuggerUrl": "https://debugger.browserbase.com/session" }),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_missing_browserbase_debug_metadata_is_non_fatal() {
+        let metadata = parse_browserbase_debug_metadata("sess_123", &json!({})).ok();
+        assert!(metadata.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_browserbase_metadata_retry_cooldown_preserves_pending_enrichment() {
+        let mut provider = ActiveProvider {
+            name: "browserbase".to_string(),
+            metadata: Some(json!({ "sessionId": "sess_123" })),
+            cleanup: None,
+            post_connect_metadata: Some(PostConnectMetadata::Browserbase {
+                session_id: "sess_123".to_string(),
+                retry_after: Some(Instant::now() + Duration::from_secs(60)),
+            }),
+        };
+
+        provider.enrich_metadata_after_connect().await;
+
+        assert_eq!(provider.metadata.unwrap()["sessionId"], "sess_123");
+        assert!(provider.post_connect_metadata.is_some());
+    }
+
+    #[test]
     fn test_agentcore_env_defaults() {
         // Test that default values are used when env vars not set
         std::env::remove_var("AGENTCORE_REGION");
@@ -914,40 +1103,31 @@ mod tests {
     }
 
     #[test]
-    fn test_agentcore_session_info_storage() {
-        let info = agentcore::AgentCoreSessionInfo {
-            session_id: "test-session".to_string(),
-            browser_identifier: "aws.browser.v1".to_string(),
-            region: "us-east-1".to_string(),
-            live_view_url: "https://example.com".to_string(),
-        };
-
-        agentcore::set_agentcore_info(info);
-        let retrieved = get_agentcore_info();
-        assert!(retrieved.is_some());
-        let retrieved = retrieved.unwrap();
-        assert_eq!(retrieved.session_id, "test-session");
-        assert_eq!(retrieved.region, "us-east-1");
-    }
-
-    #[test]
-    fn test_agentcore_ws_headers_storage() {
-        let headers = vec![
-            (
+    fn test_agentcore_connection_carries_headers_metadata_and_typed_cleanup() {
+        let connection = ProviderConnection {
+            provider: "agentcore".to_string(),
+            ws_url: "wss://example.com/automation".to_string(),
+            ws_headers: Some(vec![(
                 "Authorization".to_string(),
                 "AWS4-HMAC-SHA256...".to_string(),
-            ),
-            ("X-Amz-Date".to_string(), "20260304T180000Z".to_string()),
-        ];
+            )]),
+            cleanup: Some(ProviderCleanup::AgentCore {
+                session_id: "test-session".to_string(),
+                region: "us-east-1".to_string(),
+                browser_identifier: "aws.browser.v1".to_string(),
+            }),
+            direct_page: false,
+            metadata: Some(json!({
+                "sessionId": "test-session",
+                "liveViewUrl": "https://example.com"
+            })),
+            post_connect_metadata: None,
+        };
 
-        agentcore::set_agentcore_ws_headers(headers);
-        let taken = take_agentcore_ws_headers();
-        assert!(taken.is_some());
-        assert_eq!(taken.unwrap().len(), 2);
-
-        // Should be None after take
-        let taken_again = take_agentcore_ws_headers();
-        assert!(taken_again.is_none());
+        assert_eq!(connection.ws_headers.as_ref().unwrap().len(), 1);
+        let active = connection.into_active();
+        assert_eq!(active.name, "agentcore");
+        assert_eq!(active.metadata.unwrap()["sessionId"], "test-session");
     }
 
     #[cfg(unix)]
@@ -971,9 +1151,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         perms.set_mode(0o755);
         std::fs::set_permissions(&plugin_path, perms).unwrap();
 
-        let session = ProviderSession {
-            provider: "plugin:cloud-browser".to_string(),
-            session_id: r#"{"sessionId":"s1"}"#.to_string(),
+        let cleanup = ProviderCleanup::Plugin {
+            provider: "cloud-browser".to_string(),
+            data: json!({ "sessionId": "s1" }),
         };
         let plugins = vec![crate::plugins::PluginConfig {
             name: "cloud-browser".to_string(),
@@ -983,7 +1163,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             ..crate::plugins::PluginConfig::default()
         }];
 
-        rt.block_on(close_provider_session_with_plugins(&session, &plugins));
+        rt.block_on(close_provider_cleanup_with_plugins(&cleanup, &plugins));
 
         let request = std::fs::read_to_string(marker_path).unwrap();
         assert!(request.contains(r#""type":"browser.close""#));
@@ -1012,7 +1192,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             &plugin_path,
             r#"#!/bin/sh
 cat > "$1"
-printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cdpUrl":"ws://127.0.0.1:9222/devtools/browser/test"}}'
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cdpUrl":"ws://127.0.0.1:9222/devtools/browser/test","metadata":{"dashboard":{"url":"https://provider.example/session"}}}}'
 "#,
         )
         .unwrap();
@@ -1028,12 +1208,18 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             ..crate::plugins::PluginConfig::default()
         }];
 
-        rt.block_on(connect_provider_with_plugins("cloud-browser", &plugins))
+        let connection = rt
+            .block_on(connect_provider_with_plugins("cloud-browser", &plugins))
             .unwrap();
 
         let request: Value =
             serde_json::from_str(&std::fs::read_to_string(request_path).unwrap()).unwrap();
         assert_eq!(request["request"]["launchOptions"]["headed"], false);
+        assert_eq!(connection.provider, "cloud-browser");
+        assert_eq!(
+            connection.metadata.unwrap()["dashboard"]["url"],
+            "https://provider.example/session"
+        );
     }
 
     #[cfg(unix)]

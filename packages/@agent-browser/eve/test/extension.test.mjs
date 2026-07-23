@@ -89,6 +89,114 @@ test("navigate requires a url for goto", async () => {
   );
 });
 
+test("navigate includes provider metadata only when opted in", async () => {
+  resetConfig({ includeProviderMetadata: true });
+  const sandbox = fakeSandbox({
+    id: "provider-metadata",
+    respond(command) {
+      if (command.includes(" session info ")) {
+        return {
+          stdout: OK({
+            provider: "cloud-browser",
+            providerMetadata: {
+              sessionId: "sess_123",
+              dashboard: {
+                url: "https://provider.example/sessions/sess_123",
+              },
+            },
+          }),
+        };
+      }
+      return { stdout: OK({ title: "Example", url: "https://example.com/" }) };
+    },
+  });
+
+  const result = await tools.navigate.execute(
+    { action: "goto", url: "https://example.com" },
+    fakeCtx(sandbox),
+  );
+
+  assert.equal(result.provider, "cloud-browser");
+  assert.equal(result.providerMetadata.sessionId, "sess_123");
+  assert.equal(
+    result.providerMetadata.dashboard.url,
+    "https://provider.example/sessions/sess_123",
+  );
+  assert.equal(sandbox.commands.filter((command) => command.includes(" session info ")).length, 1);
+  assert.deepEqual(tools.navigate.toModelOutput(result), {
+    type: "json",
+    value: { title: "Example", url: "https://example.com/" },
+  });
+  resetConfig();
+});
+
+test("navigate does not request provider metadata unless opted in", async () => {
+  resetConfig();
+  const sandbox = fakeSandbox({
+    id: "provider-metadata-opt-out",
+    respond(command) {
+      if (command.includes(" session info ")) {
+        throw new Error("session info should not be called");
+      }
+      return { stdout: OK({ title: "Example", url: "https://example.com/" }) };
+    },
+  });
+
+  const result = await tools.navigate.execute(
+    { action: "goto", url: "https://example.com" },
+    fakeCtx(sandbox),
+  );
+
+  assert.deepEqual(result, { title: "Example", url: "https://example.com/" });
+  assert.equal(sandbox.commands.filter((command) => command.includes(" session info ")).length, 0);
+});
+
+test("navigate skips provider metadata lookup for history actions", async () => {
+  resetConfig({ includeProviderMetadata: true });
+  const sandbox = fakeSandbox({
+    id: "provider-metadata-history",
+    respond(command) {
+      if (command.includes(" session info ")) {
+        return {
+          stdout: OK({
+            provider: "browserbase",
+            providerMetadata: { sessionId: "sess_should_not_fetch" },
+          }),
+        };
+      }
+      return { stdout: OK({ title: "Example", url: "https://example.com/" }) };
+    },
+  });
+
+  const result = await tools.navigate.execute({ action: "back" }, fakeCtx(sandbox));
+  assert.deepEqual(result, { title: "Example", url: "https://example.com/" });
+  assert.equal(sandbox.commands.filter((command) => command.includes(" session info ")).length, 0);
+  resetConfig();
+});
+
+test("navigate keeps working when opted-in provider metadata is unavailable", async () => {
+  resetConfig({ includeProviderMetadata: true });
+  const sandbox = fakeSandbox({
+    id: "provider-metadata-unavailable",
+    respond(command) {
+      if (command.includes(" session info ")) {
+        return {
+          exitCode: 1,
+          stdout: JSON.stringify({ success: false, data: null, error: "unsupported" }),
+        };
+      }
+      return { stdout: OK({ title: "Example", url: "https://example.com/" }) };
+    },
+  });
+
+  const result = await tools.navigate.execute(
+    { action: "goto", url: "https://example.com" },
+    fakeCtx(sandbox),
+  );
+  assert.deepEqual(result, { title: "Example", url: "https://example.com/" });
+  resetConfig();
+});
+
 test("probes for the binary once per sandbox and skips install when present", async () => {
   resetConfig();
   const sandbox = fakeSandbox({ id: "probe-once" });
