@@ -950,6 +950,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--confirm-actions <list>` | Action categories requiring confirmation (or `AGENT_BROWSER_CONFIRM_ACTIONS` env) |
 | `--confirm-interactive` | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |
 | `--engine <name>` | Browser engine: `chrome` (default), `lightpanda` (or `AGENT_BROWSER_ENGINE` env) |
+| `--idle-timeout <time>` | Auto-shutdown after inactivity. Defaults to `4h`; set to `0` to disable (or `AGENT_BROWSER_IDLE_TIMEOUT_MS` env) |
 | `--no-auto-dialog` | Disable automatic dismissal of `alert`/`beforeunload` dialogs (or `AGENT_BROWSER_NO_AUTO_DIALOG` env) |
 | `--model <name>` | AI model for chat command (or `AI_GATEWAY_MODEL` env) |
 | `-v`, `--verbose` | Show tool commands and their raw output (chat) |
@@ -1490,7 +1491,7 @@ agent-browser uses a client-daemon architecture:
 1. **Rust CLI** - Parses commands, communicates with daemon
 2. **Rust Daemon** - Pure Rust daemon using direct CDP, no Node.js required
 
-The daemon starts automatically on first command and persists between commands for fast subsequent operations. To auto-shutdown the daemon after a period of inactivity, set `AGENT_BROWSER_IDLE_TIMEOUT_MS` (value in milliseconds). When set, the daemon closes the browser and exits after receiving no commands for the specified duration.
+The daemon starts automatically on first command and persists between commands for fast subsequent operations. Abandoned daemons close the browser and exit after four hours of inactivity by default. Queued and executing commands hold activity leases, so long-running work is never treated as idle. Response delivery is not leased, which prevents a client that stops reading from keeping the browser alive indefinitely. Set `AGENT_BROWSER_IDLE_TIMEOUT_MS` to a custom duration in milliseconds, or set it to `0` for an intentionally indefinite session.
 
 **Browser Engine:** Uses Chrome (from Chrome for Testing) by default. The `--engine` flag selects between `chrome` and `lightpanda`. Supported browsers: Chromium/Chrome (via CDP) and Safari (via WebDriver for iOS).
 
