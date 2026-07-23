@@ -1108,7 +1108,13 @@ impl DaemonState {
                     }
 
                     let tab_id = mgr.assign_tab_id();
-                    mgr.add_page(super::browser::PageInfo {
+                    // Event-discovered target (e.g. a tab the human opened in the
+                    // shared Chrome, or a JS-opened popup): register it so it shows
+                    // in `tab list`, but do NOT activate it. Auto-activating here is
+                    // the active-tab steal. Explicit commands (`tab new`,
+                    // `window new`, `click --new-tab`) still activate via their own
+                    // paths.
+                    mgr.add_page_without_activation(super::browser::PageInfo {
                         tab_id,
                         label: None,
                         target_id: te.target_info.target_id.clone(),
