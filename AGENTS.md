@@ -99,6 +99,26 @@ This is a Rust codebase. The browser automation daemon lives in `cli/src/native/
 
 ## Testing
 
+### Validation
+
+Run all checks at once:
+
+`ash
+pnpm run validate
+`
+
+Or run individual checks:
+
+`ash
+pnpm run format:check   # Rust formatting (requires cargo in PATH)
+pnpm run lint:rust       # Rust linting (clippy)
+pnpm run lint            # JS/TS linting (docs eslint)
+pnpm run typecheck       # TypeScript type checking (dashboard, docs, eve, sandbox)
+pnpm run test            # All JS/TS tests across workspace packages
+pnpm run test:rust       # Rust unit tests
+pnpm run test:e2e        # Rust end-to-end tests (requires Chrome, runs serially)
+`
+
 ### Unit Tests
 
 ```bash
@@ -189,6 +209,25 @@ Check bootstrap progress (first boot only):
 ```
 
 The repo lives at `C:\agent-browser` on the instance. Rust, Git, and Chrome are pre-installed. The `run.sh` wrapper automatically adds cargo and git to PATH.
+
+## Learning and Improvement
+
+When an eval case fails or agent behavior is suboptimal, capture the observation
+in evals/LEARNINGS.md with the date, category, symptom, root cause, fix, and
+verification status. Then route the fix back to the relevant guidance owner:
+
+- **Skill guidance** → update the affected file under skill-data/
+- **General agent guidance** → update this file (AGENTS.md)
+- **Eval quality** → update the affected case under evals/cases/
+
+After updating guidance, re-run the affected eval category to confirm the fix:
+
+`ash
+pnpm run eval --category <category>
+`
+
+This closes the feedback loop: eval failures → learnings → guidance updates →
+verified improvement.
 
 <!-- opensrc:start -->
 

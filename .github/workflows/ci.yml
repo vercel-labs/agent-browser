@@ -152,7 +152,6 @@ jobs:
 
   native-e2e:
     name: Native E2E Tests
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     needs: rust
     steps:
