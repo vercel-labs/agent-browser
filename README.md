@@ -111,6 +111,7 @@ agent-browser find role button click --name "Submit"
 ```bash
 agent-browser open                    # Launch browser (no navigation); stays on about:blank
 agent-browser open <url>              # Launch + navigate to URL (aliases: goto, navigate)
+agent-browser --executable-path <path-to-edge> open edge://extensions  # Open an Edge internal URL
 agent-browser read [url]              # Fetch agent-readable text, or read rendered active-tab DOM
 agent-browser click <sel>             # Click element (--new-tab to open in new tab)
 agent-browser dblclick <sel>          # Double-click element

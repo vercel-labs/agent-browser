@@ -3803,6 +3803,16 @@ mod tests {
     }
 
     #[test]
+    fn open_args_preserve_edge_url_through_cli_parser() {
+        let args = open_args(&json!({ "url": "edge://extensions" })).unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        let command = crate::commands::parse_command(&args, &flags).unwrap();
+
+        assert_eq!(command["action"], "navigate");
+        assert_eq!(command["url"], "edge://extensions");
+    }
+
+    #[test]
     fn doctor_tool_exposes_webgpu_option() {
         let tools = tools();
         let doctor = tools

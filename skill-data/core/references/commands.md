@@ -9,8 +9,9 @@ agent-browser open            # Launch browser (no navigation); stays on about:b
                               # Pair with `network route`, `cookies set --curl`, or
                               # `addinitscript` to stage state before the first navigation.
 agent-browser open <url>      # Launch + navigate (aliases: goto, navigate)
-                              # Supports: https://, http://, file://, about:, data://
-                              # Auto-prepends https:// if no protocol given
+                              # Recognizes: https://, http://, file:, about:, data:,
+                              # chrome-extension://, chrome://, and edge://
+                              # Other inputs are normalized with https://
 agent-browser read [url]      # Fetch agent-readable text, or read rendered active-tab DOM
                               # Explicit URLs send Accept: text/markdown, then try .md if needed
                               # Walks ancestor paths for llms.txt before HTML fallback
