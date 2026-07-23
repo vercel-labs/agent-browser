@@ -3085,13 +3085,11 @@ mod tests {
         );
     }
 
-    /// Finding #1: enabling pin at runtime must bind the currently active tab
-    /// immediately. The attach-to-existing path leaves `bound_target_id`
-    /// unset, so a session that turns `--pin-tab` on later would otherwise be
-    /// pinned-but-unbound until a restart re-derived the binding from disk
-    /// (pinning "applied too late / without binding the active tab").
-    /// Force-red: revert `set_pin_tab` to only flip the flag and
-    /// `bound_target_id` stays `None` here.
+    /// Enabling pin at runtime must bind the currently active tab immediately.
+    /// The attach-to-existing path leaves `bound_target_id` unset, so a session
+    /// that turns `--pin-tab` on later would otherwise be pinned-but-unbound
+    /// until a restart re-derived the binding from disk. Force-red: revert
+    /// `set_pin_tab` to only flip the flag and `bound_target_id` stays `None`.
     #[tokio::test]
     async fn test_enabling_pin_binds_active_tab_immediately() {
         let mut mgr = test_manager(vec![
@@ -3119,7 +3117,7 @@ mod tests {
         );
     }
 
-    /// Finding #2: a pinned session whose only tracked tab is closed enters the
+    /// A pinned session whose only tracked tab is closed enters the
     /// `tab_gone` state; a subsequently discovered (auto-attached,
     /// non-activated) tab must NOT silently re-bind the session and clear
     /// `tab_gone`. Before the fix, `add_page_with_activation`'s empty-pages
