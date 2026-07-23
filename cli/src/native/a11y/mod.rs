@@ -98,8 +98,16 @@ fn build_report_expression(
   }}
   const tags = {tags_json};
   const selector = {selector_json};
-  if (selector !== null && !document.querySelector(selector)) {{
-    return JSON.stringify({{ error: 'No element matches selector: ' + selector }});
+  if (selector !== null) {{
+    let matchedSelector;
+    try {{
+      matchedSelector = document.querySelector(selector);
+    }} catch (error) {{
+      return JSON.stringify({{ error: 'Invalid selector: ' + selector }});
+    }}
+    if (!matchedSelector) {{
+      return JSON.stringify({{ error: 'No element matches selector: ' + selector }});
+    }}
   }}
   const options = {{ resultTypes: ['violations', 'incomplete'] }};
   {iframes_option}
@@ -172,8 +180,16 @@ fn partial_expression(
   const tags = {tags_json};
   const selector = {selector_json};
   const frameContext = {frame_context_json};
-  if (frameContext === null && selector !== null && !document.querySelector(selector)) {{
-    return JSON.stringify({{ error: 'No element matches selector: ' + selector }});
+  if (frameContext === null && selector !== null) {{
+    let matchedSelector;
+    try {{
+      matchedSelector = document.querySelector(selector);
+    }} catch (error) {{
+      return JSON.stringify({{ error: 'Invalid selector: ' + selector }});
+    }}
+    if (!matchedSelector) {{
+      return JSON.stringify({{ error: 'No element matches selector: ' + selector }});
+    }}
   }}
   const options = {{ resultTypes: ['violations', 'incomplete'] }};
   {iframes_option}
@@ -769,6 +785,22 @@ mod tests {
         let expr = run_expression(None, Some("a\"; alert(1); //"));
         // The selector must arrive as a JSON string literal, not raw code.
         assert!(expr.contains(r#"const selector = "a\"; alert(1); //""#));
+    }
+
+    #[test]
+    fn test_selector_check_guards_invalid_selectors() {
+        // An invalid CSS selector makes document.querySelector throw. The audit
+        // must catch it and return a clean 'Invalid selector' error instead of
+        // leaking a raw evaluation exception (with isolated-world line numbers)
+        // to the user. Both the top-frame and partial expressions guard it.
+        for expr in [
+            run_expression(None, Some("div::bogus(")),
+            partial_expression(None, Some("div::bogus("), None, false),
+        ] {
+            assert!(expr.contains("try {"));
+            assert!(expr.contains("'Invalid selector: ' + selector"));
+            assert!(expr.contains("'No element matches selector: ' + selector"));
+        }
     }
 
     #[test]
