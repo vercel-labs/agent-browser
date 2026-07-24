@@ -12,9 +12,11 @@ pub(super) fn check(checks: &mut Vec<Check>) {
     let category = "Providers";
 
     let active = env::var("AGENT_BROWSER_PROVIDER").ok();
+    // Provider ids below are written without separators, so `browser-use` and
+    // `browser-cloud` normalize onto the same key as their compact spellings.
     let normalized = active
         .as_ref()
-        .map(|s| s.to_lowercase())
+        .map(|s| s.to_lowercase().replace('-', ""))
         .unwrap_or_default();
 
     let active_status = |provider: &str, ok: bool| -> Status {
@@ -32,16 +34,23 @@ pub(super) fn check(checks: &mut Vec<Check>) {
     let providers: &[(&str, &[&str], &str)] = &[
         ("browserless", &["BROWSERLESS_API_KEY"], "Browserless"),
         ("browserbase", &["BROWSERBASE_API_KEY"], "Browserbase"),
+        (
+            "browsercloud",
+            &["LT_USERNAME", "LT_ACCESS_KEY"],
+            "Browser Cloud",
+        ),
         ("browseruse", &["BROWSER_USE_API_KEY"], "Browser Use"),
         ("kernel", &["KERNEL_API_KEY"], "Kernel"),
     ];
 
     for (id, env_keys, label) in providers {
-        let present = env_keys.iter().any(|k| env::var(k).is_ok());
+        // Providers that need more than one variable are only usable when all
+        // of them are set.
+        let present = env_keys.iter().all(|k| env::var(k).is_ok());
         let provider_id = *id;
         let status = active_status(provider_id, present);
         let msg = if present {
-            format!("{}: API key present", label)
+            format!("{}: credentials present", label)
         } else {
             format!("{}: {} not set", label, env_keys.join(" / "))
         };
@@ -49,7 +58,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         if status == Status::Fail {
             check = check.with_fix(format!(
                 "set {} (or unset AGENT_BROWSER_PROVIDER={})",
-                env_keys.first().copied().unwrap_or(""),
+                env_keys.join(" and "),
                 provider_id
             ));
         }

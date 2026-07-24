@@ -1,0 +1,60 @@
+# Browser Cloud
+
+[Browser Cloud](https://testmuai.com) by TestMu AI provides remote Chrome sessions on a
+managed grid, with video, console, and network capture for every run. Use it when running
+agent-browser somewhere a local browser isn't feasible, or when you want a replayable
+recording of what the agent did.
+
+## Setup
+
+```bash
+export LT_USERNAME="your-username"
+export LT_ACCESS_KEY="your-access-key"
+agent-browser -p browsercloud open https://example.com
+```
+
+Or use environment variables for CI/scripts:
+
+```bash
+export AGENT_BROWSER_PROVIDER=browsercloud
+export LT_USERNAME="your-username"
+export LT_ACCESS_KEY="your-access-key"
+agent-browser open https://example.com
+```
+
+The `-p` flag takes precedence over `AGENT_BROWSER_PROVIDER`.
+
+When enabled, agent-browser connects to a Browser Cloud session instead of launching a
+local browser. All commands work identically. The remote session starts when the CDP
+WebSocket connects and is released when it closes.
+
+Get your username and access key from the [TestMu AI dashboard](https://testmuai.com)
+under **Account Settings**.
+
+## Options
+
+All options are optional and read from the environment.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `BROWSER_CLOUD_ENDPOINT` | `cdp.lambdatest.com` | CDP host. Accepts a bare host or a full URL. |
+| `BROWSER_CLOUD_BROWSER_NAME` | `Chrome` | Browser to launch. |
+| `BROWSER_CLOUD_BROWSER_VERSION` | `latest` | Browser version. |
+| `BROWSER_CLOUD_PLATFORM` | `Windows 10` | Operating system for the session. |
+| `BROWSER_CLOUD_PROJECT` | `agent-browser` | Project name in the dashboard. |
+| `BROWSER_CLOUD_BUILD` | `agent-browser` | Build name in the dashboard. |
+| `BROWSER_CLOUD_SESSION_NAME` | — | Session name in the dashboard. |
+| `BROWSER_CLOUD_RESOLUTION` | — | Viewport, e.g. `1920x1080`. |
+| `BROWSER_CLOUD_REGION` | — | Region to run in, e.g. `us`, `eu`. |
+| `BROWSER_CLOUD_GEO_LOCATION` | — | Two-letter country code for geolocation, e.g. `DE`. |
+| `BROWSER_CLOUD_STEALTH` | `false` | Humanize interactions and randomize the user agent. |
+| `BROWSER_CLOUD_TUNNEL` | `false` | Route traffic through a Browser Cloud tunnel to reach local or private hosts. |
+| `BROWSER_CLOUD_TUNNEL_NAME` | — | Name of an already-running tunnel. |
+
+`AGENT_BROWSER_HEADED` and `AGENT_BROWSER_USER_AGENT` are honored as well.
+
+## Session recordings
+
+Video, console logs, and network logs are captured for every session. Open the
+automation dashboard from [testmuai.com](https://testmuai.com) after signing in to
+replay a run.

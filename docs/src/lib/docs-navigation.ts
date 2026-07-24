@@ -58,6 +58,7 @@ export const navigation: NavSection[] = [
       { name: "AgentCore", href: "/providers/agentcore" },
       { name: "Browser Use", href: "/providers/browser-use" },
       { name: "Browserbase", href: "/providers/browserbase" },
+      { name: "Browser Cloud", href: "/providers/browsercloud" },
       { name: "Browserless", href: "/providers/browserless" },
       { name: "Kernel", href: "/providers/kernel" },
     ],

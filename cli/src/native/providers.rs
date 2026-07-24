@@ -1,6 +1,7 @@
 //! Browser provider connections for remote CDP sessions.
 //!
-//! Supports AgentCore, Browserbase, Browserless, Browser Use, and Kernel providers.
+//! Supports AgentCore, Browserbase, Browser Cloud, Browserless, Browser Use, and
+//! Kernel providers.
 //! Each provider returns a CDP WebSocket URL for connecting via BrowserManager.
 
 use serde_json::{json, Value};
@@ -60,6 +61,15 @@ pub async fn connect_provider_with_plugins_and_options(
         }
         "browserless" => {
             let (url, session) = connect_browserless().await?;
+            Ok(ProviderConnection {
+                ws_url: url,
+                session,
+                direct_page: false,
+                metadata: None,
+            })
+        }
+        "browsercloud" | "browser-cloud" => {
+            let (url, session) = connect_browser_cloud().await?;
             Ok(ProviderConnection {
                 ws_url: url,
                 session,
@@ -192,7 +202,7 @@ pub async fn connect_plugin_provider_with_plugins_and_options(
 ) -> Result<ProviderConnection, String> {
     if crate::plugins::find_plugin(plugins, provider_name).is_none() {
         return Err(format!(
-            "Unknown provider '{}'. Supported: browserbase, browserless, browser-use, kernel, agentcore, or a configured plugin with browser.provider",
+            "Unknown provider '{}'. Supported: browserbase, browsercloud, browserless, browser-use, kernel, agentcore, or a configured plugin with browser.provider",
             provider_name
         ));
     }
@@ -379,6 +389,111 @@ async fn connect_browserless() -> Result<(String, Option<ProviderSession>), Stri
             session_id: stop_url,
         }),
     ))
+}
+
+/// Connects to TestMu AI Browser Cloud.
+///
+/// Browser Cloud has no session-creation REST call: the CDP endpoint accepts
+/// credentials in the URL userinfo and the session capabilities as a
+/// URL-encoded `capabilities` query parameter. The remote session is created
+/// when the WebSocket connects and is torn down when it closes, so there is no
+/// session id to track for cleanup.
+async fn connect_browser_cloud() -> Result<(String, Option<ProviderSession>), String> {
+    let username =
+        env::var("LT_USERNAME").map_err(|_| "LT_USERNAME environment variable is not set")?;
+    let access_key =
+        env::var("LT_ACCESS_KEY").map_err(|_| "LT_ACCESS_KEY environment variable is not set")?;
+
+    // Accept either a bare host or a full URL for the CDP endpoint.
+    let endpoint =
+        env::var("BROWSER_CLOUD_ENDPOINT").unwrap_or_else(|_| "cdp.lambdatest.com".to_string());
+    let host = endpoint
+        .trim()
+        .trim_start_matches("wss://")
+        .trim_start_matches("ws://")
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/');
+    if host.is_empty() {
+        return Err("BROWSER_CLOUD_ENDPOINT is empty".to_string());
+    }
+
+    let mut lt_options = serde_json::Map::new();
+    lt_options.insert(
+        "platformName".to_string(),
+        json!(env::var("BROWSER_CLOUD_PLATFORM").unwrap_or_else(|_| "Windows 10".to_string())),
+    );
+    lt_options.insert(
+        "project".to_string(),
+        json!(env::var("BROWSER_CLOUD_PROJECT").unwrap_or_else(|_| "agent-browser".to_string())),
+    );
+    lt_options.insert(
+        "build".to_string(),
+        json!(env::var("BROWSER_CLOUD_BUILD").unwrap_or_else(|_| "agent-browser".to_string())),
+    );
+    lt_options.insert("console".to_string(), json!(true));
+    lt_options.insert("network".to_string(), json!(true));
+    lt_options.insert("video".to_string(), json!(true));
+    lt_options.insert(
+        "headless".to_string(),
+        json!(!env_var_is_truthy("AGENT_BROWSER_HEADED")),
+    );
+
+    if let Ok(name) = env::var("BROWSER_CLOUD_SESSION_NAME") {
+        if !name.is_empty() {
+            lt_options.insert("name".to_string(), json!(name));
+        }
+    }
+    if let Ok(resolution) = env::var("BROWSER_CLOUD_RESOLUTION") {
+        if !resolution.is_empty() {
+            lt_options.insert("resolution".to_string(), json!(resolution));
+        }
+    }
+    if let Ok(region) = env::var("BROWSER_CLOUD_REGION") {
+        if !region.is_empty() {
+            lt_options.insert("region".to_string(), json!(region));
+        }
+    }
+    if let Ok(geo) = env::var("BROWSER_CLOUD_GEO_LOCATION") {
+        if !geo.is_empty() {
+            lt_options.insert("geoLocation".to_string(), json!(geo));
+        }
+    }
+    if let Ok(user_agent) = env::var("AGENT_BROWSER_USER_AGENT") {
+        if !user_agent.is_empty() {
+            lt_options.insert("user_agent".to_string(), json!(user_agent));
+        }
+    }
+    if env_var_is_truthy("BROWSER_CLOUD_STEALTH") {
+        lt_options.insert("humanizeInteractions".to_string(), json!(true));
+        lt_options.insert("randomizeUserAgent".to_string(), json!(true));
+    }
+    if env_var_is_truthy("BROWSER_CLOUD_TUNNEL") {
+        lt_options.insert("tunnel".to_string(), json!(true));
+        if let Ok(tunnel_name) = env::var("BROWSER_CLOUD_TUNNEL_NAME") {
+            if !tunnel_name.is_empty() {
+                lt_options.insert("tunnelName".to_string(), json!(tunnel_name));
+            }
+        }
+    }
+
+    let capabilities = json!({
+        "browserName": env::var("BROWSER_CLOUD_BROWSER_NAME")
+            .unwrap_or_else(|_| "Chrome".to_string()),
+        "browserVersion": env::var("BROWSER_CLOUD_BROWSER_VERSION")
+            .unwrap_or_else(|_| "latest".to_string()),
+        "LT:Options": Value::Object(lt_options),
+    });
+
+    let ws_url = format!(
+        "wss://{}:{}@{}/puppeteer?capabilities={}",
+        urlencoding::encode(&username),
+        urlencoding::encode(&access_key),
+        host,
+        urlencoding::encode(&capabilities.to_string())
+    );
+
+    Ok((ws_url, None))
 }
 
 async fn connect_browser_use() -> Result<(String, Option<ProviderSession>), String> {
@@ -878,6 +993,95 @@ mod tests {
         let result = rt.block_on(connect_provider("unknown-provider"));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Unknown provider"));
+    }
+
+    #[test]
+    fn test_connect_browser_cloud_requires_credentials() {
+        let guard = EnvGuard::new(&["LT_USERNAME", "LT_ACCESS_KEY"]);
+        guard.remove("LT_USERNAME");
+        guard.remove("LT_ACCESS_KEY");
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt.block_on(connect_browser_cloud()).unwrap_err();
+        assert!(err.contains("LT_USERNAME"));
+
+        guard.set("LT_USERNAME", "user");
+        let err = rt.block_on(connect_browser_cloud()).unwrap_err();
+        assert!(err.contains("LT_ACCESS_KEY"));
+    }
+
+    #[test]
+    fn test_connect_browser_cloud_builds_cdp_url_with_capabilities() {
+        let optional = [
+            "BROWSER_CLOUD_BROWSER_NAME",
+            "BROWSER_CLOUD_BROWSER_VERSION",
+            "BROWSER_CLOUD_PLATFORM",
+            "BROWSER_CLOUD_PROJECT",
+            "BROWSER_CLOUD_BUILD",
+            "BROWSER_CLOUD_SESSION_NAME",
+            "BROWSER_CLOUD_REGION",
+            "BROWSER_CLOUD_GEO_LOCATION",
+            "BROWSER_CLOUD_TUNNEL",
+            "BROWSER_CLOUD_TUNNEL_NAME",
+            "AGENT_BROWSER_USER_AGENT",
+            "AGENT_BROWSER_HEADED",
+        ];
+        let mut names = vec![
+            "LT_USERNAME",
+            "LT_ACCESS_KEY",
+            "BROWSER_CLOUD_ENDPOINT",
+            "BROWSER_CLOUD_RESOLUTION",
+            "BROWSER_CLOUD_STEALTH",
+        ];
+        names.extend_from_slice(&optional);
+        let guard = EnvGuard::new(&names);
+        for name in optional {
+            guard.remove(name);
+        }
+        guard.set("LT_USERNAME", "user@example.com");
+        guard.set("LT_ACCESS_KEY", "key/with+chars");
+        guard.set("BROWSER_CLOUD_ENDPOINT", "wss://cdp.example.com/");
+        guard.set("BROWSER_CLOUD_RESOLUTION", "1920x1080");
+        guard.set("BROWSER_CLOUD_STEALTH", "true");
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (url, session) = rt.block_on(connect_browser_cloud()).unwrap();
+
+        // Credentials are percent-encoded in the userinfo, not passed raw.
+        assert!(url.starts_with("wss://user%40example.com:key%2Fwith%2Bchars@cdp.example.com/"));
+        assert!(url.contains("/puppeteer?capabilities="));
+        // Sessions end when the socket closes, so there is nothing to clean up.
+        assert!(session.is_none());
+
+        let query = url.split("capabilities=").nth(1).unwrap();
+        let decoded = urlencoding::decode(query).unwrap();
+        let caps: Value = serde_json::from_str(&decoded).unwrap();
+        assert_eq!(caps["browserName"], "Chrome");
+        assert_eq!(caps["browserVersion"], "latest");
+        assert_eq!(caps["LT:Options"]["platformName"], "Windows 10");
+        assert_eq!(caps["LT:Options"]["resolution"], "1920x1080");
+        assert_eq!(caps["LT:Options"]["humanizeInteractions"], true);
+        assert_eq!(caps["LT:Options"]["randomizeUserAgent"], true);
+        assert_eq!(caps["LT:Options"]["headless"], true);
+        // Unset optional knobs must not leak into the capabilities payload.
+        assert!(caps["LT:Options"].get("region").is_none());
+        assert!(caps["LT:Options"].get("tunnel").is_none());
+    }
+
+    #[test]
+    fn test_connect_browser_cloud_headed_disables_headless() {
+        let guard = EnvGuard::new(&["LT_USERNAME", "LT_ACCESS_KEY", "AGENT_BROWSER_HEADED"]);
+        guard.set("LT_USERNAME", "user");
+        guard.set("LT_ACCESS_KEY", "key");
+        guard.set("AGENT_BROWSER_HEADED", "1");
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (url, _) = rt.block_on(connect_browser_cloud()).unwrap();
+
+        let query = url.split("capabilities=").nth(1).unwrap();
+        let decoded = urlencoding::decode(query).unwrap();
+        let caps: Value = serde_json::from_str(&decoded).unwrap();
+        assert_eq!(caps["LT:Options"]["headless"], false);
     }
 
     #[test]

@@ -32,6 +32,7 @@ export const PAGE_TITLES: Record<string, string> = {
   "providers/agentcore": "AgentCore",
   "providers/browser-use": "Browser Use",
   "providers/browserbase": "Browserbase",
+  "providers/browsercloud": "Browser Cloud",
   "providers/browserless": "Browserless",
   "providers/kernel": "Kernel",
   changelog: "Changelog",
