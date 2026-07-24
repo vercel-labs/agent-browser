@@ -126,6 +126,8 @@ agent-browser state load ./my-auth.json
 agent-browser open https://app.example.com/dashboard
 ```
 
+State loading stages `localStorage` and `sessionStorage` before application scripts run at each saved origin, then removes the temporary staging script. Startup authentication checks can therefore read restored values, including large session values, before deciding whether to redirect to login.
+
 Combine with `--session <id> --restore` so the imported auth auto-persists across restarts:
 
 ```bash

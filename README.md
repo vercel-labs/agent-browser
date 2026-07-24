@@ -404,6 +404,8 @@ agent-browser state clear --all       # Clear all saved states
 agent-browser state clean --older-than <days>  # Delete old states
 ```
 
+State loading stages `localStorage` and `sessionStorage` before application scripts run at each saved origin, then removes the temporary staging script. This ensures startup authentication checks can read restored values, including large session values, before deciding whether to redirect to login.
+
 ### Navigation
 
 ```bash
