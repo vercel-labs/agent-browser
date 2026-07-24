@@ -19,6 +19,8 @@ export default defineExtension({
     installSystemDependencies: z.boolean().default(true),
     /** Embed captured screenshots in the tool output as data URLs so channels/UIs can render them inline (hidden from the model). */
     inlineScreenshots: z.boolean().default(true),
+    /** Attach active browser-provider metadata to navigation channel output (hidden from the model). */
+    includeProviderMetadata: z.boolean().default(false),
     /** Truncate page output to this many characters. */
     maxOutputChars: z.number().int().positive().optional(),
     /** Proxy server URL used by the browser. */

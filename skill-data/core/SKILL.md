@@ -242,6 +242,8 @@ agent-browser --session "$SESSION" --restore --restore-check-text Dashboard open
 agent-browser --session "$SESSION" session info --json
 ```
 
+For active cloud providers, session info may also include `provider` and provider-specific `providerMetadata`. Treat capability-bearing URLs in that metadata as secrets.
+
 ### Extract data
 
 ```bash

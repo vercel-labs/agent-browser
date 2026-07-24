@@ -61,6 +61,8 @@ Live View: https://us-east-1.console.aws.amazon.com/bedrock-agentcore/browser/aw
 
 Open this URL in your browser to watch the agent session in real time from the AWS Console.
 
+The launch response and `agent-browser session info --json` also expose this information through generic `providerMetadata` with `sessionId`, `browserIdentifier`, `region`, and `liveViewUrl`. The existing `agentCoreSessionId` and `agentCoreLiveViewUrl` launch fields remain available for compatibility.
+
 ## Credential Resolution
 
 AgentCore uses lightweight manual SigV4 signing (no AWS SDK dependency). Credentials are resolved in order:

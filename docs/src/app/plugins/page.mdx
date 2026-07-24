@@ -348,6 +348,8 @@ agent-browser --provider cloud-browser open https://example.com
 
 If `cleanup` is returned and connection fails, agent-browser later sends it back as the request body for `browser.close`.
 
+The optional `metadata` object is opaque and provider-owned. agent-browser returns it as `providerMetadata` from provider launches and `session info --json`; it does not normalize or interpret provider-specific keys. Plugins must return metadata from `browser.launch`; there is no post-connect metadata lifecycle call.
+
 ## Launch mutator plugin
 
 A launch mutator receives local launch options before Chrome starts and can append arguments, extensions, init scripts, or a user agent:

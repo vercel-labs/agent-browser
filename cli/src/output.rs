@@ -2841,7 +2841,7 @@ instance with separate cookies, storage, and state.
 Operations:
   (none)               Show current session name
   id                   Generate stable session id (--scope worktree|cwd|git-root, --prefix)
-  info                 Show daemon, launch, and restore diagnostics
+  info                 Show daemon, launch, provider, and restore diagnostics
   list                 List all active sessions
 
 Environment:
