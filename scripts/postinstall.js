@@ -15,31 +15,18 @@ import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
 import { get } from 'https';
 import { execSync } from 'child_process';
+import { getBinaryName, getPlatformKey, shouldOptimizeGlobalBin } from './platform.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
 const binDir = join(projectRoot, 'bin');
 
-// Detect if the system uses musl libc (e.g. Alpine Linux)
-function isMusl() {
-  if (platform() !== 'linux') return false;
-  try {
-    const result = execSync('ldd --version 2>&1 || true', { encoding: 'utf8' });
-    return result.toLowerCase().includes('musl');
-  } catch {
-    return existsSync('/lib/ld-musl-x86_64.so.1') || existsSync('/lib/ld-musl-aarch64.so.1');
-  }
-}
-
 // Platform detection
-const osKey = platform() === 'linux' && isMusl() ? 'linux-musl' : platform();
 // Windows ARM64 falls back to x64 binary (no native ARM64 build available).
 // x64 binaries run via Windows' built-in emulation on ARM64.
-const effectiveArch = platform() === 'win32' && arch() === 'arm64' ? 'x64' : arch();
-const platformKey = `${osKey}-${effectiveArch}`;
-const ext = platform() === 'win32' ? '.exe' : '';
-const binaryName = `agent-browser-${platformKey}${ext}`;
-const binaryPath = join(binDir, binaryName);
+const platformKey = getPlatformKey({ winArm64Fallback: true });
+const binaryName = getBinaryName({ winArm64Fallback: true });
+const binaryPath = binaryName ? join(binDir, binaryName) : null;
 
 // Package info
 const packageJson = JSON.parse(
@@ -49,7 +36,15 @@ const version = packageJson.version;
 
 // GitHub release URL
 const GITHUB_REPO = 'vercel-labs/agent-browser';
-const DOWNLOAD_URL = `https://github.com/${GITHUB_REPO}/releases/download/v${version}/${binaryName}`;
+const DOWNLOAD_URL = binaryName
+  ? `https://github.com/${GITHUB_REPO}/releases/download/v${version}/${binaryName}`
+  : null;
+
+function showLocalBuildInstructions() {
+  console.log('To build the native binary locally:');
+  console.log('  1. Install Rust: https://rustup.rs');
+  console.log('  2. Run: npm run build:native');
+}
 
 async function downloadFile(url, dest) {
   return new Promise((resolve, reject) => {
@@ -109,6 +104,15 @@ function writeInstallMethod() {
 }
 
 async function main() {
+  if (!platformKey || !binaryName || !binaryPath || !DOWNLOAD_URL) {
+    console.log(`No prebuilt native binary available for ${platform()}-${arch()}.`);
+    console.log('');
+    showLocalBuildInstructions();
+    writeInstallMethod();
+    showInstallReminder();
+    return;
+  }
+
   // Check if binary already exists
   if (existsSync(binaryPath)) {
     // Ensure binary is executable (npm doesn't preserve execute bit)
@@ -149,9 +153,7 @@ async function main() {
   } catch (err) {
     console.log(`Could not download native binary: ${err.message}`);
     console.log('');
-    console.log('To build the native binary locally:');
-    console.log('  1. Install Rust: https://rustup.rs');
-    console.log('  2. Run: npm run build:native');
+    showLocalBuildInstructions();
   }
 
   writeInstallMethod();
@@ -225,6 +227,10 @@ function showInstallReminder() {
  * This provides zero-overhead CLI execution for global installs.
  */
 async function fixGlobalInstallBin() {
+  if (!shouldOptimizeGlobalBin()) {
+    return;
+  }
+
   if (platform() === 'win32') {
     await fixWindowsShims();
   } else {
@@ -295,7 +301,12 @@ async function fixWindowsShims() {
 
   // Detect architecture so ARM64 Windows is handled correctly
   // (falls back to x64 binary — see platform detection above)
-  const cpuArch = effectiveArch;
+  const windowsPlatformKey = getPlatformKey({ winArm64Fallback: true });
+  if (!windowsPlatformKey) {
+    return;
+  }
+
+  const cpuArch = windowsPlatformKey.split('-').at(-1);
   const relativeBinaryPath = `node_modules\\agent-browser\\bin\\agent-browser-win32-${cpuArch}.exe`;
   const absoluteBinaryPath = join(npmBinDir, relativeBinaryPath);
 
