@@ -9293,14 +9293,18 @@ async fn handle_har_start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     Ok(json!({ "started": true }))
 }
 
-/// Stop HAR recording and write the captured requests to disk.
+/// Stop HAR recording and write the captured requests to disk. Recording state
+/// is cleared only after the file is written so callers can retry a failed
+/// export with another path without losing the capture.
 async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let path = har_output_path(cmd.get("path").and_then(|v| v.as_str()));
 
-    state.har_recording = false;
-    state.har_body_total_bytes = 0;
-
-    let entries: Vec<Value> = state.har_entries.drain(..).map(har_entry_to_json).collect();
+    let entries: Vec<Value> = state
+        .har_entries
+        .iter()
+        .cloned()
+        .map(har_entry_to_json)
+        .collect();
     let request_count = entries.len();
     let browser = har_browser_metadata(state).await;
 
@@ -9320,6 +9324,10 @@ async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     let har_str = serde_json::to_string_pretty(&har)
         .map_err(|e| format!("Failed to serialize HAR: {}", e))?;
     std::fs::write(&path, har_str).map_err(|e| format!("Failed to write HAR: {}", e))?;
+
+    state.har_recording = false;
+    state.har_body_total_bytes = 0;
+    state.har_entries.clear();
 
     Ok(json!({ "path": path, "requestCount": request_count }))
 }
@@ -13926,6 +13934,77 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert_eq!(har["log"]["entries"][0]["response"]["content"]["size"], 128);
 
         let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn test_handle_har_stop_write_failure_preserves_capture_for_retry() {
+        let unique = unix_timestamp_millis();
+        let missing_parent = std::env::temp_dir().join(format!(
+            "agent-browser-har-missing-parent-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let failed_path = missing_parent.join("capture.har");
+        let retry_path = std::env::temp_dir().join(format!(
+            "agent-browser-har-retry-{}-{}.har",
+            std::process::id(),
+            unique
+        ));
+        let mut state = DaemonState::new();
+        state.har_recording = true;
+        state.har_body_total_bytes = 13;
+        state.har_entries.push(HarEntry {
+            request_id: "retry-request".to_string(),
+            wall_time: 1773576000.0,
+            method: "GET".to_string(),
+            url: "https://example.com/api/items".to_string(),
+            request_headers: vec![],
+            post_data: None,
+            request_body_size: 0,
+            resource_type: "Fetch".to_string(),
+            status: Some(200),
+            status_text: "OK".to_string(),
+            http_version: "HTTP/2.0".to_string(),
+            response_headers: vec![("content-type".to_string(), "application/json".to_string())],
+            mime_type: "application/json".to_string(),
+            redirect_url: String::new(),
+            response_body_size: 13,
+            cdp_timing: None,
+            loading_finished_timestamp: None,
+            response_body: Some(r#"{"items":[1]}"#.to_string()),
+            response_body_base64: false,
+        });
+
+        let error = handle_har_stop(
+            &json!({ "action": "har_stop", "path": failed_path }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("Failed to write HAR"));
+        assert!(state.har_recording, "a failed export must remain retryable");
+        assert_eq!(state.har_body_total_bytes, 13);
+        assert_eq!(state.har_entries.len(), 1);
+
+        let result = handle_har_stop(
+            &json!({ "action": "har_stop", "path": &retry_path }),
+            &mut state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["requestCount"], 1);
+        assert!(!state.har_recording);
+        assert_eq!(state.har_body_total_bytes, 0);
+        assert!(state.har_entries.is_empty());
+        let har: Value = serde_json::from_str(&fs::read_to_string(&retry_path).unwrap()).unwrap();
+        assert_eq!(
+            har["log"]["entries"][0]["request"]["url"],
+            "https://example.com/api/items"
+        );
+
+        let _ = fs::remove_file(retry_path);
     }
 
     #[tokio::test]
