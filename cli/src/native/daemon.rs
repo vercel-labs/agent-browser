@@ -19,8 +19,14 @@ use super::cdp::client::CdpClient;
 use super::state;
 use super::stream::StreamServer;
 use crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION;
+use crate::validation::{is_valid_session_name, session_name_error};
 
 pub async fn run_daemon(session: &str) {
+    if !is_valid_session_name(session) {
+        eprintln!("{} {}", crate::color::error_indicator(), session_name_error(session));
+        process::exit(1);
+    }
+
     let socket_dir = get_daemon_socket_dir();
     if !socket_dir.exists() {
         let _ = fs::create_dir_all(&socket_dir);
