@@ -38,6 +38,8 @@ agent-browser batch \
   '["navigate","http://localhost:3000/target"]'
 ```
 
+`batch` parses the child commands first, submits them through one daemon connection, and returns their results in order. Use `--bail` to stop on the first parse or execution error. Confirmation requests and `close` stop the remaining commands automatically; nested batches are not supported. Batch performs one final CDP event drain but does not wait for network idle implicitly, so include a `wait` child when the workflow needs a specific settle condition.
+
 `open` with no URL gives you a clean launch so any interception, cookies, or init scripts you register take effect on the *first* real navigation. Use for SSR-only debug (`--resource-type script`), protected-origin auth, or capturing fresh `react suspense`/`vitals` state without noise from a prior page.
 
 ## Snapshot (page analysis)

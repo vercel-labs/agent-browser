@@ -31,7 +31,7 @@ use windows_sys::Win32::System::Threading::OpenProcess;
 use commands::{gen_id, parse_command, ParseError};
 use connection::{
     cleanup_stale_files, daemon_unreachable, ensure_daemon, get_socket_dir, is_pid_alive,
-    send_command, walk_daemons, DaemonOptions, Response,
+    send_command, send_command_no_retry, walk_daemons, DaemonOptions, Response,
 };
 use flags::{clean_args, parse_flags, Flags};
 use install::run_install;
@@ -1688,6 +1688,82 @@ fn send_command_with_respawn(
     }
 }
 
+/// Send a batch envelope without transient retries. A failure to establish
+/// the initial connection is safe to recover because no request bytes were
+/// sent. Once connected, any failure is returned directly so completed child
+/// actions are never replayed.
+fn send_batch_with_respawn(
+    cmd: serde_json::Value,
+    session: &str,
+    daemon_opts: &DaemonOptions,
+) -> Result<connection::Response, String> {
+    send_batch_with_recovery(
+        cmd,
+        |request| send_command_no_retry(request, session),
+        || ensure_daemon(session, daemon_opts).map(|_| ()),
+    )
+}
+
+fn send_batch_with_recovery<Send, Recover>(
+    cmd: serde_json::Value,
+    mut send: Send,
+    mut recover_initial_connection: Recover,
+) -> Result<connection::Response, String>
+where
+    Send: FnMut(serde_json::Value) -> Result<connection::Response, String>,
+    Recover: FnMut() -> Result<(), String>,
+{
+    let first_attempt = send(cmd.clone());
+    match first_attempt {
+        Err(ref e) if batch_failed_before_submit(e) => match recover_initial_connection() {
+            Ok(()) => send(cmd),
+            Err(_) => first_attempt,
+        },
+        other => other,
+    }
+}
+
+fn batch_failed_before_submit(error: &str) -> bool {
+    error.starts_with("Failed to connect")
+}
+
+fn prepare_batch(commands: &[Vec<String>], flags: &Flags) -> Vec<serde_json::Value> {
+    let mut entries = Vec::with_capacity(commands.len());
+
+    for cmd_args in commands {
+        if cmd_args.is_empty() {
+            continue;
+        }
+
+        match parse_command(cmd_args, flags) {
+            Ok(mut request) => {
+                if request.get("action").and_then(|v| v.as_str()) == Some("batch") {
+                    entries.push(json!({
+                        "command": cmd_args,
+                        "parseError": "Nested batch commands are not supported",
+                    }));
+                    continue;
+                }
+
+                attach_plugins_to_command(&mut request, &flags.plugins);
+                attach_restore_config_to_command(&mut request, flags);
+                entries.push(json!({
+                    "command": cmd_args,
+                    "request": request,
+                }));
+            }
+            Err(e) => {
+                entries.push(json!({
+                    "command": cmd_args,
+                    "parseError": e.format(),
+                }));
+            }
+        }
+    }
+
+    entries
+}
+
 fn run_batch(
     flags: &Flags,
     daemon_opts: &DaemonOptions,
@@ -1736,105 +1812,103 @@ fn run_batch(
         return;
     }
 
-    let output_opts = OutputOptions::from_flags(flags);
-
-    let mut results: Vec<serde_json::Value> = Vec::new();
-    let mut had_error = false;
-
-    for (i, cmd_args) in commands.iter().enumerate() {
-        if cmd_args.is_empty() {
-            continue;
+    let entries = prepare_batch(&commands, flags);
+    if entries.is_empty() {
+        if flags.json {
+            println!("[]");
         }
-
-        let mut parsed = match parse_command(cmd_args, flags) {
-            Ok(c) => c,
-            Err(e) => {
-                had_error = true;
-                if flags.json {
-                    results.push(json!({
-                        "command": cmd_args,
-                        "success": false,
-                        "error": e.format(),
-                    }));
-                    if bail {
-                        break;
-                    }
-                } else {
-                    eprintln!(
-                        "{} Command {}: {}",
-                        color::error_indicator(),
-                        i + 1,
-                        e.format()
-                    );
-                    if bail {
-                        exit(1);
-                    }
-                }
-                continue;
-            }
-        };
-
-        let action = parsed
-            .get("action")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        attach_plugins_to_command(&mut parsed, &flags.plugins);
-        attach_restore_config_to_command(&mut parsed, flags);
-
-        match send_command_with_respawn(parsed, &flags.session, daemon_opts) {
-            Ok(resp) => {
-                if flags.json {
-                    results.push(json!({
-                        "command": cmd_args,
-                        "success": resp.success,
-                        "result": resp.data,
-                        "error": resp.error,
-                    }));
-                } else {
-                    if i > 0 {
-                        println!();
-                    }
-                    print_response_with_opts(&resp, action.as_deref(), &output_opts);
-                }
-                if !resp.success {
-                    had_error = true;
-                    if bail {
-                        if !flags.json {
-                            exit(1);
-                        }
-                        break;
-                    }
-                }
-            }
-            Err(e) => {
-                had_error = true;
-                if flags.json {
-                    results.push(json!({
-                        "command": cmd_args,
-                        "success": false,
-                        "error": e.to_string(),
-                    }));
-                    if bail {
-                        break;
-                    }
-                } else {
-                    eprintln!("{} Command {}: {}", color::error_indicator(), i + 1, e);
-                    if bail {
-                        exit(1);
-                    }
-                }
-            }
-        }
+        return;
     }
+
+    let batch_request = json!({
+        "id": gen_id(),
+        "action": "batch",
+        "bail": bail,
+        "entries": entries,
+    });
+    let response = match send_batch_with_respawn(batch_request, &flags.session, daemon_opts) {
+        Ok(response) => response,
+        Err(e) => {
+            if flags.json {
+                print_json_error(e);
+            } else {
+                eprintln!("{} {}", color::error_indicator(), e);
+            }
+            exit(1);
+        }
+    };
+
+    let Some(results) = response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("results"))
+        .and_then(|results| results.as_array())
+    else {
+        let error = response
+            .error
+            .unwrap_or_else(|| "Invalid batch response: missing results".to_string());
+        if flags.json {
+            print_json_error(error);
+        } else {
+            eprintln!("{} {}", color::error_indicator(), error);
+        }
+        exit(1);
+    };
 
     if flags.json {
         println!(
             "{}",
-            serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string())
+            serde_json::to_string(results).unwrap_or_else(|_| "[]".to_string())
         );
+    } else {
+        let output_opts = OutputOptions::from_flags(flags);
+        for (index, result) in results.iter().enumerate() {
+            if index > 0 {
+                println!();
+            }
+            if result.get("batchFinalization").and_then(|v| v.as_bool()) == Some(true) {
+                let error = result
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Batch finalization failed");
+                eprintln!("{} {}", color::error_indicator(), error);
+                continue;
+            }
+            let action = result.get("action").and_then(|value| value.as_str());
+            if action.is_none() {
+                let error = result
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Invalid batch entry");
+                eprintln!(
+                    "{} Command {}: {}",
+                    color::error_indicator(),
+                    index + 1,
+                    error
+                );
+                continue;
+            }
+
+            let child_response = Response {
+                success: result
+                    .get("success")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                data: result.get("result").cloned().filter(|v| !v.is_null()),
+                error: result
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string),
+                warning: result
+                    .get("warning")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string),
+            };
+            print_response_with_opts(&child_response, action, &output_opts);
+        }
     }
 
-    if had_error {
+    if !response.success {
         exit(1);
     }
 }
@@ -2008,6 +2082,84 @@ mod tests {
         attach_plugins_to_command(&mut cmd, &[]);
 
         assert_eq!(cmd["plugins"], json!([]));
+    }
+
+    #[test]
+    fn test_prepare_batch_keeps_parse_errors_ordered_and_rejects_nested_batch() {
+        let flags = neutral_launch_config_flags();
+        let commands = vec![
+            vec!["get".to_string(), "url".to_string()],
+            vec!["definitely-not-a-command".to_string()],
+            vec!["batch".to_string(), "url".to_string()],
+            Vec::new(),
+        ];
+
+        let entries = prepare_batch(&commands, &flags);
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0]["request"]["action"], "url");
+        assert_eq!(entries[0]["command"], json!(["get", "url"]));
+        assert!(entries[1]["parseError"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown command"));
+        assert_eq!(
+            entries[2]["parseError"],
+            "Nested batch commands are not supported"
+        );
+    }
+
+    #[test]
+    fn test_batch_post_submit_transport_failure_is_never_replayed() {
+        let mut sends = 0;
+        let mut recoveries = 0;
+        let error = match send_batch_with_recovery(
+            json!({ "action": "batch", "entries": [] }),
+            |_| {
+                sends += 1;
+                Err("Failed to read: Connection reset by peer".to_string())
+            },
+            || {
+                recoveries += 1;
+                Ok(())
+            },
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("post-submit failure must be returned"),
+        };
+
+        assert_eq!(sends, 1, "a submitted batch must never be replayed");
+        assert_eq!(recoveries, 0, "post-submit failures must not respawn");
+        assert!(error.contains("Connection reset"));
+    }
+
+    #[test]
+    fn test_batch_initial_connect_failure_can_recover_before_submit() {
+        let mut sends = 0;
+        let mut recoveries = 0;
+        let response = send_batch_with_recovery(
+            json!({ "action": "batch", "entries": [] }),
+            |_| {
+                sends += 1;
+                if sends == 1 {
+                    Err("Failed to connect: connection refused".to_string())
+                } else {
+                    Ok(Response {
+                        success: true,
+                        ..Response::default()
+                    })
+                }
+            },
+            || {
+                recoveries += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(response.success);
+        assert_eq!(sends, 2);
+        assert_eq!(recoveries, 1);
     }
 
     #[test]
