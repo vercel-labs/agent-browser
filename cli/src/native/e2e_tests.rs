@@ -5487,18 +5487,11 @@ async fn e2e_stream_frame_metadata_respects_custom_viewport() {
             serde_json::from_str(message.to_text().expect("text message should be readable"))
                 .expect("stream payload should be valid JSON");
         if parsed.get("type") == Some(&json!("frame")) {
-            let meta = &parsed["metadata"];
-            assert_eq!(
-                meta["deviceWidth"], 800,
-                "frame metadata deviceWidth should match custom viewport, got: {}",
-                meta
-            );
-            assert_eq!(
-                meta["deviceHeight"], 600,
-                "frame metadata deviceHeight should match custom viewport, got: {}",
-                meta
-            );
-
+            // Early frames may arrive before Chrome fully applies the viewport
+            // resize, with stale image and metadata dimensions. Skip those and
+            // only assert once the settled frame arrives, since the metadata
+            // now reflects the real CDP values rather than the configured
+            // viewport.
             let data_str = parsed
                 .get("data")
                 .and_then(|v| v.as_str())
@@ -5512,6 +5505,21 @@ async fn e2e_stream_frame_metadata_respects_custom_viewport() {
             if img_w != 800 || img_h != 600 {
                 continue;
             }
+
+            let meta = &parsed["metadata"];
+            // Real CDP metadata arrives as floats (e.g. 800.0).
+            assert_eq!(
+                meta["deviceWidth"].as_f64(),
+                Some(800.0),
+                "frame metadata deviceWidth should match custom viewport, got: {}",
+                meta
+            );
+            assert_eq!(
+                meta["deviceHeight"].as_f64(),
+                Some(600.0),
+                "frame metadata deviceHeight should match custom viewport, got: {}",
+                meta
+            );
 
             found_frame = true;
             break;
