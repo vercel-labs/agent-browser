@@ -24,6 +24,11 @@ export const screencastingAtom = atom(false);
 export const recordingAtom = atom(false);
 export const viewportWidthAtom = atom(1280);
 export const viewportHeightAtom = atom(720);
+// True DIP dimensions of the latest screencast frame, from CDP metadata.
+// These can differ from the configured viewport (window chrome, scrollbars,
+// emulation), and input coordinates must be mapped into this space.
+export const frameDeviceWidthAtom = atom(0);
+export const frameDeviceHeightAtom = atom(0);
 export const currentFrameAtom = atom<string | null>(null);
 export const streamEventsAtom = atom<ActivityEvent[]>([]);
 export const consoleLogsAtom = atom<ConsoleEntry[]>([]);
@@ -80,6 +85,8 @@ export function useStreamSync(port: number) {
   const setRecording = useSetAtom(recordingAtom);
   const setVpWidth = useSetAtom(viewportWidthAtom);
   const setVpHeight = useSetAtom(viewportHeightAtom);
+  const setFrameDeviceWidth = useSetAtom(frameDeviceWidthAtom);
+  const setFrameDeviceHeight = useSetAtom(frameDeviceHeightAtom);
   const setFrame = useSetAtom(currentFrameAtom);
   const setEvents = useSetAtom(streamEventsAtom);
   const setConsoleLogs = useSetAtom(consoleLogsAtom);
@@ -108,13 +115,15 @@ export function useStreamSync(port: number) {
       setRecording(false);
       setVpWidth(1280);
       setVpHeight(720);
+      setFrameDeviceWidth(0);
+      setFrameDeviceHeight(0);
       setFrame(null);
       setEvents([]);
       setConsoleLogs([]);
       setTabs([]);
       setEngine("");
     }
-  }, [port, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine]);
+  }, [port, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrameDeviceWidth, setFrameDeviceHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine]);
 
   const connect = useCallback(() => {
     if (port <= 0) return;
@@ -151,6 +160,10 @@ export function useStreamSync(port: number) {
       switch (msg.type) {
         case "frame":
           setFrame(msg.data);
+          if (msg.metadata?.deviceWidth > 0 && msg.metadata?.deviceHeight > 0) {
+            setFrameDeviceWidth(msg.metadata.deviceWidth);
+            setFrameDeviceHeight(msg.metadata.deviceHeight);
+          }
           break;
 
         case "status":
@@ -218,7 +231,7 @@ export function useStreamSync(port: number) {
           break;
       }
     };
-  }, [port, setWsRef, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine, setTabCache, setEngineCache]);
+  }, [port, setWsRef, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrameDeviceWidth, setFrameDeviceHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine, setTabCache, setEngineCache]);
 
   useEffect(() => {
     connect();

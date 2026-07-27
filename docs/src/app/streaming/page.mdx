@@ -88,6 +88,8 @@ Send input events to control the browser remotely. Mouse, keyboard, and touch in
 
 ### Mouse events
 
+Mouse coordinates are CSS pixels in the page's device-independent pixel (DIP) space. Map positions from the displayed frame using the `metadata.deviceWidth` and `metadata.deviceHeight` of the latest frame message, not the `viewportWidth`/`viewportHeight` from the status message. The status values describe the configured viewport and can differ from the actual content area (window chrome, scrollbars, emulation).
+
 ```json
 // Click
 {
