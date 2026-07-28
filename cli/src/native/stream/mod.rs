@@ -337,6 +337,11 @@ impl StreamServer {
         self.port
     }
 
+    /// True while at least one dashboard client is connected to the stream.
+    pub async fn has_connected_clients(&self) -> bool {
+        *self.client_count.lock().await > 0
+    }
+
     /// Broadcast a raw frame string (legacy).
     pub fn broadcast_frame(&self, frame_json: &str) {
         let s = frame_json.to_string();
