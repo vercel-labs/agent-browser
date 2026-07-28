@@ -237,6 +237,9 @@ async fn handle_ws_client(
 
     client_notify.notify_one();
 
+    // Replies produced by spawned client-message handlers (clipboard reads).
+    let (reply_tx, mut reply_rx) = tokio::sync::mpsc::channel::<String>(8);
+
     loop {
         tokio::select! {
             changed = shutdown_rx.changed() => {
@@ -258,24 +261,27 @@ async fn handle_ws_client(
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
+            reply = reply_rx.recv() => {
+                // reply_tx is held for the whole loop, so None is unreachable.
+                let Some(reply) = reply else { break };
+                if ws_tx.send(Message::Text(reply)).await.is_err() {
+                    break;
+                }
+            }
             msg = ws_rx.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         let guard = client_slot.read().await;
                         if let Some(ref client) = *guard {
                             let sid = cdp_session_id.read().await;
-                            let reply = handle_client_message(
+                            handle_client_message(
                                 &text,
-                                client.as_ref(),
+                                client,
                                 sid.as_deref(),
                                 idle_activity.as_ref(),
+                                &reply_tx,
                             )
                             .await;
-                            if let Some(reply) = reply {
-                                if ws_tx.send(Message::Text(reply)).await.is_err() {
-                                    break;
-                                }
-                            }
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
@@ -293,23 +299,28 @@ async fn handle_ws_client(
     client_notify.notify_one();
 }
 
-/// Handles one dashboard client message. Returns a message to send back to
-/// the client, if any (currently only clipboard read responses).
+/// Handles one dashboard client message.
 ///
 /// Input events are dispatched without awaiting Chrome's response: the
 /// response carries no data, and awaiting it serializes every event behind
 /// a CDP round trip (~one frame tick under software rendering), so a mouse
 /// sweep's `mouseMoved` flood made clicks wait seconds behind the backlog.
 /// Socket writes are ordered, so event ordering is preserved.
+///
+/// `input_read_clipboard` is the one message that needs a CDP response; it
+/// runs in a spawned task and its reply goes out through `reply_tx`, so a
+/// slow read (a busy page main thread stalls Runtime.evaluate) cannot block
+/// this client's frame forwarding or later input messages.
 async fn handle_client_message(
     msg: &str,
-    client: &CdpClient,
+    client: &Arc<CdpClient>,
     session_id: Option<&str>,
     idle_activity: &IdleActivity,
-) -> Option<String> {
+    reply_tx: &tokio::sync::mpsc::Sender<String>,
+) {
     let parsed: Value = match serde_json::from_str(msg) {
         Ok(v) => v,
-        Err(_) => return None,
+        Err(_) => return,
     };
 
     let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -381,39 +392,47 @@ async fn handle_client_message(
         }
         "input_read_clipboard" => {
             // Copy bridge: read the remote clipboard after a copy/cut so the
-            // dashboard can mirror it into the local clipboard.
-            let result = client
-                .send_command(
-                    "Runtime.evaluate",
-                    Some(json!({
-                        "expression": "navigator.clipboard.readText().then(t => ({ ok: t }), e => ({ err: String(e) }))",
-                        "awaitPromise": true,
-                        "returnByValue": true,
-                    })),
-                    session_id,
-                )
-                .await;
-            match result {
-                Ok(result) => {
-                    let value = result.get("result").and_then(|r| r.get("value"));
-                    if let Some(text) = value.and_then(|v| v.get("ok")).and_then(|v| v.as_str()) {
-                        return Some(json!({ "type": "clipboard", "text": text }).to_string());
+            // dashboard can mirror it into the local clipboard. Spawned
+            // because Runtime.evaluate waits for the page's main thread;
+            // awaiting it inline would stall this client's frames and input
+            // behind a busy page (up to the 30s CDP command timeout).
+            let client = Arc::clone(client);
+            let session_id = session_id.map(|s| s.to_string());
+            let reply_tx = reply_tx.clone();
+            tokio::spawn(async move {
+                let result = client
+                    .send_command(
+                        "Runtime.evaluate",
+                        Some(json!({
+                            "expression": "navigator.clipboard.readText().then(t => ({ ok: t }), e => ({ err: String(e) }))",
+                            "awaitPromise": true,
+                            "returnByValue": true,
+                        })),
+                        session_id.as_deref(),
+                    )
+                    .await;
+                let reply = match result {
+                    Ok(result) => {
+                        let value = result.get("result").and_then(|r| r.get("value"));
+                        if let Some(text) = value.and_then(|v| v.get("ok")).and_then(|v| v.as_str())
+                        {
+                            json!({ "type": "clipboard", "text": text }).to_string()
+                        } else {
+                            let err = value
+                                .and_then(|v| v.get("err"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("clipboard read failed");
+                            json!({ "type": "clipboard", "error": err }).to_string()
+                        }
                     }
-                    let err = value
-                        .and_then(|v| v.get("err"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("clipboard read failed");
-                    return Some(json!({ "type": "clipboard", "error": err }).to_string());
-                }
-                Err(e) => {
-                    return Some(json!({ "type": "clipboard", "error": e }).to_string());
-                }
-            }
+                    Err(e) => json!({ "type": "clipboard", "error": e }).to_string(),
+                };
+                let _ = reply_tx.send(reply).await;
+            });
         }
         "status" => {}
         _ => {}
     }
-    None
 }
 
 fn is_user_input_message_type(msg_type: &str) -> bool {
