@@ -329,19 +329,20 @@ async fn handle_client_message(
                 .await;
         }
         "input_keyboard" => {
+            // Chrome rejects the whole command when `text` is an explicit
+            // null, so only include the string fields that are present.
+            let mut params = json!({
+                "type": parsed.get("eventType").and_then(|v| v.as_str()).unwrap_or("keyDown"),
+                "windowsVirtualKeyCode": parsed.get("windowsVirtualKeyCode").and_then(|v| v.as_i64()).unwrap_or(0),
+                "modifiers": parsed.get("modifiers").and_then(|v| v.as_i64()).unwrap_or(0),
+            });
+            for field in ["key", "code", "text"] {
+                if let Some(value) = parsed.get(field).and_then(|v| v.as_str()) {
+                    params[field] = json!(value);
+                }
+            }
             let _ = client
-                .send_command_no_wait(
-                    "Input.dispatchKeyEvent",
-                    Some(json!({
-                        "type": parsed.get("eventType").and_then(|v| v.as_str()).unwrap_or("keyDown"),
-                        "key": parsed.get("key"),
-                        "code": parsed.get("code"),
-                        "text": parsed.get("text"),
-                        "windowsVirtualKeyCode": parsed.get("windowsVirtualKeyCode").and_then(|v| v.as_i64()).unwrap_or(0),
-                        "modifiers": parsed.get("modifiers").and_then(|v| v.as_i64()).unwrap_or(0),
-                    })),
-                    session_id,
-                )
+                .send_command_no_wait("Input.dispatchKeyEvent", Some(params), session_id)
                 .await;
         }
         "input_touch" => {
