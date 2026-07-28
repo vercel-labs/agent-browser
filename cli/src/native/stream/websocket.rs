@@ -288,6 +288,11 @@ async fn handle_ws_client(
     client_notify.notify_one();
 }
 
+/// Input events are dispatched without awaiting Chrome's response: the
+/// response carries no data, and awaiting it serializes every event behind
+/// a CDP round trip (~one frame tick under software rendering), so a mouse
+/// sweep's `mouseMoved` flood made clicks wait seconds behind the backlog.
+/// Socket writes are ordered, so event ordering is preserved.
 async fn handle_client_message(
     msg: &str,
     client: &CdpClient,
@@ -307,7 +312,7 @@ async fn handle_client_message(
     match msg_type {
         "input_mouse" => {
             let _ = client
-                .send_command(
+                .send_command_no_wait(
                     "Input.dispatchMouseEvent",
                     Some(json!({
                         "type": parsed.get("eventType").and_then(|v| v.as_str()).unwrap_or("mouseMoved"),
@@ -325,7 +330,7 @@ async fn handle_client_message(
         }
         "input_keyboard" => {
             let _ = client
-                .send_command(
+                .send_command_no_wait(
                     "Input.dispatchKeyEvent",
                     Some(json!({
                         "type": parsed.get("eventType").and_then(|v| v.as_str()).unwrap_or("keyDown"),
@@ -341,7 +346,7 @@ async fn handle_client_message(
         }
         "input_touch" => {
             let _ = client
-                .send_command(
+                .send_command_no_wait(
                     "Input.dispatchTouchEvent",
                     Some(json!({
                         "type": parsed.get("eventType").and_then(|v| v.as_str()).unwrap_or("touchStart"),
