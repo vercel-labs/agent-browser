@@ -3,6 +3,8 @@ export interface ExecResult {
   exit_code: number | null;
   stdout: string;
   stderr: string;
+  /** Present when the dashboard server itself rejects the request (HTTP 4xx). */
+  error?: string;
 }
 
 export async function execCommand(args: string[]): Promise<ExecResult> {

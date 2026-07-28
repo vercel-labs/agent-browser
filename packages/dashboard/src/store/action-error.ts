@@ -24,5 +24,8 @@ export function execErrorText(result: ExecResult): string {
       // stdout wasn't JSON
     }
   }
+  // Server-side failures (bad request, exec timeout) come back as an HTTP
+  // error body with a top-level "error" and no stdout/stderr.
+  if (result.error) return result.error;
   return "";
 }
