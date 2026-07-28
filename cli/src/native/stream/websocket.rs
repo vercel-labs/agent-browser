@@ -264,13 +264,18 @@ async fn handle_ws_client(
                         let guard = client_slot.read().await;
                         if let Some(ref client) = *guard {
                             let sid = cdp_session_id.read().await;
-                            handle_client_message(
+                            let reply = handle_client_message(
                                 &text,
                                 client.as_ref(),
                                 sid.as_deref(),
                                 idle_activity.as_ref(),
                             )
                             .await;
+                            if let Some(reply) = reply {
+                                if ws_tx.send(Message::Text(reply)).await.is_err() {
+                                    break;
+                                }
+                            }
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
@@ -288,6 +293,9 @@ async fn handle_ws_client(
     client_notify.notify_one();
 }
 
+/// Handles one dashboard client message. Returns a message to send back to
+/// the client, if any (currently only clipboard read responses).
+///
 /// Input events are dispatched without awaiting Chrome's response: the
 /// response carries no data, and awaiting it serializes every event behind
 /// a CDP round trip (~one frame tick under software rendering), so a mouse
@@ -298,10 +306,10 @@ async fn handle_client_message(
     client: &CdpClient,
     session_id: Option<&str>,
     idle_activity: &IdleActivity,
-) {
+) -> Option<String> {
     let parsed: Value = match serde_json::from_str(msg) {
         Ok(v) => v,
-        Err(_) => return,
+        Err(_) => return None,
     };
 
     let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -358,13 +366,65 @@ async fn handle_client_message(
                 )
                 .await;
         }
+        "input_insert_text" => {
+            // Paste bridge: insert local clipboard text at the focused element.
+            let text = parsed.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            if !text.is_empty() {
+                let _ = client
+                    .send_command_no_wait(
+                        "Input.insertText",
+                        Some(json!({ "text": text })),
+                        session_id,
+                    )
+                    .await;
+            }
+        }
+        "input_read_clipboard" => {
+            // Copy bridge: read the remote clipboard after a copy/cut so the
+            // dashboard can mirror it into the local clipboard.
+            let result = client
+                .send_command(
+                    "Runtime.evaluate",
+                    Some(json!({
+                        "expression": "navigator.clipboard.readText().then(t => ({ ok: t }), e => ({ err: String(e) }))",
+                        "awaitPromise": true,
+                        "returnByValue": true,
+                    })),
+                    session_id,
+                )
+                .await;
+            match result {
+                Ok(result) => {
+                    let value = result.get("result").and_then(|r| r.get("value"));
+                    if let Some(text) = value.and_then(|v| v.get("ok")).and_then(|v| v.as_str()) {
+                        return Some(json!({ "type": "clipboard", "text": text }).to_string());
+                    }
+                    let err = value
+                        .and_then(|v| v.get("err"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("clipboard read failed");
+                    return Some(json!({ "type": "clipboard", "error": err }).to_string());
+                }
+                Err(e) => {
+                    return Some(json!({ "type": "clipboard", "error": e }).to_string());
+                }
+            }
+        }
         "status" => {}
         _ => {}
     }
+    None
 }
 
 fn is_user_input_message_type(msg_type: &str) -> bool {
-    matches!(msg_type, "input_mouse" | "input_keyboard" | "input_touch")
+    matches!(
+        msg_type,
+        "input_mouse"
+            | "input_keyboard"
+            | "input_touch"
+            | "input_insert_text"
+            | "input_read_clipboard"
+    )
 }
 
 #[cfg(test)]
@@ -373,7 +433,13 @@ mod tests {
 
     #[test]
     fn dashboard_input_messages_count_as_user_activity() {
-        for msg_type in ["input_mouse", "input_keyboard", "input_touch"] {
+        for msg_type in [
+            "input_mouse",
+            "input_keyboard",
+            "input_touch",
+            "input_insert_text",
+            "input_read_clipboard",
+        ] {
             assert!(is_user_input_message_type(msg_type));
         }
         assert!(!is_user_input_message_type("status"));

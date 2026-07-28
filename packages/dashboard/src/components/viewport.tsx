@@ -492,10 +492,46 @@ export function Viewport() {
   );
 
   useEffect(() => {
+    const forwardCopyShortcut = (e: KeyboardEvent) => {
+      // Copy remotely with the corrected key event, then mirror the remote
+      // clipboard back into the local one.
+      dispatchKey(e, "rawKeyDown");
+      window.setTimeout(() => {
+        sendInput({ type: "input_read_clipboard" });
+      }, 150);
+    };
+
+    const forwardPasteShortcut = (e: KeyboardEvent) => {
+      // The remote clipboard has no access to the local one, so read the
+      // local clipboard and insert its text directly.
+      navigator.clipboard
+        .readText()
+        .then((text) => {
+          if (text) {
+            sendInput({ type: "input_insert_text", text });
+          } else {
+            dispatchKey(e, "rawKeyDown");
+          }
+        })
+        .catch(() => dispatchKey(e, "rawKeyDown"));
+    };
+
     const handler = (e: KeyboardEvent) => {
       if (document.activeElement !== canvasRef.current) return;
       e.preventDefault();
       e.stopPropagation();
+      const isShortcut = (e.ctrlKey || e.metaKey) && !e.altKey && e.key.length === 1;
+      if (e.type === "keydown" && isShortcut) {
+        const key = e.key.toLowerCase();
+        if (key === "v") {
+          forwardPasteShortcut(e);
+          return;
+        }
+        if (key === "c" || key === "x") {
+          forwardCopyShortcut(e);
+          return;
+        }
+      }
       dispatchKey(e, e.type === "keydown" ? "keyDown" : "keyUp");
     };
     window.addEventListener("keydown", handler, true);
@@ -504,7 +540,7 @@ export function Viewport() {
       window.removeEventListener("keydown", handler, true);
       window.removeEventListener("keyup", handler, true);
     };
-  }, [dispatchKey]);
+  }, [dispatchKey, sendInput]);
 
   return (
     <div ref={containerRef} className="flex h-full flex-col">

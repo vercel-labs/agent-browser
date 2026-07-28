@@ -66,6 +66,12 @@ export interface ErrorMessage {
   message: string;
 }
 
+export interface ClipboardMessage {
+  type: "clipboard";
+  text?: string;
+  error?: string;
+}
+
 export interface TabInfo {
   /** Stable tab id like `t1`, `t2`. Never reused within a session. */
   tabId: string;
@@ -92,7 +98,8 @@ export type StreamMessage =
   | PageErrorMessage
   | ErrorMessage
   | UrlMessage
-  | TabsMessage;
+  | TabsMessage
+  | ClipboardMessage;
 
 export type ActivityEvent = CommandMessage | ResultMessage | ConsoleMessage;
 export type ConsoleEntry = ConsoleMessage | PageErrorMessage;
