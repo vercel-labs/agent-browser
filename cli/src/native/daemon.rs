@@ -169,9 +169,10 @@ pub async fn run_daemon(session: &str) {
 /// its Chrome tree indefinitely (issue: leaked daemons observed running for
 /// days). Socket commands and dashboard input reset the timer. Unlike an
 /// explicit timeout, the default never closes a headed browser (including
-/// Safari and iOS WebDriver sessions) or a user-attached browser because those
-/// may be in direct human use that the daemon cannot observe. Provider-owned
-/// CDP browsers remain eligible for cleanup.
+/// Safari and iOS WebDriver sessions), a user-attached browser, or a session
+/// with a connected stream client because those may be in direct human use
+/// that the daemon cannot observe. Provider-owned CDP browsers remain
+/// eligible for cleanup.
 pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 
 #[derive(Clone, Copy)]
