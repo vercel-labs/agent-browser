@@ -68,7 +68,53 @@ const KEY_INFO: Record<string, { text?: string; keyCode: number }> = {
   End: { keyCode: 35 },
   PageUp: { keyCode: 33 },
   PageDown: { keyCode: 34 },
+  Shift: { keyCode: 16 },
+  Control: { keyCode: 17 },
+  Alt: { keyCode: 18 },
+  Meta: { keyCode: 91 },
+  CapsLock: { keyCode: 20 },
+  " ": { text: " ", keyCode: 32 },
 };
+
+// Windows virtual-key codes for punctuation, keyed by the layout-independent
+// KeyboardEvent.code (US OEM table, same as Puppeteer).
+const CODE_KEY_INFO: Record<string, number> = {
+  Minus: 189,
+  Equal: 187,
+  BracketLeft: 219,
+  BracketRight: 221,
+  Backslash: 220,
+  Semicolon: 186,
+  Quote: 222,
+  Comma: 188,
+  Period: 190,
+  Slash: 191,
+  Backquote: 192,
+  NumpadAdd: 107,
+  NumpadSubtract: 109,
+  NumpadMultiply: 106,
+  NumpadDivide: 111,
+  NumpadDecimal: 110,
+};
+
+/**
+ * Windows virtual-key code for a keyboard event. Chrome matches editing
+ * shortcuts against this code, and letter VKs are uppercase ASCII:
+ * `key.charCodeAt(0)` on a lowercase letter yields a numpad VK instead,
+ * which silently breaks every Ctrl+letter shortcut.
+ */
+function vkCodeForEvent(e: KeyboardEvent): number {
+  const code = e.code;
+  if (/^Key[A-Z]$/.test(code)) return code.charCodeAt(3);
+  if (/^Digit[0-9]$/.test(code)) return 48 + Number(code[5]);
+  if (/^Numpad[0-9]$/.test(code)) return 96 + Number(code[6]);
+  if (/^F([1-9]|1[0-2])$/.test(code)) return 111 + Number(code.slice(1));
+  const fromCode = CODE_KEY_INFO[code];
+  if (fromCode !== undefined) return fromCode;
+  const info = KEY_INFO[e.key];
+  if (info) return info.keyCode;
+  return e.key.length === 1 ? e.key.toUpperCase().charCodeAt(0) : 0;
+}
 
 function cdpButton(btn: number): string {
   switch (btn) {
@@ -360,10 +406,14 @@ export function Viewport() {
   const dispatchKey = useCallback(
     (e: KeyboardEvent, eventType: string) => {
       const info = KEY_INFO[e.key];
-      const text = eventType === "keyDown"
-        ? (info?.text ?? (e.key.length === 1 ? e.key : undefined))
-        : undefined;
-      const keyCode = info?.keyCode ?? (e.key.length === 1 ? e.key.charCodeAt(0) : 0);
+      const hasShortcutModifier = e.ctrlKey || e.metaKey || e.altKey;
+      // Shortcut combos go out as rawKeyDown with no text, or Chrome treats
+      // them as text input instead of an editing command.
+      const text =
+        eventType === "keyDown" && !hasShortcutModifier
+          ? (info?.text ?? (e.key.length === 1 ? e.key : undefined))
+          : undefined;
+      const keyCode = vkCodeForEvent(e);
       let m = 0;
       if (e.altKey) m |= 1;
       if (e.ctrlKey) m |= 2;
@@ -371,7 +421,8 @@ export function Viewport() {
       if (e.shiftKey) m |= 8;
       sendInput({
         type: "input_keyboard",
-        eventType,
+        eventType:
+          eventType === "keyDown" && text === undefined ? "rawKeyDown" : eventType,
         key: e.key,
         code: e.code,
         text,
