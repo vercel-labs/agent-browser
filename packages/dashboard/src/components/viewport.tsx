@@ -45,6 +45,9 @@ import { activeSessionNameAtom, activePortAtom } from "@/store/sessions";
 
 const SCREENCAST_ENGINES = new Set(["chrome"]);
 
+// Minimum interval between forwarded mouseMoved events (~25/s).
+const MOUSEMOVE_INTERVAL_MS = 40;
+
 function cdpModifiers(e: React.MouseEvent | React.WheelEvent): number {
   let m = 0;
   if (e.altKey) m |= 1;
@@ -384,6 +387,61 @@ export function Viewport() {
     [toViewport, sendInput],
   );
 
+  // Coalesce mouseMoved events: a sweep fires 60-125 events/s and Chrome
+  // needs ~a frame tick per event, so an unthrottled flood builds a backlog
+  // that a following click waits behind. Only the latest position matters.
+  const moveThrottleRef = useRef<{
+    last: number;
+    timer: ReturnType<typeof setTimeout> | null;
+    pending: { x: number; y: number; modifiers: number } | null;
+  }>({ last: 0, timer: null, pending: null });
+
+  useEffect(() => {
+    const state = moveThrottleRef.current;
+    return () => {
+      if (state.timer) clearTimeout(state.timer);
+    };
+  }, []);
+
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent) => {
+      const pos = toViewport(e);
+      if (!pos) return;
+      const modifiers = cdpModifiers(e);
+      const state = moveThrottleRef.current;
+      const send = (p: { x: number; y: number; modifiers: number }) =>
+        sendInput({
+          type: "input_mouse",
+          eventType: "mouseMoved",
+          x: p.x,
+          y: p.y,
+          button: "none",
+          clickCount: 0,
+          modifiers: p.modifiers,
+        });
+      const now = performance.now();
+      const elapsed = now - state.last;
+      if (elapsed >= MOUSEMOVE_INTERVAL_MS) {
+        state.last = now;
+        send({ ...pos, modifiers });
+      } else {
+        state.pending = { ...pos, modifiers };
+        if (!state.timer) {
+          state.timer = setTimeout(() => {
+            state.timer = null;
+            const pending = state.pending;
+            state.pending = null;
+            if (pending) {
+              state.last = performance.now();
+              send(pending);
+            }
+          }, MOUSEMOVE_INTERVAL_MS - elapsed);
+        }
+      }
+    },
+    [toViewport, sendInput],
+  );
+
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
       const pos = toViewport(e);
@@ -565,7 +623,7 @@ export function Viewport() {
             ref={canvasRef}
             tabIndex={0}
             className="max-h-full max-w-full object-contain outline-none"
-            onMouseMove={(e) => handleMouseEvent(e, "mouseMoved")}
+            onMouseMove={handleMouseMove}
             onMouseDown={(e) => {
               canvasRef.current?.focus();
               handleMouseEvent(e, "mousePressed");
