@@ -503,9 +503,15 @@ export function Viewport() {
 
     const forwardPasteShortcut = (e: KeyboardEvent) => {
       // The remote clipboard has no access to the local one, so read the
-      // local clipboard and insert its text directly.
-      navigator.clipboard
-        .readText()
+      // local clipboard and insert its text directly. navigator.clipboard is
+      // undefined in insecure contexts (and readText in some browsers), so
+      // fall back to forwarding the raw paste keystroke.
+      const readText = navigator.clipboard?.readText?.bind(navigator.clipboard);
+      if (!readText) {
+        dispatchKey(e, "rawKeyDown");
+        return;
+      }
+      readText()
         .then((text) => {
           if (text) {
             sendInput({ type: "input_insert_text", text });
