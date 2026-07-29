@@ -276,6 +276,7 @@ agent-browser mouse wheel <dy> [dx]   # Scroll wheel
 
 ```bash
 agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2)
+agent-browser set viewport auto       # Clear emulation and follow browser window resizing
 agent-browser set device <name>       # Emulate device ("iPhone 14")
 agent-browser set geo <lat> <lng>     # Set geolocation
 agent-browser set offline [on|off]    # Toggle offline mode
@@ -283,6 +284,8 @@ agent-browser set headers <json>      # Extra HTTP headers
 agent-browser set credentials <u> <p> # HTTP basic auth
 agent-browser set media [dark|light]  # Emulate color scheme
 ```
+
+`set viewport <w> <h>` enables persistent device metrics emulation. In headed mode, use `set viewport auto` when the visible page should follow manual window resizing again.
 
 ### Cookies & Storage
 
