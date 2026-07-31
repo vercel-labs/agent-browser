@@ -325,12 +325,27 @@ export function Viewport() {
     (e: React.MouseEvent, eventType: string) => {
       const pos = toViewport(e);
       if (!pos) return;
+      // Held-button state from the browser. Chrome needs both fields on
+      // moves during a drag: it reads `button` (not just the bitmask) to
+      // start an HTML5 drag session.
+      const buttons = e.buttons;
+      const button =
+        eventType === "mouseMoved"
+          ? buttons & 1
+            ? "left"
+            : buttons & 2
+              ? "right"
+              : buttons & 4
+                ? "middle"
+                : "none"
+          : cdpButton(e.button);
       sendInput({
         type: "input_mouse",
         eventType,
         x: pos.x,
         y: pos.y,
-        button: cdpButton(e.button),
+        button,
+        buttons,
         clickCount: eventType === "mousePressed" ? 1 : 0,
         modifiers: cdpModifiers(e),
       });
