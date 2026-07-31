@@ -4142,6 +4142,70 @@ mod tests {
     }
 
     #[test]
+    fn test_click_button_and_modifiers() {
+        let cmd = parse_command(
+            &args("click #item --button right --modifiers ctrl,shift"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "click");
+        assert_eq!(cmd["selector"], "#item");
+        assert_eq!(cmd["button"], "right");
+        assert_eq!(cmd["modifiers"], 2 | 8);
+    }
+
+    #[test]
+    fn test_click_flags_before_selector() {
+        let cmd = parse_command(&args("click --button middle #item"), &default_flags()).unwrap();
+        assert_eq!(cmd["selector"], "#item");
+        assert_eq!(cmd["button"], "middle");
+    }
+
+    #[test]
+    fn test_click_new_tab_with_button() {
+        let cmd = parse_command(
+            &args("click @e3 --new-tab --button left --modifiers meta"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["newTab"], true);
+        assert_eq!(cmd["button"], "left");
+        assert_eq!(cmd["modifiers"], 4);
+    }
+
+    #[test]
+    fn test_click_invalid_button_rejected() {
+        let result = parse_command(&args("click #b --button back"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_click_unknown_modifier_rejected() {
+        let result = parse_command(&args("click #b --modifiers ctrl,super"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_click_missing_flag_value_rejected() {
+        assert!(parse_command(&args("click #b --button"), &default_flags()).is_err());
+        assert!(parse_command(&args("click #b --modifiers"), &default_flags()).is_err());
+    }
+
+    #[test]
+    fn test_dblclick_button() {
+        let cmd = parse_command(&args("dblclick #b --button right"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "dblclick");
+        assert_eq!(cmd["selector"], "#b");
+        assert_eq!(cmd["button"], "right");
+    }
+
+    #[test]
+    fn test_dblclick_invalid_button_rejected() {
+        let result = parse_command(&args("dblclick #b --button back"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_fill() {
         let cmd = parse_command(&args("fill #input hello world"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "fill");
