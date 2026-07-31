@@ -415,26 +415,94 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Core Actions ===
         "click" => {
-            let new_tab = rest.contains(&"--new-tab");
-            let sel = rest
-                .iter()
-                .find(|arg| **arg != "--new-tab")
-                .ok_or_else(|| ParseError::MissingArguments {
-                    context: "click".to_string(),
-                    usage: "click <selector> [--new-tab]",
-                })?;
-            if new_tab {
-                Ok(json!({ "id": id, "action": "click", "selector": sel, "newTab": true }))
-            } else {
-                Ok(json!({ "id": id, "action": "click", "selector": sel }))
+            const USAGE: &str =
+                "click <selector> [--button left|right|middle] [--modifiers ctrl,shift] [--new-tab]";
+            let mut new_tab = false;
+            let mut button: Option<&str> = None;
+            let mut modifiers: Option<i32> = None;
+            let mut sel: Option<&str> = None;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i] {
+                    "--new-tab" => new_tab = true,
+                    "--button" => {
+                        let raw = rest
+                            .get(i + 1)
+                            .ok_or_else(|| ParseError::MissingArguments {
+                                context: "click --button".to_string(),
+                                usage: USAGE,
+                            })?;
+                        button = Some(parse_mouse_button(raw, USAGE)?);
+                        i += 1;
+                    }
+                    "--modifiers" => {
+                        let raw = rest
+                            .get(i + 1)
+                            .ok_or_else(|| ParseError::MissingArguments {
+                                context: "click --modifiers".to_string(),
+                                usage: USAGE,
+                            })?;
+                        modifiers = Some(parse_modifier_mask(raw, USAGE)?);
+                        i += 1;
+                    }
+                    other => {
+                        if sel.is_none() {
+                            sel = Some(other);
+                        }
+                    }
+                }
+                i += 1;
             }
+            let sel = sel.ok_or_else(|| ParseError::MissingArguments {
+                context: "click".to_string(),
+                usage: USAGE,
+            })?;
+            let mut cmd = json!({ "id": id, "action": "click", "selector": sel });
+            if new_tab {
+                cmd["newTab"] = json!(true);
+            }
+            if let Some(b) = button {
+                cmd["button"] = json!(b);
+            }
+            if let Some(m) = modifiers {
+                cmd["modifiers"] = json!(m);
+            }
+            Ok(cmd)
         }
         "dblclick" => {
-            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
+            const USAGE: &str = "dblclick <selector> [--button left|right|middle]";
+            let mut button: Option<&str> = None;
+            let mut sel: Option<&str> = None;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i] {
+                    "--button" => {
+                        let raw = rest
+                            .get(i + 1)
+                            .ok_or_else(|| ParseError::MissingArguments {
+                                context: "dblclick --button".to_string(),
+                                usage: USAGE,
+                            })?;
+                        button = Some(parse_mouse_button(raw, USAGE)?);
+                        i += 1;
+                    }
+                    other => {
+                        if sel.is_none() {
+                            sel = Some(other);
+                        }
+                    }
+                }
+                i += 1;
+            }
+            let sel = sel.ok_or_else(|| ParseError::MissingArguments {
                 context: "dblclick".to_string(),
-                usage: "dblclick <selector>",
+                usage: USAGE,
             })?;
-            Ok(json!({ "id": id, "action": "dblclick", "selector": sel }))
+            let mut cmd = json!({ "id": id, "action": "dblclick", "selector": sel });
+            if let Some(b) = button {
+                cmd["button"] = json!(b);
+            }
+            Ok(cmd)
         }
         "fill" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -3156,6 +3224,46 @@ pub fn shell_words_split(s: &str) -> Vec<String> {
         args.push(current);
     }
     args
+}
+
+/// Validate a --button value for click/dblclick.
+fn parse_mouse_button(raw: &str, usage: &'static str) -> Result<&'static str, ParseError> {
+    match raw.to_lowercase().as_str() {
+        "left" => Ok("left"),
+        "right" => Ok("right"),
+        "middle" => Ok("middle"),
+        other => Err(ParseError::InvalidValue {
+            message: format!(
+                "Invalid --button '{}': expected left, right, or middle",
+                other
+            ),
+            usage,
+        }),
+    }
+}
+
+/// Parse a comma-separated modifier list into the CDP bitmask:
+/// Alt=1, Ctrl=2, Meta (Cmd)=4, Shift=8 (same mapping as key chords).
+fn parse_modifier_mask(raw: &str, usage: &'static str) -> Result<i32, ParseError> {
+    let mut mask = 0i32;
+    for part in raw.split(',') {
+        match part.trim().to_lowercase().as_str() {
+            "alt" => mask |= 1,
+            "ctrl" | "control" => mask |= 2,
+            "meta" | "cmd" | "command" => mask |= 4,
+            "shift" => mask |= 8,
+            other => {
+                return Err(ParseError::InvalidValue {
+                    message: format!(
+                        "Unknown modifier '{}': expected alt, ctrl, meta, or shift",
+                        other
+                    ),
+                    usage,
+                })
+            }
+        }
+    }
+    Ok(mask)
 }
 
 #[cfg(test)]
