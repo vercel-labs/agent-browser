@@ -5658,6 +5658,160 @@ async fn e2e_stream_click_is_not_queued_behind_a_mouse_sweep() {
     let _ = std::fs::remove_dir_all(&socket_dir);
 }
 
+// ---------------------------------------------------------------------------
+// Stream: a tab that closes itself re-targets the screencast and tab list
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_stream_self_closed_tab_resyncs_stream() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-stream-selfclose-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket dir should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir.to_str().expect("socket dir should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-stream-selfclose");
+
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "stream_enable", "port": 0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let port = get_data(&resp)["port"]
+        .as_u64()
+        .expect("stream enable should report the bound port");
+
+    // First tab repaints constantly, so a healthy screencast always has new
+    // frames to send after the stream is re-targeted to it.
+    let animated = "data:text/html,<script>setInterval(()=>{document.body.style.background='%23'+Math.floor(Math.random()*16777215).toString(16)},200)</script>";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": animated }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "tab_new", "url": "data:text/html,<h1>closing</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
+        .await
+        .expect("websocket client should connect to runtime stream");
+
+    // Wait for the screencast to be flowing on the second tab.
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
+    let mut flowing = false;
+    while tokio::time::Instant::now() < deadline && !flowing {
+        let msg = tokio::time::timeout(tokio::time::Duration::from_secs(3), ws.next()).await;
+        let Some(Ok(message)) = msg.ok().flatten() else {
+            continue;
+        };
+        if !message.is_text() {
+            continue;
+        }
+        let parsed: Value =
+            serde_json::from_str(message.to_text().expect("text message should be readable"))
+                .expect("stream payload should be valid JSON");
+        if parsed.get("type") == Some(&json!("frame")) {
+            flowing = true;
+        }
+    }
+    assert!(flowing, "screencast should be flowing before the close");
+
+    // The page closes itself over raw CDP, bypassing execute_command so no
+    // post-command sync can mask the event-driven path. The daemon's only
+    // chance to notice is the periodic drain (the 100ms tick in serve mode).
+    let (client, closing_session_id) = {
+        let mgr = state.browser.as_ref().expect("browser should be running");
+        (
+            mgr.client.clone(),
+            mgr.active_session_id()
+                .expect("an active tab should exist")
+                .to_string(),
+        )
+    };
+    let _ = client
+        .send_command(
+            "Runtime.evaluate",
+            Some(json!({ "expression": "window.close()" })),
+            Some(closing_session_id.as_str()),
+        )
+        .await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    state
+        .drain_cdp_events_background()
+        .await
+        .expect("drain should succeed");
+
+    // The dashboard must learn the tab is gone, and frames must resume from
+    // the remaining (animated) tab without any further command.
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
+    let mut saw_single_tab = false;
+    let mut frames_after = 0u32;
+    while tokio::time::Instant::now() < deadline {
+        let msg = tokio::time::timeout(tokio::time::Duration::from_secs(3), ws.next()).await;
+        let Some(Ok(message)) = msg.ok().flatten() else {
+            continue;
+        };
+        if !message.is_text() {
+            continue;
+        }
+        let parsed: Value =
+            serde_json::from_str(message.to_text().expect("text message should be readable"))
+                .expect("stream payload should be valid JSON");
+        match parsed.get("type") {
+            Some(t) if t == &json!("tabs") => {
+                let tabs = parsed["tabs"].as_array().cloned().unwrap_or_default();
+                if tabs.len() == 1 {
+                    saw_single_tab = true;
+                }
+            }
+            Some(t) if t == &json!("frame") && saw_single_tab => {
+                frames_after += 1;
+                if frames_after >= 2 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        saw_single_tab,
+        "dashboard should have received a tab list without the closed tab"
+    );
+    assert!(
+        frames_after >= 2,
+        "screencast should resume from the remaining tab, got {frames_after} frames"
+    );
+
+    // Cleanup
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "stream_disable" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    let _ = std::fs::remove_dir_all(&socket_dir);
+}
+
 /// Extract width and height from a JPEG's SOF0 (0xFFC0) or SOF2 (0xFFC2) marker.
 fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     for i in 0..data.len().saturating_sub(8) {

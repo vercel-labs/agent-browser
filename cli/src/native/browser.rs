@@ -1781,11 +1781,15 @@ impl BrowserManager {
         update_page_target_info_in_pages(&mut self.pages, target)
     }
 
-    pub fn remove_page_by_target_id(&mut self, target_id: &str) {
+    /// Remove a page by target id. Returns true when a tracked page was
+    /// actually removed (untracked targets like workers are ignored).
+    pub fn remove_page_by_target_id(&mut self, target_id: &str) -> bool {
         if let Some(pos) = self.pages.iter().position(|p| p.target_id == target_id) {
             self.pages.remove(pos);
             self.update_active_page_after_removal(pos);
+            return true;
         }
+        false
     }
 
     pub fn has_target(&self, target_id: &str) -> bool {
