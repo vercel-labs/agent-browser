@@ -5535,6 +5535,129 @@ async fn e2e_stream_frame_metadata_respects_custom_viewport() {
     let _ = std::fs::remove_dir_all(&socket_dir);
 }
 
+// ---------------------------------------------------------------------------
+// Stream: a click is not queued behind a mouse sweep
+// ---------------------------------------------------------------------------
+
+/// Guards the no-await dispatch. Awaiting Chrome's reply per event serialized
+/// the reader, so a click arrived one CDP round trip behind every mousemove
+/// ahead of it: 300 moves delayed it by ~2.5s. Measured at ~6ms with the fix,
+/// so the threshold has three orders of magnitude of headroom and fails only on
+/// a real regression.
+#[tokio::test]
+#[ignore]
+async fn e2e_stream_click_is_not_queued_behind_a_mouse_sweep() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-stream-latency-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket dir should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir.to_str().expect("socket dir should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-stream-latency");
+
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "stream_enable", "port": 0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let port = get_data(&resp)["port"]
+        .as_u64()
+        .expect("stream enable should report the bound port");
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>latency</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Record the arrival time of the first mousedown inside the page.
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "evaluate",
+            "script": "window.__down = null; document.addEventListener('mousedown', () => { if (window.__down === null) window.__down = Date.now(); }); 'armed'"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
+        .await
+        .expect("websocket client should connect to runtime stream");
+    let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), ws.next()).await;
+
+    // A sweep of moves, then the click that must not wait for them.
+    for i in 0..300 {
+        let mv = json!({
+            "type": "input_mouse", "eventType": "mouseMoved",
+            "x": 100 + (i % 400), "y": 100 + (i % 300),
+            "button": "none", "clickCount": 0
+        });
+        ws.send(Message::Text(mv.to_string()))
+            .await
+            .expect("mouse move should be accepted by the stream socket");
+    }
+    let sent_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_millis() as u64;
+    for event in ["mousePressed", "mouseReleased"] {
+        let click = json!({
+            "type": "input_mouse", "eventType": event,
+            "x": 200, "y": 200, "button": "left", "clickCount": 1
+        });
+        ws.send(Message::Text(click.to_string()))
+            .await
+            .expect("click should be accepted by the stream socket");
+    }
+
+    // Poll the page for the recorded arrival time.
+    let mut latency_ms: Option<u64> = None;
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(20);
+    while tokio::time::Instant::now() < deadline && latency_ms.is_none() {
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let resp = execute_command(
+            &json!({ "id": "4", "action": "evaluate", "script": "window.__down" }),
+            &mut state,
+        )
+        .await;
+        if let Some(down) = get_data(&resp)["result"].as_u64() {
+            latency_ms = Some(down.saturating_sub(sent_at_ms));
+        }
+    }
+
+    let latency = latency_ms.expect("the click should reach the page within the deadline");
+    assert!(
+        latency < 500,
+        "click landed {latency}ms after a 300-event mouse sweep; input dispatch is waiting on CDP replies again"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "98", "action": "stream_disable" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    let _ = std::fs::remove_dir_all(&socket_dir);
+}
+
 /// Extract width and height from a JPEG's SOF0 (0xFFC0) or SOF2 (0xFFC2) marker.
 fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     for i in 0..data.len().saturating_sub(8) {
