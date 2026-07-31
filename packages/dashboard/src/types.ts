@@ -1,5 +1,7 @@
 export interface FrameMessage {
   type: "frame";
+  /** Monotonic frame id. Echoed in an `ack` message under ack pacing. */
+  seq: number;
   data: string;
   metadata: {
     offsetTop: number;
