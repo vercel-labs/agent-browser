@@ -1504,14 +1504,16 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_AUTH_LOGIN,
             "Auth login",
-            "Log in with a saved auth profile.",
+            "Log in with a saved auth profile or configured credential provider.",
             json!({
                 "name": { "type": "string" },
                 "noNavigate": {
                     "type": "boolean",
                     "default": false,
                     "description": "Use the active top-level page without performing the initial login navigation. The credential URL must match the page origin."
-                }
+                },
+                "credentialProvider": { "type": "string" },
+                "otpSelector": { "type": "string", "description": "OTP selector override for this login." }
             }),
             &["name"],
         ),
@@ -3234,6 +3236,18 @@ fn auth_login_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     if optional_bool(arguments, "noNavigate")?.unwrap_or(false) {
         args.push("--no-navigate".to_string());
     }
+    if let Some(provider) = optional_string(arguments, "credentialProvider")? {
+        if !provider.is_empty() {
+            args.push("--credential-provider".to_string());
+            args.push(provider);
+        }
+    }
+    if let Some(selector) = optional_string(arguments, "otpSelector")? {
+        if !selector.is_empty() {
+            args.push("--otp-selector".to_string());
+            args.push(selector);
+        }
+    }
     Ok(args)
 }
 
@@ -4270,6 +4284,36 @@ mod tests {
         assert!(names.contains(&TOOL_SESSION_INFO));
         assert!(!names.contains(&"agent_browser_frame_list"));
         assert!(names.iter().all(|name| name.starts_with("agent_browser_")));
+    }
+
+    #[test]
+    fn auth_login_forwards_the_optional_credential_provider() {
+        assert_eq!(
+            auth_login_args(&json!({
+                "name": "my-app",
+                "credentialProvider": "staged-vault",
+                "otpSelector": "#otp"
+            }))
+            .unwrap(),
+            vec![
+                "auth",
+                "login",
+                "my-app",
+                "--credential-provider",
+                "staged-vault",
+                "--otp-selector",
+                "#otp"
+            ]
+        );
+
+        let tools = tools();
+        let auth_login = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some(TOOL_AUTH_LOGIN))
+            .unwrap();
+        assert!(auth_login["inputSchema"]["properties"]
+            .get("otpSelector")
+            .is_some());
     }
 
     #[test]
