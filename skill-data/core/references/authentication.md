@@ -207,6 +207,10 @@ agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"...","url"
 
 Use `--url`, `--username-selector`, `--password-selector`, and `--submit-selector` on `auth login` to override plugin-provided metadata for the current login only.
 
+### Staged TOTP providers
+
+A provider declaring both `credential.read` and `credential.challenge` can return `stagedChallenge` metadata from the primary credential response. Only `kind: "totp"` is required; `selector` is optional. agent-browser uses `--otp-selector`, the provider selector, or common OTP selectors in that order, waits for the field, derives the current page origin, requests a current TOTP, and fills through the normal `auth login` interaction path without submitting or returning the code. A successful fill returns `loggedIn: false` and `status: "challenge_filled"`.
+
 Gate plugin secret access separately from normal login automation:
 
 ```bash

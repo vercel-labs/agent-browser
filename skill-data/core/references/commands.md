@@ -312,6 +312,8 @@ agent-browser plugin run <name> <type> --payload <json>
                                           # Run an arbitrary plugin request
 ```
 
+Providers declaring `credential.challenge` resolve a TOTP after `--otp-selector`, an optional provider selector, or a common OTP selector appears. They use the normal `auth login` browser interaction path and fill the field without submitting it.
+
 Credential provider plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol and must declare `credential.read`. Use `--confirm-actions plugin:<name>:credential.read` to require explicit approval before a plugin resolves secrets.
 
 Other capabilities use the same protocol:
