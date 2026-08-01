@@ -830,7 +830,7 @@ agent-browser auth login my-app --credential-provider vault --item "My App" --ur
 agent-browser auth login my-app --credential-provider vault --otp-selector "#otp"
 ```
 
-A provider that declares both `credential.read` and `credential.challenge` can return optional staged TOTP metadata with its primary credential. agent-browser waits for an OTP field using `--otp-selector`, the provider selector, or common OTP selectors in that order. It then derives the current page origin, asks the provider for a current code, and fills the field through the normal `auth login` browser interaction path. It does not submit the field and returns `status: "challenge_filled"` with `loggedIn: false`. The code is not included in command arguments or normal command output.
+A provider that declares both `credential.read` and `credential.challenge` can return optional staged TOTP metadata with its primary credential. The metadata may include an opaque `challengeRef`, which agent-browser returns unchanged to the same provider in the staged request. agent-browser waits for an OTP field using `--otp-selector`, the provider selector, or common OTP selectors in that order. It then derives the current page origin, asks the provider for a current code, and fills the field through the normal `auth login` browser interaction path. It does not submit the field and returns `status: "challenge_filled"` with `loggedIn: false`. The code and challenge reference are not included in command arguments or normal command output.
 
 Use a browser provider plugin:
 

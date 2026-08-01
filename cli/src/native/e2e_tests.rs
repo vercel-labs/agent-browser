@@ -171,9 +171,9 @@ case "$input" in
     ;;
   *)
     if [ -n "$4" ]; then
-      printf '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{"username":"alice@example.com","password":"secret","url":"%s/","usernameSelector":"#username","passwordSelector":"#password","submitSelector":"#submit","stagedChallenge":{"kind":"totp","selector":"%s"}}}' "$1" "$4"
+      printf '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{"username":"alice@example.com","password":"secret","url":"%s/","usernameSelector":"#username","passwordSelector":"#password","submitSelector":"#submit","stagedChallenge":{"kind":"totp","selector":"%s","challengeRef":"opaque-item-reference"}}}' "$1" "$4"
     else
-      printf '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{"username":"alice@example.com","password":"secret","url":"%s/","usernameSelector":"#username","passwordSelector":"#password","submitSelector":"#submit","stagedChallenge":{"kind":"totp"}}}' "$1"
+      printf '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{"username":"alice@example.com","password":"secret","url":"%s/","usernameSelector":"#username","passwordSelector":"#password","submitSelector":"#submit","stagedChallenge":{"kind":"totp","challengeRef":"opaque-item-reference"}}}' "$1"
     fi
     ;;
 esac
@@ -270,6 +270,7 @@ esac
         let request: Value =
             serde_json::from_slice(&std::fs::read(challenge_request).unwrap()).unwrap();
         assert_eq!(request["request"]["origin"], origin);
+        assert_eq!(request["request"]["challengeRef"], "opaque-item-reference");
 
         close_current_browser(&mut state).await.unwrap();
         server.abort();

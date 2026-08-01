@@ -327,13 +327,14 @@ For staged TOTP, declare both `credential.read` and `credential.challenge`. A cr
     "submitSelector": "button[type=submit]",
     "stagedChallenge": {
       "kind": "totp",
-      "selector": "#otp"
+      "selector": "#otp",
+      "challengeRef": "provider-defined-opaque-value"
     }
   }
 }
 ```
 
-agent-browser waits for the OTP field before sending the same configured plugin a second request. Selector precedence matches username and password: `--otp-selector`, then the optional provider selector, then common OTP selectors. The request origin is derived from the current page rather than provider metadata:
+agent-browser waits for the OTP field before sending the same configured plugin a second request. Selector precedence matches username and password: `--otp-selector`, then the optional provider selector, then common OTP selectors. The request origin is derived from the current page rather than provider metadata. If the primary response includes an opaque `challengeRef`, agent-browser returns it unchanged to the same provider:
 
 ```json
 {
@@ -344,7 +345,8 @@ agent-browser waits for the OTP field before sending the same configured plugin 
     "profileName": "my-app",
     "kind": "totp",
     "purpose": "authentication.otp",
-    "origin": "https://app.example.com"
+    "origin": "https://app.example.com",
+    "challengeRef": "provider-defined-opaque-value"
   }
 }
 ```

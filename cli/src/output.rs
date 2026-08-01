@@ -2535,6 +2535,7 @@ Login behavior:
   Plugin credentials are resolved just-in-time and are not saved locally.
   Providers declaring credential.challenge may resolve a TOTP after an OTP
   field appears. The normal auth login browser and selector behavior applies.
+  An optional challengeRef is echoed only to the same provider.
   The field is filled without submitting and loggedIn=false is reported.
 
 Global Options:
@@ -3454,6 +3455,8 @@ Capabilities:
 Core capabilities and protocol request types use dedicated command paths.
 Use auth login for credential.read, --provider for browser.provider, and
 a local launch for launch.mutate.
+Staged credentials may include an opaque challengeRef that is echoed only to
+the same provider in the credential.resolve.challenge request.
 
 Example config:
   {{

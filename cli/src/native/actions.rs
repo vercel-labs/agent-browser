@@ -10691,7 +10691,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .get("otpSelector")
         .and_then(|value| value.as_str())
         .map(String::from)
-        .or(metadata.selector);
+        .or(metadata.selector.clone());
     let otp_sel = if let Some(selector) = otp_selector {
         wait_for_selector(
             &mgr.client,
@@ -10752,6 +10752,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         crate::plugins::CredentialChallengeRequest {
             profile_name: name,
             origin: &origin,
+            challenge_ref: metadata.challenge_ref.as_deref(),
         },
     )
     .await?;

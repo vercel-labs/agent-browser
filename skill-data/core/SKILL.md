@@ -216,7 +216,7 @@ agent-browser auth login my-app --credential-provider vault --item "My App"
 agent-browser auth login my-app --credential-provider vault --item "My App" --url https://app.example.com/login --username-selector "#email" --password-selector "#password"
 ```
 
-For a provider declaring `credential.challenge`, use `auth login <profile> --credential-provider <plugin>`. The provider may supply an OTP selector, `--otp-selector` may override it, and otherwise agent-browser tries common OTP selectors. The current page origin is sent only after the field appears; agent-browser fills without submitting and reports `loggedIn: false`.
+For a provider declaring `credential.challenge`, use `auth login <profile> --credential-provider <plugin>`. The provider may supply an OTP selector and opaque challenge reference, `--otp-selector` may override the selector, and otherwise agent-browser tries common OTP selectors. The current page origin and unchanged challenge reference are sent only after the field appears; agent-browser fills without submitting and reports `loggedIn: false`.
 
 Plugins can also provide browser providers, launch mutators such as stealth setup, and arbitrary namespaced commands:
 
