@@ -346,7 +346,7 @@ agent-browser plugin run <name> <type> --payload <json>
 
 `auth login` normally navigates to the effective credential URL. `--no-navigate` requires an existing active top-level HTTP(S) page, checks that its scheme, host, and effective port match the effective credential URL, then uses the normal selector waits, fills, and submit click without replacing the document. Paths, queries, and fragments may differ, and submit-triggered navigation remains enabled. Command-level `--url` takes precedence over stored or provider metadata and becomes the expected-origin constraint in this mode.
 
-Providers declaring `credential.challenge` resolve a TOTP after `--otp-selector`, an optional provider selector, or a common OTP selector appears. An optional opaque challenge reference is returned unchanged to the same provider. They use the normal `auth login` browser interaction path and fill the field without submitting it.
+Providers declaring `credential.challenge` resolve a TOTP after `--otp-selector`, an optional provider selector, or a common OTP selector appears. Common detection includes one-time-code metadata and a `123456` placeholder. An optional opaque challenge reference is returned unchanged to the same provider. They use the normal `auth login` browser interaction path and fill the field without submitting it.
 
 Credential provider plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol and must declare `credential.read`. Use `--confirm-actions plugin:<name>:credential.read` to require explicit approval before a plugin resolves secrets.
 
