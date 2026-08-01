@@ -2535,6 +2535,7 @@ Login behavior:
   Plugin credentials are resolved just-in-time and are not saved locally.
   Providers declaring credential.challenge may resolve a TOTP after an OTP
   field appears. The normal auth login browser and selector behavior applies.
+  Common detection includes one-time-code metadata and a 123456 placeholder.
   An optional challengeRef is echoed only to the same provider.
   The field is filled without submitting and loggedIn=false is reported.
 

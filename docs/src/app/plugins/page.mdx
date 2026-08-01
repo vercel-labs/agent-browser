@@ -334,7 +334,7 @@ For staged TOTP, declare both `credential.read` and `credential.challenge`. A cr
 }
 ```
 
-agent-browser waits for the OTP field before sending the same configured plugin a second request. Selector precedence matches username and password: `--otp-selector`, then the optional provider selector, then common OTP selectors. The request origin is derived from the current page rather than provider metadata. If the primary response includes an opaque `challengeRef`, agent-browser returns it unchanged to the same provider:
+agent-browser waits for the OTP field before sending the same configured plugin a second request. Selector precedence matches username and password: `--otp-selector`, then the optional provider selector, then common OTP selectors including one-time-code metadata and a `123456` placeholder. The request origin is derived from the current page rather than provider metadata. If the primary response includes an opaque `challengeRef`, agent-browser returns it unchanged to the same provider:
 
 ```json
 {

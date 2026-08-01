@@ -106,7 +106,7 @@ mod staged_auth_real_browser {
                     let body = if request.starts_with("GET /challenge ") {
                         r#"<!doctype html>
 <form id="otp-form">
-  <input id="otp" type="text" autocomplete="one-time-code">
+  <input id="OfNqHf0LkX" type="text" autocomplete="off" placeholder="123456">
   <button type="submit">Verify</button>
 </form>
 <script>
@@ -259,7 +259,7 @@ esac
             &json!({
                 "id": "verify",
                 "action": "evaluate",
-                "script": "document.querySelector('#otp')?.value === '481516' && document.querySelector('#otp-form') !== null && window.otpSubmitCount === 0"
+                "script": "document.querySelector('input[placeholder=\"123456\"]')?.value === '481516' && document.querySelector('#otp-form') !== null && window.otpSubmitCount === 0"
             }),
             &mut state,
         )
@@ -286,7 +286,8 @@ esac
             staged_plugin(&origin, Some("#provider-otp"));
         let mut state = launch_test_browser(&executable).await;
 
-        let response = execute_staged_login(&mut state, plugin, Some("#otp")).await;
+        let response =
+            execute_staged_login(&mut state, plugin, Some("input[placeholder='123456']")).await;
         assert_success(&response);
         assert_eq!(get_data(&response)["status"], "challenge_filled");
         assert_eq!(get_data(&response)["loggedIn"], false);
@@ -297,7 +298,7 @@ esac
             &json!({
                 "id": "verify",
                 "action": "evaluate",
-                "script": "document.querySelector('#otp')?.value === '481516' && window.otpSubmitCount === 0"
+                "script": "document.querySelector('input[placeholder=\"123456\"]')?.value === '481516' && window.otpSubmitCount === 0"
             }),
             &mut state,
         )

@@ -10681,6 +10681,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         "input[id*=totp i]",
         "input[name*=verification i]",
         "input[id*=verification i]",
+        "input[placeholder='123456']",
     ];
     let fallback_otp_selectors = [
         "input[name*=code i]",

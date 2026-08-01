@@ -360,7 +360,7 @@ Save options:
 
 `auth login` navigates with `load` and then waits for the username/password/submit selectors to appear before interacting. This improves reliability on SPA login pages where fields render after initial page load.
 
-Credential providers declaring `credential.challenge` may resolve a TOTP after an OTP field appears. Staged TOTP uses the same browser modes and selector behavior as the rest of `auth login`: a caller override takes precedence over an optional provider selector, followed by common OTP selectors. An optional opaque challenge reference from the primary response is returned unchanged to the same provider. agent-browser fills the field without submitting it and returns `loggedIn: false` with `status: "challenge_filled"`.
+Credential providers declaring `credential.challenge` may resolve a TOTP after an OTP field appears. Staged TOTP uses the same browser modes and selector behavior as the rest of `auth login`: a caller override takes precedence over an optional provider selector, followed by common OTP selectors including one-time-code metadata and a `123456` placeholder. An optional opaque challenge reference from the primary response is returned unchanged to the same provider. agent-browser fills the field without submitting it and returns `loggedIn: false` with `status: "challenge_filled"`.
 
 Plugin login options:
 
