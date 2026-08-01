@@ -52,6 +52,9 @@ pub struct StagedCredentialChallenge {
     /// Optional provider default. A caller override and then auto-detection take precedence.
     #[serde(default)]
     pub selector: Option<String>,
+    /// Optional opaque value echoed to the same provider for the staged request.
+    #[serde(default)]
+    pub challenge_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -78,6 +81,8 @@ pub(crate) struct CredentialChallengeRequest<'a> {
     pub(crate) profile_name: &'a str,
     /// Origin observed from the active page after the OTP field becomes visible.
     pub(crate) origin: &'a str,
+    /// Opaque provider state returned with the primary credential.
+    pub(crate) challenge_ref: Option<&'a str>,
 }
 
 /// A current challenge returned by a credential plugin.
@@ -351,6 +356,7 @@ pub(crate) async fn resolve_credential_challenge_with_plugin(
             "kind": "totp",
             "purpose": "authentication.otp",
             "origin": request.origin,
+            "challengeRef": request.challenge_ref,
         }),
         15,
         false,
@@ -1573,6 +1579,7 @@ printf '{"protocol":"agent-browser.plugin.v1","success":true,"challenge":{"kind"
             CredentialChallengeRequest {
                 profile_name: "trusted-profile",
                 origin: "https://accounts.example.com",
+                challenge_ref: Some("opaque-item-reference"),
             },
         )
         .await
@@ -1591,6 +1598,7 @@ printf '{"protocol":"agent-browser.plugin.v1","success":true,"challenge":{"kind"
                     "kind": "totp",
                     "purpose": "authentication.otp",
                     "origin": "https://accounts.example.com",
+                    "challengeRef": "opaque-item-reference",
                 },
             })
         );
