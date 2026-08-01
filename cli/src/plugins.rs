@@ -13,7 +13,9 @@ use tokio::io::AsyncWriteExt;
 
 pub const PROTOCOL_VERSION: &str = "agent-browser.plugin.v1";
 pub const TYPE_PLUGIN_MANIFEST: &str = "plugin.manifest";
+pub const TYPE_CREDENTIAL_RESOLVE_CHALLENGE: &str = "credential.resolve.challenge";
 pub const CAPABILITY_CREDENTIAL_READ: &str = "credential.read";
+pub const CAPABILITY_CREDENTIAL_CHALLENGE: &str = "credential.challenge";
 pub const CAPABILITY_BROWSER_PROVIDER: &str = "browser.provider";
 pub const CAPABILITY_LAUNCH_MUTATE: &str = "launch.mutate";
 pub const CAPABILITY_COMMAND_RUN: &str = "command.run";
@@ -36,6 +38,22 @@ pub struct CredentialResolveRequest<'a> {
     pub url: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CredentialChallengeKind {
+    Totp,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+/// Primary credential metadata that opts one login into the staged TOTP step.
+pub struct StagedCredentialChallenge {
+    pub kind: CredentialChallengeKind,
+    /// Optional provider default. A caller override and then auto-detection take precedence.
+    #[serde(default)]
+    pub selector: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedCredential {
@@ -51,6 +69,32 @@ pub struct ResolvedCredential {
     pub password_selector: Option<String>,
     #[serde(default)]
     pub submit_selector: Option<String>,
+    #[serde(default)]
+    pub staged_challenge: Option<StagedCredentialChallenge>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CredentialChallengeRequest<'a> {
+    pub(crate) profile_name: &'a str,
+    /// Origin observed from the active page after the OTP field becomes visible.
+    pub(crate) origin: &'a str,
+}
+
+/// A current challenge returned by a credential plugin.
+#[derive(Debug)]
+pub(crate) struct ResolvedCredentialChallenge {
+    code: String,
+    expires_at_unix_ms: u64,
+}
+
+impl ResolvedCredentialChallenge {
+    /// Consume the challenge immediately before handing it to the normal fill path.
+    pub(crate) fn into_unexpired_code(self) -> Result<String, String> {
+        if self.expires_at_unix_ms <= unix_time_ms()? {
+            return Err("The credential challenge expired before it could be filled".to_string());
+        }
+        Ok(self.code)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -87,6 +131,23 @@ struct CredentialPluginResponse {
     success: bool,
     #[serde(default)]
     credential: Option<ResolvedCredential>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CredentialChallengePluginResponse {
+    protocol: String,
+    success: bool,
+    #[serde(default)]
+    challenge: Option<CredentialChallengePluginValue>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CredentialChallengePluginValue {
+    kind: CredentialChallengeKind,
+    code: String,
+    expires_at_unix_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -268,6 +329,73 @@ async fn invoke_plugin_process(
     Ok(response)
 }
 
+fn unix_time_ms() -> Result<u64, String> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .map_err(|_| "System clock is before the Unix epoch".to_string())
+}
+
+pub(crate) async fn resolve_credential_challenge_with_plugin(
+    plugin: &PluginConfig,
+    request: CredentialChallengeRequest<'_>,
+) -> Result<ResolvedCredentialChallenge, String> {
+    validate_plugin(plugin, CAPABILITY_CREDENTIAL_CHALLENGE)?;
+
+    let response = invoke_plugin(
+        plugin,
+        TYPE_CREDENTIAL_RESOLVE_CHALLENGE,
+        CAPABILITY_CREDENTIAL_CHALLENGE,
+        json!({
+            "profileName": request.profile_name,
+            "kind": "totp",
+            "purpose": "authentication.otp",
+            "origin": request.origin,
+        }),
+        15,
+        false,
+    )
+    .await?;
+    parse_credential_challenge_response(&plugin.name, response)
+}
+
+fn parse_credential_challenge_response(
+    plugin_name: &str,
+    response: serde_json::Value,
+) -> Result<ResolvedCredentialChallenge, String> {
+    let response: CredentialChallengePluginResponse = serde_json::from_value(response)
+        .map_err(|_| format!("Plugin '{}' returned invalid challenge JSON", plugin_name))?;
+    if response.protocol != PROTOCOL_VERSION {
+        return Err(format!(
+            "Plugin '{}' used an unsupported challenge protocol",
+            plugin_name
+        ));
+    }
+    if !response.success {
+        return Err(format!(
+            "Plugin '{}' could not resolve the credential challenge",
+            plugin_name
+        ));
+    }
+    let challenge = response
+        .challenge
+        .ok_or_else(|| format!("Plugin '{}' returned no credential challenge", plugin_name))?;
+    if challenge.kind != CredentialChallengeKind::Totp
+        || challenge.code.is_empty()
+        || !challenge.code.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(format!(
+            "Plugin '{}' returned an invalid credential challenge",
+            plugin_name
+        ));
+    }
+
+    Ok(ResolvedCredentialChallenge {
+        code: challenge.code,
+        expires_at_unix_ms: challenge.expires_at_unix_ms,
+    })
+}
+
 pub async fn resolve_credential_with_plugins(
     provider: &str,
     plugins: &[PluginConfig],
@@ -275,7 +403,7 @@ pub async fn resolve_credential_with_plugins(
 ) -> Result<ResolvedCredential, String> {
     let plugin = find_plugin(plugins, provider)
         .ok_or_else(|| format!("Credential plugin '{}' is not configured", provider))?;
-    let response = invoke_plugin(
+    let mut response = invoke_plugin(
         plugin,
         "credential.resolve",
         CAPABILITY_CREDENTIAL_READ,
@@ -288,6 +416,14 @@ pub async fn resolve_credential_with_plugins(
         false,
     )
     .await?;
+    if !plugin_has_capability(plugin, CAPABILITY_CREDENTIAL_CHALLENGE) {
+        if let Some(credential) = response
+            .get_mut("credential")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            credential.remove("stagedChallenge");
+        }
+    }
     let response: CredentialPluginResponse = serde_json::from_value(response)
         .map_err(|_| format!("Credential plugin '{}' returned invalid JSON", provider))?;
     if response.protocol != PROTOCOL_VERSION {
@@ -893,10 +1029,12 @@ fn is_core_plugin_entrypoint(entrypoint: &str) -> bool {
     matches!(
         entrypoint,
         CAPABILITY_CREDENTIAL_READ
+            | CAPABILITY_CREDENTIAL_CHALLENGE
             | CAPABILITY_BROWSER_PROVIDER
             | CAPABILITY_LAUNCH_MUTATE
             | TYPE_PLUGIN_MANIFEST
             | "credential.resolve"
+            | TYPE_CREDENTIAL_RESOLVE_CHALLENGE
             | "browser.launch"
             | "browser.close"
     )
@@ -949,6 +1087,16 @@ fn print_plugin_error(message: &str, json_output: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn write_executable_plugin(path: &Path, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, script).unwrap();
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
 
     #[test]
     fn find_plugin_prefers_last_entry() {
@@ -1032,15 +1180,119 @@ mod tests {
     #[test]
     fn plugin_run_rejects_core_entrypoints() {
         assert!(is_core_plugin_entrypoint(CAPABILITY_CREDENTIAL_READ));
+        assert!(is_core_plugin_entrypoint(CAPABILITY_CREDENTIAL_CHALLENGE));
         assert!(is_core_plugin_entrypoint(CAPABILITY_BROWSER_PROVIDER));
         assert!(is_core_plugin_entrypoint(CAPABILITY_LAUNCH_MUTATE));
         assert!(is_core_plugin_entrypoint("credential.resolve"));
+        assert!(is_core_plugin_entrypoint(TYPE_CREDENTIAL_RESOLVE_CHALLENGE));
         assert!(is_core_plugin_entrypoint("browser.launch"));
         assert!(is_core_plugin_entrypoint("browser.close"));
         assert!(is_core_plugin_entrypoint("launch.mutate"));
         assert!(is_core_plugin_entrypoint(TYPE_PLUGIN_MANIFEST));
         assert!(!is_core_plugin_entrypoint(CAPABILITY_COMMAND_RUN));
         assert!(!is_core_plugin_entrypoint("captcha.solve"));
+    }
+
+    #[test]
+    fn challenge_response_parser_accepts_nonempty_ascii_digits() {
+        let now = 1_785_513_600_000_u64;
+        let valid = json!({
+            "protocol": PROTOCOL_VERSION,
+            "success": true,
+            "challenge": {
+                "kind": "totp",
+                "code": "481516",
+                "expiresAtUnixMs": now + 30_000,
+                "providerMetadata": "allowed",
+            },
+            "providerMetadata": "allowed",
+        });
+        let challenge = parse_credential_challenge_response("vault", valid.clone())
+            .expect("valid challenge should parse");
+        assert_eq!(challenge.code.as_str(), "481516");
+        assert_eq!(challenge.expires_at_unix_ms, now + 30_000);
+
+        for code in ["7", "481516234"] {
+            let provider_defined_length = json!({
+                "protocol": PROTOCOL_VERSION,
+                "success": true,
+                "challenge": {
+                    "kind": "totp",
+                    "code": code,
+                    "expiresAtUnixMs": now + 120_000,
+                },
+            });
+            assert!(parse_credential_challenge_response("vault", provider_defined_length).is_ok());
+        }
+
+        let cases = [
+            (
+                "wrong protocol",
+                json!({
+                    "protocol": "agent-browser.plugin.v2",
+                    "success": true,
+                    "challenge": valid["challenge"],
+                }),
+            ),
+            (
+                "empty code",
+                json!({
+                    "protocol": PROTOCOL_VERSION,
+                    "success": true,
+                    "challenge": {
+                        "kind": "totp",
+                        "code": "",
+                        "expiresAtUnixMs": now + 30_000,
+                    },
+                }),
+            ),
+            (
+                "non digit",
+                json!({
+                    "protocol": PROTOCOL_VERSION,
+                    "success": true,
+                    "challenge": {
+                        "kind": "totp",
+                        "code": "48A516",
+                        "expiresAtUnixMs": now + 30_000,
+                    },
+                }),
+            ),
+        ];
+
+        for (label, response) in cases {
+            assert!(
+                parse_credential_challenge_response("vault", response).is_err(),
+                "{label} must be rejected"
+            );
+        }
+
+        let provider_error = json!({
+            "protocol": PROTOCOL_VERSION,
+            "success": false,
+            "error": "secret-provider-detail",
+        });
+        let error = match parse_credential_challenge_response("vault", provider_error) {
+            Ok(_) => panic!("provider failure must be rejected"),
+            Err(error) => error,
+        };
+        assert!(!error.contains("secret-provider-detail"));
+    }
+
+    #[test]
+    fn challenge_expiry_is_checked_at_fill_handoff() {
+        let now = unix_time_ms().unwrap();
+        let current = ResolvedCredentialChallenge {
+            code: "481516".to_string(),
+            expires_at_unix_ms: now + 30_000,
+        };
+        assert_eq!(current.into_unexpired_code().unwrap(), "481516");
+
+        let expired = ResolvedCredentialChallenge {
+            code: "481516".to_string(),
+            expires_at_unix_ms: now,
+        };
+        assert!(expired.into_unexpired_code().is_err());
     }
 
     #[test]
@@ -1178,6 +1430,171 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{
         assert_eq!(credential.username, "user");
         assert_eq!(credential.password, "pass");
         assert_eq!(credential.url.as_deref(), Some("https://example.com/login"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn staged_capability_preserves_legacy_primary_request_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let request_path = dir.path().join("primary-request.json");
+        let plugin_path = dir.path().join("strict-primary-plugin");
+        write_executable_plugin(
+            &plugin_path,
+            r#"#!/bin/sh
+cat > "$1"
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{"username":"user","password":"pass"}}'
+"#,
+        );
+        let frozen_plugin = PluginConfig {
+            name: "vault".to_string(),
+            command: plugin_path.to_string_lossy().to_string(),
+            args: vec![request_path.to_string_lossy().to_string()],
+            capabilities: vec![
+                CAPABILITY_CREDENTIAL_READ.to_string(),
+                CAPABILITY_CREDENTIAL_CHALLENGE.to_string(),
+            ],
+            source: Some("test:frozen".to_string()),
+        };
+
+        let credential = resolve_credential_with_plugins(
+            "vault",
+            std::slice::from_ref(&frozen_plugin),
+            CredentialResolveRequest {
+                profile_name: "trusted-profile",
+                item_ref: None,
+                url: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let request: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(request_path).unwrap()).unwrap();
+        assert_eq!(
+            request,
+            json!({
+                "protocol": PROTOCOL_VERSION,
+                "type": "credential.resolve",
+                "capability": CAPABILITY_CREDENTIAL_READ,
+                "request": {
+                    "profileName": "trusted-profile",
+                    "itemRef": null,
+                    "url": null,
+                },
+            })
+        );
+        assert_eq!(credential.username, "user");
+        assert_eq!(credential.password, "pass");
+        assert!(credential.otp.is_none());
+        assert!(credential.staged_challenge.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn password_only_plugin_ignores_unadvertised_staged_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_path = dir.path().join("password-only-plugin");
+        write_executable_plugin(
+            &plugin_path,
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{"username":"user","password":"pass","stagedChallenge":{"seed":"metadata-secret-canary"}}}'
+"#,
+        );
+        let plugin = PluginConfig {
+            name: "vault".to_string(),
+            command: plugin_path.to_string_lossy().to_string(),
+            capabilities: vec![CAPABILITY_CREDENTIAL_READ.to_string()],
+            ..PluginConfig::default()
+        };
+
+        let credential = resolve_credential_with_plugins(
+            "vault",
+            std::slice::from_ref(&plugin),
+            CredentialResolveRequest {
+                profile_name: "trusted-profile",
+                item_ref: None,
+                url: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(credential.staged_challenge.is_none());
+
+        let mut staged_plugin = plugin;
+        staged_plugin
+            .capabilities
+            .push(CAPABILITY_CREDENTIAL_CHALLENGE.to_string());
+        let error = match resolve_credential_with_plugins(
+            "vault",
+            std::slice::from_ref(&staged_plugin),
+            CredentialResolveRequest {
+                profile_name: "trusted-profile",
+                item_ref: None,
+                url: None,
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("advertised staged metadata must use the strict schema"),
+            Err(error) => error,
+        };
+        assert!(error.contains("returned invalid JSON"));
+        assert!(!error.contains("metadata-secret-canary"));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn challenge_resolver_uses_minimal_internal_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let request_path = dir.path().join("challenge-request.json");
+        let plugin_path = dir.path().join("challenge-plugin");
+        write_executable_plugin(
+            &plugin_path,
+            r#"#!/bin/sh
+cat > "$1"
+printf '{"protocol":"agent-browser.plugin.v1","success":true,"challenge":{"kind":"totp","code":"481516","expiresAtUnixMs":%s}}' "$2"
+"#,
+        );
+        let expiry = unix_time_ms().unwrap() + 30_000;
+        let plugin = PluginConfig {
+            name: "vault".to_string(),
+            command: plugin_path.to_string_lossy().to_string(),
+            args: vec![
+                request_path.to_string_lossy().to_string(),
+                expiry.to_string(),
+            ],
+            capabilities: vec![CAPABILITY_CREDENTIAL_CHALLENGE.to_string()],
+            source: Some("test:frozen".to_string()),
+        };
+
+        let challenge = resolve_credential_challenge_with_plugin(
+            &plugin,
+            CredentialChallengeRequest {
+                profile_name: "trusted-profile",
+                origin: "https://accounts.example.com",
+            },
+        )
+        .await
+        .unwrap();
+
+        let request: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(request_path).unwrap()).unwrap();
+        assert_eq!(
+            request,
+            json!({
+                "protocol": PROTOCOL_VERSION,
+                "type": TYPE_CREDENTIAL_RESOLVE_CHALLENGE,
+                "capability": CAPABILITY_CREDENTIAL_CHALLENGE,
+                "request": {
+                    "profileName": "trusted-profile",
+                    "kind": "totp",
+                    "purpose": "authentication.otp",
+                    "origin": "https://accounts.example.com",
+                },
+            })
+        );
+        assert_eq!(challenge.into_unexpired_code().unwrap(), "481516");
     }
 
     #[cfg(unix)]
