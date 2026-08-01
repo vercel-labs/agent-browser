@@ -260,6 +260,8 @@ agent-browser auth login my-app --credential-provider vault --item "My App" --ur
 agent-browser auth login my-app --credential-provider vault --item "My App" --no-navigate --url https://identity.example.com/login
 ```
 
+For a provider declaring `credential.challenge`, use `auth login <profile> --credential-provider <plugin>`. The provider may supply an OTP selector, `--otp-selector` may override it, and otherwise agent-browser tries common OTP selectors. The current page origin is sent only after the field appears; agent-browser fills without submitting and reports `loggedIn: false`.
+
 Plugins can also provide browser providers, launch mutators such as stealth setup, and arbitrary namespaced commands:
 
 ```bash
