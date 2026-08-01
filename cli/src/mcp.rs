@@ -1513,6 +1513,11 @@ fn parity_tools() -> Vec<Value> {
                     "description": "Use the active top-level page without performing the initial login navigation. The credential URL must match the page origin."
                 },
                 "credentialProvider": { "type": "string" },
+                "item": { "type": "string", "description": "Provider-specific vault item reference." },
+                "url": { "type": "string", "description": "Login URL override." },
+                "usernameSelector": { "type": "string" },
+                "passwordSelector": { "type": "string" },
+                "submitSelector": { "type": "string" },
                 "otpSelector": { "type": "string", "description": "OTP selector override for this login." }
             }),
             &["name"],
@@ -3236,16 +3241,20 @@ fn auth_login_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     if optional_bool(arguments, "noNavigate")?.unwrap_or(false) {
         args.push("--no-navigate".to_string());
     }
-    if let Some(provider) = optional_string(arguments, "credentialProvider")? {
-        if !provider.is_empty() {
-            args.push("--credential-provider".to_string());
-            args.push(provider);
-        }
-    }
-    if let Some(selector) = optional_string(arguments, "otpSelector")? {
-        if !selector.is_empty() {
-            args.push("--otp-selector".to_string());
-            args.push(selector);
+    for (key, flag) in [
+        ("credentialProvider", "--credential-provider"),
+        ("item", "--item"),
+        ("url", "--url"),
+        ("usernameSelector", "--username-selector"),
+        ("passwordSelector", "--password-selector"),
+        ("submitSelector", "--submit-selector"),
+        ("otpSelector", "--otp-selector"),
+    ] {
+        if let Some(value) = optional_string(arguments, key)? {
+            if !value.is_empty() {
+                args.push(flag.to_string());
+                args.push(value);
+            }
         }
     }
     Ok(args)
@@ -4292,6 +4301,11 @@ mod tests {
             auth_login_args(&json!({
                 "name": "my-app",
                 "credentialProvider": "staged-vault",
+                "item": "Personal Xero",
+                "url": "https://login.xero.com/identity/user/login",
+                "usernameSelector": "#email",
+                "passwordSelector": "#password",
+                "submitSelector": "button[type=submit]",
                 "otpSelector": "#otp"
             }))
             .unwrap(),
@@ -4301,6 +4315,16 @@ mod tests {
                 "my-app",
                 "--credential-provider",
                 "staged-vault",
+                "--item",
+                "Personal Xero",
+                "--url",
+                "https://login.xero.com/identity/user/login",
+                "--username-selector",
+                "#email",
+                "--password-selector",
+                "#password",
+                "--submit-selector",
+                "button[type=submit]",
                 "--otp-selector",
                 "#otp"
             ]
@@ -4313,6 +4337,9 @@ mod tests {
             .unwrap();
         assert!(auth_login["inputSchema"]["properties"]
             .get("otpSelector")
+            .is_some());
+        assert!(auth_login["inputSchema"]["properties"]
+            .get("item")
             .is_some());
     }
 
