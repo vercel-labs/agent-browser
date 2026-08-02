@@ -106,6 +106,8 @@ Options:
 - `--name <name>`: filter role by accessible name
 - `--exact`: exact, case-sensitive match. For `role` it applies to the accessible name, whose default is a case-insensitive substring.
 
+The `role`, `text`, `label`, `placeholder`, `alt`, `title`, and `testid` locators honor the current frame context. After selecting an iframe with `agent-browser frame`, use `agent-browser frame main` to search the top document again.
+
 Examples:
 
 ```bash

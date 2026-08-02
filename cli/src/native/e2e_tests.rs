@@ -7958,6 +7958,132 @@ async fn e2e_presentational_role_honors_selected_frame() {
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }
 
+/// Semantic `find` locators must search the selected frame instead of always
+/// evaluating in the top document, as reported for `find text` in issue #1460.
+#[tokio::test]
+#[ignore]
+async fn e2e_semantic_find_honors_selected_frame() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let outer = r#"<body><button>Top Page</button><iframe id="f" srcdoc="
+        <button>Next Page</button>
+        <label for='email'>Email</label><input id='email'>
+        <input id='search' placeholder='Search'>
+        <img alt='Logo' src='data:image/gif;base64,R0lGODlhAQABAAAAACw='>
+        <button title='Close'>Close button</button>
+        <div data-testid='panel'>Panel</div>
+    "></iframe></body>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(outer));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "getbytext",
+            "text": "Top Page",
+            "exact": true,
+            "subaction": "text"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "Top Page");
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "frame", "selector": "#f" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "5",
+            "action": "getbytext",
+            "text": "Next Page",
+            "exact": true,
+            "subaction": "text"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "Next Page");
+
+    let resp = execute_command(
+        &json!({
+            "id": "6",
+            "action": "getbylabel",
+            "label": "Email",
+            "exact": true,
+            "subaction": "fill",
+            "value": "user@example.com"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "inputvalue", "selector": "#email" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["value"], "user@example.com");
+
+    let resp = execute_command(
+        &json!({
+            "id": "8",
+            "action": "getbyplaceholder",
+            "placeholder": "Search",
+            "exact": true,
+            "subaction": "fill",
+            "value": "frame query"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "inputvalue", "selector": "#search" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["value"], "frame query");
+
+    for (id, action, key, value, expected) in [
+        ("10", "getbyalttext", "text", "Logo", ""),
+        ("11", "getbytitle", "text", "Close", "Close button"),
+        ("12", "getbytestid", "testId", "panel", "Panel"),
+    ] {
+        let mut command = json!({
+            "id": id,
+            "action": action,
+            "subaction": "text"
+        });
+        command[key] = json!(value);
+        let resp = execute_command(&command, &mut state).await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["text"], expected);
+    }
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
 /// ARIA presentational-roles conflict resolution: role="none" on a focusable
 /// element (or one with global ARIA props) is ignored, so `find role none` must
 /// skip it but still match a truly presentational element. Force-red: drop the

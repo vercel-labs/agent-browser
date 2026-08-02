@@ -1035,7 +1035,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_FIND,
             "Find element",
-            "Find an element with semantic locators and optionally act on it.",
+            "Find an element with semantic locators and optionally act on it. The role, text, label, placeholder, alt, title, and testid locators search the currently selected frame when one is active.",
             json!({
                 "locator": { "type": "string", "enum": ["role", "text", "label", "placeholder", "alt", "title", "testid", "first", "last", "nth"] },
                 "value": { "type": "string", "description": "Role, text, label, selector, or test id." },
@@ -2614,6 +2614,10 @@ fn call_is(arguments: &Value, what: &str) -> Result<Value, ProtocolError> {
 }
 
 fn call_find(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, find_args(arguments)?, None)
+}
+
+fn find_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let locator = required_string(arguments, "locator")?;
     let value = required_string(arguments, "value")?;
     let mut args = vec!["find".to_string(), locator.clone()];
@@ -2641,7 +2645,7 @@ fn call_find(arguments: &Value) -> Result<Value, ProtocolError> {
     if exact {
         args.push("--exact".to_string());
     }
-    call_cli_tool(arguments, args, None)
+    Ok(args)
 }
 
 fn call_mouse_move(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4091,6 +4095,19 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["click", "@e1", "--new-tab"]);
+    }
+
+    #[test]
+    fn find_args_keep_text_locator_cli_parity() {
+        let args = find_args(&json!({
+            "locator": "text",
+            "value": "Next Page",
+            "action": "click",
+            "exact": true,
+        }))
+        .unwrap();
+
+        assert_eq!(args, vec!["find", "text", "Next Page", "click", "--exact"]);
     }
 
     #[test]
