@@ -39,7 +39,9 @@ If the user gave you a dev server URL, stay on that origin. Dev-only endpoints o
 
 ## Init scripts and `--enable` features inject code
 
-`--init-script <path>` and `--enable <feature>` register scripts that run before any page JS. That's exactly why they work, and it's also why you should only pass scripts you wrote or have reviewed. The built-in `--enable react-devtools` is a vendored MIT-licensed hook from facebook/react and is safe; custom `--init-script` files are the user's responsibility.
+`--init-script <path>` and some `--enable <feature>` options register scripts that run before any page JS. That's exactly why they work, and it's also why you should only pass scripts you wrote or have reviewed. The built-in `--enable react-devtools` is a vendored MIT-licensed hook from facebook/react and is safe; custom `--init-script` files are the user's responsibility.
+
+`--enable agent-cursor` injects agent-browser's own non-interactive visual overlay. Sites can detect injected page objects, and screenshots, recordings, or remote streams include the cursor. The overlay does not receive pointer events or appear in the accessibility tree.
 
 The hook in particular exposes `window.__REACT_DEVTOOLS_GLOBAL_HOOK__` to every page in the browsing context, including third-party iframes. For production-auditing tasks against sites that handle secrets, consider whether you want that global exposed during the session.
 

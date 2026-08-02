@@ -436,6 +436,14 @@ agent-browser pushstate <url>                       # SPA client-side nav (auto-
 
 `vitals` prints a summary by default and uses the same fields as the structured `--json` response.
 
+## Visible agent cursor
+
+```bash
+agent-browser open --enable agent-cursor <url>      # Show agent pointer actions in the page
+```
+
+MCP clients pass `enable: ["agent-cursor"]` to `agent_browser_open`. Set `AGENT_BROWSER_CURSOR_THEME` on the MCP server process to apply the same bounded appearance contract.
+
 ## Accessibility audit
 
 Runs an embedded axe-core audit with no CDN fetch. The vendored engine runs private partial audits through CDP across the page's frame tree and merges serialized results without page messaging, so page CSP does not block it, page-provided `window.axe` values remain intact, and iframe violations retain their frame selector paths. Accessibility audits require a CDP browser and are not available with Safari or iOS WebDriver sessions. Reports WCAG violations with impact, rule id, fix guidance URL, and failing-node selectors.
@@ -481,7 +489,8 @@ AGENT_BROWSER_SESSION="mysession"            # Default session name
 AGENT_BROWSER_EXECUTABLE_PATH="/path/chrome" # Custom browser path
 AGENT_BROWSER_EXTENSIONS="/ext1,/ext2"       # Comma-separated extension paths
 AGENT_BROWSER_INIT_SCRIPTS="/a.js,/b.js"     # Comma-separated init script paths
-AGENT_BROWSER_ENABLE="react-devtools"        # Comma-separated built-in init script features
+AGENT_BROWSER_ENABLE="agent-cursor"          # Comma-separated built-in features
+AGENT_BROWSER_CURSOR_THEME='{"accent":"#8c264c","glow":"strong"}' # Optional bounded cursor theme
 AGENT_BROWSER_HIDE_SCROLLBARS="false"        # Keep native scrollbars visible in headless Chromium screenshots
 AGENT_BROWSER_WEBGPU="1"                     # Enable the WebGPU launch preset (see references/webgpu.md)
 AGENT_BROWSER_NO_XVFB="1"                    # Disable automatic Xvfb for headed mode on displayless Linux

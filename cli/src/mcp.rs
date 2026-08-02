@@ -750,11 +750,16 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_OPEN,
             "Open page",
-            "Launch the browser and optionally navigate to a URL.",
+            "Launch the browser and optionally navigate to a URL. Agent cursor themes use the MCP server's inherited AGENT_BROWSER_CURSOR_THEME environment setting.",
             json!({
                 "url": { "type": "string", "description": "URL to open. Omit to launch about:blank." },
                 "headed": { "type": "boolean", "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults." },
-                "webgpu": { "type": "boolean", "description": "Enable WebGPU (SwiftShader software Vulkan on Linux; no GPU required). Explicit true/false overrides AGENT_BROWSER_WEBGPU and config; omit to use those defaults." }
+                "webgpu": { "type": "boolean", "description": "Enable WebGPU (SwiftShader software Vulkan on Linux; no GPU required). Explicit true/false overrides AGENT_BROWSER_WEBGPU and config; omit to use those defaults." },
+                "enable": {
+                    "type": "array",
+                    "items": { "type": "string", "enum": ["react-devtools", "agent-cursor"] },
+                    "description": "Built-in launch features to enable."
+                }
             }),
             &[],
         ),
@@ -2365,6 +2370,12 @@ fn open_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
         args.push("--webgpu".to_string());
         args.push(webgpu.to_string());
     }
+    if let Some(features) = optional_string_array(arguments, "enable")? {
+        for feature in features {
+            args.push("--enable".to_string());
+            args.push(feature);
+        }
+    }
     args.push("open".to_string());
     if let Some(url) = optional_string(arguments, "url")? {
         if !url.is_empty() {
@@ -3838,6 +3849,7 @@ mod tests {
         let props = &open["inputSchema"]["properties"];
         assert!(props.get("headed").is_some());
         assert!(props.get("webgpu").is_some());
+        assert!(props.get("enable").is_some());
     }
 
     #[test]
@@ -3858,6 +3870,16 @@ mod tests {
         assert_eq!(
             open_args(&json!({ "headed": false })).unwrap(),
             vec!["--headed", "false", "open"]
+        );
+        assert_eq!(
+            open_args(&json!({ "enable": ["react-devtools", "agent-cursor"] })).unwrap(),
+            vec![
+                "--enable",
+                "react-devtools",
+                "--enable",
+                "agent-cursor",
+                "open"
+            ]
         );
     }
 

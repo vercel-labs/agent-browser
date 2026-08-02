@@ -1403,7 +1403,7 @@ Global Options:
   --session <name>     Use specific session
   --headers <json>     Set HTTP headers (scoped to this origin)
   --headed             Show browser window
-  --enable react-devtools   Inject the React DevTools hook before any page JS
+  --enable <feature>        Enable react-devtools or the visible agent-cursor
   --init-script <path>      Register a page init script (repeatable)
 
 Examples:
@@ -3696,7 +3696,7 @@ Options:
   --extension <path>         Load browser extensions (repeatable)
   --init-script <path>       Register a page init script before the first navigation (repeatable)
                              (or AGENT_BROWSER_INIT_SCRIPTS env, comma-separated)
-  --enable <feature>         Built-in init scripts: react-devtools (repeatable or comma-separated)
+  --enable <feature>         Built-in features: react-devtools, agent-cursor (repeatable or comma-separated)
                              (or AGENT_BROWSER_ENABLE env)
   --args <args>              Browser launch args, comma or newline separated (or AGENT_BROWSER_ARGS)
                              e.g., --args "--no-sandbox,--disable-blink-features=AutomationControlled"
@@ -3777,7 +3777,8 @@ Environment:
   AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
   AGENT_BROWSER_EXTENSIONS       Comma-separated browser extension paths
   AGENT_BROWSER_INIT_SCRIPTS     Comma-separated paths to page init scripts
-  AGENT_BROWSER_ENABLE           Comma-separated built-in init script features (e.g. react-devtools)
+  AGENT_BROWSER_ENABLE           Comma-separated built-in features (react-devtools, agent-cursor)
+  AGENT_BROWSER_CURSOR_THEME     Bounded JSON theme for agent-cursor appearance
   AGENT_BROWSER_HEADED           Show browser window (not headless)
   AGENT_BROWSER_NO_XVFB          Disable automatic Xvfb for headed mode on displayless Linux hosts
   AGENT_BROWSER_WEBGPU           Enable WebGPU (SwiftShader software Vulkan on Linux)

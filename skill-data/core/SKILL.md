@@ -438,6 +438,8 @@ EOF
 --namespace <name>      # isolate daemon sockets and restore-state directories
 ```
 
+When a person is watching a headed browser, recording, or remote browser stream, launch with `--enable agent-cursor` to make agent click, hover, drag, and coordinate mouse actions visible. It is presentation-only and should not be enabled for unattended work where nobody will see it.
+
 ## When to load another skill
 
 - **Electron desktop app** (VS Code, Slack desktop, Discord, Figma, etc.): `agent-browser skills get electron`
