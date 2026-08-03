@@ -111,6 +111,7 @@ export type BrowserLaunchOptions = Pick<
   | 'executablePath'
   | 'cdpPort'
   | 'cdpUrl'
+  | 'cdpHeaders'
   | 'autoConnect'
   | 'extensions'
   | 'profile'
@@ -1497,7 +1498,10 @@ export class BrowserManager {
     }
 
     if (cdpEndpoint) {
-      await this.connectViaCDP(cdpEndpoint);
+      await this.connectViaCDP(cdpEndpoint, {
+        timeout: options?.timeout,
+        headers: options?.cdpHeaders,
+      });
       return;
     }
 
@@ -1766,7 +1770,10 @@ export class BrowserManager {
     }
 
     const browser = await chromium
-      .connectOverCDP(cdpUrl, { timeout: options?.timeout })
+      .connectOverCDP(cdpUrl, {
+        timeout: options?.timeout,
+        ...(options?.headers ? { headers: options.headers } : {}),
+      })
       .catch(() => {
         throw new Error(
           `Failed to connect via CDP to ${cdpUrl}. ` +
