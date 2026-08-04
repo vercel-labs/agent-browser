@@ -1343,6 +1343,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_ref_map_clear_resets_ref_numbering() {
+        let mut ref_map = RefMap::new();
+        assert_eq!(ref_map.next_ref_num(), 1);
+
+        ref_map.add("e1".to_string(), Some(10), "button", "One", None);
+        ref_map.set_next_ref_num(84);
+
+        ref_map.clear();
+
+        assert_eq!(
+            ref_map.next_ref_num(),
+            1,
+            "clear() must reset the counter so snapshots restart at e1"
+        );
+        assert!(ref_map.get("e1").is_none());
+    }
+
+    #[test]
+    fn test_ref_map_reuses_same_ids_after_clear() {
+        let mut ref_map = RefMap::new();
+
+        let first: Vec<String> = (0..3)
+            .map(|_| {
+                let n = ref_map.next_ref_num();
+                let ref_id = format!("e{}", n);
+                ref_map.add(ref_id.clone(), Some(n as i64), "button", "One", None);
+                ref_map.set_next_ref_num(n + 1);
+                ref_id
+            })
+            .collect();
+
+        ref_map.clear();
+
+        let second: Vec<String> = (0..3)
+            .map(|_| {
+                let n = ref_map.next_ref_num();
+                let ref_id = format!("e{}", n);
+                ref_map.add(ref_id.clone(), Some(n as i64), "button", "One", None);
+                ref_map.set_next_ref_num(n + 1);
+                ref_id
+            })
+            .collect();
+
+        assert_eq!(first, vec!["e1", "e2", "e3"]);
+        assert_eq!(
+            first, second,
+            "a cleared ref map must hand out the same ids again"
+        );
+    }
+
+    #[test]
     fn test_parse_ref_at_prefix() {
         assert_eq!(parse_ref("@e1"), Some("e1".to_string()));
         assert_eq!(parse_ref("@e123"), Some("e123".to_string()));

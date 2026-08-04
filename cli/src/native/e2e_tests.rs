@@ -32,6 +32,13 @@ fn get_data(resp: &Value) -> &Value {
     resp.get("data").expect("Missing 'data' in response")
 }
 
+/// Pages with several interactive elements, so snapshots of them allocate refs.
+/// Kept free of spaces and quotes so they survive as bare `data:` URLs.
+const REF_HEAVY_PAGE: &str =
+    "data:text/html,<button>Alpha</button><button>Beta</button><a href=https://example.com>Gamma</a>";
+const REF_HEAVY_PAGE_ALT: &str =
+    "data:text/html,<button>Delta</button><a href=https://example.com>Epsilon</a>";
+
 fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
@@ -3392,6 +3399,224 @@ async fn e2e_diff_snapshot() {
     assert_success(&resp);
     let data = get_data(&resp);
     assert_eq!(data["changed"], true, "Diff should detect the h1 change");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// A page with refs, diffed against its own snapshot, must report no changes -
+/// and must keep reporting no changes however many times the diff runs.
+#[tokio::test]
+#[ignore]
+async fn e2e_diff_snapshot_unchanged_page_reports_no_changes() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": REF_HEAVY_PAGE }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let baseline = get_data(&resp)["snapshot"].as_str().unwrap().to_string();
+    assert!(
+        baseline.contains("ref=e1"),
+        "Fixture should allocate refs, got: {}",
+        baseline
+    );
+
+    // Run the same diff repeatedly: ref numbering that leaks across commands
+    // shows up on the second and third runs, not just the first.
+    for i in 0..3 {
+        let resp = execute_command(
+            &json!({ "id": format!("diff-{}", i), "action": "diff_snapshot", "baseline": baseline }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        let data = get_data(&resp);
+        assert_eq!(
+            data["changed"], false,
+            "Diff run {} against an unchanged page reported changes:\n{}",
+            i, data["diff"]
+        );
+        assert_eq!(data["additions"], 0, "Diff run {} had additions", i);
+        assert_eq!(data["removals"], 0, "Diff run {} had removals", i);
+    }
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// A real edit must show up as a small diff, not a rewrite of every ref-bearing
+/// line. The existing `e2e_diff_snapshot` asserts only that something changed,
+/// which stays true even when the refs themselves are what changed.
+#[tokio::test]
+#[ignore]
+async fn e2e_diff_snapshot_reports_only_the_changed_element() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": REF_HEAVY_PAGE }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let baseline = get_data(&resp)["snapshot"].as_str().unwrap().to_string();
+
+    // Rename the first button only.
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "evaluate",
+            "script": "document.querySelector('button').textContent = 'Omega'",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "diff_snapshot", "baseline": baseline }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let data = get_data(&resp);
+    let diff = data["diff"].as_str().unwrap_or_default();
+    assert_eq!(
+        data["changed"], true,
+        "Diff should detect the button rename"
+    );
+    assert!(
+        diff.contains("Omega"),
+        "Diff should show the new button name:\n{}",
+        diff
+    );
+
+    // One renamed button touches at most its own line and its static text child.
+    let additions = data["additions"].as_u64().unwrap_or(u64::MAX);
+    let removals = data["removals"].as_u64().unwrap_or(u64::MAX);
+    assert!(
+        additions <= 2 && removals <= 2,
+        "One rename should be a small diff, got +{} -{}:\n{}",
+        additions,
+        removals,
+        diff
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Snapshotting an untouched page twice must produce identical text. This is
+/// the invariant every ref-consuming command relies on.
+#[tokio::test]
+#[ignore]
+async fn e2e_repeated_snapshots_are_identical() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": REF_HEAVY_PAGE }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let first = get_data(&resp)["snapshot"].as_str().unwrap().to_string();
+
+    let resp = execute_command(&json!({ "id": "4", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let second = get_data(&resp)["snapshot"].as_str().unwrap().to_string();
+
+    assert_eq!(
+        first, second,
+        "Two snapshots of an unchanged page must be identical"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Both sides of a `diff url` must number their refs from the same base.
+#[tokio::test]
+#[ignore]
+async fn e2e_diff_url_numbers_both_snapshots_from_e1() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Consume some refs first: on a fresh daemon the counter already sits at 1,
+    // so a leaked counter only shows up once an earlier command has moved it.
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": REF_HEAVY_PAGE }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "diff_url",
+            "url1": REF_HEAVY_PAGE,
+            "url2": REF_HEAVY_PAGE_ALT,
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let data = get_data(&resp);
+    let snap1 = data["snapshot1"].as_str().unwrap();
+    let snap2 = data["snapshot2"].as_str().unwrap();
+
+    assert!(
+        snap1.contains("ref=e1"),
+        "First snapshot should start at e1, got:\n{}",
+        snap1
+    );
+    assert!(
+        snap2.contains("ref=e1"),
+        "Second snapshot should start at e1, got:\n{}",
+        snap2
+    );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);

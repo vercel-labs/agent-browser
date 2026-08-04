@@ -5746,6 +5746,10 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         selector,
         ..SnapshotOptions::default()
     };
+    // Reset ref numbering so an unchanged page produces an identical snapshot
+    // on every run. Without this the counter keeps climbing across commands and
+    // every ref-bearing line shows up as a difference.
+    state.ref_map.clear();
     let current = snapshot::take_snapshot(
         &mgr.client,
         &session_id,
@@ -5798,6 +5802,9 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     mgr.navigate(url1, wait_until).await?;
     let session_id = mgr.active_session_id()?.to_string();
     let options = SnapshotOptions::default();
+    // Both snapshots must number refs from the same base, otherwise the diff
+    // reports every ref-bearing line as changed.
+    state.ref_map.clear();
     let snap1 = snapshot::take_snapshot(
         &mgr.client,
         &session_id,
