@@ -5536,6 +5536,197 @@ async fn e2e_stream_frame_metadata_respects_custom_viewport() {
 }
 
 // ---------------------------------------------------------------------------
+// Stream: dashboard input dispatch and clipboard bridge
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_stream_input_dispatch_and_clipboard_bridge() {
+    use futures_util::SinkExt;
+
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-stream-input-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket dir should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir.to_str().expect("socket dir should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-stream-input");
+
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "stream_enable", "port": 0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let port = get_data(&resp)["port"]
+        .as_u64()
+        .expect("stream enable should report the bound port");
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
+        .await
+        .expect("websocket client should connect to runtime stream");
+
+    // The clipboard bridge needs a secure context, so serve the test page
+    // over localhost HTTP instead of a data: URL.
+    let page_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test page listener should bind");
+    let page_port = page_listener
+        .local_addr()
+        .expect("listener should have a local address")
+        .port();
+    let page_body = "<!doctype html><html><body><textarea id='ta'>stream clipboard bridge</textarea></body></html>";
+    let page_server = tokio::spawn(async move {
+        while let Ok((mut sock, _)) = page_listener.accept().await {
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                page_body.len(),
+                page_body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        }
+    });
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": format!("http://127.0.0.1:{page_port}/") }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    async fn send_ws(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        msg: Value,
+    ) {
+        let _ = ws
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                msg.to_string(),
+            ))
+            .await;
+    }
+
+    // The first frame implies the screencast and the clipboard permission
+    // grant ran.
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
+    let mut saw_frame = false;
+    while tokio::time::Instant::now() < deadline && !saw_frame {
+        let msg = tokio::time::timeout(tokio::time::Duration::from_secs(3), ws.next()).await;
+        let Some(Ok(message)) = msg.ok().flatten() else {
+            continue;
+        };
+        if message.is_text() {
+            let parsed: Value =
+                serde_json::from_str(message.to_text().expect("text message should be readable"))
+                    .expect("stream payload should be valid JSON");
+            saw_frame = parsed.get("type") == Some(&json!("frame"));
+        }
+    }
+    assert!(saw_frame, "should have received a screencast frame");
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": "const ta = document.getElementById('ta'); ta.focus(); ta.select(); ta.value" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Copy via the key events the dashboard sends: rawKeyDown with the
+    // uppercase VK for C (67). Pre-fix it sent 99 (numpad 3), a no-op.
+    for msg in [
+        json!({ "type": "input_keyboard", "eventType": "rawKeyDown", "key": "Control", "code": "ControlLeft", "windowsVirtualKeyCode": 17, "modifiers": 2 }),
+        json!({ "type": "input_keyboard", "eventType": "rawKeyDown", "key": "c", "code": "KeyC", "windowsVirtualKeyCode": 67, "modifiers": 2 }),
+        json!({ "type": "input_keyboard", "eventType": "keyUp", "key": "c", "code": "KeyC", "windowsVirtualKeyCode": 67, "modifiers": 2 }),
+        json!({ "type": "input_keyboard", "eventType": "keyUp", "key": "Control", "code": "ControlLeft", "windowsVirtualKeyCode": 17, "modifiers": 0 }),
+    ] {
+        send_ws(&mut ws, msg).await;
+    }
+
+    // Input dispatch is fire-and-forget now, so poll until the copy lands.
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
+    let mut copied = String::new();
+    while tokio::time::Instant::now() < deadline && copied != "stream clipboard bridge" {
+        send_ws(&mut ws, json!({ "type": "input_read_clipboard" })).await;
+        let msg = tokio::time::timeout(tokio::time::Duration::from_secs(3), ws.next()).await;
+        let Some(Ok(message)) = msg.ok().flatten() else {
+            continue;
+        };
+        if !message.is_text() {
+            continue;
+        }
+        let parsed: Value =
+            serde_json::from_str(message.to_text().expect("text message should be readable"))
+                .expect("stream payload should be valid JSON");
+        if parsed.get("type") == Some(&json!("clipboard")) {
+            if let Some(err) = parsed.get("error").and_then(|v| v.as_str()) {
+                panic!("clipboard bridge returned an error: {err}");
+            }
+            if let Some(text) = parsed.get("text").and_then(|v| v.as_str()) {
+                if !text.is_empty() {
+                    copied = text.to_string();
+                }
+            }
+        }
+    }
+    assert_eq!(
+        copied, "stream clipboard bridge",
+        "clipboard bridge should return the text copied from the page"
+    );
+
+    // Paste bridge: input_insert_text replaces the selection at the focus.
+    send_ws(
+        &mut ws,
+        json!({ "type": "input_insert_text", "text": "pasted" }),
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
+    let mut inserted = false;
+    while tokio::time::Instant::now() < deadline && !inserted {
+        let resp = execute_command(
+            &json!({ "id": "4", "action": "evaluate", "script": "document.getElementById('ta').value" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        let value = get_data(&resp)["result"].as_str().unwrap_or("");
+        if value == "pasted" {
+            inserted = true;
+        } else {
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        }
+    }
+    assert!(
+        inserted,
+        "input_insert_text should replace the textarea value"
+    );
+
+    // Cleanup
+    page_server.abort();
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "stream_disable" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    let _ = std::fs::remove_dir_all(&socket_dir);
+}
+
+// ---------------------------------------------------------------------------
 // Stream: a click is not queued behind a mouse sweep
 // ---------------------------------------------------------------------------
 
