@@ -153,7 +153,22 @@ fn get_config_path(session: &str) -> PathBuf {
     get_socket_dir().join(format!("{}.config", session))
 }
 
-/// Clean up stale socket and PID files for a session
+fn get_provider_session_path(session: &str) -> PathBuf {
+    get_socket_dir().join(format!("{}.provider-session", session))
+}
+
+/// Read the provider session ID saved by the daemon for cleanup on crash.
+pub fn read_provider_session_id(session: &str) -> Option<String> {
+    fs::read_to_string(get_provider_session_path(session))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Clean up stale socket and PID files for a session.
+///
+/// The `.provider-session` sidecar is preserved so a later `close --all`
+/// can still release the remote provider session after a crash.
 pub fn cleanup_stale_files(session: &str) {
     let pid_path = get_pid_path(session);
     let _ = fs::remove_file(&pid_path);
@@ -229,6 +244,7 @@ pub enum CleanReason {
 pub struct CleanedSession {
     pub name: String,
     pub reason: CleanReason,
+    pub provider_session_id: Option<String>,
 }
 
 /// Information about the standalone dashboard process, if any.
@@ -289,6 +305,7 @@ pub fn walk_daemons() -> DaemonInventory {
                         inventory.cleaned.push(CleanedSession {
                             name: "dashboard".to_string(),
                             reason: CleanReason::DashboardGone,
+                            provider_session_id: None,
                         });
                     }
                 }
@@ -307,20 +324,24 @@ pub fn walk_daemons() -> DaemonInventory {
         {
             Some(p) => p,
             None => {
+                let provider_session_id = read_provider_session_id(&session_name);
                 cleanup_stale_files(&session_name);
                 inventory.cleaned.push(CleanedSession {
                     name: session_name,
                     reason: CleanReason::UnreadablePidFile,
+                    provider_session_id,
                 });
                 continue;
             }
         };
 
         if !is_pid_alive(pid) {
+            let provider_session_id = read_provider_session_id(&session_name);
             cleanup_stale_files(&session_name);
             inventory.cleaned.push(CleanedSession {
                 name: session_name,
                 reason: CleanReason::ProcessGone,
+                provider_session_id,
             });
             continue;
         }
@@ -344,10 +365,12 @@ pub fn walk_daemons() -> DaemonInventory {
                 }
                 let pid_path = socket_dir.join(format!("{}.pid", session_name));
                 if !pid_path.exists() {
+                    let provider_session_id = read_provider_session_id(session_name);
                     cleanup_stale_files(session_name);
                     inventory.cleaned.push(CleanedSession {
                         name: session_name.to_string(),
                         reason: CleanReason::OrphanedSocket,
+                        provider_session_id,
                     });
                 }
             }
