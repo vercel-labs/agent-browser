@@ -2406,7 +2406,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "headers" => handle_headers(cmd, state).await,
         "offline" => handle_offline(cmd, state).await,
         "console" => handle_console(cmd, state).await,
-        "errors" => handle_errors(state).await,
+        "errors" => handle_errors(cmd, state).await,
         "session_info" => handle_session_info(state).await,
         "state_save" => handle_state_save(cmd, state).await,
         "state_load" => handle_state_load(cmd, state).await,
@@ -5653,8 +5653,14 @@ async fn handle_console(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     }
 }
 
-async fn handle_errors(state: &DaemonState) -> Result<Value, String> {
-    Ok(state.event_tracker.get_errors_json())
+async fn handle_errors(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let clear = cmd.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
+    if clear {
+        state.event_tracker.clear_errors();
+        Ok(json!({ "cleared": true }))
+    } else {
+        Ok(state.event_tracker.get_errors_json())
+    }
 }
 
 async fn handle_session_info(state: &DaemonState) -> Result<Value, String> {
@@ -11186,6 +11192,26 @@ mod tests {
     #[test]
     fn find_actions_help_text_matches_the_accepted_set() {
         assert_eq!(FIND_ACTIONS.join(", "), "click, fill, check, hover, text");
+    }
+
+    #[tokio::test]
+    async fn errors_clear_empties_page_error_log() {
+        let mut state = DaemonState::new();
+        state
+            .event_tracker
+            .add_error("boom", Some("app.js"), Some(7), Some(3));
+
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "errors", "clear": true }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true);
+        assert_eq!(resp["data"]["cleared"], true);
+
+        let resp = execute_command(&json!({ "id": "2", "action": "errors" }), &mut state).await;
+        assert_eq!(resp["success"], true);
+        assert_eq!(resp["data"]["errors"], json!([]));
     }
 
     /// `type`, `focus`, and `uncheck` are real standalone commands but were
