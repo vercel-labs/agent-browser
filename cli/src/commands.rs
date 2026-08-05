@@ -1603,10 +1603,16 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     }
                     Ok(cmd)
                 }
-                Some(state @ ("minimize" | "maximize" | "fullscreen" | "normal")) => Ok(json!({
+                Some(verb @ ("minimize" | "maximize" | "fullscreen" | "normal")) => Ok(json!({
                     "id": id,
                     "action": "window_bounds",
-                    "windowState": state,
+                    // CDP's Browser.Bounds windowState enum uses the
+                    // past-participle forms.
+                    "windowState": match verb {
+                        "minimize" => "minimized",
+                        "maximize" => "maximized",
+                        other => other,
+                    },
                 })),
                 Some("focus") => match rest.get(1) {
                     Some(tab) => Ok(json!({ "id": id, "action": "window_focus", "tab": tab })),

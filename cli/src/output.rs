@@ -801,10 +801,24 @@ fn print_response_body(resp: &Response, action: Option<&str>, opts: &OutputOptio
                 } else {
                     " ".to_string()
                 };
+                let mut suffix = String::new();
+                if let Some(parent) = tab.get("parentTabId").and_then(|v| v.as_str()) {
+                    suffix.push_str(&color::dim(&format!(" (opened by {})", parent)));
+                }
+                if tab
+                    .get("crashed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    suffix.push_str(&format!(" {}", color::red("[crashed]")));
+                }
                 if let Some(label) = tab_label {
-                    println!("{} [{}] {} {} - {}", marker, tab_id, label, title, url);
+                    println!(
+                        "{} [{}] {} {} - {}{}",
+                        marker, tab_id, label, title, url, suffix
+                    );
                 } else {
-                    println!("{} [{}] {} - {}", marker, tab_id, title, url);
+                    println!("{} [{}] {} - {}{}", marker, tab_id, title, url, suffix);
                 }
             }
             return;

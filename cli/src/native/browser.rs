@@ -372,7 +372,9 @@ pub struct BrowserManager {
     direct_page: bool,
     /// Whether the daemon-spawned browser actually runs headless after
     /// launch rules such as extension-forced headed mode. Meaningless for
-    /// attached browsers (browser_process is None).
+    /// attached browsers (browser_process is None). Window-state changes
+    /// (minimize/maximize) abort headless Chrome, so those verbs are refused
+    /// up front (see is_headless / handle_window_bounds).
     headless: bool,
 }
 
@@ -390,6 +392,12 @@ impl BrowserManager {
     /// lifecycle. An explicit AGENT_BROWSER_IDLE_TIMEOUT_MS applies regardless.
     pub fn blocks_default_idle_shutdown(&self) -> bool {
         self.browser_process.is_none() || !self.headless
+    }
+
+    /// Whether window-state changes (minimize/maximize) are unsafe: they
+    /// abort headless Chrome outright.
+    pub fn is_headless(&self) -> bool {
+        self.headless
     }
 
     pub async fn launch(options: LaunchOptions, engine: Option<&str>) -> Result<Self, String> {

@@ -9588,6 +9588,15 @@ async fn handle_window_bounds(cmd: &Value, state: &mut DaemonState) -> Result<Va
     let (window_id, current) = window_for_target(&mgr.client, &page.target_id).await?;
 
     let bounds = if let Some(window_state) = cmd.get("windowState").and_then(|v| v.as_str()) {
+        // Browser.setWindowBounds{minimized|maximized} aborts headless Chrome
+        // outright (reproduced on 0.32.3-tako.4 smoke: "CDP response channel
+        // closed" + relaunch). Refuse with the alternative instead.
+        if mgr.is_headless() && (window_state == "minimized" || window_state == "maximized") {
+            return Err(format!(
+                "window {} needs a headed browser (AGENT_BROWSER_HEADED=1); in headless Chrome use `window bounds <w> <h>` or `set viewport` instead",
+                if window_state == "minimized" { "minimize" } else { "maximize" }
+            ));
+        }
         json!({ "windowState": window_state })
     } else {
         // Chrome rejects size changes while minimized/maximized/fullscreen;
