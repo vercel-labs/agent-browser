@@ -144,9 +144,16 @@ export AI_GATEWAY_URL=https://ai-gateway.vercel.sh   # this is the default
 export AI_GATEWAY_MODEL=openai/gpt-4o-mini           # default: anthropic/claude-sonnet-4.6
 ```
 
+Atlas Cloud can be used as the OpenAI-compatible chat backend:
+
+```bash
+export ATLASCLOUD_API_KEY=your_atlascloud_key
+export ATLASCLOUD_MODEL=qwen/qwen3.5-flash           # optional, this is the default for Atlas Cloud
+```
+
 ### How it works
 
-The Rust server proxies chat requests from the dashboard to the Vercel AI Gateway and streams responses back using the Vercel AI SDK's UI Message Stream protocol. The dashboard frontend uses `useChat` from `@ai-sdk/react` with `DefaultChatTransport`.
+The Rust server proxies chat requests from the dashboard to the configured OpenAI-compatible backend and streams responses back using the Vercel AI SDK's UI Message Stream protocol. The dashboard frontend uses `useChat` from `@ai-sdk/react` with `DefaultChatTransport`.
 
 <table>
   <thead>
@@ -154,7 +161,10 @@ The Rust server proxies chat requests from the dashboard to the Vercel AI Gatewa
   </thead>
   <tbody>
     <tr><td><code>AI_GATEWAY_URL</code></td><td>Vercel AI Gateway base URL.</td><td><code>https://ai-gateway.vercel.sh</code></td></tr>
-    <tr><td><code>AI_GATEWAY_API_KEY</code></td><td>API key for the AI Gateway. Required to enable AI chat responses.</td><td>(none)</td></tr>
+    <tr><td><code>AI_GATEWAY_API_KEY</code></td><td>API key for the AI Gateway. Required to enable AI chat responses unless <code>ATLASCLOUD_API_KEY</code> is set.</td><td>(none)</td></tr>
     <tr><td><code>AI_GATEWAY_MODEL</code></td><td>Default AI model for chat requests.</td><td><code>anthropic/claude-sonnet-4.6</code></td></tr>
+    <tr><td><code>ATLASCLOUD_API_KEY</code></td><td>Atlas Cloud API key for the OpenAI-compatible chat backend.</td><td>(none)</td></tr>
+    <tr><td><code>ATLASCLOUD_API_BASE</code></td><td>Atlas Cloud OpenAI-compatible base URL.</td><td><code>https://api.atlascloud.ai</code></td></tr>
+    <tr><td><code>ATLASCLOUD_MODEL</code></td><td>Default Atlas Cloud chat model when <code>AI_GATEWAY_MODEL</code> is not set.</td><td><code>qwen/qwen3.5-flash</code></td></tr>
   </tbody>
 </table>
