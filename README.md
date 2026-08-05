@@ -827,7 +827,10 @@ Use a credential provider plugin for one login:
 ```bash
 agent-browser auth login my-app --credential-provider vault --item "My App"
 agent-browser auth login my-app --credential-provider vault --item "My App" --url https://app.example.com/login --username-selector "#email" --password-selector "#password" --submit-selector "button[type=submit]"
+agent-browser auth login my-app --credential-provider vault --otp-selector "#otp"
 ```
+
+A provider that declares both `credential.read` and `credential.challenge` can return optional staged TOTP metadata with its primary credential. The metadata may include an opaque `challengeRef`, which agent-browser returns unchanged to the same provider in the staged request. agent-browser waits for an OTP field using `--otp-selector`, the provider selector, or common OTP selectors in that order. Common detection includes one-time-code metadata and the conventional six-digit `123456` placeholder. It then derives the current page origin, asks the provider for a current code, and fills the field through the normal `auth login` browser interaction path. It does not submit the field and returns `status: "challenge_filled"` with `loggedIn: false`. The code and challenge reference are not included in command arguments or normal command output.
 
 Use a browser provider plugin:
 
@@ -847,7 +850,7 @@ Use a generic plugin command for domain-specific tools such as CAPTCHA solvers:
 agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"...","url":"https://example.com"}'
 ```
 
-The protocol request always includes `protocol`, `type`, `capability`, and `request`. A credential plugin receives `credential.resolve`, a browser provider receives `browser.launch`, a launch mutator receives `launch.mutate`, and generic commands receive the supplied request type. `plugin run` is for `command.run` and custom capabilities; core capabilities and protocol request types use their dedicated command paths. agent-browser keeps browser automation, redaction-sensitive output, and policy enforcement in core.
+The protocol request always includes `protocol`, `type`, `capability`, and `request`. A credential plugin receives `credential.resolve` and may later receive `credential.resolve.challenge`; a browser provider receives `browser.launch`, a launch mutator receives `launch.mutate`, and generic commands receive the supplied request type. `plugin run` is for `command.run` and custom capabilities; core capabilities and protocol request types use their dedicated command paths. agent-browser keeps browser automation, redaction-sensitive output, and policy enforcement in core.
 
 Gate plugin access by capability action:
 

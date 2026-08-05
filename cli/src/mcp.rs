@@ -1402,8 +1402,17 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_AUTH_LOGIN,
             "Auth login",
-            "Log in with a saved auth profile.",
-            json!({ "name": { "type": "string" } }),
+            "Log in with a saved auth profile or configured credential provider.",
+            json!({
+                "name": { "type": "string" },
+                "credentialProvider": { "type": "string" },
+                "item": { "type": "string", "description": "Provider-specific vault item reference." },
+                "url": { "type": "string", "description": "Login URL override." },
+                "usernameSelector": { "type": "string" },
+                "passwordSelector": { "type": "string" },
+                "submitSelector": { "type": "string" },
+                "otpSelector": { "type": "string", "description": "OTP selector override for this login." }
+            }),
             &["name"],
         ),
         tool(
@@ -2191,7 +2200,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_CLIPBOARD_COPY => call_literal(arguments, &["clipboard", "copy"]),
         TOOL_CLIPBOARD_PASTE => call_literal(arguments, &["clipboard", "paste"]),
         TOOL_AUTH_SAVE => call_auth_save(arguments),
-        TOOL_AUTH_LOGIN => call_one_string(arguments, "auth login", "name"),
+        TOOL_AUTH_LOGIN => call_auth_login(arguments),
         TOOL_AUTH_LIST => call_literal(arguments, &["auth", "list"]),
         TOOL_AUTH_SHOW => call_one_string(arguments, "auth show", "name"),
         TOOL_AUTH_DELETE => call_one_string(arguments, "auth delete", "name"),
@@ -2949,6 +2958,33 @@ fn call_auth_save(arguments: &Value) -> Result<Value, ProtocolError> {
     }
     args.push("--password-stdin".to_string());
     call_cli_tool(arguments, args, Some(password))
+}
+
+fn auth_login_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let name = required_string(arguments, "name")?;
+    let mut args = vec!["auth".to_string(), "login".to_string(), name];
+    for (key, flag) in [
+        ("credentialProvider", "--credential-provider"),
+        ("item", "--item"),
+        ("url", "--url"),
+        ("usernameSelector", "--username-selector"),
+        ("passwordSelector", "--password-selector"),
+        ("submitSelector", "--submit-selector"),
+        ("otpSelector", "--otp-selector"),
+    ] {
+        if let Some(value) = optional_string(arguments, key)? {
+            if !value.is_empty() {
+                args.push(flag.to_string());
+                args.push(value);
+            }
+        }
+    }
+    Ok(args)
+}
+
+fn call_auth_login(arguments: &Value) -> Result<Value, ProtocolError> {
+    let args = auth_login_args(arguments)?;
+    call_cli_tool(arguments, args, None)
 }
 
 fn call_state_clear(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -3826,6 +3862,54 @@ mod tests {
         assert!(names.contains(&TOOL_SESSION_ID));
         assert!(names.contains(&TOOL_SESSION_INFO));
         assert!(!names.contains(&"agent_browser_frame_list"));
+    }
+
+    #[test]
+    fn auth_login_forwards_the_optional_credential_provider() {
+        assert_eq!(
+            auth_login_args(&json!({
+                "name": "my-app",
+                "credentialProvider": "staged-vault",
+                "item": "Personal Xero",
+                "url": "https://login.xero.com/identity/user/login",
+                "usernameSelector": "#email",
+                "passwordSelector": "#password",
+                "submitSelector": "button[type=submit]",
+                "otpSelector": "#otp"
+            }))
+            .unwrap(),
+            vec![
+                "auth",
+                "login",
+                "my-app",
+                "--credential-provider",
+                "staged-vault",
+                "--item",
+                "Personal Xero",
+                "--url",
+                "https://login.xero.com/identity/user/login",
+                "--username-selector",
+                "#email",
+                "--password-selector",
+                "#password",
+                "--submit-selector",
+                "button[type=submit]",
+                "--otp-selector",
+                "#otp"
+            ]
+        );
+
+        let tools = tools();
+        let auth_login = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some(TOOL_AUTH_LOGIN))
+            .unwrap();
+        assert!(auth_login["inputSchema"]["properties"]
+            .get("otpSelector")
+            .is_some());
+        assert!(auth_login["inputSchema"]["properties"]
+            .get("item")
+            .is_some());
     }
 
     #[test]

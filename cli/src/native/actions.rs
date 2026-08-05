@@ -2086,6 +2086,17 @@ fn policy_actions_for_command(
         if let Some(provider) = cmd.get("credentialProvider").and_then(|v| v.as_str()) {
             let plugins = plugins_from_command_or_env(cmd);
             append_credential_policy_action_for(&mut actions, provider, &plugins);
+            if crate::plugins::find_plugin(&plugins, provider).is_some_and(|plugin| {
+                crate::plugins::plugin_has_capability(
+                    plugin,
+                    crate::plugins::CAPABILITY_CREDENTIAL_CHALLENGE,
+                )
+            }) {
+                actions.push(crate::plugins::plugin_policy_action(
+                    provider,
+                    crate::plugins::CAPABILITY_CREDENTIAL_CHALLENGE,
+                ));
+            }
         }
     }
     if action == "launch" {
@@ -10400,13 +10411,20 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         return Err("Browser not launched".to_string());
     }
     let url_override = cmd.get("url").and_then(|v| v.as_str());
+    let command_plugins = plugins_from_command_or_env(cmd);
+    let staged_plugin = cmd
+        .get("credentialProvider")
+        .and_then(|value| value.as_str())
+        .and_then(|provider| crate::plugins::find_plugin(&command_plugins, provider))
+        .filter(|plugin| {
+            crate::plugins::plugin_has_capability(
+                plugin,
+                crate::plugins::CAPABILITY_CREDENTIAL_CHALLENGE,
+            )
+        })
+        .cloned();
+    let mut staged_metadata = None;
     let cred = if let Some(provider) = cmd.get("credentialProvider").and_then(|v| v.as_str()) {
-        let command_plugins = cmd
-            .get("plugins")
-            .and_then(|v| {
-                serde_json::from_value::<Vec<crate::plugins::PluginConfig>>(v.clone()).ok()
-            })
-            .unwrap_or_else(crate::plugins::plugins_from_env);
         let resolved = crate::plugins::resolve_credential_with_plugins(
             provider,
             &command_plugins,
@@ -10417,6 +10435,9 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
             },
         )
         .await?;
+        if staged_plugin.is_some() {
+            staged_metadata = resolved.staged_challenge.clone();
+        }
         auth::AuthProfile {
             name: name.to_string(),
             url: url_override
@@ -10641,7 +10662,116 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         }
     }
 
-    Ok(json!({ "loggedIn": true, "name": name }))
+    let Some(metadata) = staged_metadata else {
+        return Ok(json!({ "loggedIn": true, "name": name }));
+    };
+    let plugin = staged_plugin
+        .as_ref()
+        .ok_or("Staged credential provider unavailable")?;
+    let session_id = mgr.active_session_id()?.to_string();
+    let preferred_otp_selectors = [
+        "input[autocomplete=one-time-code]",
+        "input[name=otp]",
+        "input[id=otp]",
+        "input[name=totp]",
+        "input[id=totp]",
+        "input[name*=otp i]",
+        "input[id*=otp i]",
+        "input[name*=totp i]",
+        "input[id*=totp i]",
+        "input[name*=verification i]",
+        "input[id*=verification i]",
+        "input[placeholder='123456']",
+    ];
+    let fallback_otp_selectors = [
+        "input[name*=code i]",
+        "input[id*=code i]",
+        "input[inputmode=numeric]",
+    ];
+    let otp_selector = cmd
+        .get("otpSelector")
+        .and_then(|value| value.as_str())
+        .map(String::from)
+        .or(metadata.selector.clone());
+    let otp_sel = if let Some(selector) = otp_selector {
+        wait_for_selector(
+            &mgr.client,
+            &session_id,
+            &selector,
+            "visible",
+            auth_timeout_ms,
+        )
+        .await
+        .map_err(|_| format!("Timed out waiting for OTP selector '{}'", selector))?;
+        selector
+    } else {
+        let preferred_window_ms = auth_timeout_ms.min(AUTH_LOGIN_PREFERRED_SELECTOR_WINDOW_MS);
+        let fallback_window_ms = auth_timeout_ms.saturating_sub(preferred_window_ms);
+        match wait_for_any_selector(
+            &mgr.client,
+            &session_id,
+            &preferred_otp_selectors,
+            preferred_window_ms,
+        )
+        .await
+        {
+            Ok(selector) => selector,
+            Err(_) => {
+                if fallback_window_ms == 0 {
+                    return Err(format!(
+                        "Timed out waiting for OTP field (preferred selectors for {}ms: {})",
+                        preferred_window_ms,
+                        preferred_otp_selectors.join(", ")
+                    ));
+                }
+                wait_for_any_selector(
+                    &mgr.client,
+                    &session_id,
+                    &fallback_otp_selectors,
+                    fallback_window_ms,
+                )
+                .await
+                .map_err(|_| {
+                    format!(
+                        "Timed out waiting for OTP field (preferred selectors for {}ms: {}; fallback selectors for {}ms: {})",
+                        preferred_window_ms,
+                        preferred_otp_selectors.join(", "),
+                        fallback_window_ms,
+                        fallback_otp_selectors.join(", ")
+                    )
+                })?
+            }
+        }
+    };
+    let current_url = mgr.get_url().await?;
+    let origin = url::Url::parse(&current_url)
+        .map_err(|_| "Could not determine the current page origin for the OTP request")?
+        .origin()
+        .ascii_serialization();
+    let challenge = crate::plugins::resolve_credential_challenge_with_plugin(
+        plugin,
+        crate::plugins::CredentialChallengeRequest {
+            profile_name: name,
+            origin: &origin,
+            challenge_ref: metadata.challenge_ref.as_deref(),
+        },
+    )
+    .await?;
+    let code = challenge.into_unexpired_code()?;
+    interaction::fill(
+        &mgr.client,
+        &session_id,
+        &state.ref_map,
+        &otp_sel,
+        &code,
+        &state.iframe_sessions,
+    )
+    .await?;
+    Ok(json!({
+        "loggedIn": false,
+        "status": "challenge_filled",
+        "name": name,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -12061,6 +12191,29 @@ mod tests {
         let actions = policy_actions_for_command(&cmd, "auth_login", false);
 
         assert_eq!(actions, vec!["auth_login".to_string()]);
+    }
+
+    #[test]
+    fn staged_auth_policy_checks_read_and_challenge_capabilities() {
+        let cmd = json!({
+            "action": "auth_login",
+            "name": "example",
+            "credentialProvider": "vault",
+            "plugins": [{
+                "name": "vault",
+                "command": "staged-vault",
+                "capabilities": ["credential.read", "credential.challenge"]
+            }]
+        });
+
+        assert_eq!(
+            policy_actions_for_command(&cmd, "auth_login", false),
+            vec![
+                "auth_login".to_string(),
+                "plugin:vault:credential.read".to_string(),
+                "plugin:vault:credential.challenge".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]
