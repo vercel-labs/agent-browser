@@ -22,9 +22,33 @@ Launch-time scripts are applied when the browser starts. If the daemon is alread
 
 ```bash
 agent-browser --enable react-devtools open http://localhost:3000
+agent-browser --enable agent-cursor open https://example.com
 ```
 
-`react-devtools` is the built-in feature currently available. It installs the React DevTools hook before application code runs and is required for `react tree`, `react inspect`, `react renders`, and `react suspense`.
+`react-devtools` installs the React DevTools hook before application code runs and is required for `react tree`, `react inspect`, `react renders`, and `react suspense`.
+
+`agent-cursor` shows an animated cursor for agent-driven click, hover, drag, and coordinate mouse actions. The overlay is installed inside each page, so it is visible in screenshots, recordings, and remote browser streams. It ignores pointer input and accessibility APIs, respects reduced-motion preferences, and survives navigation. Human input sent directly to a remote browser is not represented as agent input.
+
+MCP clients enable the same feature at launch:
+
+```json
+{
+  "name": "agent_browser_open",
+  "arguments": {
+    "url": "https://example.com",
+    "enable": ["agent-cursor"]
+  }
+}
+```
+
+Each high-level pointer trajectory is capped at 430 milliseconds and completes before its input is dispatched. Raw coordinate input enqueues an exact cursor placement before the real event on the same CDP session without waiting for a cosmetic response. The first action in a new document snaps into place, and crossing an out-of-process iframe transfers the cursor to that frame's page target.
+
+Cursor appearance is configurable through the bounded `AGENT_BROWSER_CURSOR_THEME` JSON object. It accepts `shape` (`arrow` or `ring`), a six-digit `accent`, `glow` (`none`, `soft`, or `strong`), `scale` (`0.75`–`1.5`), and `motion` (`smooth` or `direct`). Omitted fields use the default; arbitrary CSS and SVG are rejected.
+
+```bash
+AGENT_BROWSER_CURSOR_THEME='{"shape":"arrow","accent":"#8c264c","glow":"strong"}' \
+  agent-browser --enable agent-cursor open https://example.com
+```
 
 ## Runtime scripts
 

@@ -7106,6 +7106,406 @@ async fn e2e_react_tree_with_enable_hook() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_agent_cursor_tracks_pointer_actions_across_navigation() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_ENABLE", "AGENT_BROWSER_CURSOR_THEME"]);
+    guard.remove("AGENT_BROWSER_ENABLE");
+    guard.set(
+        "AGENT_BROWSER_CURSOR_THEME",
+        r##"{"accent":"#8c264c","glow":"strong"}"##,
+    );
+    let mut state = DaemonState::new();
+    let first_page = format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode(
+            "<!doctype html><style>[data-agent-browser-cursor]{pointer-events:auto!important;opacity:0!important;transform:none!important}</style><button id='target' style='position:fixed;left:180px;top:120px;width:120px;height:60px' onclick='window.__clicked=true;document.querySelector(\"dialog\").showModal()'>Click me</button><dialog><button id='modal' style='width:140px;height:70px'>Modal action</button></dialog>"
+        )
+    );
+
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": true,
+            "enable": ["agent-cursor"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(state.cursor_state.enabled());
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": first_page }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "click", "selector": "#target" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "evaluate",
+            "script": "({ clicked: window.__clicked, position: globalThis.__agentBrowserCursor?.position, theme: globalThis.__agentBrowserCursor?.configure({}), host: (() => { const el = document.querySelector('[data-agent-browser-cursor]'); const computed = getComputedStyle(el); return el && { pointerEvents: computed.pointerEvents, ariaHidden: el.getAttribute('aria-hidden'), inert: el.inert, inlineOpacity: el.style.opacity, opacityPriority: el.style.getPropertyPriority('opacity'), transformPriority: el.style.getPropertyPriority('transform'), popoverOpen: el.matches(':popover-open') }; })(), target: (() => { const r = document.querySelector('#target').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })() })"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let result = &get_data(&resp)["result"];
+    assert_eq!(result["clicked"], true);
+    assert_eq!(result["host"]["pointerEvents"], "none");
+    assert_eq!(result["host"]["ariaHidden"], "true");
+    assert_eq!(result["host"]["inert"], true);
+    assert_eq!(result["host"]["inlineOpacity"], "1");
+    assert_eq!(result["host"]["opacityPriority"], "important");
+    assert_eq!(result["host"]["transformPriority"], "important");
+    assert_eq!(result["host"]["popoverOpen"], true);
+    assert_eq!(result["theme"]["accent"], "#8c264c");
+    assert_eq!(result["theme"]["glow"], "strong");
+    assert_eq!(result["theme"]["shape"], "arrow");
+    assert_eq!(result["position"]["x"], result["target"]["x"]);
+    assert_eq!(result["position"]["y"], result["target"]["y"]);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "click", "selector": "#modal" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "6",
+            "action": "evaluate",
+            "script": "(() => { const p = globalThis.__agentBrowserCursor.position; const r = document.querySelector('#modal').getBoundingClientRect(); const host = document.querySelector('[data-agent-browser-cursor]'); return { dx: Math.abs(p.x - (r.x + r.width / 2)), dy: Math.abs(p.y - (r.y + r.height / 2)), popoverOpen: host.matches(':popover-open') }; })()"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(get_data(&resp)["result"]["dx"].as_f64().unwrap() < 0.01);
+    assert!(get_data(&resp)["result"]["dy"].as_f64().unwrap() < 0.01);
+    assert_eq!(get_data(&resp)["result"]["popoverOpen"], true);
+
+    let second_page = format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode("<!doctype html><button id='next'>Next page</button>")
+    );
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "navigate", "url": &second_page }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "8",
+            "action": "evaluate",
+            "script": "Boolean(globalThis.__agentBrowserCursor) && Boolean(document.querySelector('[data-agent-browser-cursor]'))"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], true);
+
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "launch", "headless": true, "enable": [] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(!state.cursor_state.enabled());
+
+    let resp = execute_command(
+        &json!({ "id": "10", "action": "navigate", "url": second_page }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({
+            "id": "11",
+            "action": "evaluate",
+            "script": "typeof globalThis.__agentBrowserCursor === 'undefined' && !document.querySelector('[data-agent-browser-cursor]')"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], true);
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_agent_cursor_transfers_to_the_active_oopif_only() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_ENABLE"]);
+    guard.remove("AGENT_BROWSER_ENABLE");
+    let (port, server) = start_a11y_frame_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": true,
+            "enable": ["agent-cursor"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": format!("http://localhost:{port}/top")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(!state.active_iframe_sessions.is_empty());
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "click", "selector": "h1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let outer_frame_id = state
+        .iframe_sessions
+        .iter()
+        .find(|(_, session_id)| state.active_iframe_sessions.contains(*session_id))
+        .map(|(frame_id, _)| frame_id.clone())
+        .expect("outer OOPIF should have a frame id");
+    state.active_frame_id = Some(outer_frame_id);
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "click", "selector": "h1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let mgr = state.browser.as_ref().unwrap();
+    let top_session_id = mgr.active_session_id().unwrap().to_string();
+    let top = mgr
+        .client
+        .send_command(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": "document.querySelector('[data-agent-browser-cursor]')?.style.opacity || null",
+                "returnByValue": true
+            })),
+            Some(&top_session_id),
+        )
+        .await
+        .unwrap();
+    assert_eq!(top["result"]["value"], "0");
+
+    let mut visible_iframe_count = 0;
+    for iframe_session_id in &state.active_iframe_sessions {
+        let result = mgr
+            .client
+            .send_command(
+                "Runtime.evaluate",
+                Some(json!({
+                    "expression": "document.querySelector('[data-agent-browser-cursor]')?.style.opacity || null",
+                    "returnByValue": true
+                })),
+                Some(iframe_session_id),
+            )
+            .await
+            .unwrap();
+        if result["result"]["value"] == "1" {
+            visible_iframe_count += 1;
+        }
+    }
+    assert_eq!(visible_iframe_count, 1);
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_agent_cursor_keeps_raw_input_and_drag_truthful() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_ENABLE"]);
+    guard.remove("AGENT_BROWSER_ENABLE");
+    let mut state = DaemonState::new();
+    let page = format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode(
+            r#"<!doctype html>
+<div id="source" style="position:fixed;left:80px;top:90px;width:80px;height:60px;background:red"></div>
+<div id="target" style="position:fixed;left:600px;top:420px;width:100px;height:70px;background:blue"></div>
+<dialog><button style="width:180px;height:90px">Modal target</button></dialog>
+<script>
+window.__pointerEvents = [];
+window.__allPointerEvents = [];
+for (const type of ['mousedown', 'mousemove', 'mouseup']) {
+  document.addEventListener(type, event => {
+    const position = globalThis.__agentBrowserCursor?.position;
+    const sample = { type, x: event.clientX, y: event.clientY, cursorX: position?.x, cursorY: position?.y };
+    window.__allPointerEvents.push(sample);
+    if (type !== 'mousemove' || event.buttons === 1) window.__pointerEvents.push(sample);
+  });
+}
+</script>"#,
+        )
+    );
+
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": true,
+            "enable": ["agent-cursor"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": page }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "drag",
+            "source": "#source",
+            "target": "#target"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "evaluate",
+            "script": "({ count: window.__pointerEvents.length, mismatches: window.__pointerEvents.filter(e => Math.abs(e.x-e.cursorX) > .51 || Math.abs(e.y-e.cursorY) > .51).length })"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(get_data(&resp)["result"]["count"].as_u64().unwrap() >= 12);
+    assert_eq!(get_data(&resp)["result"]["mismatches"], 0);
+
+    let resp = execute_command(
+        &json!({
+            "id": "5",
+            "action": "input_mouse",
+            "type": "mouseMoved",
+            "x": 40,
+            "y": 50
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({
+            "id": "6",
+            "action": "evaluate",
+            "script": "({ position: globalThis.__agentBrowserCursor.position, event: window.__allPointerEvents.at(-1) })"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let result = &get_data(&resp)["result"];
+    assert_eq!(result["position"]["x"], 40);
+    assert_eq!(result["position"]["y"], 50);
+    assert_eq!(result["event"]["x"], result["event"]["cursorX"]);
+    assert_eq!(result["event"]["y"], result["event"]["cursorY"]);
+
+    let resp = execute_command(
+        &json!({
+            "id": "9",
+            "action": "evaluate",
+            "script": "document.querySelector('dialog').showModal()"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({
+            "id": "10",
+            "action": "input_mouse",
+            "type": "mouseMoved",
+            "x": 400,
+            "y": 300
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({
+            "id": "11",
+            "action": "evaluate",
+            "script": "({ modal: document.querySelector('dialog').open, popoverOpen: document.querySelector('[data-agent-browser-cursor]').matches(':popover-open'), position: globalThis.__agentBrowserCursor.position })"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let result = &get_data(&resp)["result"];
+    assert_eq!(result["modal"], true);
+    assert_eq!(result["popoverOpen"], true);
+    assert_eq!(result["position"]["x"], 400);
+    assert_eq!(result["position"]["y"], 300);
+
+    let resp = execute_command(
+        &json!({
+            "id": "7",
+            "action": "input_mouse",
+            "type": "mousePressed",
+            "x": 75,
+            "y": 85,
+            "button": "left"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({
+            "id": "8",
+            "action": "evaluate",
+            "script": "({ position: globalThis.__agentBrowserCursor.position, event: window.__allPointerEvents.at(-1) })"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let result = &get_data(&resp)["result"];
+    assert_eq!(result["position"]["x"], 75);
+    assert_eq!(result["position"]["y"], 85);
+    assert_eq!(result["event"]["x"], result["event"]["cursorX"]);
+    assert_eq!(result["event"]["y"], result["event"]["cursorY"]);
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_relaunch_when_enable_changes_installs_react_hook() {
     let mut state = DaemonState::new();
 

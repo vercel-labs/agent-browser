@@ -433,6 +433,7 @@ pub struct DaemonOptions<'a> {
     pub extensions: &'a [String],
     pub init_scripts: &'a [String],
     pub enable: &'a [String],
+    pub cursor_theme: Option<&'a str>,
     pub args: Option<&'a str>,
     pub user_agent: Option<&'a str>,
     pub proxy: Option<&'a str>,
@@ -486,6 +487,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if !opts.enable.is_empty() {
         cmd.env("AGENT_BROWSER_ENABLE", opts.enable.join(","));
+    }
+    if let Some(theme) = opts.cursor_theme {
+        cmd.env("AGENT_BROWSER_CURSOR_THEME", theme);
     }
     if let Some(a) = opts.args {
         cmd.env("AGENT_BROWSER_ARGS", a);
@@ -588,6 +592,7 @@ fn daemon_config_fingerprint(opts: &DaemonOptions) -> String {
     opts.idle_timeout.hash(&mut hasher);
     opts.default_timeout.hash(&mut hasher);
     opts.no_auto_dialog.hash(&mut hasher);
+    opts.cursor_theme.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
@@ -1241,6 +1246,7 @@ mod tests {
             extensions: &[],
             init_scripts: &[],
             enable: &[],
+            cursor_theme: None,
             args: None,
             user_agent: None,
             proxy: None,
@@ -1281,6 +1287,8 @@ mod tests {
         let idle_changed = test_daemon_options(Some("1000"), false, None);
         let dialog_changed = test_daemon_options(None, true, None);
         let domains_changed = test_daemon_options(None, false, Some(&domains));
+        let mut theme_changed = test_daemon_options(None, false, None);
+        theme_changed.cursor_theme = Some(r##"{"accent":"#8c264c"}"##);
 
         assert_ne!(
             daemon_config_fingerprint(&base),
@@ -1294,6 +1302,11 @@ mod tests {
             daemon_config_fingerprint(&base),
             daemon_config_fingerprint(&domains_changed),
             "allowed domains are browser launch state, not daemon identity"
+        );
+        assert_ne!(
+            daemon_config_fingerprint(&base),
+            daemon_config_fingerprint(&theme_changed),
+            "cursor theme belongs to the daemon that owns cursor rendering"
         );
     }
 

@@ -24,6 +24,7 @@ use super::cdp::types::{
     TargetInfoChangedEvent,
 };
 use super::cookies;
+use super::cursor;
 use super::diff;
 use super::element::RefMap;
 use super::inspect_server::InspectServer;
@@ -404,6 +405,8 @@ pub struct DaemonState {
     /// so they never block the agent.
     dialog_handler_task: Option<tokio::task::JoinHandle<()>>,
     pub mouse_state: MouseState,
+    /// Visual cursor state for the active browser launch.
+    pub cursor_state: cursor::CursorState,
     /// Tracks the currently open JavaScript dialog (alert/confirm/prompt), if any.
     pub pending_dialog: Option<PendingDialog>,
     /// A mouse button left logically down because a dialog opened between
@@ -507,6 +510,7 @@ impl DaemonState {
             fetch_handler_task: None,
             dialog_handler_task: None,
             mouse_state: MouseState::default(),
+            cursor_state: cursor::CursorState::from_env(),
             pending_dialog: None,
             pending_pointer_release: None,
             auto_dialog: !matches!(
@@ -1094,6 +1098,7 @@ impl DaemonState {
         for sid in &drained.detached_iframe_sessions {
             self.iframe_sessions.retain(|_, v| v != sid);
             self.active_iframe_sessions.remove(sid);
+            self.cursor_state.forget_session(sid);
         }
 
         // Attach and register new targets
@@ -1968,6 +1973,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
 
     close_active_provider_session(state).await;
     state.launch_hash = None;
+    state.cursor_state.reset();
     state.network_auto_attach_installed = false;
     state.iframe_sessions.clear();
     state.active_iframe_sessions.clear();
@@ -3336,39 +3342,46 @@ fn allowed_domains_from_launch_command(cmd: &Value) -> Option<Vec<String>> {
 }
 
 async fn apply_launch_init_scripts(
-    state: &DaemonState,
+    state: &mut DaemonState,
     enable_features: &[String],
     init_script_paths: &[String],
 ) {
-    let Some(mgr) = state.browser.as_ref() else {
-        return;
-    };
+    {
+        let Some(mgr) = state.browser.as_ref() else {
+            return;
+        };
 
-    for feature in enable_features {
-        match feature.as_str() {
-            "react-devtools" | "react" => {
-                let _ = mgr.add_script_to_evaluate(react::INSTALL_HOOK_JS).await;
+        for feature in enable_features {
+            match feature.as_str() {
+                cursor::FEATURE_NAME => {
+                    let _ = mgr.add_script_to_evaluate(cursor::INSTALL_SCRIPT).await;
+                }
+                "react-devtools" | "react" => {
+                    let _ = mgr.add_script_to_evaluate(react::INSTALL_HOOK_JS).await;
+                }
+                other => {
+                    eprintln!("warning: unknown --enable feature '{}'", other);
+                }
             }
-            other => {
-                eprintln!("warning: unknown --enable feature '{}'", other);
+        }
+
+        for path in init_script_paths {
+            match fs::read_to_string(path) {
+                Ok(source) => {
+                    let _ = mgr.add_script_to_evaluate(&source).await;
+                }
+                Err(e) => {
+                    eprintln!("warning: failed to read --init-script '{}': {}", path, e);
+                }
             }
+        }
+
+        for source in &state.plugin_init_scripts {
+            let _ = mgr.add_script_to_evaluate(source).await;
         }
     }
 
-    for path in init_script_paths {
-        match fs::read_to_string(path) {
-            Ok(source) => {
-                let _ = mgr.add_script_to_evaluate(&source).await;
-            }
-            Err(e) => {
-                eprintln!("warning: failed to read --init-script '{}': {}", path, e);
-            }
-        }
-    }
-
-    for source in &state.plugin_init_scripts {
-        let _ = mgr.add_script_to_evaluate(source).await;
-    }
+    state.cursor_state.configure(enable_features);
 }
 
 async fn apply_launch_mutator_plugins(
@@ -4733,6 +4746,22 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     let new_tab = cmd.get("newTab").and_then(|v| v.as_bool()).unwrap_or(false);
 
     if new_tab {
+        if state.cursor_state.enabled() {
+            let (_, _, pointer_session_id) = interaction::point_to_element(
+                &mgr.client,
+                &session_id,
+                &state.ref_map,
+                &mut state.cursor_state,
+                selector,
+                &state.iframe_sessions,
+            )
+            .await?;
+            cursor::pulse(&mgr.client, &state.cursor_state, &pointer_session_id).await;
+        }
+
+        // Resolve the link after the optional cursor trajectory. The page can
+        // mutate while the cursor moves, so reading href first could open a
+        // stale destination while visibly pointing at the current element.
         use super::element::resolve_element_object_id;
         let (object_id, effective_session_id) = resolve_element_object_id(
             &mgr.client,
@@ -4807,9 +4836,12 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         &mgr.client,
         &session_id,
         &state.ref_map,
+        &mut state.cursor_state,
         selector,
-        button,
-        click_count,
+        interaction::ClickOptions {
+            button,
+            count: click_count,
+        },
         &state.iframe_sessions,
     )
     .await?;
@@ -4833,6 +4865,7 @@ async fn handle_dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         &mgr.client,
         &session_id,
         &state.ref_map,
+        &mut state.cursor_state,
         selector,
         &state.iframe_sessions,
     )
@@ -4971,6 +5004,7 @@ async fn handle_hover(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         &mgr.client,
         &session_id,
         &state.ref_map,
+        &mut state.cursor_state,
         selector,
         &state.iframe_sessions,
     )
@@ -5057,6 +5091,7 @@ async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         &mgr.client,
         &session_id,
         &state.ref_map,
+        &mut state.cursor_state,
         selector,
         &state.iframe_sessions,
     )
@@ -5076,6 +5111,7 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         &mgr.client,
         &session_id,
         &state.ref_map,
+        &mut state.cursor_state,
         selector,
         &state.iframe_sessions,
     )
@@ -5876,7 +5912,7 @@ async fn handle_auth_show(cmd: &Value) -> Result<Value, String> {
     auth::auth_show(name)
 }
 
-async fn handle_mouse(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_mouse(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
@@ -5888,6 +5924,12 @@ async fn handle_mouse(cmd: &Value, state: &DaemonState) -> Result<Value, String>
     let y = cmd.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let button = cmd.get("button").and_then(|v| v.as_str()).unwrap_or("none");
     let click_count = cmd.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    if event_type == "mousePressed" {
+        cursor::press_at(&mgr.client, &mut state.cursor_state, &session_id, x, y).await;
+    } else if event_type == "mouseMoved" {
+        cursor::place_at(&mgr.client, &mut state.cursor_state, &session_id, x, y).await;
+    }
 
     mgr.client
         .send_command(
@@ -6217,9 +6259,12 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         &mgr.client,
         &session_id,
         &state.ref_map,
+        &mut state.cursor_state,
         selector,
-        "left",
-        1,
+        interaction::ClickOptions {
+            button: "left",
+            count: 1,
+        },
         &state.iframe_sessions,
     )
     .await?;
@@ -8124,9 +8169,12 @@ async fn execute_subaction(
                 &mgr.client,
                 &session_id,
                 &state.ref_map,
+                &mut state.cursor_state,
                 selector,
-                "left",
-                1,
+                interaction::ClickOptions {
+                    button: "left",
+                    count: 1,
+                },
                 &state.iframe_sessions,
             )
             .await?;
@@ -8157,6 +8205,7 @@ async fn execute_subaction(
                 &mgr.client,
                 &session_id,
                 &state.ref_map,
+                &mut state.cursor_state,
                 selector,
                 &state.iframe_sessions,
             )
@@ -8168,6 +8217,7 @@ async fn execute_subaction(
                 &mgr.client,
                 &session_id,
                 &state.ref_map,
+                &mut state.cursor_state,
                 selector,
                 &state.iframe_sessions,
             )
@@ -8869,7 +8919,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         .and_then(|v| v.as_str())
         .ok_or("Missing 'target' parameter")?;
 
-    let (sx, sy, source_session_id) = super::element::resolve_element_center(
+    let (mut sx, mut sy, mut source_session_id) = super::element::resolve_element_center(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -8877,7 +8927,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &state.iframe_sessions,
     )
     .await?;
-    let (tx, ty, target_session_id) = super::element::resolve_element_center(
+    let (mut tx, mut ty, mut target_session_id) = super::element::resolve_element_center(
         &mgr.client,
         &session_id,
         &state.ref_map,
@@ -8885,6 +8935,32 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &state.iframe_sessions,
     )
     .await?;
+    if state.cursor_state.enabled() {
+        cursor::move_to(
+            &mgr.client,
+            &mut state.cursor_state,
+            &source_session_id,
+            sx,
+            sy,
+        )
+        .await;
+        (sx, sy, source_session_id) = super::element::resolve_element_center(
+            &mgr.client,
+            &session_id,
+            &state.ref_map,
+            source,
+            &state.iframe_sessions,
+        )
+        .await?;
+        (tx, ty, target_session_id) = super::element::resolve_element_center(
+            &mgr.client,
+            &session_id,
+            &state.ref_map,
+            target,
+            &state.iframe_sessions,
+        )
+        .await?;
+    }
 
     // Mouse down at source
     mgr.client
@@ -8901,6 +8977,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
             Some(&source_session_id),
         )
         .await?;
+    cursor::pulse(&mgr.client, &state.cursor_state, &source_session_id).await;
 
     // Move in steps to target, keeping the left button held (buttons: 1) so
     // that the browser sees a drag rather than a plain pointer move.
@@ -8908,6 +8985,14 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     for i in 1..=steps {
         let cx = sx + (tx - sx) * (i as f64) / (steps as f64);
         let cy = sy + (ty - sy) * (i as f64) / (steps as f64);
+        cursor::place_at(
+            &mgr.client,
+            &mut state.cursor_state,
+            &target_session_id,
+            cx,
+            cy,
+        )
+        .await;
         mgr.client
             .send_command(
                 "Input.dispatchMouseEvent",
@@ -8915,7 +9000,10 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
                 Some(&target_session_id),
             )
             .await?;
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(
+            if state.cursor_state.enabled() { 16 } else { 10 },
+        ))
+        .await;
     }
 
     // Mouse up at target
@@ -10601,9 +10689,12 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         &mgr.client,
         &session_id,
         &state.ref_map,
+        &mut state.cursor_state,
         &sub_sel,
-        "left",
-        1,
+        interaction::ClickOptions {
+            button: "left",
+            count: 1,
+        },
         &state.iframe_sessions,
     )
     .await?;
@@ -10929,6 +11020,25 @@ async fn handle_input_mouse(cmd: &Value, state: &mut DaemonState) -> Result<Valu
             .map(|v| v as i32),
     );
 
+    if event_type == "mousePressed" {
+        cursor::press_at(
+            &mgr.client,
+            &mut state.cursor_state,
+            &session_id,
+            params.x,
+            params.y,
+        )
+        .await;
+    } else if event_type == "mouseMoved" {
+        cursor::place_at(
+            &mgr.client,
+            &mut state.cursor_state,
+            &session_id,
+            params.x,
+            params.y,
+        )
+        .await;
+    }
     mgr.client
         .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
@@ -11049,6 +11159,14 @@ async fn handle_mousemove(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         None,
     );
 
+    cursor::place_at(
+        &mgr.client,
+        &mut state.cursor_state,
+        &session_id,
+        params.x,
+        params.y,
+    )
+    .await;
     mgr.client
         .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
@@ -11072,6 +11190,14 @@ async fn handle_mousedown(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         None,
     );
 
+    cursor::press_at(
+        &mgr.client,
+        &mut state.cursor_state,
+        &session_id,
+        params.x,
+        params.y,
+    )
+    .await;
     mgr.client
         .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;

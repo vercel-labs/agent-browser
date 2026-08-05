@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
+use super::cursor;
 use super::element::{resolve_element_center, resolve_element_object_id, RefMap};
 
 /// Outcome of a click. `dialog_opened` is true if a JavaScript dialog opened
@@ -25,16 +26,20 @@ pub struct PendingRelease {
     pub button: String,
 }
 
-pub async fn click(
+pub struct ClickOptions<'a> {
+    pub button: &'a str,
+    pub count: i32,
+}
+
+pub async fn point_to_element(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
+    cursor_state: &mut cursor::CursorState,
     selector_or_ref: &str,
-    button: &str,
-    click_count: i32,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<ClickResult, String> {
-    let (x, y, effective_session_id) = resolve_element_center(
+) -> Result<(f64, f64, String), String> {
+    let (mut x, mut y, mut effective_session_id) = resolve_element_center(
         client,
         session_id,
         ref_map,
@@ -42,6 +47,51 @@ pub async fn click(
         iframe_sessions,
     )
     .await?;
+    if !cursor_state.enabled() {
+        return Ok((x, y, effective_session_id));
+    }
+
+    let initial_x = x;
+    let initial_y = y;
+    let initial_session_id = effective_session_id.clone();
+    cursor::move_to(client, cursor_state, &effective_session_id, x, y).await;
+    (x, y, effective_session_id) = resolve_element_center(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+    if effective_session_id != initial_session_id {
+        cursor::move_to(client, cursor_state, &effective_session_id, x, y).await;
+    } else if (x - initial_x).abs() > 1.0 || (y - initial_y).abs() > 1.0 {
+        cursor::correct_to(client, cursor_state, &effective_session_id, x, y).await;
+    }
+    Ok((x, y, effective_session_id))
+}
+
+pub async fn click(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    cursor_state: &mut cursor::CursorState,
+    selector_or_ref: &str,
+    options: ClickOptions<'_>,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<ClickResult, String> {
+    let (x, y, effective_session_id) = point_to_element(
+        client,
+        session_id,
+        ref_map,
+        cursor_state,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+    if cursor_state.enabled() {
+        cursor::pulse(client, cursor_state, &effective_session_id).await;
+    }
     // A click-triggered dialog can fire on the frame's own session (OOPIF) or
     // on the top-level page session; both count as "ours". A dialog on any
     // other session belongs to a background tab and must not abort this click.
@@ -51,8 +101,8 @@ pub async fn click(
         &[effective_session_id.as_str(), session_id],
         x,
         y,
-        button,
-        click_count,
+        options.button,
+        options.count,
     )
     .await
 }
@@ -61,6 +111,7 @@ pub async fn dblclick(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
+    cursor_state: &mut cursor::CursorState,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<ClickResult, String> {
@@ -68,9 +119,12 @@ pub async fn dblclick(
         client,
         session_id,
         ref_map,
+        cursor_state,
         selector_or_ref,
-        "left",
-        2,
+        ClickOptions {
+            button: "left",
+            count: 2,
+        },
         iframe_sessions,
     )
     .await
@@ -80,13 +134,15 @@ pub async fn hover(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
+    cursor_state: &mut cursor::CursorState,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let (x, y, effective_session_id) = resolve_element_center(
+    let (x, y, effective_session_id) = point_to_element(
         client,
         session_id,
         ref_map,
+        cursor_state,
         selector_or_ref,
         iframe_sessions,
     )
@@ -490,6 +546,7 @@ pub async fn check(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
+    cursor_state: &mut cursor::CursorState,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
@@ -506,9 +563,12 @@ pub async fn check(
             client,
             session_id,
             ref_map,
+            cursor_state,
             selector_or_ref,
-            "left",
-            1,
+            ClickOptions {
+                button: "left",
+                count: 1,
+            },
             iframe_sessions,
         )
         .await?;
@@ -542,6 +602,7 @@ pub async fn uncheck(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
+    cursor_state: &mut cursor::CursorState,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
@@ -558,9 +619,12 @@ pub async fn uncheck(
             client,
             session_id,
             ref_map,
+            cursor_state,
             selector_or_ref,
-            "left",
-            1,
+            ClickOptions {
+                button: "left",
+                count: 1,
+            },
             iframe_sessions,
         )
         .await?;

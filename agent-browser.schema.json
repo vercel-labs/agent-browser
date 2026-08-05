@@ -72,7 +72,7 @@
       "type": "array",
       "items": {
         "type": "string",
-        "enum": ["react-devtools"]
+        "enum": ["react-devtools", "agent-cursor"]
       },
       "description": "Built-in launch features to enable."
     },

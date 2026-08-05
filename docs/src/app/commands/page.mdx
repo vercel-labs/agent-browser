@@ -508,6 +508,7 @@ React commands require `--enable react-devtools` at launch (installs the React D
 
 ```bash
 agent-browser open --enable react-devtools <url>   # Launch with React hook installed
+agent-browser open --enable agent-cursor <url>     # Show agent pointer actions in the page
 agent-browser react tree                           # Full component tree
 agent-browser react inspect <fiberId>              # Inspect one component
 agent-browser react renders start                  # Begin fiber render recording
@@ -543,7 +544,7 @@ agent-browser addinitscript <js>                  # Register at runtime (returns
 agent-browser removeinitscript <identifier>       # Remove a previously registered init script
 ```
 
-See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime scripts, built-in React DevTools, and extensions.
+See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime scripts, built-in React DevTools and agent cursor features, and extensions.
 
 ## Global options
 
@@ -558,7 +559,7 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime 
 --executable-path <path> # Custom browser executable
 --extension <path>       # Load browser extension (repeatable)
 --init-script <path>     # Register a page init script before first navigation (repeatable)
---enable <feature>       # Built-in init scripts: react-devtools (repeatable or comma-list)
+--enable <feature>       # Built-in features: react-devtools, agent-cursor (repeatable or comma-list)
 --args <args>            # Browser launch args (comma separated)
 --user-agent <ua>        # Custom User-Agent string
 --proxy <url>            # Proxy server URL

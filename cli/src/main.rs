@@ -1246,6 +1246,7 @@ fn main() {
     };
     let plugin_registry_json =
         serde_json::to_string(&flags.plugins).unwrap_or_else(|_| "[]".to_string());
+    let cursor_theme = env::var("AGENT_BROWSER_CURSOR_THEME").ok();
     let daemon_opts = DaemonOptions {
         headed: flags.headed,
         debug: flags.debug,
@@ -1253,6 +1254,7 @@ fn main() {
         extensions: &flags.extensions,
         init_scripts: &flags.init_scripts,
         enable: &flags.enable,
+        cursor_theme: cursor_theme.as_deref(),
         args: flags.args.as_deref(),
         user_agent: flags.user_agent.as_deref(),
         proxy: proxy_server.as_deref(),

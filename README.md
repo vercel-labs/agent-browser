@@ -448,6 +448,25 @@ Each `react ...` subcommand requires `--enable react-devtools` to have been pass
 
 Works on any React app — Next.js, Remix, Vite+React, CRA, TanStack Start, React Native Web, etc. `vitals` and `pushstate` are framework-agnostic. `vitals` prints a summary by default; pass `--json` for the full structured payload.
 
+### Visible agent cursor
+
+Show a smooth, glowing cursor when agent-browser clicks, hovers, drags, or sends coordinate mouse actions. Because the overlay lives inside the page, it appears in screenshots, recordings, and remote browser streams. It does not intercept pointer input or appear in the accessibility tree, and reduced-motion preferences disable its movement animation.
+
+```bash
+agent-browser open --enable agent-cursor https://example.com
+```
+
+MCP clients can pass `enable: ["agent-cursor"]` to `agent_browser_open`. The MCP server inherits `AGENT_BROWSER_CURSOR_THEME` when it starts, so the same bounded theme applies without adding request-level styling data.
+
+The cursor represents actions sent through agent-browser. Input sent directly to a remote browser is intentionally not presented as agent activity. Each high-level pointer trajectory is capped at 430 milliseconds and completes before its input is dispatched. Raw coordinate input first enqueues an exact cursor placement and then dispatches the real event on the same CDP session, without waiting for a cosmetic response. The first action after a navigation snaps into place because the page has a new JavaScript context. Crossing an out-of-process iframe transfers the cursor between page targets instead of inventing cross-frame coordinates.
+
+The renderer has a bounded theme contract—no arbitrary CSS or SVG. Set a partial JSON override through `AGENT_BROWSER_CURSOR_THEME`; omitted fields retain the default. Supported fields are `shape` (`arrow` or `ring`), a six-digit `accent`, `glow` (`none`, `soft`, or `strong`), `scale` (`0.75`–`1.5`), and `motion` (`smooth` or `direct`).
+
+```bash
+AGENT_BROWSER_CURSOR_THEME='{"accent":"#8c264c","glow":"strong"}' \
+  agent-browser --enable agent-cursor open https://example.com
+```
+
 ### Accessibility audits
 
 Run an [axe-core](https://github.com/dequelabs/axe-core) accessibility audit against the current page or a URL. The axe-core engine is embedded in the binary, so it works offline and under strict CSP. It runs private partial audits across the page's frame tree and merges serialized results without page messaging, so page-provided `window.axe` values remain intact and iframe violations retain their frame selector paths. Accessibility audits require a CDP browser and are not available with Safari or iOS WebDriver sessions.
@@ -922,7 +941,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--executable-path <path>` | Custom browser executable (or `AGENT_BROWSER_EXECUTABLE_PATH` env) |
 | `--extension <path>` | Load browser extension (repeatable; or `AGENT_BROWSER_EXTENSIONS` env) |
 | `--init-script <path>` | Register a page init script before the first navigation (repeatable; or `AGENT_BROWSER_INIT_SCRIPTS` env) |
-| `--enable <feature>` | Built-in init scripts: `react-devtools` (repeatable or comma-list; or `AGENT_BROWSER_ENABLE` env) |
+| `--enable <feature>` | Built-in features: `react-devtools`, `agent-cursor` (repeatable or comma-list; or `AGENT_BROWSER_ENABLE` env) |
 | `--args <args>` | Browser launch args, comma or newline separated (or `AGENT_BROWSER_ARGS` env) |
 | `--user-agent <ua>` | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env) |
 | `--proxy <url>` | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env) |

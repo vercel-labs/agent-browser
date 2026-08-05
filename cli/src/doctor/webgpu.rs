@@ -197,6 +197,7 @@ pub(super) fn check(checks: &mut Vec<Check>, opts: &DoctorOptions) {
         extensions: &[],
         init_scripts: &[],
         enable: &[],
+        cursor_theme: None,
         args: None,
         user_agent: None,
         proxy: None,

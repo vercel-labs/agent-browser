@@ -269,7 +269,8 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_ENCRYPTION_KEY</code></td><td>64-char hex key for AES-256-GCM session encryption.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_EXTENSIONS</code></td><td>Comma-separated browser extension paths. Extensions work in both headed and headless mode.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_INIT_SCRIPTS</code></td><td>Comma-separated paths to page init scripts.</td><td>(none)</td></tr>
-    <tr><td><code>AGENT_BROWSER_ENABLE</code></td><td>Comma-separated built-in init script features such as <code>react-devtools</code>.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_ENABLE</code></td><td>Comma-separated built-in features: <code>react-devtools</code> and <code>agent-cursor</code>.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_CURSOR_THEME</code></td><td>Bounded JSON appearance override for <code>agent-cursor</code>: shape, six-digit accent, glow, scale, and motion.</td><td>(built-in theme)</td></tr>
     <tr><td><code>AGENT_BROWSER_HEADED</code></td><td>Show browser window instead of running headless (<code>1</code> to enable).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_WEBGPU</code></td><td>Enable WebGPU; SwiftShader software Vulkan on Linux, no GPU required (<code>1</code> to enable).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_NO_XVFB</code></td><td>Disable automatic Xvfb virtual display for headed mode on displayless Linux hosts (<code>1</code> to disable).</td><td>(auto-Xvfb enabled)</td></tr>
