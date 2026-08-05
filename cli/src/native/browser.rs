@@ -365,6 +365,8 @@ pub struct BrowserManager {
     /// Origins visited during this session, used by save_state to collect cross-origin localStorage.
     visited_origins: HashSet<String>,
     next_tab_id: u32,
+    /// User-named browser contexts (`tab new --context <name>`), name → id.
+    named_contexts: HashMap<String, String>,
     /// True when the CDP WebSocket is already scoped to a page target and
     /// browser-level Target.* commands are not available.
     direct_page: bool,
@@ -456,6 +458,7 @@ impl BrowserManager {
                 ignore_https_errors,
                 visited_origins: HashSet::new(),
                 next_tab_id: 1,
+                named_contexts: HashMap::new(),
                 direct_page: false,
                 headless,
             };
@@ -547,6 +550,7 @@ impl BrowserManager {
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
+            named_contexts: HashMap::new(),
             direct_page,
             headless: true,
         };
@@ -605,6 +609,8 @@ impl BrowserManager {
                     "Target.createTarget",
                     &CreateTargetParams {
                         url: "about:blank".to_string(),
+                        background: None,
+                        browser_context_id: None,
                     },
                     None,
                 )
@@ -1189,6 +1195,8 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: "about:blank".to_string(),
+                    background: None,
+                    browser_context_id: None,
                 },
                 None,
             )
@@ -1347,10 +1355,40 @@ impl BrowserManager {
         self.pages.iter().any(|p| p.label.as_deref() == Some(label))
     }
 
+    /// Resolve a named browser context to its id, creating the context on
+    /// first use. Named contexts give storage/cookie isolation inside one
+    /// browser ("logged in as two users") without a second session.
+    pub async fn ensure_named_context(&mut self, name: &str) -> Result<String, String> {
+        if !is_valid_label(name) {
+            return Err(format!(
+                "Invalid context name `{}`; names must start with a letter and contain only \
+                 letters, digits, `-`, and `_`",
+                name
+            ));
+        }
+        if let Some(id) = self.named_contexts.get(name) {
+            return Ok(id.clone());
+        }
+        let result = self
+            .client
+            .send_command_no_params("Target.createBrowserContext", None)
+            .await?;
+        let context_id = result
+            .get("browserContextId")
+            .and_then(|v| v.as_str())
+            .ok_or("Failed to create browser context")?
+            .to_string();
+        self.named_contexts
+            .insert(name.to_string(), context_id.clone());
+        Ok(context_id)
+    }
+
     pub async fn tab_new(
         &mut self,
         url: Option<&str>,
         label: Option<&str>,
+        background: bool,
+        browser_context_id: Option<&str>,
     ) -> Result<Value, String> {
         if let Some(label) = label {
             if !is_valid_label(label) {
@@ -1377,6 +1415,8 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: target_url.to_string(),
+                    background: if background { Some(true) } else { None },
+                    browser_context_id: browser_context_id.map(|s| s.to_string()),
                 },
                 None,
             )
@@ -1411,12 +1451,15 @@ impl BrowserManager {
             parent_tab_id: None,
             crashed: false,
         });
-        self.active_page_index = index;
+        if !background {
+            self.active_page_index = index;
+        }
 
         Ok(json!({
             "tabId": format_tab_id(tab_id),
             "label": label,
             "url": target_url,
+            "background": background,
             "total": self.pages.len(),
         }))
     }
@@ -2048,6 +2091,7 @@ async fn initialize_lightpanda_manager(
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
+            named_contexts: HashMap::new(),
             direct_page: false,
             headless: true,
         };

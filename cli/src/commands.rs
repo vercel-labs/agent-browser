@@ -1488,10 +1488,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "tab" => {
             match rest.first().copied() {
                 Some("new") => {
-                    // Accepted forms:
+                    // Accepted forms (flags may precede or follow the url):
                     //   tab new [url]
                     //   tab new --label <name> [url]
-                    //   tab new [url] --label <name>
+                    //   tab new --background [url]
+                    //   tab new --context <name> [url]
                     let mut cmd = json!({ "id": id, "action": "tab_new" });
                     let mut i = 1;
                     while i < rest.len() {
@@ -1504,6 +1505,18 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                 cmd["label"] = json!(name);
                                 i += 2;
                             }
+                            "--background" | "-b" => {
+                                cmd["background"] = json!(true);
+                                i += 1;
+                            }
+                            "--context" => {
+                                let name = rest.get(i + 1).ok_or(ParseError::MissingArguments {
+                                    context: "tab new --context".to_string(),
+                                    usage: "tab new --context <name> [url]",
+                                })?;
+                                cmd["context"] = json!(name);
+                                i += 2;
+                            }
                             other if !other.starts_with("--") && cmd.get("url").is_none() => {
                                 cmd["url"] = json!(other);
                                 i += 1;
@@ -1511,7 +1524,12 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                             other => {
                                 return Err(ParseError::UnknownSubcommand {
                                     subcommand: other.to_string(),
-                                    valid_options: &["--label", "<url>"],
+                                    valid_options: &[
+                                        "--label",
+                                        "--background",
+                                        "--context",
+                                        "<url>",
+                                    ],
                                 });
                             }
                         }

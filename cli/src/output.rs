@@ -2534,8 +2534,18 @@ Operations:
   list                       List open tabs with their ids and labels (default)
   new [url]                  Open a new tab
   new --label <name> [url]   Open a new tab with a label like `docs` or `app`
+  new --background [url]     Open a tab WITHOUT switching to it (active tab
+                             and element refs stay untouched)
+  new --context <name> [url] Open in a named isolated browser context — own
+                             cookies/storage (e.g. logged in as a second
+                             user); the context is created on first use
   close [t<N>|label]         Close a tab (current if no ref given)
   <t<N>|label>               Switch to a tab by id or label
+
+Tab list annotations: `(opened by tN)` marks popup provenance, `[crashed]`
+a dead renderer. Any command's response gains a `tabs (...)` section when
+the tab list changed since the previous response; popups open in the
+background and are announced instead of stealing focus.
 
 Global Options:
   --json               Output as JSON

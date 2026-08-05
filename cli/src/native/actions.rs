@@ -2859,7 +2859,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 /// subsequent navigations don't hijack the user's existing tabs.
 async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
     let mut mgr = BrowserManager::connect_auto().await?;
-    mgr.tab_new(None, None).await?;
+    mgr.tab_new(None, None, false, None).await?;
     let session_id = mgr.active_session_id()?.to_string();
     let _ = mgr
         .client
@@ -5024,6 +5024,8 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
                     Some(&href)
                 },
                 None,
+                false,
+                None,
             )
             .await?;
         }
@@ -6215,18 +6217,40 @@ async fn handle_tab_list(state: &DaemonState) -> Result<Value, String> {
 async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let url = cmd.get("url").and_then(|v| v.as_str());
     let label = cmd.get("label").and_then(|v| v.as_str());
+    let background = cmd
+        .get("background")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let context_name = cmd.get("context").and_then(|v| v.as_str());
     let domain_filter = state.domain_filter.read().await.clone();
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
     let defer_url_until_controls =
         should_defer_url_until_network_controls(domain_filter.as_ref(), has_proxy_creds, url)?;
 
-    state.ref_map.clear();
-    state.active_iframe_sessions.clear();
-    state.active_frame_id = None;
+    if !background {
+        // A background tab leaves the active tab (and its refs/frames) alone.
+        state.ref_map.clear();
+        state.active_iframe_sessions.clear();
+        state.active_frame_id = None;
+    }
     let mut result = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-        mgr.tab_new(if defer_url_until_controls { None } else { url }, label)
-            .await?
+        let context_id = match context_name {
+            Some(name) => Some(mgr.ensure_named_context(name).await?),
+            None => None,
+        };
+        let mut result = mgr
+            .tab_new(
+                if defer_url_until_controls { None } else { url },
+                label,
+                background,
+                context_id.as_deref(),
+            )
+            .await?;
+        if let (Some(name), Some(obj)) = (context_name, result.as_object_mut()) {
+            obj.insert("context".to_string(), json!(name));
+        }
+        result
     };
 
     install_network_controls_or_close(state, has_proxy_creds).await?;
@@ -6234,16 +6258,35 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
 
     if defer_url_until_controls {
         if let Some(url) = url {
-            let nav = {
-                let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-                mgr.navigate(url, WaitUntil::Load).await?
-            };
-            if let Some(obj) = result.as_object_mut() {
-                if let Some(value) = nav.get("url") {
-                    obj.insert("url".to_string(), value.clone());
+            if background {
+                // mgr.navigate targets the ACTIVE tab; navigate the new
+                // background tab through its own session instead.
+                let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+                let new_tab_id = result.get("tabId").and_then(|v| v.as_str()).unwrap_or("");
+                let session = mgr
+                    .pages_list()
+                    .into_iter()
+                    .find(|p| super::browser::format_tab_id(p.tab_id) == new_tab_id)
+                    .map(|p| p.session_id)
+                    .ok_or("New background tab vanished before navigation")?;
+                mgr.client
+                    .send_command("Page.navigate", Some(json!({ "url": url })), Some(&session))
+                    .await?;
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert("url".to_string(), json!(url));
                 }
-                if let Some(value) = nav.get("title") {
-                    obj.insert("title".to_string(), value.clone());
+            } else {
+                let nav = {
+                    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+                    mgr.navigate(url, WaitUntil::Load).await?
+                };
+                if let Some(obj) = result.as_object_mut() {
+                    if let Some(value) = nav.get("url") {
+                        obj.insert("url".to_string(), value.clone());
+                    }
+                    if let Some(value) = nav.get("title") {
+                        obj.insert("title".to_string(), value.clone());
+                    }
                 }
             }
         }
