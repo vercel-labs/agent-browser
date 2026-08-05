@@ -8568,14 +8568,14 @@ fn find_ax_node_by_role(
     Err(format!("No element found: {}", desc))
 }
 
+/// Locate an element in the selected frame's document, or in the top document
+/// when no frame is selected, then run the requested subaction against it.
 async fn handle_semantic_locator(
     cmd: &Value,
     state: &mut DaemonState,
     strategy: &str,
     param_name: &str,
 ) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
     let value = cmd
         .get(param_name)
         .and_then(|v| v.as_str())
@@ -8594,7 +8594,7 @@ async fn handle_semantic_locator(
         )
     };
 
-    let query = match strategy {
+    let locate_body = match strategy {
         // Like Playwright's getByLabel: match <label> associations AND
         // aria-label / aria-labelledby. Icon buttons and custom controls
         // are usually labelled via aria-label only.
@@ -8606,64 +8606,64 @@ async fn handle_semantic_locator(
                 format!("(s) => !!s && s.includes({value_json})")
             };
             format!(
-                r#"(() => {{
+                r#"(root) => {{
                 const matches = {matches_fn};
-                const label = Array.from(document.querySelectorAll('label')).find(el => matches(el.textContent));
+                const label = Array.from(root.querySelectorAll('label')).find(el => matches(el.textContent));
                 if (label) {{
                     const forId = label.getAttribute('for');
-                    const target = forId ? document.getElementById(forId) : label.querySelector('input,select,textarea');
+                    const target = forId ? root.getElementById(forId) : label.querySelector('input,select,textarea');
                     if (target) {{ target.setAttribute('data-agent-browser-located', 'true'); return true; }}
                 }}
-                const aria = Array.from(document.querySelectorAll('[aria-label]')).find(el => matches(el.getAttribute('aria-label')));
+                const aria = Array.from(root.querySelectorAll('[aria-label]')).find(el => matches(el.getAttribute('aria-label')));
                 if (aria) {{ aria.setAttribute('data-agent-browser-located', 'true'); return true; }}
-                const referenced = Array.from(document.querySelectorAll('[aria-labelledby]')).find(el => {{
+                const referenced = Array.from(root.querySelectorAll('[aria-labelledby]')).find(el => {{
                     const text = el.getAttribute('aria-labelledby').split(/\s+/)
-                        .map(id => {{ const r = document.getElementById(id); return r ? r.textContent : ''; }})
+                        .map(id => {{ const r = root.getElementById(id); return r ? r.textContent : ''; }})
                         .join(' ');
                     return matches(text);
                 }});
                 if (referenced) {{ referenced.setAttribute('data-agent-browser-located', 'true'); return true; }}
                 return false;
-            }})()"#,
+            }}"#,
             )
         }
         "placeholder" => format!(
-            r#"(() => {{
-                const el = document.querySelector('input[placeholder={val}], textarea[placeholder={val}]');
+            r#"(root) => {{
+                const el = root.querySelector('input[placeholder={val}], textarea[placeholder={val}]');
                 if (el) {{ el.setAttribute('data-agent-browser-located', 'true'); return true; }}
                 return false;
-            }})()"#,
+            }}"#,
             val = serde_json::to_string(value).unwrap_or_default(),
         ),
         "alttext" => format!(
-            r#"(() => {{
-                const el = document.querySelector('img[alt={val}], [alt={val}]');
+            r#"(root) => {{
+                const el = root.querySelector('img[alt={val}], [alt={val}]');
                 if (el) {{ el.setAttribute('data-agent-browser-located', 'true'); return true; }}
                 return false;
-            }})()"#,
+            }}"#,
             val = serde_json::to_string(value).unwrap_or_default(),
         ),
         "title" => format!(
-            r#"(() => {{
-                const el = document.querySelector('[title={val}]');
+            r#"(root) => {{
+                const el = root.querySelector('[title={val}]');
                 if (el) {{ el.setAttribute('data-agent-browser-located', 'true'); return true; }}
                 return false;
-            }})()"#,
+            }}"#,
             val = serde_json::to_string(value).unwrap_or_default(),
         ),
         "testid" => format!(
-            r#"(() => {{
-                const el = document.querySelector('[data-testid={val}]');
+            r#"(root) => {{
+                const el = root.querySelector('[data-testid={val}]');
                 if (el) {{ el.setAttribute('data-agent-browser-located', 'true'); return true; }}
                 return false;
-            }})()"#,
+            }}"#,
             val = serde_json::to_string(value).unwrap_or_default(),
         ),
         _ => {
             // "text" strategy
             format!(
-                r#"(() => {{
-                    const all = document.querySelectorAll('*');
+                r#"(root) => {{
+                    const all = root.querySelectorAll('*');
                     for (const el of all) {{
                         if (el.children.length === 0 && {match_fn}) {{
                             el.setAttribute('data-agent-browser-located', 'true');
@@ -8671,45 +8671,45 @@ async fn handle_semantic_locator(
                         }}
                     }}
                     return false;
-                }})()"#,
+                }}"#,
                 match_fn = match_fn,
             )
         }
     };
 
-    let result: super::cdp::types::EvaluateResult = mgr
-        .client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &super::cdp::types::EvaluateParams {
-                expression: query,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&session_id),
+    let located = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        let top_session = mgr.active_session_id()?.to_string();
+        eval_body_in_active_frame(
+            mgr,
+            state.active_frame_id.as_deref(),
+            &top_session,
+            &state.iframe_sessions,
+            &locate_body,
         )
-        .await?;
+        .await?
+    };
 
-    if !result
-        .result
-        .value
-        .as_ref()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    if !located.as_bool().unwrap_or(false) {
         return Err(format!("No element found by {} '{}'", strategy, value));
     }
 
     let selector = "[data-agent-browser-located='true']";
     let action_result = execute_subaction(cmd, state, selector).await;
 
-    if let Some(ref browser) = state.browser {
-        let _ = browser
-            .evaluate(
-                "document.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located')",
-                None,
+    // Clean up the marker in whichever document it was set in.
+    if let Some(mgr) = state.browser.as_ref() {
+        if let Ok(top_session) = mgr.active_session_id() {
+            let top_session = top_session.to_string();
+            let _ = eval_body_in_active_frame(
+                mgr,
+                state.active_frame_id.as_deref(),
+                &top_session,
+                &state.iframe_sessions,
+                "(root) => { root.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located'); }",
             )
             .await;
+        }
     }
 
     action_result

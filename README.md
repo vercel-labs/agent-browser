@@ -206,6 +206,8 @@ agent-browser find nth <n> <sel> <action> [value]     # Nth match
 
 **Options:** `--name <name>` (filter role by accessible name), `--exact` (exact, case-sensitive match; for `role` it applies to the accessible name, whose default is a case-insensitive substring)
 
+The `role`, `text`, `label`, `placeholder`, `alt`, `title`, and `testid` locators honor the current frame context. After selecting an iframe with `agent-browser frame`, use `agent-browser frame main` to return locator searches to the top document.
+
 **Examples:**
 
 ```bash
