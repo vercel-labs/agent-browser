@@ -385,6 +385,66 @@ fn format_a11y_target(target: &serde_json::Value) -> Option<String> {
 }
 
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
+    print_response_body(resp, action, opts);
+    // Notices and the tab-list-on-change section print for every rendering
+    // branch, including errors. JSON mode already carries both fields in the
+    // envelope.
+    if !opts.json {
+        print_notices(resp);
+        print_tabs_section(resp);
+    }
+}
+
+fn print_notices(resp: &Response) {
+    if let Some(ref notices) = resp.notices {
+        for notice in notices {
+            eprintln!("{} {}", color::warning_indicator(), notice);
+        }
+    }
+}
+
+fn print_tabs_section(resp: &Response) {
+    let Some(tabs) = resp.tabs.as_ref().and_then(|v| v.as_array()) else {
+        return;
+    };
+    println!("{}", color::dim(&format!("tabs ({}):", tabs.len())));
+    for tab in tabs {
+        let tab_id = tab.get("tabId").and_then(|v| v.as_str()).unwrap_or("?");
+        let label = tab.get("label").and_then(|v| v.as_str());
+        let title = tab.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let url = tab.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        let active = tab.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+        let crashed = tab
+            .get("crashed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let parent = tab.get("parentTabId").and_then(|v| v.as_str());
+        let marker = if active {
+            color::cyan("→")
+        } else {
+            " ".to_string()
+        };
+        let mut line = format!("{} [{}]", marker, tab_id);
+        if let Some(label) = label {
+            line.push_str(&format!(" {}", label));
+        }
+        if !title.is_empty() {
+            line.push_str(&format!(" {}", title));
+        }
+        if !url.is_empty() {
+            line.push_str(&format!(" - {}", url));
+        }
+        if let Some(parent) = parent {
+            line.push_str(&color::dim(&format!(" (opened by {})", parent)));
+        }
+        if crashed {
+            line.push_str(&format!(" {}", color::red("[crashed]")));
+        }
+        println!("{}", line);
+    }
+}
+
+fn print_response_body(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     if opts.json {
         if opts.content_boundaries {
             let mut json_val = serde_json::to_value(resp).unwrap_or_default();

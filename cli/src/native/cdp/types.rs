@@ -110,6 +110,9 @@ pub struct TargetInfo {
     pub url: String,
     pub attached: Option<bool>,
     pub browser_context_id: Option<String>,
+    /// Target id of the opener, present when this target was opened by
+    /// another page (window.open, target=_blank).
+    pub opener_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

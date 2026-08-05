@@ -37,6 +37,14 @@ pub struct Response {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// Tab list, present only when it changed since the previous response
+    /// and more than one tab is (or was) involved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tabs: Option<Value>,
+    /// One-shot notices about events the agent did not initiate (popup
+    /// opened, tab crashed or closed underneath, browser relaunched).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notices: Option<Vec<String>>,
 }
 
 #[allow(dead_code)]

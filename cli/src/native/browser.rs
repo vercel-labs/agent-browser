@@ -127,6 +127,10 @@ pub(crate) fn should_track_target(target: &TargetInfo) -> bool {
 
 fn update_page_target_info_in_pages(pages: &mut [PageInfo], target: &TargetInfo) -> bool {
     if let Some(page) = pages.iter_mut().find(|p| p.target_id == target.target_id) {
+        if page.crashed && page.url != target.url {
+            // The renderer navigated again — Chrome revived it.
+            page.crashed = false;
+        }
         page.url = target.url.clone();
         page.title = target.title.clone();
         page.target_type = target.target_type.clone();
@@ -220,6 +224,12 @@ pub struct PageInfo {
     pub url: String,
     pub title: String,
     pub target_type: String, // "page" or "webview"
+    /// Stable id of the tab that opened this one (from CDP `openerId`), for
+    /// popups and `target=_blank` tabs. None for agent-created tabs.
+    pub parent_tab_id: Option<u32>,
+    /// True once Target.targetCrashed fired for this tab. Cleared on
+    /// navigation (Chrome revives the renderer).
+    pub crashed: bool,
 }
 
 /// Canonical string form of a stable tab id: `t1`, `t2`, ... The `t` prefix
@@ -551,6 +561,8 @@ impl BrowserManager {
                 url: String::new(),
                 title: String::new(),
                 target_type: "page".to_string(),
+                parent_tab_id: None,
+                crashed: false,
             });
             manager.active_page_index = 0;
             manager.enable_domains_direct().await?;
@@ -620,6 +632,8 @@ impl BrowserManager {
                 url: "about:blank".to_string(),
                 title: String::new(),
                 target_type: "page".to_string(),
+                parent_tab_id: None,
+                crashed: false,
             });
             self.active_page_index = 0;
             self.enable_domains(&attach_result.session_id).await?;
@@ -647,6 +661,8 @@ impl BrowserManager {
                     url: target.url.clone(),
                     title: target.title.clone(),
                     target_type: target.target_type.clone(),
+                    parent_tab_id: None,
+                    crashed: false,
                 });
             }
 
@@ -1200,6 +1216,8 @@ impl BrowserManager {
             url: "about:blank".to_string(),
             title: String::new(),
             target_type: "page".to_string(),
+            parent_tab_id: None,
+            crashed: false,
         });
         self.active_page_index = 0;
         self.enable_domains(&attach_result.session_id).await?;
@@ -1236,16 +1254,64 @@ impl BrowserManager {
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                json!({
+                let mut tab = json!({
                     "tabId": format_tab_id(p.tab_id),
                     "label": p.label,
                     "title": p.title,
                     "url": p.url,
                     "type": p.target_type,
                     "active": i == self.active_page_index,
-                })
+                });
+                let obj = tab.as_object_mut().expect("literal object");
+                if let Some(parent) = p.parent_tab_id {
+                    obj.insert("parentTabId".to_string(), json!(format_tab_id(parent)));
+                }
+                if p.crashed {
+                    obj.insert("crashed".to_string(), json!(true));
+                }
+                tab
             })
             .collect()
+    }
+
+    /// Stable tab id for a CDP target id, if the target is tracked as a tab.
+    pub fn tab_id_for_target(&self, target_id: &str) -> Option<u32> {
+        self.pages
+            .iter()
+            .find(|p| p.target_id == target_id)
+            .map(|p| p.tab_id)
+    }
+
+    /// Mark a tab crashed (Target.targetCrashed). Returns the stable tab id
+    /// and whether it is the active tab, if the target is tracked.
+    pub fn mark_crashed(&mut self, target_id: &str) -> Option<(u32, bool)> {
+        let active_index = self.active_page_index;
+        self.pages
+            .iter_mut()
+            .enumerate()
+            .find(|(_, p)| p.target_id == target_id)
+            .map(|(i, p)| {
+                p.crashed = true;
+                (p.tab_id, i == active_index)
+            })
+    }
+
+    /// Order-sensitive fingerprint of everything `tab_list` renders. Used to
+    /// decide whether the tab list changed since the last response.
+    pub fn tabs_signature(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        self.active_page_index.hash(&mut h);
+        for p in &self.pages {
+            p.tab_id.hash(&mut h);
+            p.label.hash(&mut h);
+            p.url.hash(&mut h);
+            p.title.hash(&mut h);
+            p.crashed.hash(&mut h);
+            p.parent_tab_id.hash(&mut h);
+        }
+        h.finish()
     }
 
     /// Resolve a user-supplied `TabRef` (either `t<N>` or a label) to the
@@ -1342,6 +1408,8 @@ impl BrowserManager {
             url: target_url.to_string(),
             title: String::new(),
             target_type: "page".to_string(),
+            parent_tab_id: None,
+            crashed: false,
         });
         self.active_page_index = index;
 
@@ -2147,6 +2215,7 @@ mod tests {
             url: String::new(),
             attached: None,
             browser_context_id: None,
+            opener_id: None,
         };
 
         assert!(should_track_target(&target));
@@ -2161,6 +2230,7 @@ mod tests {
             url: "chrome://newtab/".to_string(),
             attached: None,
             browser_context_id: None,
+            opener_id: None,
         };
 
         assert!(!should_track_target(&target));
@@ -2176,6 +2246,8 @@ mod tests {
             url: String::new(),
             title: String::new(),
             target_type: "page".to_string(),
+            parent_tab_id: None,
+            crashed: false,
         }];
         let target = TargetInfo {
             target_id: "popup-1".to_string(),
@@ -2184,6 +2256,7 @@ mod tests {
             url: "https://example.com/popup".to_string(),
             attached: None,
             browser_context_id: None,
+            opener_id: None,
         };
 
         assert!(update_page_target_info_in_pages(&mut pages, &target));

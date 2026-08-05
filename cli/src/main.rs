@@ -1210,14 +1210,13 @@ fn main() {
             Ok(data) => connection::Response {
                 success: true,
                 data: Some(data),
-                error: None,
-                warning: None,
+                ..Default::default()
             },
             Err(e) => connection::Response {
                 success: false,
                 data: None,
                 error: Some(e),
-                warning: None,
+                ..Default::default()
             },
         };
         let output_opts = OutputOptions::from_flags(&flags);
@@ -2193,6 +2192,8 @@ mod tests {
             })),
             error: None,
             warning: None,
+            tabs: None,
+            notices: None,
         };
 
         let prompt = confirmation_prompt_from_response(&resp).unwrap();
