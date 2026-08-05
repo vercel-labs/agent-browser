@@ -2699,6 +2699,10 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "responsebody" => handle_responsebody(cmd, state).await,
         "waitfordownload" => handle_waitfordownload(cmd, state).await,
         "window_new" => handle_window_new(cmd, state).await,
+        "window_list" => handle_window_list(state).await,
+        "window_close" => handle_window_close(cmd, state).await,
+        "window_bounds" => handle_window_bounds(cmd, state).await,
+        "window_focus" => handle_window_focus(cmd, state).await,
         "diff_screenshot" => handle_diff_screenshot(cmd, state).await,
         "video_start" => handle_video_start(cmd, state).await,
         "video_stop" => handle_video_stop(state).await,
@@ -9446,6 +9450,228 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
     Ok(json!({
         "tabId": super::browser::format_tab_id(tab_id),
         "total": total,
+    }))
+}
+
+/// Browser-level `Browser.getWindowForTarget`: (windowId, bounds).
+/// `bounds` carries left/top/width/height/windowState per CDP.
+async fn window_for_target(
+    client: &super::cdp::client::CdpClient,
+    target_id: &str,
+) -> Result<(i64, Value), String> {
+    let result = client
+        .send_command(
+            "Browser.getWindowForTarget",
+            Some(json!({ "targetId": target_id })),
+            None,
+        )
+        .await?;
+    let window_id = result
+        .get("windowId")
+        .and_then(|v| v.as_i64())
+        .ok_or("Browser.getWindowForTarget returned no windowId")?;
+    let bounds = result.get("bounds").cloned().unwrap_or(Value::Null);
+    Ok((window_id, bounds))
+}
+
+/// Resolve an optional `tab` param (`t<N>` or label) to a tracked page,
+/// defaulting to the active page.
+fn resolve_tab_param(
+    cmd: &Value,
+    mgr: &super::browser::BrowserManager,
+) -> Result<super::browser::PageInfo, String> {
+    match cmd.get("tab").and_then(|v| v.as_str()) {
+        Some(tab_ref_str) => {
+            let tab_ref = super::browser::TabRef::parse(tab_ref_str)?;
+            let tab_id = mgr.resolve_tab_ref(&tab_ref)?;
+            mgr.pages_list()
+                .into_iter()
+                .find(|p| p.tab_id == tab_id)
+                .ok_or_else(|| format!("Tab ID {} not found", tab_id))
+        }
+        None => mgr
+            .active_page()
+            .cloned()
+            .ok_or_else(|| "No active page".to_string()),
+    }
+}
+
+async fn handle_window_list(state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let active_tab = mgr.active_tab_id();
+    // Group the flat tab list by OS window. Insertion order = first tab seen.
+    let mut window_order: Vec<i64> = Vec::new();
+    let mut window_bounds: HashMap<i64, Value> = HashMap::new();
+    let mut window_tabs: HashMap<i64, Vec<Value>> = HashMap::new();
+    for page in mgr.pages_list() {
+        // Direct-page providers and webviews may not support window lookup;
+        // group those under windowId -1 rather than failing the listing.
+        let (window_id, bounds) = window_for_target(&mgr.client, &page.target_id)
+            .await
+            .unwrap_or((-1, Value::Null));
+        if !window_order.contains(&window_id) {
+            window_order.push(window_id);
+            window_bounds.insert(window_id, bounds);
+        }
+        window_tabs.entry(window_id).or_default().push(json!({
+            "tabId": super::browser::format_tab_id(page.tab_id),
+            "label": page.label,
+            "url": page.url,
+            "active": Some(page.tab_id) == active_tab,
+        }));
+    }
+    let windows: Vec<Value> = window_order
+        .into_iter()
+        .map(|wid| {
+            let bounds = window_bounds.remove(&wid).unwrap_or(Value::Null);
+            let tabs = window_tabs.remove(&wid).unwrap_or_default();
+            let has_active = tabs
+                .iter()
+                .any(|t| t.get("active").and_then(|v| v.as_bool()).unwrap_or(false));
+            json!({
+                "windowId": wid,
+                "bounds": bounds,
+                "active": has_active,
+                "tabs": tabs,
+            })
+        })
+        .collect();
+    Ok(json!({ "windows": windows }))
+}
+
+async fn handle_window_bounds(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let page = mgr.active_page().ok_or("No active page")?;
+    let (window_id, current) = window_for_target(&mgr.client, &page.target_id).await?;
+
+    let bounds = if let Some(window_state) = cmd.get("windowState").and_then(|v| v.as_str()) {
+        json!({ "windowState": window_state })
+    } else {
+        // Chrome rejects size changes while minimized/maximized/fullscreen;
+        // drop back to normal first when needed.
+        let current_state = current
+            .get("windowState")
+            .and_then(|v| v.as_str())
+            .unwrap_or("normal");
+        if current_state != "normal" {
+            mgr.client
+                .send_command(
+                    "Browser.setWindowBounds",
+                    Some(json!({
+                        "windowId": window_id,
+                        "bounds": { "windowState": "normal" },
+                    })),
+                    None,
+                )
+                .await?;
+        }
+        let mut bounds = json!({
+            "windowState": "normal",
+            "width": cmd.get("width").and_then(|v| v.as_i64()).unwrap_or(1280),
+            "height": cmd.get("height").and_then(|v| v.as_i64()).unwrap_or(720),
+        });
+        let obj = bounds.as_object_mut().expect("literal object");
+        if let Some(left) = cmd.get("left").and_then(|v| v.as_i64()) {
+            obj.insert("left".to_string(), json!(left));
+        }
+        if let Some(top) = cmd.get("top").and_then(|v| v.as_i64()) {
+            obj.insert("top".to_string(), json!(top));
+        }
+        bounds
+    };
+
+    mgr.client
+        .send_command(
+            "Browser.setWindowBounds",
+            Some(json!({ "windowId": window_id, "bounds": bounds })),
+            None,
+        )
+        .await?;
+
+    Ok(json!({ "windowId": window_id, "bounds": bounds }))
+}
+
+async fn handle_window_focus(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let page = resolve_tab_param(cmd, mgr)?;
+    mgr.client
+        .send_command("Page.bringToFront", None, Some(&page.session_id))
+        .await?;
+    let window_id = window_for_target(&mgr.client, &page.target_id)
+        .await
+        .map(|(wid, _)| wid)
+        .ok();
+    Ok(json!({
+        "tabId": super::browser::format_tab_id(page.tab_id),
+        "windowId": window_id,
+        // Raising a window shows that tab to a human watching the display;
+        // the agent's own active tab is deliberately unchanged.
+        "activeTabUnchanged": true,
+    }))
+}
+
+async fn handle_window_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let (window_id, doomed, active_was_closed) = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        let anchor = resolve_tab_param(cmd, mgr)?;
+        let (window_id, _) = window_for_target(&mgr.client, &anchor.target_id).await?;
+        let mut doomed: Vec<super::browser::PageInfo> = Vec::new();
+        for page in mgr.pages_list() {
+            let (wid, _) = window_for_target(&mgr.client, &page.target_id)
+                .await
+                .unwrap_or((-1, Value::Null));
+            if wid == window_id {
+                doomed.push(page);
+            }
+        }
+        if doomed.len() >= mgr.page_count() {
+            return Err("Cannot close the last window".to_string());
+        }
+        let active_tab = mgr.active_tab_id();
+        let active_was_closed = doomed.iter().any(|p| Some(p.tab_id) == active_tab);
+        (window_id, doomed, active_was_closed)
+    };
+
+    let mut closed_tabs: Vec<String> = Vec::new();
+    for page in &doomed {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        let _ = mgr
+            .client
+            .send_command(
+                "Target.closeTarget",
+                Some(json!({ "targetId": page.target_id })),
+                None,
+            )
+            .await;
+        // Remove synchronously so the drain path doesn't announce our own
+        // window close as an external tab death.
+        mgr.remove_page_by_target_id(&page.target_id);
+        closed_tabs.push(super::browser::format_tab_id(page.tab_id));
+    }
+
+    if active_was_closed {
+        state.ref_map.clear();
+        state.iframe_sessions.clear();
+        state.active_frame_id = None;
+    }
+
+    let (new_active, remaining) = {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        mgr.update_active_page_if_needed();
+        if let Ok(session_id) = mgr.active_session_id().map(String::from) {
+            mgr.enable_domains_pub(&session_id).await?;
+        }
+        (
+            mgr.active_tab_id().map(super::browser::format_tab_id),
+            mgr.page_count(),
+        )
+    };
+
+    Ok(json!({
+        "windowId": window_id,
+        "closedTabs": closed_tabs,
+        "activeTab": new_active,
+        "total": remaining,
     }))
 }
 

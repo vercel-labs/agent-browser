@@ -1094,6 +1094,27 @@ fn main() {
         return;
     }
 
+    // Handle restart client-side: recovery for a wedged daemon ("CDP
+    // response channel closed") that cannot answer a graceful shutdown over
+    // its own socket. Kills the daemon process and cleans up its files; the
+    // next command starts a fresh daemon.
+    if clean.first().map(|s| s.as_str()) == Some("restart") {
+        connection::kill_stale_daemon(&flags.session);
+        if flags.json {
+            print_json_value(json!({
+                "success": true,
+                "data": { "restarted": true, "session": flags.session },
+            }));
+        } else {
+            println!(
+                "{} Daemon for session `{}` killed and cleaned up; the next command starts a fresh one",
+                color::green("✓"),
+                flags.session
+            );
+        }
+        return;
+    }
+
     // Handle close --all: close all active sessions
     if matches!(
         clean.first().map(|s| s.as_str()),

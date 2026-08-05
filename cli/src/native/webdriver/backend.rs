@@ -129,6 +129,10 @@ pub const WEBDRIVER_UNSUPPORTED_ACTIONS: &[&str] = &[
     "network",
     "har_start",
     "har_stop",
+    "window_list",
+    "window_close",
+    "window_bounds",
+    "window_focus",
 ];
 
 #[cfg(test)]

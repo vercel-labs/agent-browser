@@ -712,7 +712,7 @@ fn daemon_version_matches(session: &str) -> bool {
 }
 
 /// Kill a running daemon by reading its PID file and sending a kill signal.
-fn kill_stale_daemon(session: &str) {
+pub fn kill_stale_daemon(session: &str) {
     // Remove the socket first so no new connections reach the old daemon
     #[cfg(unix)]
     {
