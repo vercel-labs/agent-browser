@@ -926,9 +926,25 @@ impl DaemonState {
         }
 
         // Remove destroyed targets
+        let mut removed_tracked_page = false;
         for target_id in &drained.destroyed_targets {
             if let Some(ref mut mgr) = self.browser {
-                mgr.remove_page_by_target_id(target_id);
+                removed_tracked_page |= mgr.remove_page_by_target_id(target_id);
+            }
+        }
+
+        // Tab closes that bypass daemon commands (window.close, crashes,
+        // external CDP) only surface here, via the drain. Without this the
+        // stream keeps targeting the dead session and the dashboard keeps
+        // showing the closed tab until some later command re-syncs it.
+        if removed_tracked_page {
+            if let Some(ref server) = self.stream_server {
+                if let Some(ref mgr) = self.browser {
+                    server.broadcast_tabs(&mgr.tab_list()).await;
+                    let session_id = mgr.active_session_id().ok().map(|s| s.to_string());
+                    server.set_cdp_session_id(session_id).await;
+                    server.notify_client_changed();
+                }
             }
         }
 
