@@ -15,6 +15,7 @@ import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
 import { get } from 'https';
 import { execSync } from 'child_process';
+import { verifyChecksum } from './verify-checksum.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
@@ -140,6 +141,11 @@ async function main() {
   try {
     await downloadFile(DOWNLOAD_URL, binaryPath);
 
+    // Verify integrity before making the binary executable. A mismatch means the
+    // downloaded bytes are not what this package expects (corrupted download or a
+    // tampered release artifact), so bail out and leave no executable behind.
+    verifyChecksum(binaryPath, binaryName, version);
+
     // Make executable on Unix
     if (platform() !== 'win32') {
       chmodSync(binaryPath, 0o755);
@@ -147,6 +153,11 @@ async function main() {
 
     console.log(`✓ Downloaded native binary: ${binaryName}`);
   } catch (err) {
+    if (err.code === 'ERR_CHECKSUM_MISMATCH') {
+      // Integrity failure is a hard stop, not a soft "couldn't download".
+      console.error(`✗ ${err.message}`);
+      process.exit(1);
+    }
     console.log(`Could not download native binary: ${err.message}`);
     console.log('');
     console.log('To build the native binary locally:');
