@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useAtomValue, useSetAtom } from "jotai/react";
+import { useAtom, useAtomValue, useSetAtom } from "jotai/react";
 import { ArrowLeft, ArrowRight, Camera, Circle, FileCode, Maximize, Moon, RotateCw, Smartphone, Square, Sun, Wifi, WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { execCommand, sessionArgs } from "@/lib/exec";
@@ -42,6 +42,7 @@ import {
   sendInputAtom,
 } from "@/store/stream";
 import { activeSessionNameAtom, activePortAtom } from "@/store/sessions";
+import { actionErrorAtom, execErrorText, reportActionErrorAtom } from "@/store/action-error";
 
 const SCREENCAST_ENGINES = new Set(["chrome"]);
 
@@ -133,6 +134,7 @@ export function Viewport() {
   const sessionName = useAtomValue(activeSessionNameAtom);
   const streamPort = useAtomValue(activePortAtom);
   const sendInput = useSetAtom(sendInputAtom);
+  const [actionError, setActionError] = useAtom(actionErrorAtom);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -184,9 +186,16 @@ export function Viewport() {
     return () => ro.disconnect();
   }, []);
 
+  const reportActionError = useSetAtom(reportActionErrorAtom);
   const runCmd = useCallback(
-    (...args: string[]) => execCommand(sessionArgs(sessionName, ...args)),
-    [sessionName],
+    async (...args: string[]) => {
+      const result = await execCommand(sessionArgs(sessionName, ...args));
+      if (!result.success) {
+        reportActionError(execErrorText(result) || `Action failed: ${args.join(" ")}`);
+      }
+      return result;
+    },
+    [sessionName, reportActionError],
   );
 
   const handleNavigate = useCallback(async () => {
@@ -398,7 +407,7 @@ export function Viewport() {
   }, [dispatchKey]);
 
   return (
-    <div ref={containerRef} className="flex h-full flex-col">
+    <div ref={containerRef} className="relative flex h-full flex-col">
       {browserConnected && (
         <>
           <div className="flex shrink-0 items-center gap-1.5 px-2 py-1.5">
@@ -726,6 +735,15 @@ export function Viewport() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {actionError && (
+        <div className="absolute bottom-3 right-3 z-50 flex items-center gap-2 rounded-md bg-destructive px-3 py-2 text-xs text-destructive-foreground shadow-lg">
+          <span className="max-w-md truncate">{actionError}</span>
+          <button type="button" onClick={() => setActionError(null)} className="shrink-0">
+            ×
+          </button>
+        </div>
+      )}
     </div>
   );
 }

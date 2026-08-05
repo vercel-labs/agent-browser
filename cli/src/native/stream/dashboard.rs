@@ -681,6 +681,21 @@ async fn read_post_body(stream: &mut tokio::net::TcpStream, initial: &[u8], n: u
     String::from_utf8(body).unwrap_or_default()
 }
 
+/// Path used to spawn the CLI from the dashboard server. On Linux,
+/// /proc/self/exe stays executable after the binary on disk is replaced
+/// (dev rebuilds, package upgrades); the original path would ENOENT and
+/// silently break every dashboard action.
+fn self_exe() -> Result<std::path::PathBuf, String> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok(std::path::PathBuf::from("/proc/self/exe"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::env::current_exe().map_err(|e| format!("Cannot resolve executable: {}", e))
+    }
+}
+
 async fn exec_cli(body: &str) -> Result<String, String> {
     let parsed: Value = serde_json::from_str(body).map_err(|e| format!("Invalid JSON: {}", e))?;
     let args: Vec<String> = parsed
@@ -695,19 +710,22 @@ async fn exec_cli(body: &str) -> Result<String, String> {
         return Err("Empty args array".to_string());
     }
 
-    let exe = std::env::current_exe().map_err(|e| format!("Cannot resolve executable: {}", e))?;
+    let exe = self_exe()?;
 
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.args(&args)
         .arg("--json")
         .env_remove("AGENT_BROWSER_DASHBOARD")
         .env_remove("AGENT_BROWSER_DASHBOARD_PORT")
-        .env_remove("AGENT_BROWSER_STREAM_PORT");
+        .env_remove("AGENT_BROWSER_STREAM_PORT")
+        .kill_on_drop(true);
 
-    let output = cmd
-        .output()
-        .await
-        .map_err(|e| format!("Failed to execute: {}", e))?;
+    // A wedged session daemon must not hang the dashboard action forever.
+    let output = match tokio::time::timeout(std::time::Duration::from_secs(120), cmd.output()).await
+    {
+        Ok(result) => result.map_err(|e| format!("Failed to execute: {}", e))?,
+        Err(_) => return Err("Command timed out after 120s".to_string()),
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -777,7 +795,7 @@ pub(super) async fn spawn_session(body: &str) -> Result<String, String> {
         return Err("Session name must be 1-64 characters".to_string());
     }
 
-    let exe = std::env::current_exe().map_err(|e| format!("Cannot resolve executable: {}", e))?;
+    let exe = self_exe()?;
 
     let mut cmd = tokio::process::Command::new(&exe);
     cmd.arg("open")
