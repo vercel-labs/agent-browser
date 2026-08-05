@@ -255,6 +255,44 @@ fn active_frame_scope_may_have_changed(drained: &DrainedEvents) -> bool {
         || !drained.destroyed_targets.is_empty()
 }
 
+/// Register a page the agent did not create (popup, `target=_blank`, tab
+/// opened by a human in the same browser). Unless follow-popups is enabled
+/// the page is added WITHOUT stealing the active tab. Returns the notice for
+/// the next response and whether the new page became active.
+fn register_uninvited_page(
+    mgr: &mut super::browser::BrowserManager,
+    page: super::browser::PageInfo,
+    tab_id: u32,
+    parent_tab_id: Option<u32>,
+    url: &str,
+    follow_popups: bool,
+) -> (String, bool) {
+    let tab = super::browser::format_tab_id(tab_id);
+    let opener = parent_tab_id
+        .map(|p| format!(" (opened by {})", super::browser::format_tab_id(p)))
+        .unwrap_or_default();
+    let shown_url = if url.is_empty() { "about:blank" } else { url };
+    if follow_popups {
+        mgr.add_page(page);
+        (
+            format!(
+                "New tab {}{} opened and is now active (AGENT_BROWSER_FOLLOW_POPUPS): {} — element refs were cleared, re-snapshot before using @e refs",
+                tab, opener, shown_url
+            ),
+            true,
+        )
+    } else {
+        mgr.add_page_background(page);
+        (
+            format!(
+                "New tab {}{} opened in background: {} — switch with `tab {}`",
+                tab, opener, shown_url, tab
+            ),
+            false,
+        )
+    }
+}
+
 /// Compute a hash of the [`LaunchOptions`] fields that require a browser
 /// relaunch when changed (baked into the Chrome process at startup).
 ///
@@ -447,6 +485,10 @@ pub struct DaemonState {
     /// (popup opened, active tab crashed/closed, browser relaunched).
     /// Drained into the `notices` field of the next response.
     pub pending_notices: Vec<String>,
+    /// When true (AGENT_BROWSER_FOLLOW_POPUPS), a popup/`target=_blank` tab
+    /// becomes the active tab on open — the pre-0.32.3-tako.4 behavior —
+    /// with an announcement. Default: popups open in the background.
+    pub follow_popups: bool,
     /// (signature, page_count) of the tab list as of the last response, used
     /// to render the tab list into responses only when it changed.
     last_tabs_state: Option<(u64, usize)>,
@@ -541,6 +583,10 @@ impl DaemonState {
             active_provider_connection: false,
             confirmed_policy_actions: HashSet::new(),
             pending_notices: Vec::new(),
+            follow_popups: matches!(
+                env::var("AGENT_BROWSER_FOLLOW_POPUPS").as_deref(),
+                Ok("1" | "true" | "yes")
+            ),
             last_tabs_state: None,
         }
     }
@@ -1007,6 +1053,9 @@ impl DaemonState {
             let filter = self.domain_filter.read().await.clone();
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
+            let follow_popups = self.follow_popups;
+            let mut popup_notice: Option<String> = None;
+            let mut popup_activated = false;
             let setup_result = if let Some(ref mut mgr) = self.browser {
                 async {
                     mgr.prepare_domains_pub(page_sid).await?;
@@ -1039,20 +1088,31 @@ impl DaemonState {
                         mgr.update_page_target_info(target_info);
                     } else {
                         let tab_id = mgr.assign_tab_id();
-                        mgr.add_page(super::browser::PageInfo {
+                        let parent_tab_id = target_info
+                            .opener_id
+                            .as_deref()
+                            .and_then(|o| mgr.tab_id_for_target(o));
+                        let page = super::browser::PageInfo {
                             tab_id,
                             label: None,
                             target_id: target_info.target_id.clone(),
                             session_id: page_sid.clone(),
-                            url: page_url,
+                            url: page_url.clone(),
                             title: target_info.title.clone(),
                             target_type: target_info.target_type.clone(),
-                            parent_tab_id: target_info
-                                .opener_id
-                                .as_deref()
-                                .and_then(|o| mgr.tab_id_for_target(o)),
+                            parent_tab_id,
                             crashed: false,
-                        });
+                        };
+                        let (notice, activated) = register_uninvited_page(
+                            mgr,
+                            page,
+                            tab_id,
+                            parent_tab_id,
+                            &page_url,
+                            follow_popups,
+                        );
+                        popup_notice = Some(notice);
+                        popup_activated = activated;
                     }
 
                     mgr.resume_if_waiting_pub(page_sid).await
@@ -1061,6 +1121,13 @@ impl DaemonState {
             } else {
                 Ok(())
             };
+            if let Some(notice) = popup_notice {
+                self.pending_notices.push(notice);
+            }
+            if popup_activated {
+                // The active tab changed underneath any existing snapshot.
+                self.ref_map.clear();
+            }
             if let Err(error) = setup_result {
                 if controls_active {
                     return close_after_network_control_failure(self, error).await;
@@ -1131,6 +1198,9 @@ impl DaemonState {
             let filter = self.domain_filter.read().await.clone();
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
+            let follow_popups = self.follow_popups;
+            let mut popup_notice: Option<String> = None;
+            let mut popup_activated = false;
             let setup_result = if let Some(ref mut mgr) = self.browser {
                 async {
                     let attach: AttachToTargetResult = mgr
@@ -1171,27 +1241,45 @@ impl DaemonState {
                     }
 
                     let tab_id = mgr.assign_tab_id();
-                    mgr.add_page(super::browser::PageInfo {
+                    let parent_tab_id = te
+                        .target_info
+                        .opener_id
+                        .as_deref()
+                        .and_then(|o| mgr.tab_id_for_target(o));
+                    let page = super::browser::PageInfo {
                         tab_id,
                         label: None,
                         target_id: te.target_info.target_id.clone(),
                         session_id: attach.session_id.clone(),
-                        url: page_url,
+                        url: page_url.clone(),
                         title: te.target_info.title.clone(),
                         target_type: te.target_info.target_type.clone(),
-                        parent_tab_id: te
-                            .target_info
-                            .opener_id
-                            .as_deref()
-                            .and_then(|o| mgr.tab_id_for_target(o)),
+                        parent_tab_id,
                         crashed: false,
-                    });
+                    };
+                    let (notice, activated) = register_uninvited_page(
+                        mgr,
+                        page,
+                        tab_id,
+                        parent_tab_id,
+                        &page_url,
+                        follow_popups,
+                    );
+                    popup_notice = Some(notice);
+                    popup_activated = activated;
                     mgr.resume_if_waiting_pub(&attach.session_id).await
                 }
                 .await
             } else {
                 Ok(())
             };
+            if let Some(notice) = popup_notice {
+                self.pending_notices.push(notice);
+            }
+            if popup_activated {
+                // The active tab changed underneath any existing snapshot.
+                self.ref_map.clear();
+            }
             if let Err(error) = setup_result {
                 if controls_active {
                     return close_after_network_control_failure(self, error).await;

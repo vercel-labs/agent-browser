@@ -1845,6 +1845,14 @@ impl BrowserManager {
         self.active_page_index = index;
     }
 
+    /// Register a page WITHOUT making it the active tab. Used for targets the
+    /// agent did not create (popups, `target=_blank`, tabs opened by a human
+    /// in the same browser window) so they never silently steal focus. If no
+    /// pages existed before, index 0 is the new page and it is active anyway.
+    pub fn add_page_background(&mut self, page: PageInfo) {
+        self.pages.push(page);
+    }
+
     pub fn update_page_target_info(&mut self, target: &TargetInfo) -> bool {
         update_page_target_info_in_pages(&mut self.pages, target)
     }
