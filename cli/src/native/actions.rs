@@ -992,10 +992,31 @@ impl DaemonState {
             }
         }
 
-        // Remove destroyed targets
+        // Remove destroyed targets. If the ACTIVE tab died, announce the
+        // retarget — the old behavior silently re-pointed the next command
+        // at a neighboring tab — and drop refs minted on the dead tab.
         for target_id in &drained.destroyed_targets {
             if let Some(ref mut mgr) = self.browser {
-                mgr.remove_page_by_target_id(target_id);
+                if let Some((removed, was_active)) = mgr.remove_page_by_target_id(target_id) {
+                    if was_active {
+                        let removed_id = super::browser::format_tab_id(removed.tab_id);
+                        let notice = match mgr.active_page() {
+                            Some(next) => format!(
+                                "Active tab {} ({}) was closed externally — now on {} ({})",
+                                removed_id,
+                                removed.url,
+                                super::browser::format_tab_id(next.tab_id),
+                                next.url
+                            ),
+                            None => format!(
+                                "Active tab {} ({}) was closed externally — no tabs remain; the next page command opens a fresh about:blank tab",
+                                removed_id, removed.url
+                            ),
+                        };
+                        self.pending_notices.push(notice);
+                        self.ref_map.clear();
+                    }
+                }
             }
         }
 
@@ -2435,6 +2456,14 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 return error_response(&id, &format!("Auto-launch failed: {}", e));
             }
             lifecycle_launched = true;
+            if lifecycle_relaunched_browser {
+                // The old process's tabs are gone and ids restart at t1; a
+                // model still holding t3 would only see "Tab t3 not found".
+                state.ref_map.clear();
+                state.pending_notices.push(
+                    "Browser was relaunched — previous tab ids and element refs are invalid; tab ids restart at t1".to_string(),
+                );
+            }
         } else {
             lifecycle_reused = true;
         }

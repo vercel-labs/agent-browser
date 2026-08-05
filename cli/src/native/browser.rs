@@ -1857,11 +1857,16 @@ impl BrowserManager {
         update_page_target_info_in_pages(&mut self.pages, target)
     }
 
-    pub fn remove_page_by_target_id(&mut self, target_id: &str) {
-        if let Some(pos) = self.pages.iter().position(|p| p.target_id == target_id) {
-            self.pages.remove(pos);
-            self.update_active_page_after_removal(pos);
-        }
+    /// Remove a page whose target was destroyed externally (tab closed by
+    /// the page itself, a human, or a crash-reap). Returns the removed page
+    /// and whether it was the active tab, so callers can announce the
+    /// retarget instead of the next command silently running elsewhere.
+    pub fn remove_page_by_target_id(&mut self, target_id: &str) -> Option<(PageInfo, bool)> {
+        let pos = self.pages.iter().position(|p| p.target_id == target_id)?;
+        let was_active = pos == self.active_page_index;
+        let removed = self.pages.remove(pos);
+        self.update_active_page_after_removal(pos);
+        Some((removed, was_active))
     }
 
     pub fn has_target(&self, target_id: &str) -> bool {
@@ -1875,6 +1880,11 @@ impl BrowserManager {
     /// Returns the stable `tab_id` of the currently active page, if any.
     pub fn active_tab_id(&self) -> Option<u32> {
         self.pages.get(self.active_page_index).map(|p| p.tab_id)
+    }
+
+    /// Returns the currently active page, if any.
+    pub fn active_page(&self) -> Option<&PageInfo> {
+        self.pages.get(self.active_page_index)
     }
 
     /// Returns true if a tab with the given stable `tab_id` is still open.
