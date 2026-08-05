@@ -1437,7 +1437,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_STATE_LOAD,
             "State load",
-            "Load cookies and storage state.",
+            "Load cookies and storage state. Storage write failures return secret-safe context.",
             json!({ "path": { "type": "string" } }),
             &["path"],
         ),
