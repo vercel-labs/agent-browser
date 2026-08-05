@@ -21,6 +21,16 @@ agent-browser snapshot -i       # 4. Re-snapshot after any page change
 
 Refs (`@e1`, `@e2`, ...) are assigned fresh on every snapshot. They become **stale the moment the page changes** — after clicks that navigate, form submits, dynamic re-renders, dialog opens. Always re-snapshot before your next ref interaction.
 
+## Always use your own session
+
+Before your first command, set a named session for the whole task:
+
+```bash
+export AGENT_BROWSER_SESSION="$(agent-browser session id --scope worktree --prefix task)"
+```
+
+The default (unnamed) session is a single shared browser: it is shared with every other agent on the machine and it persists across conversations, so working in it can hijack another agent's page mid-task or navigate away from something the human left open. Every example below assumes a named session is active. See [Run multiple browsers in parallel](#run-multiple-browsers-in-parallel) and `references/session-management.md`.
+
 ## Quickstart
 
 ```bash
@@ -287,7 +297,7 @@ agent-browser tab t2                   # switch to tab t2
 agent-browser tab close t2             # close tab t2
 ```
 
-Stable `tabId`s mean `t2` points at the same tab across commands even when other tabs open or close. After switching, refs from a prior snapshot on a different tab no longer apply — re-snapshot.
+Stable `tabId`s mean `t2` points at the same tab across commands even when other tabs open or close. After switching, refs from a prior snapshot on a different tab no longer apply — re-snapshot. `tab list --json` also reports each tab's CDP `targetId`, accepted anywhere a tab ref is accepted; target ids stay stable across daemon restarts, unlike `t<N>` ids.
 
 Switching has two special cases worth knowing:
 
@@ -306,6 +316,8 @@ agent-browser --session b fill @e1 "bob@test.com"
 ```
 
 `AGENT_BROWSER_SESSION=myapp` sets the default session for the current shell.
+
+When several sessions share one Chrome over `--cdp <port>`, add `--pin-tab` so each session sticks to its own tab. Every session remembers its bound tab across daemon restarts; with `--pin-tab` a command whose bound tab was closed fails with a `tab_gone` error (`"code": "tab_gone"` in `--json`) instead of acting on another session's tab. Recover with `tab new <url>` or pick a tab from `tab list`. The flag is sticky per session, so pass it once (`--no-pin-tab` turns it off again). See `references/session-management.md` for details.
 
 ### Mock network requests
 

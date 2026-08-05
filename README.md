@@ -344,6 +344,8 @@ agent-browser click @e3              # click uses docs's refs
 agent-browser tab close docs         # close by label
 ```
 
+`tab list --json` also reports each tab's CDP `targetId`, and target ids are accepted anywhere a tab ref is accepted (`tab <targetId>`, `tab close <targetId>`). Unlike `t<N>` ids, which are per-daemon counters, target ids stay stable across daemon restarts, so they're the right handle for scripts coordinating multiple sessions on one browser.
+
 Switching to a tab discarded by Chrome's Memory Saver reactivates it, since a discarded tab has no renderer to drive. Reactivation reloads the discarded page and resets its unsaved state, and the switch result reports `"revived": true`. A tab whose page is paused by a JavaScript dialog is alive rather than discarded, so the switch leaves it untouched and reports `"dialogBlocked": true`; resolve the dialog with `dialog accept` or `dialog dismiss` before interacting. Closing the active tab onto a discarded successor revives it the same way and reports `"activeTabRevived": true`.
 
 ### Frames
@@ -661,6 +663,27 @@ Each session has its own:
 - Navigation history
 - Authentication state
 
+### Tab pinning
+
+When several sessions share one Chrome over `--cdp`, each session remembers which tab it is bound to (by CDP target id, persisted across daemon restarts). A restarted daemon reattaches to the session's own tab instead of adopting whatever tab happens to be active, which is usually another session's.
+
+By default, if the bound tab is closed the session falls back to a neighboring tab (legacy behavior). Pass `--pin-tab` (or set `AGENT_BROWSER_PIN_TAB=1`) to make the binding strict:
+
+```bash
+# Two agents sharing one Chrome, each pinned to its own tab
+agent-browser --session agent1 --cdp 9222 --pin-tab open site-a.com
+agent-browser --session agent2 --cdp 9222 --pin-tab open site-b.com
+```
+
+With `--pin-tab`:
+
+- Attaching with no binding opens a fresh tab instead of adopting an existing one
+- If the bound tab is closed, commands fail with a `tab_gone` error (exit code 1; `--json` responses carry `"code": "tab_gone"`) instead of silently acting on another tab
+- `tab list`, `tab new`, and `tab <ref>` still work in that state, so an agent can recover by binding a new tab
+- Tabs opened by other sessions or the user never steal the pinned session's active tab
+
+The flag is sticky per session: pass it once and later commands and daemon restarts keep the strict semantics. Pass `--no-pin-tab` to explicitly turn the pin off again.
+
 ## Chrome Profile Reuse
 
 The fastest way to use your existing login state: pass a Chrome profile name to `--profile`:
@@ -941,6 +964,8 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--webgpu` | Enable WebGPU; SwiftShader software Vulkan on Linux, no GPU required (or `AGENT_BROWSER_WEBGPU` env) |
 | `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) |
 | `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
+| `--pin-tab` | Pin the session to its bound tab; fail with `tab_gone` instead of falling back to another tab (or `AGENT_BROWSER_PIN_TAB` env) |
+| `--no-pin-tab` | Disable a sticky pin previously enabled with `--pin-tab` |
 | `--color-scheme <scheme>` | Color scheme: `dark`, `light`, `no-preference` (or `AGENT_BROWSER_COLOR_SCHEME` env) |
 | `--download-path <path>` | Default download directory (or `AGENT_BROWSER_DOWNLOAD_PATH` env) |
 | `--content-boundaries` | Wrap page output in boundary markers for LLM safety (or `AGENT_BROWSER_CONTENT_BOUNDARIES` env) |

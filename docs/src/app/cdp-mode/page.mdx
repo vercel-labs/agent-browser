@@ -57,6 +57,27 @@ This is useful when:
 - You want a zero-configuration connection to your existing browser
 - You don't want to track which port Chrome is using
 
+## Tab pinning
+
+When several sessions share one browser over CDP, each session remembers which tab it is bound to (by CDP target id, persisted across daemon restarts). A restarted daemon reattaches to the session's own tab instead of adopting whatever tab is currently active, which in a shared browser is usually another session's.
+
+Pass `--pin-tab` (or set `AGENT_BROWSER_PIN_TAB=1`) to make the binding strict:
+
+```bash
+# Two agents sharing one Chrome, each pinned to its own tab
+agent-browser --session agent1 --cdp 9222 --pin-tab open https://site-a.com
+agent-browser --session agent2 --cdp 9222 --pin-tab open https://site-b.com
+```
+
+With `--pin-tab`:
+
+- Attaching with no binding opens a fresh tab instead of adopting an existing one
+- If the bound tab is closed, commands fail with a `tab_gone` error instead of silently acting on another tab; with `--json` the response carries <code>"code": "tab_gone"</code>
+- `tab list`, `tab new`, and `tab <ref>` still work in that state, so an agent can recover by binding a new tab
+- Tabs opened by other sessions or the user never steal the pinned session's active tab
+
+The flag is sticky per session: pass it once and later commands and daemon restarts keep the strict semantics. Pass `--no-pin-tab` to explicitly turn the pin off again. See [Sessions](/sessions) for the multi-session workflow and [Commands](/commands) for tab refs by CDP target id.
+
 ## Color scheme
 
 Use `--color-scheme` to set a persistent preference when connecting via CDP:
@@ -104,6 +125,8 @@ This enables control of:
     <tr><td><code>--headed</code></td><td>Show browser window</td></tr>
     <tr><td><code>{"--cdp <port|url>"}</code></td><td>CDP connection (port or WebSocket URL)</td></tr>
     <tr><td><code>--auto-connect</code></td><td>Auto-discover and connect to running Chrome</td></tr>
+    <tr><td><code>--pin-tab</code></td><td>Pin the session to its bound tab (strict tab binding)</td></tr>
+    <tr><td><code>--no-pin-tab</code></td><td>Disable a sticky pin previously enabled with <code>--pin-tab</code></td></tr>
     <tr><td><code>--color-scheme &lt;scheme&gt;</code></td><td>Persistent color scheme (<code>dark</code>, <code>light</code>, <code>no-preference</code>)</td></tr>
     <tr><td><code>--debug</code></td><td>Debug output</td></tr>
   </tbody>

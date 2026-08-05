@@ -35,6 +35,10 @@ pub struct Response {
     pub success: bool,
     pub data: Option<Value>,
     pub error: Option<String>,
+    /// Machine-readable error code for select failures (e.g. `tab_gone`
+    /// when a pinned session's bound tab no longer exists).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
 }
@@ -458,6 +462,7 @@ pub struct DaemonOptions<'a> {
     pub confirm_actions: Option<&'a str>,
     pub engine: Option<&'a str>,
     pub auto_connect: bool,
+    pub pin_tab: bool,
     pub idle_timeout: Option<&'a str>,
     pub default_timeout: Option<u64>,
     pub cdp: Option<&'a str>,
@@ -562,6 +567,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if opts.auto_connect {
         cmd.env("AGENT_BROWSER_AUTO_CONNECT", "1");
+    }
+    if opts.pin_tab {
+        cmd.env("AGENT_BROWSER_PIN_TAB", "1");
     }
     if let Some(idle) = opts.idle_timeout {
         cmd.env("AGENT_BROWSER_IDLE_TIMEOUT_MS", idle);
@@ -1266,6 +1274,7 @@ mod tests {
             confirm_actions: None,
             engine: None,
             auto_connect: false,
+            pin_tab: false,
             idle_timeout,
             default_timeout: None,
             cdp: None,

@@ -41,6 +41,8 @@ pub mod storage;
 #[allow(dead_code)]
 pub mod stream;
 #[allow(dead_code)]
+pub mod tab_binding;
+#[allow(dead_code)]
 pub mod tracing;
 #[allow(dead_code)]
 pub mod webdriver;

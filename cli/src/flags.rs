@@ -83,6 +83,7 @@ pub struct Config {
     pub allow_file_access: Option<bool>,
     pub cdp: Option<String>,
     pub auto_connect: Option<bool>,
+    pub pin_tab: Option<bool>,
     pub headers: Option<String>,
     pub annotate: Option<bool>,
     pub color_scheme: Option<String>,
@@ -153,6 +154,7 @@ impl Config {
             allow_file_access: other.allow_file_access.or(self.allow_file_access),
             cdp: other.cdp.or(self.cdp),
             auto_connect: other.auto_connect.or(self.auto_connect),
+            pin_tab: other.pin_tab.or(self.pin_tab),
             headers: other.headers.or(self.headers),
             annotate: other.annotate.or(self.annotate),
             color_scheme: other.color_scheme.or(self.color_scheme),
@@ -356,6 +358,7 @@ pub struct Flags {
     pub no_xvfb: bool,
     pub device: Option<String>,
     pub auto_connect: bool,
+    pub pin_tab: bool,
     pub session_name: Option<String>,
     pub annotate: bool,
     pub color_scheme: Option<String>,
@@ -397,6 +400,10 @@ pub struct Flags {
     pub cli_headed: bool,
     pub cli_webgpu: bool,
     pub cli_restore: bool,
+    /// True when --pin-tab / --no-pin-tab was passed on the command line, so
+    /// an explicit disable can be sent to the daemon (a bare `pin_tab: false`
+    /// just means "absent" and must not override a sticky pin).
+    pub cli_pin_tab: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -536,6 +543,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
             || config.auto_connect.unwrap_or(false),
+        pin_tab: env_var_is_truthy("AGENT_BROWSER_PIN_TAB") || config.pin_tab.unwrap_or(false),
         session_name: env::var("AGENT_BROWSER_SESSION_NAME")
             .ok()
             .or(config.session_name),
@@ -612,6 +620,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_headed: false,
         cli_webgpu: false,
         cli_restore: false,
+        cli_pin_tab: false,
     };
 
     let mut i = 0;
@@ -859,6 +868,22 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--pin-tab" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.pin_tab = val;
+                flags.cli_pin_tab = true;
+                if consumed {
+                    i += 1;
+                }
+            }
+            "--no-pin-tab" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.pin_tab = !val;
+                flags.cli_pin_tab = true;
+                if consumed {
+                    i += 1;
+                }
+            }
             "--session-name" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.session_name = Some(s.clone());
@@ -1021,6 +1046,8 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--allow-file-access",
         "--hide-scrollbars",
         "--auto-connect",
+        "--pin-tab",
+        "--no-pin-tab",
         "--annotate",
         "--content-boundaries",
         "--confirm-interactive",
