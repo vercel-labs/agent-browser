@@ -228,6 +228,8 @@ struct DrainedEvents {
     attached_other_sessions: Vec<String>,
     /// Session IDs from Target.detachedFromTarget.
     detached_iframe_sessions: Vec<String>,
+    /// Target IDs from Target.targetCrashed.
+    crashed_targets: Vec<String>,
     /// (request_id, event session_id) pairs from `Network.loadingFinished`
     /// while HAR recording; bodies are fetched for these in
     /// `apply_drained_events` before Chrome evicts them (e.g. on navigation).
@@ -251,6 +253,54 @@ fn active_frame_scope_may_have_changed(drained: &DrainedEvents) -> bool {
         || !drained.attached_page_sessions.is_empty()
         || !drained.new_targets.is_empty()
         || !drained.destroyed_targets.is_empty()
+}
+
+/// Returns the first `@eN` element-ref argument of a command, if any.
+/// Selector-bearing params across the verb set: `selector` (click/fill/…),
+/// and `source`/`target` (drag).
+fn command_ref_argument(cmd: &Value) -> Option<&str> {
+    ["selector", "source", "target"]
+        .iter()
+        .filter_map(|key| cmd.get(*key).and_then(|v| v.as_str()))
+        .find(|s| s.starts_with('@'))
+}
+
+/// Register a page the agent did not create (popup, `target=_blank`, tab
+/// opened by a human in the same browser). Unless follow-popups is enabled
+/// the page is added WITHOUT stealing the active tab. Returns the notice for
+/// the next response and whether the new page became active.
+fn register_uninvited_page(
+    mgr: &mut super::browser::BrowserManager,
+    page: super::browser::PageInfo,
+    tab_id: u32,
+    parent_tab_id: Option<u32>,
+    url: &str,
+    follow_popups: bool,
+) -> (String, bool) {
+    let tab = super::browser::format_tab_id(tab_id);
+    let opener = parent_tab_id
+        .map(|p| format!(" (opened by {})", super::browser::format_tab_id(p)))
+        .unwrap_or_default();
+    let shown_url = if url.is_empty() { "about:blank" } else { url };
+    if follow_popups {
+        mgr.add_page(page);
+        (
+            format!(
+                "New tab {}{} opened and is now active (AGENT_BROWSER_FOLLOW_POPUPS): {} — element refs were cleared, re-snapshot before using @e refs",
+                tab, opener, shown_url
+            ),
+            true,
+        )
+    } else {
+        mgr.add_page_background(page);
+        (
+            format!(
+                "New tab {}{} opened in background: {} — switch with `tab {}`",
+                tab, opener, shown_url, tab
+            ),
+            false,
+        )
+    }
 }
 
 /// Compute a hash of the [`LaunchOptions`] fields that require a browser
@@ -441,6 +491,17 @@ pub struct DaemonState {
     active_provider_connection: bool,
     /// Actions already approved while replaying a confirmed command.
     confirmed_policy_actions: HashSet<String>,
+    /// One-shot notices about tab-level events the agent did not initiate
+    /// (popup opened, active tab crashed/closed, browser relaunched).
+    /// Drained into the `notices` field of the next response.
+    pub pending_notices: Vec<String>,
+    /// When true (AGENT_BROWSER_FOLLOW_POPUPS), a popup/`target=_blank` tab
+    /// becomes the active tab on open — the pre-0.32.3-tako.4 behavior —
+    /// with an announcement. Default: popups open in the background.
+    pub follow_popups: bool,
+    /// (signature, page_count) of the tab list as of the last response, used
+    /// to render the tab list into responses only when it changed.
+    last_tabs_state: Option<(u64, usize)>,
 }
 
 fn default_idle_shutdown_is_blocked(
@@ -531,6 +592,12 @@ impl DaemonState {
             active_provider_session: None,
             active_provider_connection: false,
             confirmed_policy_actions: HashSet::new(),
+            pending_notices: Vec::new(),
+            follow_popups: matches!(
+                env::var("AGENT_BROWSER_FOLLOW_POPUPS").as_deref(),
+                Ok("1" | "true" | "yes")
+            ),
+            last_tabs_state: None,
         }
     }
 
@@ -925,10 +992,45 @@ impl DaemonState {
             }
         }
 
-        // Remove destroyed targets
+        // Remove destroyed targets. If the ACTIVE tab died, announce the
+        // retarget — the old behavior silently re-pointed the next command
+        // at a neighboring tab — and drop refs minted on the dead tab.
         for target_id in &drained.destroyed_targets {
             if let Some(ref mut mgr) = self.browser {
-                mgr.remove_page_by_target_id(target_id);
+                if let Some((removed, was_active)) = mgr.remove_page_by_target_id(target_id) {
+                    if was_active {
+                        let removed_id = super::browser::format_tab_id(removed.tab_id);
+                        let notice = match mgr.active_page() {
+                            Some(next) => format!(
+                                "Active tab {} ({}) was closed externally — now on {} ({})",
+                                removed_id,
+                                removed.url,
+                                super::browser::format_tab_id(next.tab_id),
+                                next.url
+                            ),
+                            None => format!(
+                                "Active tab {} ({}) was closed externally — no tabs remain; the next page command opens a fresh about:blank tab",
+                                removed_id, removed.url
+                            ),
+                        };
+                        self.pending_notices.push(notice);
+                        self.ref_map.clear();
+                    }
+                }
+            }
+        }
+
+        // Mark crashed targets so `tab list` can render them
+        for target_id in &drained.crashed_targets {
+            if let Some(ref mut mgr) = self.browser {
+                if let Some((tab_id, was_active)) = mgr.mark_crashed(target_id) {
+                    if was_active {
+                        self.pending_notices.push(format!(
+                            "Active tab {} crashed; `reload` to revive it or switch with `tab <ref>`",
+                            super::browser::format_tab_id(tab_id)
+                        ));
+                    }
+                }
             }
         }
 
@@ -982,6 +1084,9 @@ impl DaemonState {
             let filter = self.domain_filter.read().await.clone();
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
+            let follow_popups = self.follow_popups;
+            let mut popup_notice: Option<String> = None;
+            let mut popup_activated = false;
             let setup_result = if let Some(ref mut mgr) = self.browser {
                 async {
                     mgr.prepare_domains_pub(page_sid).await?;
@@ -1014,15 +1119,31 @@ impl DaemonState {
                         mgr.update_page_target_info(target_info);
                     } else {
                         let tab_id = mgr.assign_tab_id();
-                        mgr.add_page(super::browser::PageInfo {
+                        let parent_tab_id = target_info
+                            .opener_id
+                            .as_deref()
+                            .and_then(|o| mgr.tab_id_for_target(o));
+                        let page = super::browser::PageInfo {
                             tab_id,
                             label: None,
                             target_id: target_info.target_id.clone(),
                             session_id: page_sid.clone(),
-                            url: page_url,
+                            url: page_url.clone(),
                             title: target_info.title.clone(),
                             target_type: target_info.target_type.clone(),
-                        });
+                            parent_tab_id,
+                            crashed: false,
+                        };
+                        let (notice, activated) = register_uninvited_page(
+                            mgr,
+                            page,
+                            tab_id,
+                            parent_tab_id,
+                            &page_url,
+                            follow_popups,
+                        );
+                        popup_notice = Some(notice);
+                        popup_activated = activated;
                     }
 
                     mgr.resume_if_waiting_pub(page_sid).await
@@ -1031,6 +1152,13 @@ impl DaemonState {
             } else {
                 Ok(())
             };
+            if let Some(notice) = popup_notice {
+                self.pending_notices.push(notice);
+            }
+            if popup_activated {
+                // The active tab changed underneath any existing snapshot.
+                self.ref_map.clear();
+            }
             if let Err(error) = setup_result {
                 if controls_active {
                     return close_after_network_control_failure(self, error).await;
@@ -1101,6 +1229,9 @@ impl DaemonState {
             let filter = self.domain_filter.read().await.clone();
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
+            let follow_popups = self.follow_popups;
+            let mut popup_notice: Option<String> = None;
+            let mut popup_activated = false;
             let setup_result = if let Some(ref mut mgr) = self.browser {
                 async {
                     let attach: AttachToTargetResult = mgr
@@ -1141,21 +1272,45 @@ impl DaemonState {
                     }
 
                     let tab_id = mgr.assign_tab_id();
-                    mgr.add_page(super::browser::PageInfo {
+                    let parent_tab_id = te
+                        .target_info
+                        .opener_id
+                        .as_deref()
+                        .and_then(|o| mgr.tab_id_for_target(o));
+                    let page = super::browser::PageInfo {
                         tab_id,
                         label: None,
                         target_id: te.target_info.target_id.clone(),
                         session_id: attach.session_id.clone(),
-                        url: page_url,
+                        url: page_url.clone(),
                         title: te.target_info.title.clone(),
                         target_type: te.target_info.target_type.clone(),
-                    });
+                        parent_tab_id,
+                        crashed: false,
+                    };
+                    let (notice, activated) = register_uninvited_page(
+                        mgr,
+                        page,
+                        tab_id,
+                        parent_tab_id,
+                        &page_url,
+                        follow_popups,
+                    );
+                    popup_notice = Some(notice);
+                    popup_activated = activated;
                     mgr.resume_if_waiting_pub(&attach.session_id).await
                 }
                 .await
             } else {
                 Ok(())
             };
+            if let Some(notice) = popup_notice {
+                self.pending_notices.push(notice);
+            }
+            if popup_activated {
+                // The active tab changed underneath any existing snapshot.
+                self.ref_map.clear();
+            }
             if let Err(error) = setup_result {
                 if controls_active {
                     return close_after_network_control_failure(self, error).await;
@@ -1270,6 +1425,7 @@ impl DaemonState {
         let mut attached_worker_sessions: Vec<(TargetInfo, String)> = Vec::new();
         let mut attached_other_sessions: Vec<String> = Vec::new();
         let mut detached_iframe_sessions: Vec<String> = Vec::new();
+        let mut crashed_targets: Vec<String> = Vec::new();
         let mut har_finished_requests: Vec<(String, Option<String>)> = Vec::new();
 
         loop {
@@ -1364,6 +1520,13 @@ impl DaemonState {
                                 event.params.get("sessionId").and_then(|v| v.as_str())
                             {
                                 detached_iframe_sessions.push(sid.to_string());
+                            }
+                            continue;
+                        }
+                        "Target.targetCrashed" => {
+                            if let Some(tid) = event.params.get("targetId").and_then(|v| v.as_str())
+                            {
+                                crashed_targets.push(tid.to_string());
                             }
                             continue;
                         }
@@ -1724,6 +1887,7 @@ impl DaemonState {
             attached_worker_sessions,
             attached_other_sessions,
             detached_iframe_sessions,
+            crashed_targets,
             har_finished_requests,
         }
     }
@@ -2292,6 +2456,14 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 return error_response(&id, &format!("Auto-launch failed: {}", e));
             }
             lifecycle_launched = true;
+            if lifecycle_relaunched_browser {
+                // The old process's tabs are gone and ids restart at t1; a
+                // model still holding t3 would only see "Tab t3 not found".
+                state.ref_map.clear();
+                state.pending_notices.push(
+                    "Browser was relaunched — previous tab ids and element refs are invalid; tab ids restart at t1".to_string(),
+                );
+            }
         } else {
             lifecycle_reused = true;
         }
@@ -2361,6 +2533,32 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                     dialog.dialog_type, dialog.message, action
                 ),
             );
+        }
+    }
+
+    // Element refs belong to the tab whose snapshot minted them. If the
+    // active tab changed since (relaunch, retarget after a tab died, any
+    // path that did not clear the ref map), using a stale `@ref` is a hard
+    // error — never the role/name fallback, which could silently resolve a
+    // same-role element in a different page.
+    if let Some(stale_ref) = command_ref_argument(cmd) {
+        if let (Some(minted), Some(active)) = (
+            state.ref_map.minted_tab(),
+            state.browser.as_ref().and_then(|m| m.active_tab_id()),
+        ) {
+            if minted != active {
+                let minted_tab = super::browser::format_tab_id(minted);
+                return error_response(
+                    &id,
+                    &format!(
+                        "{} was minted on tab {}, but the active tab is now {} — switch back with `tab {}`, or run `snapshot` here for fresh refs",
+                        stale_ref,
+                        minted_tab,
+                        super::browser::format_tab_id(active),
+                        minted_tab
+                    ),
+                );
+            }
         }
     }
 
@@ -2501,6 +2699,10 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "responsebody" => handle_responsebody(cmd, state).await,
         "waitfordownload" => handle_waitfordownload(cmd, state).await,
         "window_new" => handle_window_new(cmd, state).await,
+        "window_list" => handle_window_list(state).await,
+        "window_close" => handle_window_close(cmd, state).await,
+        "window_bounds" => handle_window_bounds(cmd, state).await,
+        "window_focus" => handle_window_focus(cmd, state).await,
         "diff_screenshot" => handle_diff_screenshot(cmd, state).await,
         "video_start" => handle_video_start(cmd, state).await,
         "video_stop" => handle_video_stop(state).await,
@@ -2584,6 +2786,43 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
+    // Stamp freshly minted refs with the tab they belong to. Every path that
+    // changes the active tab either clears the ref map or is caught by the
+    // minted-tab check above, so a non-empty unstamped map can only mean the
+    // refs were minted during this command, on the current active tab.
+    if !state.ref_map.is_empty() && state.ref_map.minted_tab().is_none() {
+        let active = state.browser.as_ref().and_then(|m| m.active_tab_id());
+        state.ref_map.set_minted_tab(active);
+    }
+
+    // Tab-list-on-change: render the tab list into any response whenever it
+    // changed since the last response and more than one tab is (or was)
+    // involved — the agent should never have to poll `tab list` to notice a
+    // popup, a closed tab, or a crash.
+    if let Some(ref mgr) = state.browser {
+        let signature = mgr.tabs_signature();
+        let count = mgr.page_count();
+        if state.last_tabs_state != Some((signature, count)) {
+            let prev_count = state.last_tabs_state.map(|(_, c)| c).unwrap_or(count);
+            if (count > 1 || prev_count > 1)
+                && !matches!(action, "tab_list" | "tab_new" | "tab_switch" | "tab_close")
+            {
+                if let Some(obj) = resp.as_object_mut() {
+                    obj.insert("tabs".to_string(), json!(mgr.tab_list()));
+                }
+            }
+            state.last_tabs_state = Some((signature, count));
+        }
+    }
+
+    // Deliver one-shot notices (popup opened, tab crashed/closed, relaunch).
+    if !state.pending_notices.is_empty() {
+        let notices: Vec<String> = state.pending_notices.drain(..).collect();
+        if let Some(obj) = resp.as_object_mut() {
+            obj.insert("notices".to_string(), json!(notices));
+        }
+    }
+
     if let Some(ref server) = state.stream_server {
         let duration_ms = cmd_start.elapsed().as_millis() as u64;
         let success = resp
@@ -2620,7 +2859,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 /// subsequent navigations don't hijack the user's existing tabs.
 async fn connect_auto_with_fresh_tab() -> Result<BrowserManager, String> {
     let mut mgr = BrowserManager::connect_auto().await?;
-    mgr.tab_new(None, None).await?;
+    mgr.tab_new(None, None, false, None).await?;
     let session_id = mgr.active_session_id()?.to_string();
     let _ = mgr
         .client
@@ -4785,6 +5024,8 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
                     Some(&href)
                 },
                 None,
+                false,
+                None,
             )
             .await?;
         }
@@ -5976,18 +6217,40 @@ async fn handle_tab_list(state: &DaemonState) -> Result<Value, String> {
 async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let url = cmd.get("url").and_then(|v| v.as_str());
     let label = cmd.get("label").and_then(|v| v.as_str());
+    let background = cmd
+        .get("background")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let context_name = cmd.get("context").and_then(|v| v.as_str());
     let domain_filter = state.domain_filter.read().await.clone();
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
     let defer_url_until_controls =
         should_defer_url_until_network_controls(domain_filter.as_ref(), has_proxy_creds, url)?;
 
-    state.ref_map.clear();
-    state.active_iframe_sessions.clear();
-    state.active_frame_id = None;
+    if !background {
+        // A background tab leaves the active tab (and its refs/frames) alone.
+        state.ref_map.clear();
+        state.active_iframe_sessions.clear();
+        state.active_frame_id = None;
+    }
     let mut result = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-        mgr.tab_new(if defer_url_until_controls { None } else { url }, label)
-            .await?
+        let context_id = match context_name {
+            Some(name) => Some(mgr.ensure_named_context(name).await?),
+            None => None,
+        };
+        let mut result = mgr
+            .tab_new(
+                if defer_url_until_controls { None } else { url },
+                label,
+                background,
+                context_id.as_deref(),
+            )
+            .await?;
+        if let (Some(name), Some(obj)) = (context_name, result.as_object_mut()) {
+            obj.insert("context".to_string(), json!(name));
+        }
+        result
     };
 
     install_network_controls_or_close(state, has_proxy_creds).await?;
@@ -5995,16 +6258,35 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
 
     if defer_url_until_controls {
         if let Some(url) = url {
-            let nav = {
-                let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-                mgr.navigate(url, WaitUntil::Load).await?
-            };
-            if let Some(obj) = result.as_object_mut() {
-                if let Some(value) = nav.get("url") {
-                    obj.insert("url".to_string(), value.clone());
+            if background {
+                // mgr.navigate targets the ACTIVE tab; navigate the new
+                // background tab through its own session instead.
+                let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+                let new_tab_id = result.get("tabId").and_then(|v| v.as_str()).unwrap_or("");
+                let session = mgr
+                    .pages_list()
+                    .into_iter()
+                    .find(|p| super::browser::format_tab_id(p.tab_id) == new_tab_id)
+                    .map(|p| p.session_id)
+                    .ok_or("New background tab vanished before navigation")?;
+                mgr.client
+                    .send_command("Page.navigate", Some(json!({ "url": url })), Some(&session))
+                    .await?;
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert("url".to_string(), json!(url));
                 }
-                if let Some(value) = nav.get("title") {
-                    obj.insert("title".to_string(), value.clone());
+            } else {
+                let nav = {
+                    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+                    mgr.navigate(url, WaitUntil::Load).await?
+                };
+                if let Some(obj) = result.as_object_mut() {
+                    if let Some(value) = nav.get("url") {
+                        obj.insert("url".to_string(), value.clone());
+                    }
+                    if let Some(value) = nav.get("title") {
+                        obj.insert("title".to_string(), value.clone());
+                    }
                 }
             }
         }
@@ -6490,6 +6772,8 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
             url: "about:blank".to_string(),
             title: String::new(),
             target_type: "page".to_string(),
+            parent_tab_id: None,
+            crashed: false,
         });
 
         (mgr.client.clone(), new_session_id, nav_url)
@@ -9170,6 +9454,8 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
             url: "about:blank".to_string(),
             title: String::new(),
             target_type: "page".to_string(),
+            parent_tab_id: None,
+            crashed: false,
         });
         (tab_id, attach.session_id)
     };
@@ -9207,6 +9493,237 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
     Ok(json!({
         "tabId": super::browser::format_tab_id(tab_id),
         "total": total,
+    }))
+}
+
+/// Browser-level `Browser.getWindowForTarget`: (windowId, bounds).
+/// `bounds` carries left/top/width/height/windowState per CDP.
+async fn window_for_target(
+    client: &super::cdp::client::CdpClient,
+    target_id: &str,
+) -> Result<(i64, Value), String> {
+    let result = client
+        .send_command(
+            "Browser.getWindowForTarget",
+            Some(json!({ "targetId": target_id })),
+            None,
+        )
+        .await?;
+    let window_id = result
+        .get("windowId")
+        .and_then(|v| v.as_i64())
+        .ok_or("Browser.getWindowForTarget returned no windowId")?;
+    let bounds = result.get("bounds").cloned().unwrap_or(Value::Null);
+    Ok((window_id, bounds))
+}
+
+/// Resolve an optional `tab` param (`t<N>` or label) to a tracked page,
+/// defaulting to the active page.
+fn resolve_tab_param(
+    cmd: &Value,
+    mgr: &super::browser::BrowserManager,
+) -> Result<super::browser::PageInfo, String> {
+    match cmd.get("tab").and_then(|v| v.as_str()) {
+        Some(tab_ref_str) => {
+            let tab_ref = super::browser::TabRef::parse(tab_ref_str)?;
+            let tab_id = mgr.resolve_tab_ref(&tab_ref)?;
+            mgr.pages_list()
+                .into_iter()
+                .find(|p| p.tab_id == tab_id)
+                .ok_or_else(|| format!("Tab ID {} not found", tab_id))
+        }
+        None => mgr
+            .active_page()
+            .cloned()
+            .ok_or_else(|| "No active page".to_string()),
+    }
+}
+
+async fn handle_window_list(state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let active_tab = mgr.active_tab_id();
+    // Group the flat tab list by OS window. Insertion order = first tab seen.
+    let mut window_order: Vec<i64> = Vec::new();
+    let mut window_bounds: HashMap<i64, Value> = HashMap::new();
+    let mut window_tabs: HashMap<i64, Vec<Value>> = HashMap::new();
+    for page in mgr.pages_list() {
+        // Direct-page providers and webviews may not support window lookup;
+        // group those under windowId -1 rather than failing the listing.
+        let (window_id, bounds) = window_for_target(&mgr.client, &page.target_id)
+            .await
+            .unwrap_or((-1, Value::Null));
+        if !window_order.contains(&window_id) {
+            window_order.push(window_id);
+            window_bounds.insert(window_id, bounds);
+        }
+        window_tabs.entry(window_id).or_default().push(json!({
+            "tabId": super::browser::format_tab_id(page.tab_id),
+            "label": page.label,
+            "url": page.url,
+            "active": Some(page.tab_id) == active_tab,
+        }));
+    }
+    let windows: Vec<Value> = window_order
+        .into_iter()
+        .map(|wid| {
+            let bounds = window_bounds.remove(&wid).unwrap_or(Value::Null);
+            let tabs = window_tabs.remove(&wid).unwrap_or_default();
+            let has_active = tabs
+                .iter()
+                .any(|t| t.get("active").and_then(|v| v.as_bool()).unwrap_or(false));
+            json!({
+                "windowId": wid,
+                "bounds": bounds,
+                "active": has_active,
+                "tabs": tabs,
+            })
+        })
+        .collect();
+    Ok(json!({ "windows": windows }))
+}
+
+async fn handle_window_bounds(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let page = mgr.active_page().ok_or("No active page")?;
+    let (window_id, current) = window_for_target(&mgr.client, &page.target_id).await?;
+
+    let bounds = if let Some(window_state) = cmd.get("windowState").and_then(|v| v.as_str()) {
+        // Browser.setWindowBounds{minimized|maximized} aborts headless Chrome
+        // outright (reproduced on 0.32.3-tako.4 smoke: "CDP response channel
+        // closed" + relaunch). Refuse with the alternative instead.
+        if mgr.is_headless() && (window_state == "minimized" || window_state == "maximized") {
+            return Err(format!(
+                "window {} needs a headed browser (AGENT_BROWSER_HEADED=1); in headless Chrome use `window bounds <w> <h>` or `set viewport` instead",
+                if window_state == "minimized" { "minimize" } else { "maximize" }
+            ));
+        }
+        json!({ "windowState": window_state })
+    } else {
+        // Chrome rejects size changes while minimized/maximized/fullscreen;
+        // drop back to normal first when needed.
+        let current_state = current
+            .get("windowState")
+            .and_then(|v| v.as_str())
+            .unwrap_or("normal");
+        if current_state != "normal" {
+            mgr.client
+                .send_command(
+                    "Browser.setWindowBounds",
+                    Some(json!({
+                        "windowId": window_id,
+                        "bounds": { "windowState": "normal" },
+                    })),
+                    None,
+                )
+                .await?;
+        }
+        let mut bounds = json!({
+            "windowState": "normal",
+            "width": cmd.get("width").and_then(|v| v.as_i64()).unwrap_or(1280),
+            "height": cmd.get("height").and_then(|v| v.as_i64()).unwrap_or(720),
+        });
+        let obj = bounds.as_object_mut().expect("literal object");
+        if let Some(left) = cmd.get("left").and_then(|v| v.as_i64()) {
+            obj.insert("left".to_string(), json!(left));
+        }
+        if let Some(top) = cmd.get("top").and_then(|v| v.as_i64()) {
+            obj.insert("top".to_string(), json!(top));
+        }
+        bounds
+    };
+
+    mgr.client
+        .send_command(
+            "Browser.setWindowBounds",
+            Some(json!({ "windowId": window_id, "bounds": bounds })),
+            None,
+        )
+        .await?;
+
+    Ok(json!({ "windowId": window_id, "bounds": bounds }))
+}
+
+async fn handle_window_focus(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let page = resolve_tab_param(cmd, mgr)?;
+    mgr.client
+        .send_command("Page.bringToFront", None, Some(&page.session_id))
+        .await?;
+    let window_id = window_for_target(&mgr.client, &page.target_id)
+        .await
+        .map(|(wid, _)| wid)
+        .ok();
+    Ok(json!({
+        "tabId": super::browser::format_tab_id(page.tab_id),
+        "windowId": window_id,
+        // Raising a window shows that tab to a human watching the display;
+        // the agent's own active tab is deliberately unchanged.
+        "activeTabUnchanged": true,
+    }))
+}
+
+async fn handle_window_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let (window_id, doomed, active_was_closed) = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        let anchor = resolve_tab_param(cmd, mgr)?;
+        let (window_id, _) = window_for_target(&mgr.client, &anchor.target_id).await?;
+        let mut doomed: Vec<super::browser::PageInfo> = Vec::new();
+        for page in mgr.pages_list() {
+            let (wid, _) = window_for_target(&mgr.client, &page.target_id)
+                .await
+                .unwrap_or((-1, Value::Null));
+            if wid == window_id {
+                doomed.push(page);
+            }
+        }
+        if doomed.len() >= mgr.page_count() {
+            return Err("Cannot close the last window".to_string());
+        }
+        let active_tab = mgr.active_tab_id();
+        let active_was_closed = doomed.iter().any(|p| Some(p.tab_id) == active_tab);
+        (window_id, doomed, active_was_closed)
+    };
+
+    let mut closed_tabs: Vec<String> = Vec::new();
+    for page in &doomed {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        let _ = mgr
+            .client
+            .send_command(
+                "Target.closeTarget",
+                Some(json!({ "targetId": page.target_id })),
+                None,
+            )
+            .await;
+        // Remove synchronously so the drain path doesn't announce our own
+        // window close as an external tab death.
+        mgr.remove_page_by_target_id(&page.target_id);
+        closed_tabs.push(super::browser::format_tab_id(page.tab_id));
+    }
+
+    if active_was_closed {
+        state.ref_map.clear();
+        state.iframe_sessions.clear();
+        state.active_frame_id = None;
+    }
+
+    let (new_active, remaining) = {
+        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
+        mgr.update_active_page_if_needed();
+        if let Ok(session_id) = mgr.active_session_id().map(String::from) {
+            mgr.enable_domains_pub(&session_id).await?;
+        }
+        (
+            mgr.active_tab_id().map(super::browser::format_tab_id),
+            mgr.page_count(),
+        )
+    };
+
+    Ok(json!({
+        "windowId": window_id,
+        "closedTabs": closed_tabs,
+        "activeTab": new_active,
+        "total": remaining,
     }))
 }
 
@@ -13072,6 +13589,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 url: "about:blank".to_string(),
                 title: String::new(),
                 target_type: "page".to_string(),
+                parent_tab_id: None,
+                crashed: false,
             },
             super::super::browser::PageInfo {
                 tab_id: 2,
@@ -13081,6 +13600,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 url: "about:blank".to_string(),
                 title: String::new(),
                 target_type: "page".to_string(),
+                parent_tab_id: None,
+                crashed: false,
             },
             super::super::browser::PageInfo {
                 tab_id: 3,
@@ -13090,6 +13611,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 url: "about:blank".to_string(),
                 title: String::new(),
                 target_type: "page".to_string(),
+                parent_tab_id: None,
+                crashed: false,
             },
         ];
 
@@ -13109,6 +13632,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             url: String::new(),
             title: String::new(),
             target_type: "page".to_string(),
+            parent_tab_id: None,
+            crashed: false,
         }];
 
         assert_eq!(

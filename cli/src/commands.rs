@@ -165,6 +165,7 @@ pub fn is_top_level_command(value: &str) -> bool {
             | "pushstate"
             | "removeinitscript"
             | "session"
+            | "restart"
             | "mcp"
             | "doctor"
             | "install"
@@ -1487,10 +1488,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "tab" => {
             match rest.first().copied() {
                 Some("new") => {
-                    // Accepted forms:
+                    // Accepted forms (flags may precede or follow the url):
                     //   tab new [url]
                     //   tab new --label <name> [url]
-                    //   tab new [url] --label <name>
+                    //   tab new --background [url]
+                    //   tab new --context <name> [url]
                     let mut cmd = json!({ "id": id, "action": "tab_new" });
                     let mut i = 1;
                     while i < rest.len() {
@@ -1503,6 +1505,18 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                 cmd["label"] = json!(name);
                                 i += 2;
                             }
+                            "--background" | "-b" => {
+                                cmd["background"] = json!(true);
+                                i += 1;
+                            }
+                            "--context" => {
+                                let name = rest.get(i + 1).ok_or(ParseError::MissingArguments {
+                                    context: "tab new --context".to_string(),
+                                    usage: "tab new --context <name> [url]",
+                                })?;
+                                cmd["context"] = json!(name);
+                                i += 2;
+                            }
                             other if !other.starts_with("--") && cmd.get("url").is_none() => {
                                 cmd["url"] = json!(other);
                                 i += 1;
@@ -1510,7 +1524,12 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                             other => {
                                 return Err(ParseError::UnknownSubcommand {
                                     subcommand: other.to_string(),
-                                    valid_options: &["--label", "<url>"],
+                                    valid_options: &[
+                                        "--label",
+                                        "--background",
+                                        "--context",
+                                        "<url>",
+                                    ],
                                 });
                             }
                         }
@@ -1536,16 +1555,72 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Window ===
         "window" => {
-            const VALID: &[&str] = &["new"];
+            const VALID: &[&str] = &[
+                "new",
+                "list",
+                "close",
+                "bounds",
+                "minimize",
+                "maximize",
+                "fullscreen",
+                "normal",
+                "focus",
+            ];
             match rest.first().copied() {
                 Some("new") => Ok(json!({ "id": id, "action": "window_new" })),
+                Some("list") | None => Ok(json!({ "id": id, "action": "window_list" })),
+                Some("close") => match rest.get(1) {
+                    Some(tab) => Ok(json!({ "id": id, "action": "window_close", "tab": tab })),
+                    None => Ok(json!({ "id": id, "action": "window_close" })),
+                },
+                Some("bounds") => {
+                    let width: i64 = rest.get(1).and_then(|s| s.parse().ok()).ok_or_else(|| {
+                        ParseError::MissingArguments {
+                            context: "window bounds".to_string(),
+                            usage: "window bounds <width> <height> [x y]",
+                        }
+                    })?;
+                    let height: i64 =
+                        rest.get(2).and_then(|s| s.parse().ok()).ok_or_else(|| {
+                            ParseError::MissingArguments {
+                                context: "window bounds".to_string(),
+                                usage: "window bounds <width> <height> [x y]",
+                            }
+                        })?;
+                    let mut cmd = json!({
+                        "id": id,
+                        "action": "window_bounds",
+                        "width": width,
+                        "height": height,
+                    });
+                    if let (Some(x), Some(y)) = (
+                        rest.get(3).and_then(|s| s.parse::<i64>().ok()),
+                        rest.get(4).and_then(|s| s.parse::<i64>().ok()),
+                    ) {
+                        let obj = cmd.as_object_mut().expect("literal object");
+                        obj.insert("left".to_string(), json!(x));
+                        obj.insert("top".to_string(), json!(y));
+                    }
+                    Ok(cmd)
+                }
+                Some(verb @ ("minimize" | "maximize" | "fullscreen" | "normal")) => Ok(json!({
+                    "id": id,
+                    "action": "window_bounds",
+                    // CDP's Browser.Bounds windowState enum uses the
+                    // past-participle forms.
+                    "windowState": match verb {
+                        "minimize" => "minimized",
+                        "maximize" => "maximized",
+                        other => other,
+                    },
+                })),
+                Some("focus") => match rest.get(1) {
+                    Some(tab) => Ok(json!({ "id": id, "action": "window_focus", "tab": tab })),
+                    None => Ok(json!({ "id": id, "action": "window_focus" })),
+                },
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
                     valid_options: VALID,
-                }),
-                None => Err(ParseError::MissingArguments {
-                    context: "window".to_string(),
-                    usage: "window <new>",
                 }),
             }
         }

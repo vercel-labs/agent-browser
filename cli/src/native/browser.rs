@@ -127,6 +127,10 @@ pub(crate) fn should_track_target(target: &TargetInfo) -> bool {
 
 fn update_page_target_info_in_pages(pages: &mut [PageInfo], target: &TargetInfo) -> bool {
     if let Some(page) = pages.iter_mut().find(|p| p.target_id == target.target_id) {
+        if page.crashed && page.url != target.url {
+            // The renderer navigated again — Chrome revived it.
+            page.crashed = false;
+        }
         page.url = target.url.clone();
         page.title = target.title.clone();
         page.target_type = target.target_type.clone();
@@ -220,6 +224,12 @@ pub struct PageInfo {
     pub url: String,
     pub title: String,
     pub target_type: String, // "page" or "webview"
+    /// Stable id of the tab that opened this one (from CDP `openerId`), for
+    /// popups and `target=_blank` tabs. None for agent-created tabs.
+    pub parent_tab_id: Option<u32>,
+    /// True once Target.targetCrashed fired for this tab. Cleared on
+    /// navigation (Chrome revives the renderer).
+    pub crashed: bool,
 }
 
 /// Canonical string form of a stable tab id: `t1`, `t2`, ... The `t` prefix
@@ -355,12 +365,16 @@ pub struct BrowserManager {
     /// Origins visited during this session, used by save_state to collect cross-origin localStorage.
     visited_origins: HashSet<String>,
     next_tab_id: u32,
+    /// User-named browser contexts (`tab new --context <name>`), name → id.
+    named_contexts: HashMap<String, String>,
     /// True when the CDP WebSocket is already scoped to a page target and
     /// browser-level Target.* commands are not available.
     direct_page: bool,
     /// Whether the daemon-spawned browser actually runs headless after
     /// launch rules such as extension-forced headed mode. Meaningless for
-    /// attached browsers (browser_process is None).
+    /// attached browsers (browser_process is None). Window-state changes
+    /// (minimize/maximize) abort headless Chrome, so those verbs are refused
+    /// up front (see is_headless / handle_window_bounds).
     headless: bool,
 }
 
@@ -378,6 +392,12 @@ impl BrowserManager {
     /// lifecycle. An explicit AGENT_BROWSER_IDLE_TIMEOUT_MS applies regardless.
     pub fn blocks_default_idle_shutdown(&self) -> bool {
         self.browser_process.is_none() || !self.headless
+    }
+
+    /// Whether window-state changes (minimize/maximize) are unsafe: they
+    /// abort headless Chrome outright.
+    pub fn is_headless(&self) -> bool {
+        self.headless
     }
 
     pub async fn launch(options: LaunchOptions, engine: Option<&str>) -> Result<Self, String> {
@@ -446,6 +466,7 @@ impl BrowserManager {
                 ignore_https_errors,
                 visited_origins: HashSet::new(),
                 next_tab_id: 1,
+                named_contexts: HashMap::new(),
                 direct_page: false,
                 headless,
             };
@@ -537,6 +558,7 @@ impl BrowserManager {
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
+            named_contexts: HashMap::new(),
             direct_page,
             headless: true,
         };
@@ -551,6 +573,8 @@ impl BrowserManager {
                 url: String::new(),
                 title: String::new(),
                 target_type: "page".to_string(),
+                parent_tab_id: None,
+                crashed: false,
             });
             manager.active_page_index = 0;
             manager.enable_domains_direct().await?;
@@ -593,6 +617,8 @@ impl BrowserManager {
                     "Target.createTarget",
                     &CreateTargetParams {
                         url: "about:blank".to_string(),
+                        background: None,
+                        browser_context_id: None,
                     },
                     None,
                 )
@@ -620,6 +646,8 @@ impl BrowserManager {
                 url: "about:blank".to_string(),
                 title: String::new(),
                 target_type: "page".to_string(),
+                parent_tab_id: None,
+                crashed: false,
             });
             self.active_page_index = 0;
             self.enable_domains(&attach_result.session_id).await?;
@@ -647,6 +675,8 @@ impl BrowserManager {
                     url: target.url.clone(),
                     title: target.title.clone(),
                     target_type: target.target_type.clone(),
+                    parent_tab_id: None,
+                    crashed: false,
                 });
             }
 
@@ -1173,6 +1203,8 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: "about:blank".to_string(),
+                    background: None,
+                    browser_context_id: None,
                 },
                 None,
             )
@@ -1200,6 +1232,8 @@ impl BrowserManager {
             url: "about:blank".to_string(),
             title: String::new(),
             target_type: "page".to_string(),
+            parent_tab_id: None,
+            crashed: false,
         });
         self.active_page_index = 0;
         self.enable_domains(&attach_result.session_id).await?;
@@ -1236,16 +1270,64 @@ impl BrowserManager {
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                json!({
+                let mut tab = json!({
                     "tabId": format_tab_id(p.tab_id),
                     "label": p.label,
                     "title": p.title,
                     "url": p.url,
                     "type": p.target_type,
                     "active": i == self.active_page_index,
-                })
+                });
+                let obj = tab.as_object_mut().expect("literal object");
+                if let Some(parent) = p.parent_tab_id {
+                    obj.insert("parentTabId".to_string(), json!(format_tab_id(parent)));
+                }
+                if p.crashed {
+                    obj.insert("crashed".to_string(), json!(true));
+                }
+                tab
             })
             .collect()
+    }
+
+    /// Stable tab id for a CDP target id, if the target is tracked as a tab.
+    pub fn tab_id_for_target(&self, target_id: &str) -> Option<u32> {
+        self.pages
+            .iter()
+            .find(|p| p.target_id == target_id)
+            .map(|p| p.tab_id)
+    }
+
+    /// Mark a tab crashed (Target.targetCrashed). Returns the stable tab id
+    /// and whether it is the active tab, if the target is tracked.
+    pub fn mark_crashed(&mut self, target_id: &str) -> Option<(u32, bool)> {
+        let active_index = self.active_page_index;
+        self.pages
+            .iter_mut()
+            .enumerate()
+            .find(|(_, p)| p.target_id == target_id)
+            .map(|(i, p)| {
+                p.crashed = true;
+                (p.tab_id, i == active_index)
+            })
+    }
+
+    /// Order-sensitive fingerprint of everything `tab_list` renders. Used to
+    /// decide whether the tab list changed since the last response.
+    pub fn tabs_signature(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        self.active_page_index.hash(&mut h);
+        for p in &self.pages {
+            p.tab_id.hash(&mut h);
+            p.label.hash(&mut h);
+            p.url.hash(&mut h);
+            p.title.hash(&mut h);
+            p.crashed.hash(&mut h);
+            p.parent_tab_id.hash(&mut h);
+        }
+        h.finish()
     }
 
     /// Resolve a user-supplied `TabRef` (either `t<N>` or a label) to the
@@ -1281,10 +1363,40 @@ impl BrowserManager {
         self.pages.iter().any(|p| p.label.as_deref() == Some(label))
     }
 
+    /// Resolve a named browser context to its id, creating the context on
+    /// first use. Named contexts give storage/cookie isolation inside one
+    /// browser ("logged in as two users") without a second session.
+    pub async fn ensure_named_context(&mut self, name: &str) -> Result<String, String> {
+        if !is_valid_label(name) {
+            return Err(format!(
+                "Invalid context name `{}`; names must start with a letter and contain only \
+                 letters, digits, `-`, and `_`",
+                name
+            ));
+        }
+        if let Some(id) = self.named_contexts.get(name) {
+            return Ok(id.clone());
+        }
+        let result = self
+            .client
+            .send_command_no_params("Target.createBrowserContext", None)
+            .await?;
+        let context_id = result
+            .get("browserContextId")
+            .and_then(|v| v.as_str())
+            .ok_or("Failed to create browser context")?
+            .to_string();
+        self.named_contexts
+            .insert(name.to_string(), context_id.clone());
+        Ok(context_id)
+    }
+
     pub async fn tab_new(
         &mut self,
         url: Option<&str>,
         label: Option<&str>,
+        background: bool,
+        browser_context_id: Option<&str>,
     ) -> Result<Value, String> {
         if let Some(label) = label {
             if !is_valid_label(label) {
@@ -1311,6 +1423,8 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: target_url.to_string(),
+                    background: if background { Some(true) } else { None },
+                    browser_context_id: browser_context_id.map(|s| s.to_string()),
                 },
                 None,
             )
@@ -1342,13 +1456,18 @@ impl BrowserManager {
             url: target_url.to_string(),
             title: String::new(),
             target_type: "page".to_string(),
+            parent_tab_id: None,
+            crashed: false,
         });
-        self.active_page_index = index;
+        if !background {
+            self.active_page_index = index;
+        }
 
         Ok(json!({
             "tabId": format_tab_id(tab_id),
             "label": label,
             "url": target_url,
+            "background": background,
             "total": self.pages.len(),
         }))
     }
@@ -1777,15 +1896,28 @@ impl BrowserManager {
         self.active_page_index = index;
     }
 
+    /// Register a page WITHOUT making it the active tab. Used for targets the
+    /// agent did not create (popups, `target=_blank`, tabs opened by a human
+    /// in the same browser window) so they never silently steal focus. If no
+    /// pages existed before, index 0 is the new page and it is active anyway.
+    pub fn add_page_background(&mut self, page: PageInfo) {
+        self.pages.push(page);
+    }
+
     pub fn update_page_target_info(&mut self, target: &TargetInfo) -> bool {
         update_page_target_info_in_pages(&mut self.pages, target)
     }
 
-    pub fn remove_page_by_target_id(&mut self, target_id: &str) {
-        if let Some(pos) = self.pages.iter().position(|p| p.target_id == target_id) {
-            self.pages.remove(pos);
-            self.update_active_page_after_removal(pos);
-        }
+    /// Remove a page whose target was destroyed externally (tab closed by
+    /// the page itself, a human, or a crash-reap). Returns the removed page
+    /// and whether it was the active tab, so callers can announce the
+    /// retarget instead of the next command silently running elsewhere.
+    pub fn remove_page_by_target_id(&mut self, target_id: &str) -> Option<(PageInfo, bool)> {
+        let pos = self.pages.iter().position(|p| p.target_id == target_id)?;
+        let was_active = pos == self.active_page_index;
+        let removed = self.pages.remove(pos);
+        self.update_active_page_after_removal(pos);
+        Some((removed, was_active))
     }
 
     pub fn has_target(&self, target_id: &str) -> bool {
@@ -1799,6 +1931,11 @@ impl BrowserManager {
     /// Returns the stable `tab_id` of the currently active page, if any.
     pub fn active_tab_id(&self) -> Option<u32> {
         self.pages.get(self.active_page_index).map(|p| p.tab_id)
+    }
+
+    /// Returns the currently active page, if any.
+    pub fn active_page(&self) -> Option<&PageInfo> {
+        self.pages.get(self.active_page_index)
     }
 
     /// Returns true if a tab with the given stable `tab_id` is still open.
@@ -1962,6 +2099,7 @@ async fn initialize_lightpanda_manager(
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
+            named_contexts: HashMap::new(),
             direct_page: false,
             headless: true,
         };
@@ -2147,6 +2285,7 @@ mod tests {
             url: String::new(),
             attached: None,
             browser_context_id: None,
+            opener_id: None,
         };
 
         assert!(should_track_target(&target));
@@ -2161,6 +2300,7 @@ mod tests {
             url: "chrome://newtab/".to_string(),
             attached: None,
             browser_context_id: None,
+            opener_id: None,
         };
 
         assert!(!should_track_target(&target));
@@ -2176,6 +2316,8 @@ mod tests {
             url: String::new(),
             title: String::new(),
             target_type: "page".to_string(),
+            parent_tab_id: None,
+            crashed: false,
         }];
         let target = TargetInfo {
             target_id: "popup-1".to_string(),
@@ -2184,6 +2326,7 @@ mod tests {
             url: "https://example.com/popup".to_string(),
             attached: None,
             browser_context_id: None,
+            opener_id: None,
         };
 
         assert!(update_page_target_info_in_pages(&mut pages, &target));

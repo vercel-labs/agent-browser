@@ -385,6 +385,66 @@ fn format_a11y_target(target: &serde_json::Value) -> Option<String> {
 }
 
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
+    print_response_body(resp, action, opts);
+    // Notices and the tab-list-on-change section print for every rendering
+    // branch, including errors. JSON mode already carries both fields in the
+    // envelope.
+    if !opts.json {
+        print_notices(resp);
+        print_tabs_section(resp);
+    }
+}
+
+fn print_notices(resp: &Response) {
+    if let Some(ref notices) = resp.notices {
+        for notice in notices {
+            eprintln!("{} {}", color::warning_indicator(), notice);
+        }
+    }
+}
+
+fn print_tabs_section(resp: &Response) {
+    let Some(tabs) = resp.tabs.as_ref().and_then(|v| v.as_array()) else {
+        return;
+    };
+    println!("{}", color::dim(&format!("tabs ({}):", tabs.len())));
+    for tab in tabs {
+        let tab_id = tab.get("tabId").and_then(|v| v.as_str()).unwrap_or("?");
+        let label = tab.get("label").and_then(|v| v.as_str());
+        let title = tab.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let url = tab.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        let active = tab.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+        let crashed = tab
+            .get("crashed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let parent = tab.get("parentTabId").and_then(|v| v.as_str());
+        let marker = if active {
+            color::cyan("→")
+        } else {
+            " ".to_string()
+        };
+        let mut line = format!("{} [{}]", marker, tab_id);
+        if let Some(label) = label {
+            line.push_str(&format!(" {}", label));
+        }
+        if !title.is_empty() {
+            line.push_str(&format!(" {}", title));
+        }
+        if !url.is_empty() {
+            line.push_str(&format!(" - {}", url));
+        }
+        if let Some(parent) = parent {
+            line.push_str(&color::dim(&format!(" (opened by {})", parent)));
+        }
+        if crashed {
+            line.push_str(&format!(" {}", color::red("[crashed]")));
+        }
+        println!("{}", line);
+    }
+}
+
+fn print_response_body(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     if opts.json {
         if opts.content_boundaries {
             let mut json_val = serde_json::to_value(resp).unwrap_or_default();
@@ -682,6 +742,49 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             }
             return;
         }
+        // Window list
+        if let Some(windows) = data.get("windows").and_then(|v| v.as_array()) {
+            for win in windows {
+                let wid = win.get("windowId").and_then(|v| v.as_i64()).unwrap_or(-1);
+                let bounds = win.get("bounds");
+                let state = bounds
+                    .and_then(|b| b.get("windowState"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let size = bounds
+                    .and_then(|b| {
+                        Some(format!(
+                            "{}x{}",
+                            b.get("width")?.as_i64()?,
+                            b.get("height")?.as_i64()?
+                        ))
+                    })
+                    .unwrap_or_else(|| "?".to_string());
+                let active = win.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+                let marker = if active {
+                    color::cyan("→")
+                } else {
+                    " ".to_string()
+                };
+                println!("{} window {} ({}, {})", marker, wid, state, size);
+                if let Some(tabs) = win.get("tabs").and_then(|v| v.as_array()) {
+                    for tab in tabs {
+                        let tab_id = tab.get("tabId").and_then(|v| v.as_str()).unwrap_or("?");
+                        let label = tab.get("label").and_then(|v| v.as_str());
+                        let url = tab.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                        let tab_active =
+                            tab.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let tab_marker = if tab_active { "→" } else { " " };
+                        if let Some(label) = label {
+                            println!("  {} [{}] {} - {}", tab_marker, tab_id, label, url);
+                        } else {
+                            println!("  {} [{}] {}", tab_marker, tab_id, url);
+                        }
+                    }
+                }
+            }
+            return;
+        }
         // Tabs
         if let Some(tabs) = data.get("tabs").and_then(|v| v.as_array()) {
             for tab in tabs {
@@ -698,10 +801,24 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 } else {
                     " ".to_string()
                 };
+                let mut suffix = String::new();
+                if let Some(parent) = tab.get("parentTabId").and_then(|v| v.as_str()) {
+                    suffix.push_str(&color::dim(&format!(" (opened by {})", parent)));
+                }
+                if tab
+                    .get("crashed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    suffix.push_str(&format!(" {}", color::red("[crashed]")));
+                }
                 if let Some(label) = tab_label {
-                    println!("{} [{}] {} {} - {}", marker, tab_id, label, title, url);
+                    println!(
+                        "{} [{}] {} {} - {}{}",
+                        marker, tab_id, label, title, url, suffix
+                    );
                 } else {
-                    println!("{} [{}] {} - {}", marker, tab_id, title, url);
+                    println!("{} [{}] {} - {}{}", marker, tab_id, title, url, suffix);
                 }
             }
             return;
@@ -2431,8 +2548,18 @@ Operations:
   list                       List open tabs with their ids and labels (default)
   new [url]                  Open a new tab
   new --label <name> [url]   Open a new tab with a label like `docs` or `app`
+  new --background [url]     Open a tab WITHOUT switching to it (active tab
+                             and element refs stay untouched)
+  new --context <name> [url] Open in a named isolated browser context — own
+                             cookies/storage (e.g. logged in as a second
+                             user); the context is created on first use
   close [t<N>|label]         Close a tab (current if no ref given)
   <t<N>|label>               Switch to a tab by id or label
+
+Tab list annotations: `(opened by tN)` marks popup provenance, `[crashed]`
+a dead renderer. Any command's response gains a `tabs (...)` section when
+the tab list changed since the previous response; popups open in the
+background and are announced instead of stealing focus.
 
 Global Options:
   --json               Output as JSON
@@ -2457,19 +2584,34 @@ Examples:
             r##"
 agent-browser window - Manage browser windows
 
-Usage: agent-browser window <operation>
+Usage: agent-browser window <operation> [args]
 
-Manage browser windows.
+Manage OS-level browser windows. A window groups tabs; `window new` creates
+a fresh window backed by its own browser context (isolated cookies/storage).
 
 Operations:
-  new                  Open new browser window
+  list                        List windows with their tabs (default)
+  new                         Open new browser window (isolated context)
+  close [t<N>|label]          Close the window containing a tab (default: active tab's window)
+  bounds <w> <h> [x y]        Resize (and optionally move) the active tab's window
+  minimize|maximize|fullscreen|normal
+                              Set the active tab's window state
+  focus [t<N>|label]          Raise the window containing a tab and show that
+                              tab on the display; the agent's active tab is
+                              NOT changed (use `tab <ref>` for that)
 
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
 
 Examples:
+  agent-browser window
   agent-browser window new
+  agent-browser window bounds 1280 800
+  agent-browser window bounds 1280 800 0 0
+  agent-browser window maximize
+  agent-browser window focus docs
+  agent-browser window close t3
 "##
         }
 
@@ -3561,8 +3703,14 @@ Storage:
                              Or:  cookies set --curl <file> [--domain <host>] (auto-detects JSON/cURL/Cookie-header files)
   storage <local|session>    Manage web storage
 
-Tabs:
-  tab [new|list|close|<n>]   Manage tabs
+Tabs & Windows:
+  tab [list]                 List tabs (stable ids t1, t2, ... + labels)
+  tab new [--label <name>] [url]
+                             Open a tab (never bare integers; `tab --help`)
+  tab <t<N>|label>           Switch tabs
+  tab close [t<N>|label]     Close a tab (default: active)
+  window [list|new|close|focus|bounds <w> <h>|minimize|maximize|fullscreen|normal]
+                             Manage OS windows (`window --help`)
 
 Diff:
   diff snapshot              Compare current vs last snapshot
@@ -3641,6 +3789,9 @@ Confirmation:
 Sessions:
   session                    Show current session name
   session list               List active sessions
+  restart                    Kill this session's daemon (recovery for a wedged
+                             daemon, e.g. "CDP response channel closed"); the
+                             next command starts a fresh one
 
 MCP:
   mcp                        Start an MCP stdio server exposing agent-browser tools

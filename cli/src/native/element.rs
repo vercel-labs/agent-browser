@@ -18,6 +18,11 @@ pub struct RefEntry {
 pub struct RefMap {
     map: HashMap<String, RefEntry>,
     next_ref: usize,
+    /// Stable tab id of the tab whose snapshot minted the current refs.
+    /// `@eN` refs are only valid on that tab; using one while another tab is
+    /// active is a hard error (never the role/name fallback, which could
+    /// silently resolve a same-role element in the wrong page).
+    minted_tab: Option<u32>,
 }
 
 impl RefMap {
@@ -25,7 +30,20 @@ impl RefMap {
         Self {
             map: HashMap::new(),
             next_ref: 1,
+            minted_tab: None,
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    pub fn minted_tab(&self) -> Option<u32> {
+        self.minted_tab
+    }
+
+    pub fn set_minted_tab(&mut self, tab: Option<u32>) {
+        self.minted_tab = tab;
     }
 
     pub fn add(
@@ -110,6 +128,7 @@ impl RefMap {
     pub fn clear(&mut self) {
         self.map.clear();
         self.next_ref = 1;
+        self.minted_tab = None;
     }
 
     pub fn next_ref_num(&self) -> usize {
