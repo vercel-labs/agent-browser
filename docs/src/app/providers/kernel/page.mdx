@@ -1,0 +1,41 @@
+# Kernel
+
+[Kernel](https://www.kernel.sh) provides cloud browser infrastructure for AI agents with features like stealth mode and persistent profiles.
+
+## Setup
+
+```bash
+export KERNEL_API_KEY="your-api-key"
+agent-browser -p kernel open https://example.com
+```
+
+Or use environment variables for CI/scripts:
+
+```bash
+export AGENT_BROWSER_PROVIDER=kernel
+export KERNEL_API_KEY="your-api-key"
+agent-browser open https://example.com
+```
+
+The `-p` flag takes precedence over `AGENT_BROWSER_PROVIDER`.
+
+## Configuration
+
+<table>
+  <thead>
+    <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>KERNEL_API_KEY</code></td><td>API key (required)</td><td></td></tr>
+    <tr><td><code>KERNEL_HEADLESS</code></td><td>Run browser in headless mode</td><td><code>true</code></td></tr>
+    <tr><td><code>KERNEL_STEALTH</code></td><td>Enable stealth mode to avoid bot detection</td><td><code>false</code></td></tr>
+    <tr><td><code>KERNEL_TIMEOUT_SECONDS</code></td><td>Session timeout in seconds</td><td><code>300</code></td></tr>
+    <tr><td><code>KERNEL_PROFILE_NAME</code></td><td>Browser profile name for persistent cookies/logins</td><td>(none)</td></tr>
+  </tbody>
+</table>
+
+**Profile persistence:** When `KERNEL_PROFILE_NAME` is set, the profile will be created if it doesn't already exist. Cookies, logins, and session data are automatically saved back to the profile when the browser session ends, making them available for future sessions.
+
+When enabled, agent-browser connects to a Kernel cloud session instead of launching a local browser. All commands work identically.
+
+Get your API key from the [Kernel Dashboard](https://dashboard.onkernel.com).

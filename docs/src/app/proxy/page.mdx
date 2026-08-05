@@ -1,0 +1,75 @@
+# Proxy
+
+Use proxies for corporate networks, geo-testing, scraping infrastructure, and traffic routing through a controlled egress point.
+
+## CLI flags
+
+```bash
+agent-browser --proxy "http://proxy.example.com:8080" open https://example.com
+agent-browser --proxy "http://user:pass@proxy.example.com:8080" open https://example.com
+agent-browser --proxy "http://proxy.example.com:8080" --proxy-bypass "localhost,*.internal.com" open https://example.com
+```
+
+<table>
+  <thead>
+    <tr><th>Flag</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>--proxy &lt;url&gt;</code></td><td>Proxy server URL, with optional credentials</td></tr>
+    <tr><td><code>--proxy-bypass &lt;hosts&gt;</code></td><td>Hosts that should bypass the proxy</td></tr>
+  </tbody>
+</table>
+
+## Environment variables
+
+<table>
+  <thead>
+    <tr><th>Variable</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>AGENT_BROWSER_PROXY</code></td><td>agent-browser proxy URL</td></tr>
+    <tr><td><code>AGENT_BROWSER_PROXY_BYPASS</code></td><td>agent-browser proxy bypass list</td></tr>
+    <tr><td><code>AGENT_BROWSER_PROXY_USERNAME</code></td><td>Proxy username when credentials are provided separately</td></tr>
+    <tr><td><code>AGENT_BROWSER_PROXY_PASSWORD</code></td><td>Proxy password when credentials are provided separately</td></tr>
+    <tr><td><code>HTTP_PROXY</code> / <code>HTTPS_PROXY</code></td><td>Standard proxy environment variables, used as fallbacks</td></tr>
+    <tr><td><code>ALL_PROXY</code></td><td>SOCKS or all-traffic proxy fallback</td></tr>
+    <tr><td><code>NO_PROXY</code></td><td>Standard proxy bypass fallback</td></tr>
+  </tbody>
+</table>
+
+`AGENT_BROWSER_PROXY` takes precedence over standard proxy variables. The CLI also accepts credentials embedded in the proxy URL and separates them before passing launch options to the daemon.
+
+## SOCKS proxy
+
+```bash
+export ALL_PROXY="socks5://proxy.example.com:1080"
+agent-browser open https://example.com
+
+export ALL_PROXY="socks5://user:pass@proxy.example.com:1080"
+agent-browser open https://example.com
+```
+
+## Bypass local traffic
+
+```bash
+export AGENT_BROWSER_PROXY="http://proxy.example.com:8080"
+export AGENT_BROWSER_PROXY_BYPASS="localhost,127.0.0.1,*.internal.com"
+
+agent-browser open https://external.example.com
+agent-browser open http://localhost:3000
+```
+
+## Verify routing
+
+```bash
+agent-browser open https://httpbin.org/ip
+agent-browser get text body
+```
+
+The response should show the proxy egress address, not the machine's direct network address.
+
+## Security notes
+
+- Prefer environment variables or secret stores for proxy credentials.
+- Do not commit proxy usernames, passwords, or session URLs.
+- HAR exports and network logs may include proxy-authenticated requests.

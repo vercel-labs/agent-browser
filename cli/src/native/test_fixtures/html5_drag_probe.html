@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>HTML5 Drag Probe</title>
+  <style>
+    body {
+      margin: 24px;
+      font: 14px/1.4 sans-serif;
+    }
+
+    #source, #dest {
+      width: 120px;
+      height: 80px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid #666;
+      user-select: none;
+      margin-right: 40px;
+    }
+
+    #source {
+      background: #f97316;
+      color: white;
+    }
+
+    #dest {
+      background: #e5e7eb;
+    }
+
+    pre {
+      margin-top: 24px;
+      white-space: pre-wrap;
+      font-family: ui-monospace, monospace;
+    }
+  </style>
+</head>
+<body>
+  <div id="source" draggable="true">drag source</div>
+  <div id="dest">drop zone</div>
+  <pre id="log"></pre>
+  <script>
+    const source = document.getElementById("source");
+    const dest = document.getElementById("dest");
+    const logEl = document.getElementById("log");
+
+    window.__html5DragProbe = { events: [] };
+
+    function pushEvent(event, extra = {}) {
+      window.__html5DragProbe.events.push({
+        type: event.type,
+        target: event.target.id || event.target.tagName,
+        x: event.clientX,
+        y: event.clientY,
+        button: event.button,
+        buttons: event.buttons,
+        ...extra,
+      });
+      logEl.textContent = JSON.stringify(window.__html5DragProbe, null, 2);
+    }
+
+    for (const type of ["pointerdown", "mousedown", "dragstart", "drag", "dragend"]) {
+      source.addEventListener(type, (event) => {
+        if (type === "dragstart") {
+          event.dataTransfer.setData("text/plain", "probe");
+        }
+        pushEvent(event);
+      });
+    }
+
+    for (const type of ["pointermove", "mousemove", "dragenter", "dragover", "drop", "pointerup", "mouseup"]) {
+      document.addEventListener(type, (event) => {
+        if (type === "dragover") {
+          event.preventDefault();
+        }
+        if (type === "drop") {
+          pushEvent(event, { dropped: event.dataTransfer.getData("text/plain") });
+          return;
+        }
+        pushEvent(event);
+      });
+    }
+
+    dest.addEventListener("dragover", (event) => event.preventDefault());
+    dest.addEventListener("drop", (event) => {
+      pushEvent(event, { dropped: event.dataTransfer.getData("text/plain") });
+    });
+  </script>
+</body>
+</html>

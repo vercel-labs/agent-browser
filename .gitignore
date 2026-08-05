@@ -1,0 +1,73 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Native binaries (keep the launcher scripts)
+bin/agent-browser-*
+bin/.install-method
+!bin/agent-browser
+!bin/agent-browser.cmd
+
+# Rust build artifacts
+cli/target/
+cli/*.o
+
+# Logs
+*.log
+npm-debug.log*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+
+# Test artifacts
+*.png
+*.jpeg
+*.jpg
+*.webm
+test/e2e/.dogfood-output/
+
+# Package manager
+package-lock.json
+yarn.lock
+
+# Environment
+.env
+.env.local
+.env.*
+!.env.example
+!.env.*.example
+
+# Windows debug instance config
+scripts/windows-debug/.instance
+
+# opensrc - source code for packages
+opensrc/
+
+# Docs site
+docs/node_modules/
+docs/.next/
+docs/out/
+docs/package-lock.json
+
+# pnpm
+.pnpm-store/
+
+# TypeScript
+*.tsbuildinfo
+
+# next
+.next/
+out/
+next-env.d.ts

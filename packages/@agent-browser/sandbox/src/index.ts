@@ -1,0 +1,18 @@
+export {
+  AGENT_BROWSER_SANDBOX_VERSION,
+  AgentBrowserCommandError,
+  DEFAULT_AGENT_BROWSER_INSTALL_SPEC,
+  buildAgentBrowserArgv,
+  buildShellCommand,
+  createAgentBrowserCommandResult,
+  defaultSessionName,
+  quoteShellArg,
+  resolveAgentBrowserInstallSpec,
+  throwIfCommandFailed,
+  type AgentBrowserArgs,
+  type AgentBrowserCommandResult,
+  type AgentBrowserInstallOptions,
+  type AgentBrowserRunOptions,
+  type BuildAgentBrowserArgvOptions,
+  type BuildShellCommandOptions,
+} from "./shared.js";

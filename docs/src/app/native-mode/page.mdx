@@ -1,0 +1,5 @@
+# Native Mode
+
+agent-browser is now 100% native Rust by default. The Node.js/Playwright daemon has been removed.
+
+This page is no longer relevant. See the main [documentation](/) for current architecture and usage.

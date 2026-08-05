@@ -1,0 +1,252 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Agent Browser Configuration",
+  "description": "Configuration file for agent-browser (e.g., agent-browser.json or ~/.agent-browser/config.json)",
+  "type": "object",
+  "properties": {
+    "headed": {
+      "type": "boolean",
+      "description": "Show browser window instead of running headless."
+    },
+    "json": {
+      "type": "boolean",
+      "description": "Output in JSON format."
+    },
+    "debug": {
+      "type": "boolean",
+      "description": "Enable debug output."
+    },
+    "session": {
+      "type": "string",
+      "description": "Session identifier."
+    },
+    "restore": {
+      "type": "string",
+      "description": "Auto-save/restore persistence key. A bare CLI --restore uses the current session; config values use this explicit key."
+    },
+    "restoreSave": {
+      "type": "string",
+      "enum": ["auto", "always", "never"],
+      "default": "auto",
+      "description": "Auto-save policy for restored state."
+    },
+    "restoreCheckUrl": {
+      "type": "string",
+      "description": "URL glob that restored state must match before auto-save."
+    },
+    "restoreCheckText": {
+      "type": "string",
+      "description": "Visible page text that restored state must expose before auto-save."
+    },
+    "restoreCheckFn": {
+      "type": "string",
+      "description": "JavaScript expression that must evaluate truthy before restored state is auto-saved."
+    },
+    "namespace": {
+      "type": "string",
+      "description": "Namespace that isolates daemon sockets and restore-state directories."
+    },
+    "sessionName": {
+      "type": "string",
+      "description": "Legacy alias for restore persistence key."
+    },
+    "executablePath": {
+      "type": "string",
+      "description": "Path to a custom browser executable."
+    },
+    "extensions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Paths to browser extensions. Extensions from user-level and project-level configs are concatenated."
+    },
+    "initScripts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Page init script paths registered before navigation."
+    },
+    "enable": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["react-devtools"]
+      },
+      "description": "Built-in launch features to enable."
+    },
+    "profile": {
+      "type": "string",
+      "description": "Path to the browser profile data directory."
+    },
+    "state": {
+      "type": "string",
+      "description": "Path to load/save browser state."
+    },
+    "proxy": {
+      "type": "string",
+      "description": "Proxy server URL (e.g., http://localhost:8080)."
+    },
+    "proxyBypass": {
+      "type": "string",
+      "description": "Comma-separated domains to bypass the proxy (e.g., localhost,*.internal.com)."
+    },
+    "args": {
+      "type": "string",
+      "description": "Additional comma-separated launch arguments for the browser."
+    },
+    "userAgent": {
+      "type": "string",
+      "description": "Custom User-Agent string."
+    },
+    "provider": {
+      "type": "string",
+      "description": "Provider to use, such as 'ios'."
+    },
+    "device": {
+      "type": "string",
+      "description": "Device name or identifier for emulation or providers (e.g., 'iPhone 16 Pro')."
+    },
+    "hideScrollbars": {
+      "type": "boolean",
+      "description": "Hide native scrollbars in headless Chromium screenshots. Defaults to true."
+    },
+    "webgpu": {
+      "type": "boolean",
+      "description": "Enable WebGPU (SwiftShader software Vulkan on Linux; no GPU required). Defaults to false."
+    },
+    "ignoreHttpsErrors": {
+      "type": "boolean",
+      "description": "Ignore HTTPS errors during navigation."
+    },
+    "allowFileAccess": {
+      "type": "boolean",
+      "description": "Allow file:// URLs to access local files."
+    },
+    "cdp": {
+      "type": "string",
+      "description": "Chrome DevTools Protocol endpoint URL."
+    },
+    "autoConnect": {
+      "type": "boolean",
+      "description": "Auto-discover and connect to a running Chrome instance."
+    },
+    "annotate": {
+      "type": "boolean",
+      "description": "Annotated screenshot with numbered element labels."
+    },
+    "colorScheme": {
+      "type": "string",
+      "enum": ["dark", "light", "no-preference"],
+      "description": "Color scheme preference."
+    },
+    "downloadPath": {
+      "type": "string",
+      "description": "Default directory for browser downloads."
+    },
+    "contentBoundaries": {
+      "type": "boolean",
+      "description": "Wrap page output in boundary markers for LLM safety."
+    },
+    "maxOutput": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Max characters for page output (truncates beyond limit)."
+    },
+    "allowedDomains": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Allowed domain patterns (e.g., ['example.com', '*.example.com']). Requires a fresh controllable browser context, so CDP, auto-connect, Chrome profiles, restore/state replay, direct-page provider plugins, iOS, and Safari are not supported."
+    },
+    "actionPolicy": {
+      "type": "string",
+      "description": "Path to action policy JSON file."
+    },
+    "confirmActions": {
+      "type": "string",
+      "description": "Comma-separated action categories requiring confirmation."
+    },
+    "confirmInteractive": {
+      "type": "boolean",
+      "description": "Enable interactive confirmation prompts (auto-denies if stdin is not a TTY)."
+    },
+    "engine": {
+      "type": "string",
+      "enum": ["chrome", "lightpanda"],
+      "default": "chrome",
+      "description": "Browser engine to use."
+    },
+    "screenshotDir": {
+      "type": "string",
+      "description": "Default screenshot output directory."
+    },
+    "screenshotQuality": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "JPEG quality for screenshots (0-100)."
+    },
+    "screenshotFormat": {
+      "type": "string",
+      "enum": ["png", "jpeg"],
+      "description": "Screenshot format."
+    },
+    "idleTimeout": {
+      "type": "string",
+      "description": "Auto-shutdown the daemon after inactivity (e.g., '30s', '5m', '1h', or raw milliseconds like '60000')."
+    },
+    "model": {
+      "type": "string",
+      "description": "AI model for chat command (e.g., 'openai/gpt-4o')."
+    },
+    "noAutoDialog": {
+      "type": "boolean",
+      "description": "Disable automatic dismissal of alert/beforeunload dialogs."
+    },
+    "headers": {
+      "type": "string",
+      "description": "Custom HTTP headers supplied as a JSON-formatted string."
+    },
+    "plugins": {
+      "type": "array",
+      "description": "External plugin registry. Project-level entries are appended after user-level entries, and duplicate names resolve to the later entry.",
+      "items": {
+        "type": "object",
+        "required": ["name", "command"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Plugin name used by commands such as auth login --credential-provider."
+          },
+          "command": {
+            "type": "string",
+            "description": "Executable path or command name for the plugin process."
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional arguments passed to the plugin process. Do not store secrets here."
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Capabilities declared by the plugin. Built-in capability names include credential.read, browser.provider, launch.mutate, and command.run; plugins may also declare custom names such as captcha.solve."
+          },
+          "source": {
+            "type": "string",
+            "description": "Optional source recorded by agent-browser plugin add, such as npm:agent-browser-plugin-example or github:owner/repo."
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}
