@@ -2948,6 +2948,10 @@ async fn install_network_controls_for_session(
     Ok(())
 }
 
+fn is_stale_cdp_session_error(error: &str) -> bool {
+    error.contains("Session with given id not found")
+}
+
 async fn install_worker_network_controls_for_session(
     client: &CdpClient,
     session_id: &str,
@@ -3004,15 +3008,27 @@ async fn install_active_network_controls(
     let session_ids = network_control_session_ids(mgr)?;
 
     for session_id in session_ids {
-        mgr.prepare_domains_pub(&session_id).await?;
-        install_network_controls_for_session(
-            &mgr.client,
-            &session_id,
-            filter.as_ref(),
-            handle_auth_requests,
-        )
-        .await?;
-        mgr.resume_if_waiting_pub(&session_id).await?;
+        let result = async {
+            mgr.prepare_domains_pub(&session_id).await?;
+            install_network_controls_for_session(
+                &mgr.client,
+                &session_id,
+                filter.as_ref(),
+                handle_auth_requests,
+            )
+            .await?;
+            mgr.resume_if_waiting_pub(&session_id).await
+        }
+        .await;
+        if let Err(error) = result {
+            if is_stale_cdp_session_error(&error) {
+                // A target can disappear after the session snapshot but before
+                // controls are installed; new live targets are still covered by
+                // browser-level auto-attach.
+                continue;
+            }
+            return Err(error);
+        }
     }
 
     if let Some(ref filter) = filter {
@@ -11186,6 +11202,135 @@ mod tests {
     #[test]
     fn find_actions_help_text_matches_the_accepted_set() {
         assert_eq!(FIND_ACTIONS.join(", "), "click, fill, check, hover, text");
+    }
+
+    #[test]
+    fn stale_cdp_session_error_is_narrowly_classified() {
+        assert!(is_stale_cdp_session_error(
+            "CDP error (Page.enable): Session with given id not found."
+        ));
+        assert!(!is_stale_cdp_session_error(
+            "CDP error (Page.enable): Permission denied"
+        ));
+        assert!(!is_stale_cdp_session_error(
+            "CDP command timed out: Page.enable"
+        ));
+    }
+
+    async fn start_mock_cdp_with_stale_snapshot_session(
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use futures_util::{SinkExt, StreamExt};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let live_fetch_enables = Arc::new(AtomicUsize::new(0));
+        let live_fetch_enables_task = live_fetch_enables.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "ws://127.0.0.1:{}/devtools/browser/mock",
+            listener.local_addr().unwrap().port()
+        );
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut tx, mut rx) = ws.split();
+
+            while let Some(Ok(msg)) = rx.next().await {
+                let text = match msg {
+                    Message::Text(t) => t,
+                    Message::Ping(p) => {
+                        let _ = tx.send(Message::Pong(p)).await;
+                        continue;
+                    }
+                    _ => continue,
+                };
+                let cmd: Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let Some(id) = cmd["id"].as_u64() else {
+                    continue;
+                };
+                let method = cmd["method"].as_str().unwrap_or("");
+                let session = cmd["sessionId"].as_str().unwrap_or("");
+                let result = |value: Value| json!({ "id": id, "result": value }).to_string();
+                let error = |message: &str| {
+                    json!({
+                        "id": id,
+                        "error": { "code": -32001, "message": message }
+                    })
+                    .to_string()
+                };
+
+                let reply = match method {
+                    "Target.getTargets" => result(json!({
+                        "targetInfos": [
+                            {
+                                "targetId": "live",
+                                "type": "page",
+                                "title": "live",
+                                "url": "https://example.com/",
+                                "attached": false
+                            },
+                            {
+                                "targetId": "stale",
+                                "type": "page",
+                                "title": "stale",
+                                "url": "https://example.com/transient",
+                                "attached": false
+                            }
+                        ]
+                    })),
+                    "Target.attachToTarget" => {
+                        let target = cmd["params"]["targetId"].as_str().unwrap_or("");
+                        result(json!({ "sessionId": format!("S-{target}") }))
+                    }
+                    "Page.enable" if session == "S-stale" => {
+                        error("Session with given id not found.")
+                    }
+                    "Fetch.enable" if session == "S-live" => {
+                        live_fetch_enables_task.fetch_add(1, Ordering::SeqCst);
+                        result(json!({}))
+                    }
+                    "Runtime.evaluate" => {
+                        result(json!({ "result": { "type": "boolean", "value": true } }))
+                    }
+                    _ => result(json!({})),
+                };
+                let _ = tx.send(Message::Text(reply)).await;
+            }
+        });
+
+        (url, live_fetch_enables)
+    }
+
+    #[tokio::test]
+    async fn install_active_network_controls_skips_stale_snapshot_sessions() {
+        let (url, live_fetch_enables) = start_mock_cdp_with_stale_snapshot_session().await;
+        let mgr = BrowserManager::connect_cdp(&url)
+            .await
+            .expect("mock browser should connect");
+
+        let mut state = DaemonState::new();
+        state.browser = Some(mgr);
+        *state.domain_filter.write().await = Some(DomainFilter::new("example.com"));
+
+        install_active_network_controls(&mut state, false)
+            .await
+            .expect("a vanished transient session must not abort allowed-domain setup");
+
+        assert_eq!(
+            live_fetch_enables.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the live page still receives network controls"
+        );
+        assert!(
+            state.browser.is_some(),
+            "the browser must stay open when only a stale snapshot session disappears"
+        );
     }
 
     /// `type`, `focus`, and `uncheck` are real standalone commands but were
