@@ -1182,8 +1182,10 @@ fn key_text(key_name: &str) -> Option<String> {
         "Tab" => Some("\t".to_string()),
         " " => Some(" ".to_string()),
         _ => {
-            // Single printable characters carry themselves as text.
-            if key_name.len() == 1 {
+            // Single printable characters carry themselves as text. Count chars,
+            // not bytes, so multi-byte characters (e.g. 'Æ', 'Ø', 'Å') are still
+            // treated as a single printable key and carry their own text.
+            if key_name.chars().count() == 1 {
                 Some(key_name.to_string())
             } else {
                 None
@@ -1209,7 +1211,11 @@ fn named_key_info(key: &str) -> (String, String, i32) {
         "pagedown" => ("PageDown".to_string(), "PageDown".to_string(), 34),
         "space" | " " => (" ".to_string(), "Space".to_string(), 32),
         _ => {
-            if key.len() == 1 {
+            // Use char count, not byte length: multi-byte UTF-8 characters such
+            // as 'Æ', 'Ø', 'Å' or 'é' are a single character but len() (bytes)
+            // is > 1, which would otherwise route them to the malformed
+            // named-key branch below and drop the text entirely.
+            if key.chars().count() == 1 {
                 let ch = key.chars().next().unwrap();
                 char_to_key_info(ch)
             } else {
@@ -1333,5 +1339,40 @@ mod tests {
         assert_eq!(key_text("ArrowUp"), None);
         assert_eq!(key_text("Backspace"), None);
         assert_eq!(key_text("Delete"), None);
+    }
+
+    /// Regression test: multi-byte UTF-8 letters (Danish Æ/Ø/Å and accented
+    /// chars) are a single *character* but more than one *byte*. The earlier
+    /// `key.len() == 1` / `key_name.len() == 1` byte-length checks failed for
+    /// them, so `press Æ` dispatched a keyDown with no `text` and the letter
+    /// was silently dropped (e.g. the danskespil.dk Krydsord board). Both
+    /// `named_key_info` and `key_text` must treat them as single printable keys.
+    #[test]
+    fn test_danish_letters_are_single_printable_keys() {
+        for key in ["Æ", "Ø", "Å", "æ", "ø", "å", "é"] {
+            assert!(
+                key.len() > 1,
+                "precondition: {:?} should be multi-byte to exercise the bug",
+                key
+            );
+
+            // named_key_info must route through char_to_key_info and keep the
+            // character itself as the `key`, not fall into the empty/0 branch.
+            let (name, _code, _vk) = named_key_info(key);
+            assert_eq!(
+                name, key,
+                "named_key_info({:?}) should keep the character as key, got {:?}",
+                key, name
+            );
+
+            // key_text must carry the character as the dispatched text so Chrome
+            // actually inserts it.
+            assert_eq!(
+                key_text(&name),
+                Some(key.to_string()),
+                "key_text({:?}) must carry the character as text",
+                name
+            );
+        }
     }
 }
