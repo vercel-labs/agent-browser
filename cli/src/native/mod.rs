@@ -11,6 +11,8 @@ pub mod cdp;
 #[allow(dead_code)]
 pub mod cookies;
 #[allow(dead_code)]
+pub mod coverage;
+#[allow(dead_code)]
 pub mod daemon;
 #[allow(dead_code)]
 pub mod diff;
@@ -20,6 +22,8 @@ pub mod element;
 pub mod inspect_server;
 #[allow(dead_code)]
 pub mod interaction;
+#[allow(dead_code)]
+pub mod memory;
 #[allow(dead_code)]
 pub mod network;
 #[allow(dead_code)]

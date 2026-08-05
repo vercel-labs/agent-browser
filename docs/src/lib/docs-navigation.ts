@@ -41,6 +41,7 @@ export const navigation: NavSection[] = [
       { name: "WebGPU", href: "/webgpu" },
       { name: "Debugging", href: "/debugging" },
       { name: "Profiler", href: "/profiler" },
+      { name: "Memory Diagnostics", href: "/memory" },
       { name: "React & Web Vitals", href: "/react" },
       { name: "Files & Clipboard", href: "/files" },
       { name: "Init Scripts", href: "/init-scripts" },

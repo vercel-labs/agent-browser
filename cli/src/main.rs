@@ -1211,12 +1211,14 @@ fn main() {
                 success: true,
                 data: Some(data),
                 error: None,
+                error_code: None,
                 warning: None,
             },
             Err(e) => connection::Response {
                 success: false,
                 data: None,
                 error: Some(e),
+                error_code: None,
                 warning: None,
             },
         };
@@ -2192,6 +2194,7 @@ mod tests {
                 }
             })),
             error: None,
+            error_code: None,
             warning: None,
         };
 
