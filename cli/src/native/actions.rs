@@ -255,6 +255,16 @@ fn active_frame_scope_may_have_changed(drained: &DrainedEvents) -> bool {
         || !drained.destroyed_targets.is_empty()
 }
 
+/// Returns the first `@eN` element-ref argument of a command, if any.
+/// Selector-bearing params across the verb set: `selector` (click/fill/…),
+/// and `source`/`target` (drag).
+fn command_ref_argument(cmd: &Value) -> Option<&str> {
+    ["selector", "source", "target"]
+        .iter()
+        .filter_map(|key| cmd.get(*key).and_then(|v| v.as_str()))
+        .find(|s| s.starts_with('@'))
+}
+
 /// Register a page the agent did not create (popup, `target=_blank`, tab
 /// opened by a human in the same browser). Unless follow-popups is enabled
 /// the page is added WITHOUT stealing the active tab. Returns the notice for
@@ -2497,6 +2507,32 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
+    // Element refs belong to the tab whose snapshot minted them. If the
+    // active tab changed since (relaunch, retarget after a tab died, any
+    // path that did not clear the ref map), using a stale `@ref` is a hard
+    // error — never the role/name fallback, which could silently resolve a
+    // same-role element in a different page.
+    if let Some(stale_ref) = command_ref_argument(cmd) {
+        if let (Some(minted), Some(active)) = (
+            state.ref_map.minted_tab(),
+            state.browser.as_ref().and_then(|m| m.active_tab_id()),
+        ) {
+            if minted != active {
+                let minted_tab = super::browser::format_tab_id(minted);
+                return error_response(
+                    &id,
+                    &format!(
+                        "{} was minted on tab {}, but the active tab is now {} — switch back with `tab {}`, or run `snapshot` here for fresh refs",
+                        stale_ref,
+                        minted_tab,
+                        super::browser::format_tab_id(active),
+                        minted_tab
+                    ),
+                );
+            }
+        }
+    }
+
     let result = match action {
         "launch" => handle_launch(cmd, state).await,
         "navigate" => handle_navigate(cmd, state).await,
@@ -2715,6 +2751,15 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 );
             }
         }
+    }
+
+    // Stamp freshly minted refs with the tab they belong to. Every path that
+    // changes the active tab either clears the ref map or is caught by the
+    // minted-tab check above, so a non-empty unstamped map can only mean the
+    // refs were minted during this command, on the current active tab.
+    if !state.ref_map.is_empty() && state.ref_map.minted_tab().is_none() {
+        let active = state.browser.as_ref().and_then(|m| m.active_tab_id());
+        state.ref_map.set_minted_tab(active);
     }
 
     // Tab-list-on-change: render the tab list into any response whenever it
