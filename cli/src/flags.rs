@@ -181,17 +181,20 @@ impl Config {
     }
 }
 
+fn try_read_config_file(path: &Path) -> Result<Config, String> {
+    let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut config = serde_json::from_str::<Config>(&content).map_err(|e| e.to_string())?;
+    config.idle_timeout = parse_idle_timeout_value(
+        config.idle_timeout.take(),
+        &format!("config file {}", path.display()),
+    );
+    Ok(config)
+}
+
 fn read_config_file(path: &Path) -> Option<Config> {
-    let content = fs::read_to_string(path).ok()?;
-    match serde_json::from_str::<Config>(&content) {
-        Ok(mut config) => {
-            config.idle_timeout = parse_idle_timeout_value(
-                config.idle_timeout.take(),
-                &format!("config file {}", path.display()),
-            );
-            Some(config)
-        }
-        Err(e) => {
+    match try_read_config_file(path) {
+        Ok(config) => Some(config),
+        Err(e) if path.exists() => {
             eprintln!(
                 "{} invalid config file {}: {}",
                 color::warning_indicator(),
@@ -200,6 +203,7 @@ fn read_config_file(path: &Path) -> Option<Config> {
             );
             None
         }
+        Err(_) => None,
     }
 }
 
@@ -232,6 +236,44 @@ fn parse_bool_arg(args: &[String], i: usize) -> (bool, bool) {
     }
 }
 
+const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
+    "--session",
+    "--restore-save",
+    "--restore-check-url",
+    "--restore-check-text",
+    "--restore-check-fn",
+    "--namespace",
+    "--headers",
+    "--executable-path",
+    "--cdp",
+    "--extension",
+    "--init-script",
+    "--enable",
+    "--profile",
+    "--state",
+    "--proxy",
+    "--proxy-bypass",
+    "--args",
+    "--user-agent",
+    "-p",
+    "--provider",
+    "--device",
+    "--session-name",
+    "--color-scheme",
+    "--download-path",
+    "--max-output",
+    "--allowed-domains",
+    "--action-policy",
+    "--confirm-actions",
+    "--config",
+    "--engine",
+    "--screenshot-dir",
+    "--screenshot-quality",
+    "--screenshot-format",
+    "--idle-timeout",
+    "--model",
+];
+
 /// Extract --config <path> from args before full flag parsing.
 /// Returns `Some(Some(path))` if --config <path> found, `Some(None)` if --config
 /// was the last arg with no value, `None` if --config not present.
@@ -241,48 +283,12 @@ fn parse_bool_arg(args: &[String], i: usize) -> (bool, bool) {
 /// intentionally absent -- they don't take a value, so they can't cause
 /// the next argument to be mis-consumed.
 fn extract_config_path(args: &[String]) -> Option<Option<String>> {
-    const FLAGS_WITH_VALUE: &[&str] = &[
-        "--session",
-        "--restore-save",
-        "--restore-check-url",
-        "--restore-check-text",
-        "--restore-check-fn",
-        "--namespace",
-        "--headers",
-        "--executable-path",
-        "--cdp",
-        "--extension",
-        "--init-script",
-        "--enable",
-        "--profile",
-        "--state",
-        "--proxy",
-        "--proxy-bypass",
-        "--args",
-        "--user-agent",
-        "-p",
-        "--provider",
-        "--device",
-        "--session-name",
-        "--color-scheme",
-        "--download-path",
-        "--max-output",
-        "--allowed-domains",
-        "--action-policy",
-        "--confirm-actions",
-        "--engine",
-        "--screenshot-dir",
-        "--screenshot-quality",
-        "--screenshot-format",
-        "--idle-timeout",
-        "--model",
-    ];
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--config" {
             return Some(args.get(i + 1).cloned());
         }
-        if FLAGS_WITH_VALUE.contains(&args[i].as_str()) {
+        if GLOBAL_FLAGS_WITH_VALUE.contains(&args[i].as_str()) {
             i += 1;
         }
         i += 1;
@@ -305,8 +311,8 @@ pub fn load_config(args: &[String]) -> Result<Config, String> {
         if !path.exists() {
             return Err(format!("config file not found: {}", path_str));
         }
-        return read_config_file(&path)
-            .ok_or_else(|| format!("failed to load config from {}", path_str));
+        return try_read_config_file(&path)
+            .map_err(|e| format!("failed to load config from {}: {}", path_str, e));
     }
 
     let user_config = dirs::home_dir()
@@ -399,11 +405,28 @@ pub struct Flags {
     pub cli_restore: bool,
 }
 
-pub fn parse_flags(args: &[String]) -> Flags {
-    let config = load_config(args).unwrap_or_else(|e| {
-        eprintln!("{} {}", color::warning_indicator(), e);
-        std::process::exit(1);
-    });
+/// Resolve JSON output intent without loading configuration so startup errors
+/// can still honor the environment and explicit CLI override.
+pub fn json_output_requested(args: &[String]) -> bool {
+    let mut json = env_var_is_truthy("AGENT_BROWSER_JSON");
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--json" {
+            let (value, consumed) = parse_bool_arg(args, i);
+            json = value;
+            if consumed {
+                i += 1;
+            }
+        } else if GLOBAL_FLAGS_WITH_VALUE.contains(&args[i].as_str()) {
+            i += 1;
+        }
+        i += 1;
+    }
+    json
+}
+
+pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
+    let config = load_config(args)?;
 
     let extensions_env = env::var("AGENT_BROWSER_EXTENSIONS")
         .ok()
@@ -1000,7 +1023,15 @@ pub fn parse_flags(args: &[String]) -> Flags {
         }
         i += 1;
     }
-    flags
+    Ok(flags)
+}
+
+#[cfg(test)]
+pub fn parse_flags(args: &[String]) -> Flags {
+    try_parse_flags(args).unwrap_or_else(|e| {
+        eprintln!("{} {}", color::warning_indicator(), e);
+        std::process::exit(1);
+    })
 }
 
 fn looks_like_command(value: &str) -> bool {
@@ -1034,45 +1065,6 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--quick",
         "--fix",
     ];
-    // Global flags that always take a value (need to skip the next arg too)
-    const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
-        "--session",
-        "--restore-save",
-        "--restore-check-url",
-        "--restore-check-text",
-        "--restore-check-fn",
-        "--namespace",
-        "--headers",
-        "--executable-path",
-        "--cdp",
-        "--extension",
-        "--init-script",
-        "--enable",
-        "--profile",
-        "--state",
-        "--proxy",
-        "--proxy-bypass",
-        "--args",
-        "--user-agent",
-        "-p",
-        "--provider",
-        "--device",
-        "--session-name",
-        "--color-scheme",
-        "--download-path",
-        "--max-output",
-        "--allowed-domains",
-        "--action-policy",
-        "--confirm-actions",
-        "--config",
-        "--engine",
-        "--screenshot-dir",
-        "--screenshot-quality",
-        "--screenshot-format",
-        "--idle-timeout",
-        "--model",
-    ];
-
     let mut i = 0;
     let mut seen_command = false;
     while i < args.len() {
@@ -1127,6 +1119,24 @@ mod tests {
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn test_json_output_requested_honors_cli_override() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_JSON"]);
+        guard.remove("AGENT_BROWSER_JSON");
+        assert!(!json_output_requested(&args("open example.com")));
+        assert!(json_output_requested(&args("--json open example.com")));
+
+        guard.set("AGENT_BROWSER_JSON", "1");
+        assert!(json_output_requested(&args("open example.com")));
+        assert!(!json_output_requested(&args(
+            "--json false open example.com"
+        )));
+        guard.remove("AGENT_BROWSER_JSON");
+        assert!(!json_output_requested(&args(
+            "--args --json open example.com"
+        )));
     }
 
     #[test]
