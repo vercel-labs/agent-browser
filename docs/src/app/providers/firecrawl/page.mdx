@@ -1,0 +1,32 @@
+# Firecrawl
+
+[Firecrawl](https://firecrawl.dev) provides a managed cloud browser (proxies, anti-bot, persistent login profiles, live view) via its Browser Sandbox. Use it when running agent-browser in environments where a local browser isn't feasible, or when you want Firecrawl's infrastructure underneath agent-browser's automation.
+
+## Setup
+
+```bash
+export FIRECRAWL_API_KEY="fc-your-api-key"
+agent-browser -p firecrawl open https://example.com
+```
+
+Or use environment variables for CI/scripts:
+
+```bash
+export AGENT_BROWSER_PROVIDER=firecrawl
+export FIRECRAWL_API_KEY="fc-your-api-key"
+agent-browser open https://example.com
+```
+
+The `-p` flag takes precedence over `AGENT_BROWSER_PROVIDER`.
+
+When enabled, agent-browser creates a Firecrawl browser session (`POST /v2/interact`), connects to the returned CDP URL instead of launching a local browser, and deletes the session on close. All commands work identically.
+
+## Options
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `FIRECRAWL_API_KEY` | — | Firecrawl API key (`fc-...`). Required. |
+| `FIRECRAWL_API_URL` | `https://api.firecrawl.dev` | Override for self-hosted Firecrawl. |
+| `FIRECRAWL_PROFILE_NAME` | — | Persistent profile to load (cookies/localStorage/login state), so you can log in once and reuse the session. |
+
+Get your API key from the [Firecrawl Dashboard](https://www.firecrawl.dev/app).
