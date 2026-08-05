@@ -512,6 +512,19 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push(format!("--window-size={},{}", w, h));
     }
 
+    // Keep Chrome's hidden headless window outside the Windows virtual desktop
+    // to avoid visible desktop artifacts. Preserve an explicit user position.
+    #[cfg(windows)]
+    if options.headless
+        && !has_extensions
+        && !options
+            .args
+            .iter()
+            .any(|a| a.starts_with("--window-position="))
+    {
+        args.push("--window-position=-32000,-32000".to_string());
+    }
+
     args.extend(user_args);
 
     if options.restrict_webrtc {
@@ -1672,6 +1685,11 @@ mod tests {
             .iter()
             .any(|a| a == "--enable-unsafe-swiftshader"));
         assert!(result.args.iter().any(|a| a == "--window-size=1280,720"));
+        #[cfg(windows)]
+        assert!(result
+            .args
+            .iter()
+            .any(|a| a == "--window-position=-32000,-32000"));
         // Temp dir created when no profile
         assert!(result.temp_user_data_dir.is_some());
         let dir = result.temp_user_data_dir.unwrap();
@@ -1693,6 +1711,11 @@ mod tests {
             .iter()
             .any(|a| a == "--enable-unsafe-swiftshader"));
         assert!(!result.args.iter().any(|a| a.starts_with("--window-size=")));
+        #[cfg(windows)]
+        assert!(!result
+            .args
+            .iter()
+            .any(|a| a.starts_with("--window-position=")));
         // Temp dir created when no profile
         assert!(result.temp_user_data_dir.is_some());
         let dir = result.temp_user_data_dir.unwrap();
@@ -1737,6 +1760,25 @@ mod tests {
         let result = build_chrome_args(&opts).unwrap();
         assert!(!result.args.iter().any(|a| a == "--window-size=1280,720"));
         assert!(result.args.iter().any(|a| a == "--window-size=1920,1080"));
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_build_args_custom_window_position_not_overridden() {
+        let opts = LaunchOptions {
+            headless: true,
+            args: vec!["--window-position=100,200".to_string()],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(!result
+            .args
+            .iter()
+            .any(|a| a == "--window-position=-32000,-32000"));
+        assert!(result.args.iter().any(|a| a == "--window-position=100,200"));
         if let Some(ref dir) = result.temp_user_data_dir {
             let _ = std::fs::remove_dir_all(dir);
         }
@@ -1984,6 +2026,14 @@ mod tests {
         assert!(
             !result.args.iter().any(|a| a.contains("--window-size")),
             "window-size should be omitted when extensions force headed mode"
+        );
+        #[cfg(windows)]
+        assert!(
+            !result
+                .args
+                .iter()
+                .any(|a| a.starts_with("--window-position=")),
+            "window-position should be omitted when extensions force headed mode"
         );
         assert!(result
             .args
