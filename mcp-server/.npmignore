@@ -1,0 +1,20 @@
+# Source files
+src/
+test/
+*.test.ts
+
+# Config files
+tsconfig.json
+vitest.config.ts
+.prettierrc
+
+# Build artifacts
+node_modules/
+*.log
+
+# Git
+.git/
+.gitignore
+
+# Development
+PULL_REQUEST_TEMPLATE.md
