@@ -444,6 +444,19 @@ agent-browser dashboard stop          # Stop the dashboard server
 
 Open the dashboard through `http://localhost:4848` or a proxied/forwarded dashboard URL such as `https://dashboard.agent-browser.localhost`. The browser stays on the dashboard origin; per-session tabs, status, and stream traffic are proxied internally, so session ports do not need to be exposed.
 
+## Install
+
+Install or validate the current Chrome for Testing stable version. Add `--with-deps` to install Linux system dependencies. Add `--prune` to remove obsolete agent-browser-managed Chrome versions after successful validation.
+
+```bash
+agent-browser install
+agent-browser install --with-deps
+agent-browser close --all
+agent-browser install --prune
+```
+
+Pruning is opt-in, refuses while sessions are active, and preserves the current manifest version plus unknown entries, symlinks, files, other engines, and user state. See [Pruning old Chrome versions](/installation#pruning-old-chrome-versions) for the full safety boundary.
+
 ## Doctor
 
 Diagnose your install, auto-clean stale daemon files, and optionally repair common problems.

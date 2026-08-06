@@ -67,6 +67,17 @@ agent-browser install --with-deps
 
 This exits nonzero if the package manager cannot install every required browser library.
 
+## Pruning old Chrome versions
+
+Each Chrome update installs into a versioned directory. To retain the current Chrome for Testing stable version and remove older agent-browser-managed versions:
+
+```bash
+agent-browser close --all
+agent-browser install --prune
+```
+
+Pruning is opt-in. It runs only after the current manifest-resolved Chrome executable is installed or validated, and it refuses while agent-browser sessions are active. Only direct child directories matching `chrome-A.B.C.D` are removed. The current version, unknown or malformed entries, symlinks, files, other browser engines, profiles, auth data, sessions, screenshots, traces, Playwright and Puppeteer caches, and system Chrome installations remain untouched. Failed metadata fetches, downloads, extraction, or validation never trigger pruning.
+
 ## Updating
 
 Upgrade to the latest version:

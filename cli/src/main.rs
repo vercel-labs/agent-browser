@@ -999,7 +999,8 @@ fn main() {
     // Handle install separately
     if clean.first().map(|s| s.as_str()) == Some("install") {
         let with_deps = args.iter().any(|a| a == "--with-deps" || a == "-d");
-        run_install(with_deps);
+        let prune = args.iter().any(|a| a == "--prune");
+        run_install(with_deps, prune);
         return;
     }
 

@@ -2867,16 +2867,18 @@ Examples:
             r##"
 agent-browser install - Install browser binaries
 
-Usage: agent-browser install [--with-deps]
+Usage: agent-browser install [--with-deps] [--prune]
 
 Downloads and installs browser binaries required for automation.
 
 Options:
   -d, --with-deps      Also install system dependencies (Linux only; fails if deps fail)
+      --prune          Remove obsolete managed Chrome versions after validating the current version
 
 Examples:
   agent-browser install
   agent-browser install --with-deps
+  agent-browser install --prune
 "##
         }
 
@@ -3658,6 +3660,7 @@ Dashboard:
 Setup:
   install                    Install browser binaries
   install --with-deps        Also install system dependencies (Linux)
+  install --prune            Remove obsolete managed Chrome versions
   upgrade                    Upgrade to the latest version
   doctor [--fix]             Diagnose install; auto-clean stale files
   dashboard start            Start the observability dashboard

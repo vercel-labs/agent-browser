@@ -64,6 +64,15 @@ agent-browser install --with-deps
 
 This exits nonzero if the package manager cannot install every required browser library.
 
+To remove obsolete agent-browser-managed Chrome versions after installing or validating the current stable version:
+
+```bash
+agent-browser close --all
+agent-browser install --prune
+```
+
+Pruning is opt-in and refuses to run while agent-browser sessions are active. It removes only version directories matching `chrome-A.B.C.D` under the resolved browser directory. The current manifest version, malformed or unknown entries, symlinks, files, other browser engines, profiles, and session data remain untouched.
+
 ### Updating
 
 Upgrade to the latest version:
@@ -492,6 +501,7 @@ agent-browser removeinitscript <identifier>       # Remove a previously register
 ```bash
 agent-browser install                 # Download Chrome from Chrome for Testing (Google's official automation channel)
 agent-browser install --with-deps     # Also install system deps (Linux)
+agent-browser install --prune         # Retain current Chrome and remove obsolete managed versions
 agent-browser upgrade                 # Upgrade agent-browser to the latest version
 agent-browser doctor                  # Diagnose the install and auto-clean stale daemon files
 agent-browser doctor --fix            # Also run destructive repairs (reinstall Chrome, purge old state, ...)

@@ -1,4 +1,5 @@
 use crate::color;
+use crate::connection::walk_daemons;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -397,7 +398,174 @@ fn extract_zip(bytes: Vec<u8>, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn run_install(with_deps: bool) {
+#[derive(Debug, PartialEq, Eq)]
+struct PruneReport {
+    removed: Vec<PathBuf>,
+    failures: Vec<(PathBuf, String)>,
+}
+
+/// Return whether a direct browser-cache child has agent-browser's managed
+/// Chrome directory shape: `chrome-A.B.C.D`, with four decimal components.
+fn is_managed_chrome_dir_name(name: &str) -> bool {
+    let Some(version) = name.strip_prefix("chrome-") else {
+        return false;
+    };
+    let mut components = version.split('.');
+    (0..4).all(|_| {
+        components.next().is_some_and(|component| {
+            !component.is_empty() && component.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    }) && components.next().is_none()
+}
+
+fn prune_obsolete_chrome_versions_with<F>(
+    browsers_dir: &Path,
+    current_version: &str,
+    mut remove_dir: F,
+) -> Result<PruneReport, String>
+where
+    F: FnMut(&Path) -> io::Result<()>,
+{
+    let entries = match fs::read_dir(browsers_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(PruneReport {
+                removed: Vec::new(),
+                failures: Vec::new(),
+            });
+        }
+        Err(error) => {
+            return Err(format!(
+                "Failed to read browser directory {}: {}",
+                browsers_dir.display(),
+                error
+            ));
+        }
+    };
+
+    let current_name = format!("chrome-{current_version}");
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!(
+                "Failed to inspect browser directory {}: {}",
+                browsers_dir.display(),
+                error
+            )
+        })?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("Failed to inspect {}: {}", entry.path().display(), error))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if file_type.is_dir() && name != current_name && is_managed_chrome_dir_name(name) {
+            candidates.push(entry.path());
+        }
+    }
+
+    candidates.sort();
+    let mut report = PruneReport {
+        removed: Vec::new(),
+        failures: Vec::new(),
+    };
+    for path in candidates {
+        match remove_dir(&path) {
+            Ok(()) => report.removed.push(path),
+            Err(error) => report.failures.push((path, error.to_string())),
+        }
+    }
+    Ok(report)
+}
+
+fn prune_obsolete_chrome_versions(
+    browsers_dir: &Path,
+    current_version: &str,
+) -> Result<PruneReport, String> {
+    prune_obsolete_chrome_versions_with(browsers_dir, current_version, |path| {
+        fs::remove_dir_all(path)
+    })
+}
+
+fn prune_after_validation(
+    enabled: bool,
+    browsers_dir: &Path,
+    current_version: &str,
+    current_validated: bool,
+    active_sessions: &[String],
+) -> Result<Option<PruneReport>, String> {
+    if !enabled {
+        return Ok(None);
+    }
+    if !current_validated {
+        return Err(format!(
+            "Cannot prune Chrome versions because Chrome {current_version} failed validation"
+        ));
+    }
+    if !is_managed_chrome_dir_name(&format!("chrome-{current_version}")) {
+        return Err(format!(
+            "Cannot prune Chrome versions because the resolved version is invalid: {current_version}"
+        ));
+    }
+    if !active_sessions.is_empty() {
+        return Err(format!(
+            "Cannot prune Chrome versions while agent-browser sessions are active: {}. Run `agent-browser close --all`, then retry.",
+            active_sessions.join(", ")
+        ));
+    }
+    prune_obsolete_chrome_versions(browsers_dir, current_version).map(Some)
+}
+
+fn finish_prune(enabled: bool, browsers_dir: &Path, current_version: &str, current_dir: &Path) {
+    if !enabled {
+        return;
+    }
+
+    let active_sessions: Vec<String> = walk_daemons()
+        .sessions
+        .into_iter()
+        .map(|session| session.name)
+        .collect();
+    println!("  Retained Chrome {current_version}");
+    match prune_after_validation(
+        enabled,
+        browsers_dir,
+        current_version,
+        chrome_binary_in_dir(current_dir).is_some(),
+        &active_sessions,
+    ) {
+        Ok(Some(report)) => {
+            if report.removed.is_empty() {
+                println!("  Removed obsolete Chrome versions: none");
+            } else {
+                println!("  Removed obsolete Chrome versions:");
+                for path in &report.removed {
+                    println!("    {}", path.display());
+                }
+            }
+            if !report.failures.is_empty() {
+                eprintln!(
+                    "{} Some obsolete Chrome versions could not be removed:",
+                    color::error_indicator()
+                );
+                for (path, error) in &report.failures {
+                    eprintln!("  {}: {}", path.display(), error);
+                }
+                exit(1);
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("{} {}", color::error_indicator(), error);
+            exit(1);
+        }
+    }
+}
+
+/// Install the current Chrome for Testing stable version and optionally prune
+/// obsolete agent-browser-managed versions after validating the current binary.
+pub fn run_install(with_deps: bool, prune: bool) {
     if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         eprintln!(
             "{} Chrome for Testing does not provide Linux ARM64 builds.",
@@ -447,7 +615,8 @@ pub fn run_install(with_deps: bool) {
         }
     };
 
-    let dest = get_browsers_dir().join(format!("chrome-{}", version));
+    let browsers_dir = get_browsers_dir();
+    let dest = browsers_dir.join(format!("chrome-{}", version));
 
     if let Some(bin) = chrome_binary_in_dir(&dest) {
         if bin.exists() {
@@ -456,6 +625,7 @@ pub fn run_install(with_deps: bool) {
                 color::success_indicator(),
                 version
             );
+            finish_prune(prune, &browsers_dir, &version, &dest);
             return;
         }
     }
@@ -472,7 +642,7 @@ pub fn run_install(with_deps: bool) {
     };
 
     match extract_zip(bytes, &dest) {
-        Ok(()) => {
+        Ok(()) if chrome_binary_in_dir(&dest).is_some() => {
             println!(
                 "{} Chrome {} installed successfully",
                 color::success_indicator(),
@@ -488,6 +658,17 @@ pub fn run_install(with_deps: bool) {
                 );
                 println!("  agent-browser install --with-deps");
             }
+
+            finish_prune(prune, &browsers_dir, &version, &dest);
+        }
+        Ok(()) => {
+            let _ = fs::remove_dir_all(&dest);
+            eprintln!(
+                "{} Chrome {} extraction completed but the expected browser executable is missing",
+                color::error_indicator(),
+                version
+            );
+            exit(1);
         }
         Err(e) => {
             let _ = fs::remove_dir_all(&dest);
@@ -820,6 +1001,7 @@ fn package_exists_apt(pkg: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -835,6 +1017,146 @@ mod tests {
             use std::os::windows::process::ExitStatusExt;
             ExitStatus::from_raw(1)
         }
+    }
+
+    fn create_dir(parent: &Path, name: &str) -> PathBuf {
+        let path = parent.join(name);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn child_names(parent: &Path) -> BTreeSet<String> {
+        fs::read_dir(parent)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn managed_chrome_name_requires_four_decimal_components() {
+        assert!(is_managed_chrome_dir_name("chrome-151.0.7922.76"));
+        for malformed in [
+            "chrome-151.0.7922",
+            "chrome-151.0.7922.76.1",
+            "chrome-151..7922.76",
+            "chrome-151.0.7922.x",
+            "chrome-151.0.7922.-1",
+            "chrome-151.０.7922.76",
+            "chromium-151.0.7922.76",
+        ] {
+            assert!(!is_managed_chrome_dir_name(malformed), "{malformed}");
+        }
+    }
+
+    #[test]
+    fn prune_retains_exact_current_and_removes_every_other_managed_version() {
+        let temp = tempfile::tempdir().unwrap();
+        for name in [
+            "chrome-151.0.7922.9",
+            "chrome-151.0.7922.34",
+            "chrome-151.0.7922.76",
+        ] {
+            create_dir(temp.path(), name);
+        }
+
+        let report = prune_obsolete_chrome_versions(temp.path(), "151.0.7922.76").unwrap();
+
+        assert_eq!(report.removed.len(), 2);
+        assert_eq!(
+            child_names(temp.path()),
+            BTreeSet::from(["chrome-151.0.7922.76".to_string()])
+        );
+    }
+
+    #[test]
+    fn prune_preserves_unknown_malformed_files_and_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        create_dir(temp.path(), "chrome-151.0.7922.76");
+        create_dir(temp.path(), "chrome-backup");
+        create_dir(temp.path(), "firefox-151.0.7922.34");
+        fs::write(temp.path().join("chrome-151.0.7922.34"), b"keep").unwrap();
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            temp.path().join("chrome-151.0.7922.76"),
+            temp.path().join("chrome-150.0.1.2"),
+        )
+        .unwrap();
+        let report = prune_obsolete_chrome_versions(temp.path(), "151.0.7922.76").unwrap();
+
+        assert!(report.removed.is_empty());
+        #[cfg(unix)]
+        assert_eq!(child_names(temp.path()).len(), 5);
+        #[cfg(windows)]
+        assert_eq!(child_names(temp.path()).len(), 4);
+    }
+
+    #[test]
+    fn prune_missing_directory_and_single_version_are_harmless_and_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        assert!(prune_obsolete_chrome_versions(&missing, "151.0.7922.76")
+            .unwrap()
+            .removed
+            .is_empty());
+
+        create_dir(temp.path(), "chrome-151.0.7922.76");
+        for _ in 0..2 {
+            let report = prune_obsolete_chrome_versions(temp.path(), "151.0.7922.76").unwrap();
+            assert!(report.removed.is_empty());
+            assert!(report.failures.is_empty());
+        }
+    }
+
+    #[test]
+    fn post_validation_gate_disables_pruning_without_flag_or_with_active_session() {
+        let temp = tempfile::tempdir().unwrap();
+        create_dir(temp.path(), "chrome-150.0.1.2");
+        create_dir(temp.path(), "chrome-151.0.7922.76");
+
+        assert_eq!(
+            prune_after_validation(false, temp.path(), "151.0.7922.76", false, &[]).unwrap(),
+            None
+        );
+        assert!(temp.path().join("chrome-150.0.1.2").exists());
+
+        let error =
+            prune_after_validation(true, temp.path(), "151.0.7922.76", false, &[]).unwrap_err();
+        assert!(error.contains("failed validation"));
+        assert!(temp.path().join("chrome-150.0.1.2").exists());
+
+        let error = prune_after_validation(
+            true,
+            temp.path(),
+            "151.0.7922.76",
+            true,
+            &["default".to_string()],
+        )
+        .unwrap_err();
+        assert!(error.contains("agent-browser close --all"));
+        assert!(temp.path().join("chrome-150.0.1.2").exists());
+    }
+
+    #[test]
+    fn prune_reports_deletion_failures_and_continues() {
+        let temp = tempfile::tempdir().unwrap();
+        let failed = create_dir(temp.path(), "chrome-149.0.1.2");
+        let removed = create_dir(temp.path(), "chrome-150.0.1.2");
+        create_dir(temp.path(), "chrome-151.0.7922.76");
+
+        let report = prune_obsolete_chrome_versions_with(temp.path(), "151.0.7922.76", |path| {
+            if path == failed {
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+            } else {
+                fs::remove_dir_all(path)
+            }
+        })
+        .unwrap();
+
+        assert_eq!(report.removed, vec![removed]);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].0, failed);
+        assert!(report.failures[0].1.contains("denied"));
     }
 
     fn http_response(status: u16, reason: &str, body: &[u8]) -> Vec<u8> {
