@@ -68,6 +68,38 @@ const KEY_INFO: Record<string, { text?: string; keyCode: number }> = {
   End: { keyCode: 35 },
   PageUp: { keyCode: 33 },
   PageDown: { keyCode: 34 },
+  ";": { text: ";", keyCode: 186 },
+  ":": { text: ":", keyCode: 186 },
+  "=": { text: "=", keyCode: 187 },
+  "+": { text: "+", keyCode: 187 },
+  ",": { text: ",", keyCode: 188 },
+  "<": { text: "<", keyCode: 188 },
+  "-": { text: "-", keyCode: 189 },
+  "_": { text: "_", keyCode: 189 },
+  ".": { text: ".", keyCode: 190 },
+  ">": { text: ">", keyCode: 190 },
+  "/": { text: "/", keyCode: 191 },
+  "?": { text: "?", keyCode: 191 },
+  "`": { text: "`", keyCode: 192 },
+  "~": { text: "~", keyCode: 192 },
+  "[": { text: "[", keyCode: 219 },
+  "{": { text: "{", keyCode: 219 },
+  "\\": { text: "\\", keyCode: 220 },
+  "|": { text: "|", keyCode: 220 },
+  "]": { text: "]", keyCode: 221 },
+  "}": { text: "}", keyCode: 221 },
+  "'": { text: "'", keyCode: 222 },
+  "\"": { text: "\"", keyCode: 222 },
+  "!": { text: "!", keyCode: 49 },
+  "@": { text: "@", keyCode: 50 },
+  "#": { text: "#", keyCode: 51 },
+  "$": { text: "$", keyCode: 52 },
+  "%": { text: "%", keyCode: 53 },
+  "^": { text: "^", keyCode: 54 },
+  "&": { text: "&", keyCode: 55 },
+  "*": { text: "*", keyCode: 56 },
+  "(": { text: "(", keyCode: 57 },
+  ")": { text: ")", keyCode: 48 },
 };
 
 function cdpButton(btn: number): string {
@@ -363,7 +395,7 @@ export function Viewport() {
       const text = eventType === "keyDown"
         ? (info?.text ?? (e.key.length === 1 ? e.key : undefined))
         : undefined;
-      const keyCode = info?.keyCode ?? (e.key.length === 1 ? e.key.charCodeAt(0) : 0);
+      const keyCode = info?.keyCode ?? (e.key.length === 1 ? e.key.toUpperCase().charCodeAt(0) : 0);
       let m = 0;
       if (e.altKey) m |= 1;
       if (e.ctrlKey) m |= 2;
