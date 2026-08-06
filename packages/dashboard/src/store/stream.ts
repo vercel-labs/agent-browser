@@ -6,6 +6,7 @@ import { useSetAtom } from "jotai/react";
 import type {
   ActivityEvent,
   ConsoleEntry,
+  FrameMetadata,
   StreamMessage,
   TabInfo,
 } from "@/types";
@@ -25,6 +26,7 @@ export const recordingAtom = atom(false);
 export const viewportWidthAtom = atom(1280);
 export const viewportHeightAtom = atom(720);
 export const currentFrameAtom = atom<string | null>(null);
+export const currentFrameMetadataAtom = atom<FrameMetadata | null>(null);
 export const streamEventsAtom = atom<ActivityEvent[]>([]);
 export const consoleLogsAtom = atom<ConsoleEntry[]>([]);
 export const streamTabsAtom = atom<TabInfo[]>([]);
@@ -81,6 +83,7 @@ export function useStreamSync(port: number) {
   const setVpWidth = useSetAtom(viewportWidthAtom);
   const setVpHeight = useSetAtom(viewportHeightAtom);
   const setFrame = useSetAtom(currentFrameAtom);
+  const setFrameMetadata = useSetAtom(currentFrameMetadataAtom);
   const setEvents = useSetAtom(streamEventsAtom);
   const setConsoleLogs = useSetAtom(consoleLogsAtom);
   const setTabs = useSetAtom(streamTabsAtom);
@@ -109,12 +112,13 @@ export function useStreamSync(port: number) {
       setVpWidth(1280);
       setVpHeight(720);
       setFrame(null);
+      setFrameMetadata(null);
       setEvents([]);
       setConsoleLogs([]);
       setTabs([]);
       setEngine("");
     }
-  }, [port, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine]);
+  }, [port, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setFrameMetadata, setEvents, setConsoleLogs, setTabs, setEngine]);
 
   const connect = useCallback(() => {
     if (port <= 0) return;
@@ -151,6 +155,7 @@ export function useStreamSync(port: number) {
       switch (msg.type) {
         case "frame":
           setFrame(msg.data);
+          setFrameMetadata(msg.metadata);
           break;
 
         case "status":
@@ -218,7 +223,7 @@ export function useStreamSync(port: number) {
           break;
       }
     };
-  }, [port, setWsRef, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine, setTabCache, setEngineCache]);
+  }, [port, setWsRef, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setFrameMetadata, setEvents, setConsoleLogs, setTabs, setEngine, setTabCache, setEngineCache]);
 
   useEffect(() => {
     connect();
