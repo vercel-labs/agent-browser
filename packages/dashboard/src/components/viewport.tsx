@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAtomValue, useSetAtom } from "jotai/react";
-import { ArrowLeft, ArrowRight, Camera, Circle, FileCode, Maximize, Moon, RotateCw, Smartphone, Square, Sun, Wifi, WifiOff } from "lucide-react";
+import { ArrowLeft, ArrowRight, Camera, Circle, FileCode, Hash, Maximize, Moon, RotateCw, Smartphone, Square, Sun, Wifi, WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { execCommand, sessionArgs } from "@/lib/exec";
 import { getSessionStreamUrl } from "@/lib/dashboard-routes";
@@ -188,6 +188,30 @@ export function Viewport() {
     (...args: string[]) => execCommand(sessionArgs(sessionName, ...args)),
     [sessionName],
   );
+
+  // Live element-annotation toggle: when ON, the daemon injects numbered
+  // boxes onto the active page so refs are visible in the streaming viewport.
+  // State is session-scoped — switching sessions resets the toggle to OFF so
+  // the UI doesn't claim "on" for a session whose overlay was never injected.
+  const [annotateOn, setAnnotateOn] = useState(false);
+  useEffect(() => {
+    setAnnotateOn(false);
+  }, [sessionName]);
+
+  const toggleAnnotate = useCallback(async () => {
+    const next = !annotateOn;
+    setAnnotateOn(next);
+    await runCmd("annotate-overlay", next ? "on" : "off");
+  }, [annotateOn, runCmd]);
+
+  // Re-apply overlay after navigation so labels match the new DOM.
+  useEffect(() => {
+    if (!annotateOn) return;
+    const t = setTimeout(() => {
+      runCmd("annotate-overlay", "on");
+    }, 300);
+    return () => clearTimeout(t);
+  }, [url, annotateOn, runCmd]);
 
   const handleNavigate = useCallback(async () => {
     if (!addressValue.trim() || navigating) return;
@@ -461,6 +485,26 @@ export function Viewport() {
               />
             </div>
             <TooltipProvider delayDuration={300}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={toggleAnnotate}
+                    aria-pressed={annotateOn}
+                    className={cn(
+                      "shrink-0 rounded p-1 transition-colors hover:bg-muted",
+                      annotateOn
+                        ? "bg-muted text-foreground"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    <Hash className="size-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">
+                  <p>{annotateOn ? "Hide element labels" : "Show element labels"}</p>
+                </TooltipContent>
+              </Tooltip>
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
