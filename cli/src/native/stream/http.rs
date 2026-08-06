@@ -123,6 +123,29 @@ fn is_loopback_authority(authority: &str) -> bool {
     )
 }
 
+fn is_localhost_or_loopback_authority(authority: &str) -> bool {
+    let host = authority_host(authority);
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]") || host.ends_with(".localhost")
+}
+
+fn origin_is_trusted_local_or_https(origin: &str, authority: &str) -> bool {
+    url::Url::parse(origin)
+        .map(|url| url.scheme() == "https" || is_localhost_or_loopback_authority(authority))
+        .unwrap_or(false)
+}
+
+pub(super) fn request_header_matches_host(request: &str, header_name: &str) -> Option<bool> {
+    let origin = request_header_value(request, header_name)?;
+    let authority = normalize_origin_authority(origin)?;
+    let host = request_header_value(request, "host").map(normalize_host_authority)?;
+    Some(origin_is_trusted_local_or_https(origin, &authority) && authority == host)
+}
+
+pub(super) fn is_same_origin_http_request(request: &str) -> bool {
+    matches!(request_header_matches_host(request, "origin"), Some(true))
+        || matches!(request_header_matches_host(request, "referer"), Some(true))
+}
+
 fn header_authority_matches_host(request: &str, header_name: &str) -> bool {
     let Some(authority) =
         request_header_value(request, header_name).and_then(normalize_origin_authority)
@@ -188,6 +211,16 @@ pub(super) async fn handle_http_request(
     let origin = parse_origin(peeked);
 
     if method == "OPTIONS" {
+        if path == "/api/sessions" && !is_same_origin_http_request(&request) {
+            write_json_error_response_no_cors(
+                &mut stream,
+                "403 Forbidden",
+                "Origin or Referer does not match Host header.",
+            )
+            .await;
+            return;
+        }
+
         if path == "/api/command" {
             if !is_same_origin_command_request(&request) {
                 write_json_error_response_no_cors(
@@ -215,6 +248,16 @@ pub(super) async fn handle_http_request(
     }
 
     if method == "POST" {
+        if path == "/api/sessions" && !is_same_origin_http_request(&request) {
+            write_json_error_response_no_cors(
+                &mut stream,
+                "403 Forbidden",
+                "Origin or Referer does not match Host header.",
+            )
+            .await;
+            return;
+        }
+
         if path == "/api/command" && !is_same_origin_command_request(&request) {
             write_json_error_response_no_cors(
                 &mut stream,
@@ -537,16 +580,54 @@ mod tests {
         rx
     }
 
+    #[test]
+    fn same_origin_http_request_allows_matching_origin() {
+        let req = "POST /api/command HTTP/1.1\r\nHost: localhost:4848\r\nOrigin: http://localhost:4848\r\n\r\n";
+        assert!(is_same_origin_http_request(req));
+    }
+
+    #[test]
+    fn same_origin_http_request_allows_matching_referer() {
+        let req = "GET /api/sessions HTTP/1.1\r\nHost: dashboard.agent-browser.localhost:443\r\nReferer: https://dashboard.agent-browser.localhost/sessions\r\n\r\n";
+        assert!(is_same_origin_http_request(req));
+    }
+
+    #[test]
+    fn same_origin_http_request_allows_https_proxy_origin() {
+        let req = "POST /api/command HTTP/1.1\r\nHost: workspace.coder.example\r\nOrigin: https://workspace.coder.example\r\n\r\n";
+        assert!(is_same_origin_http_request(req));
+    }
+
+    #[test]
+    fn same_origin_http_request_allows_http_localhost_subdomain() {
+        let req = "POST /api/command HTTP/1.1\r\nHost: dashboard.agent-browser.localhost:4848\r\nOrigin: http://dashboard.agent-browser.localhost:4848\r\n\r\n";
+        assert!(is_same_origin_http_request(req));
+    }
+
+    #[test]
+    fn same_origin_http_request_rejects_cross_origin() {
+        let req = "POST /api/command HTTP/1.1\r\nHost: localhost:4848\r\nOrigin: https://evil.example\r\n\r\n";
+        assert!(!is_same_origin_http_request(req));
+    }
+
+    #[test]
+    fn same_origin_http_request_rejects_http_dns_rebind_origin() {
+        let req = "POST /api/command HTTP/1.1\r\nHost: evil.example:4848\r\nOrigin: http://evil.example:4848\r\n\r\n";
+        assert!(!is_same_origin_http_request(req));
+    }
+
+    #[test]
+    fn same_origin_http_request_rejects_missing_origin_and_referer() {
+        let req = "POST /api/command HTTP/1.1\r\nHost: localhost:4848\r\n\r\n";
+        assert!(!is_same_origin_http_request(req));
+    }
+
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn cross_origin_command_post_is_rejected_without_relaying_to_daemon() {
-        let temp_parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("t");
-        std::fs::create_dir_all(&temp_parent).unwrap();
         let socket_dir = tempfile::Builder::new()
             .prefix("ab-")
-            .tempdir_in(temp_parent)
+            .tempdir_in(std::path::Path::new("/tmp"))
             .unwrap();
         let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
         guard.set(
@@ -664,16 +745,55 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn sessions_preflight_without_origin_or_referer_is_rejected_without_wildcard_cors() {
+        let request = concat!(
+            "OPTIONS /api/sessions HTTP/1.1\r\n",
+            "Host: localhost:7777\r\n",
+            "Access-Control-Request-Method: POST\r\n",
+            "Access-Control-Request-Headers: content-type\r\n",
+            "\r\n"
+        );
+
+        let response = send_request_to_handler(request, "x").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin: *"),
+            "forbidden sessions preflight exposed wildcard CORS: {response}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sessions_post_without_origin_or_referer_is_rejected_without_wildcard_cors() {
+        let body = r#"{"browserArgs":[]}"#;
+        let request = format!(
+            "POST /api/sessions HTTP/1.1\r\nHost: localhost:7777\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let response = send_request_to_handler(&request, "x").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin: *"),
+            "forbidden sessions response exposed wildcard CORS: {response}"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn same_origin_command_post_relays_without_wildcard_cors() {
-        let temp_parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("t");
-        std::fs::create_dir_all(&temp_parent).unwrap();
         let socket_dir = tempfile::Builder::new()
             .prefix("ab-")
-            .tempdir_in(temp_parent)
+            .tempdir_in(std::path::Path::new("/tmp"))
             .unwrap();
         let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
         guard.set(
