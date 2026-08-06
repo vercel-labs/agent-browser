@@ -84,7 +84,7 @@ Issue #1661 asks maintainers to confirm:
 2. Fetch upstream `main` and recheck for overlapping lifecycle work.
 3. Rebase this branch onto current upstream `main`.
 4. Revise or replace commit `dc44a44` according to confirmed retention and command semantics. Do not preserve the prototype merely because it already exists.
-5. Remove this fork-only status file before opening an upstream pull request.
+5. Remove both fork-only archive files, `INSTALL_PRUNE_GOAL.md` and `INSTALL_PRUNE_STATUS.md`, before opening an upstream pull request.
 6. Rerun all repository-prescribed validation, including platform checks made necessary by the accepted design.
 7. Push the revised branch and open an upstream pull request only after the issue provides sufficient direction.
 8. Read and address top-level comments, submitted reviews, thread-aware inline discussions, and CI failures. Do not merge.

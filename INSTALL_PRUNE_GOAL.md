@@ -105,6 +105,33 @@ Relevant end-to-end and platform-specific checks should run where available. Env
 9. Address all actionable feedback.
 10. Do not merge.
 
+## Pull request acceptance constraints
+
+Keep any eventual upstream pull request smaller than broad installer proposals. Do not combine pruning with:
+
+- XDG migration.
+- Chrome Headless Shell installation.
+- General uninstall support.
+- Doctor redesign.
+- External cache cleanup.
+- Daemon lifecycle refactors.
+
+The feature should manage only obsolete versions created by the agent-browser installer, subject to the retention policy maintainers confirm.
+
+The eventual pull request body must include:
+
+- Problem and reproduction.
+- Why lifecycle management belongs upstream.
+- Exact deletion and preservation boundaries.
+- Why cleanup is opt-in.
+- Active-session behavior.
+- Compatibility with XDG/path and Headless Shell work.
+- Test commands and results.
+- Manual verification.
+- The confirmation issue link.
+
+The final report for resumed work must return the issue URL, pull request URL, branch, and commit SHA.
+
 ## Research changed the immediate goal
 
 The upstream audit found maintainer-authored branch `feat/chrome-version-select` at commit `742dfa7`. It adds exact version and channel installation, `chrome list`, and per-run Chrome selection. Under that planned architecture, multiple managed versions can be deliberate. Removing every version except the current Stable release could destroy explicitly installed or pinned versions.
@@ -126,6 +153,7 @@ To respect maintainer time, no upstream pull request was opened. Instead, [issue
 - Local and fork branch: `feat/install-prune-old-chrome`
 - Prototype commit: `dc44a44`
 - Research/status commit: `f13b380`
+- Goal archive commit: branch history after `f13b380`
 - Upstream confirmation issue: `https://github.com/vercel-labs/agent-browser/issues/1661`
 - Upstream pull request: none
 
@@ -133,4 +161,6 @@ The prototype implements the original `install --prune` interpretation and passe
 
 ## Current disposition
 
-This goal is intentionally closed as an archived checkpoint, not claimed as an accepted upstream feature. Future work begins only after meaningful maintainer direction appears on issue #1661 or linked upstream work. At that time, treat the response as a new goal, reread all linked context, fetch current upstream state, and revise or discard the prototype according to the confirmed architecture.
+This goal is intentionally closed as an archived checkpoint, not claimed as an accepted upstream feature. The only unperformed original deliverables are the upstream pull request, its CI/review cycle, and any implementation revision required by maintainers. Those actions are deliberately blocked on external lifecycle-policy confirmation and are not silently treated as implemented.
+
+Future work begins only after meaningful maintainer direction appears on issue #1661 or linked upstream work. At that time, treat the response as a new goal, reread all linked context, fetch current upstream state, and revise or discard the prototype according to the confirmed architecture.
