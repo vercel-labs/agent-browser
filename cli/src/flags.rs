@@ -82,6 +82,7 @@ pub struct Config {
     pub ignore_https_errors: Option<bool>,
     pub allow_file_access: Option<bool>,
     pub cdp: Option<String>,
+    pub cdp_headers: Option<String>,
     pub auto_connect: Option<bool>,
     pub headers: Option<String>,
     pub annotate: Option<bool>,
@@ -152,6 +153,7 @@ impl Config {
             ignore_https_errors: other.ignore_https_errors.or(self.ignore_https_errors),
             allow_file_access: other.allow_file_access.or(self.allow_file_access),
             cdp: other.cdp.or(self.cdp),
+            cdp_headers: other.cdp_headers.or(self.cdp_headers),
             auto_connect: other.auto_connect.or(self.auto_connect),
             headers: other.headers.or(self.headers),
             annotate: other.annotate.or(self.annotate),
@@ -251,6 +253,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--headers",
         "--executable-path",
         "--cdp",
+        "--cdp-headers",
         "--extension",
         "--init-script",
         "--enable",
@@ -337,6 +340,9 @@ pub struct Flags {
     pub headers: Option<String>,
     pub executable_path: Option<String>,
     pub cdp: Option<String>,
+    /// JSON object of WebSocket headers for `--cdp` connect (e.g. Authorization).
+    /// Distinct from page/origin `--headers`.
+    pub cdp_headers: Option<String>,
     pub extensions: Vec<String>,
     pub init_scripts: Vec<String>,
     pub enable: Vec<String>,
@@ -500,6 +506,9 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .ok()
             .or(config.executable_path),
         cdp: env::var("AGENT_BROWSER_CDP").ok().or(config.cdp),
+        cdp_headers: env::var("AGENT_BROWSER_CDP_HEADERS")
+            .ok()
+            .or(config.cdp_headers),
         extensions,
         init_scripts,
         enable,
@@ -775,6 +784,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--cdp-headers" => {
+                if let Some(h) = args.get(i + 1) {
+                    flags.cdp_headers = Some(h.clone());
+                    i += 1;
+                }
+            }
             "--profile" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.profile = Some(s.clone());
@@ -1045,6 +1060,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--headers",
         "--executable-path",
         "--cdp",
+        "--cdp-headers",
         "--extension",
         "--init-script",
         "--enable",
@@ -1133,6 +1149,22 @@ mod tests {
     fn test_parse_headers_flag() {
         let flags = parse_flags(&args(r#"open example.com --headers {"Auth":"token"}"#));
         assert_eq!(flags.headers, Some(r#"{"Auth":"token"}"#.to_string()));
+    }
+
+    #[test]
+    fn test_parse_cdp_headers_flag() {
+        let flags = parse_flags(&[
+            "snapshot".to_string(),
+            "--cdp".to_string(),
+            "wss://example.com/cdp".to_string(),
+            "--cdp-headers".to_string(),
+            r#"{"Authorization":"Bearer t"}"#.to_string(),
+        ]);
+        assert_eq!(flags.cdp.as_deref(), Some("wss://example.com/cdp"));
+        assert_eq!(
+            flags.cdp_headers.as_deref(),
+            Some(r#"{"Authorization":"Bearer t"}"#)
+        );
     }
 
     #[test]
