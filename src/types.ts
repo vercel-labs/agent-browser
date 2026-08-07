@@ -16,6 +16,8 @@ export interface LaunchCommand extends BaseCommand {
   executablePath?: string;
   cdpPort?: number;
   cdpUrl?: string;
+  /** Headers for chromium.connectOverCDP (e.g. Authorization for Cloudflare Browser Rendering). */
+  cdpHeaders?: Record<string, string>;
   autoConnect?: boolean; // Auto-discover and connect to running Chrome via DevToolsActivePort
   extensions?: string[];
   profile?: string; // Path to persistent browser profile directory
