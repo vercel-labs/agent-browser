@@ -10,7 +10,7 @@ on:
 jobs:
   version-sync:
     name: Version Sync Check
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lxc]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -25,7 +25,7 @@ jobs:
 
   rust:
     name: Rust
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lxc]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -51,7 +51,7 @@ jobs:
 
   dashboard:
     name: Dashboard
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lxc]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -74,7 +74,7 @@ jobs:
 
   sandbox-package:
     name: Sandbox Package
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lxc]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -96,7 +96,7 @@ jobs:
 
   eve-package:
     name: Eve Package
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lxc]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -153,7 +153,7 @@ jobs:
   native-e2e:
     name: Native E2E Tests
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lxc]
     needs: rust
     steps:
       - name: Checkout repository
@@ -242,7 +242,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: [self-hosted, Linux, X64, lxc]
             target: x86_64-unknown-linux-gnu
             binary: agent-browser-linux-x64
           - os: macos-latest

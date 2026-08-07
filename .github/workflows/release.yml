@@ -14,7 +14,7 @@ permissions:
 jobs:
   check-release:
     name: Check for new version
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lxc]
     timeout-minutes: 5
     permissions:
       contents: read
@@ -97,31 +97,31 @@ jobs:
       matrix:
         include:
           - name: Linux x64
-            os: ubuntu-latest
+            os: [self-hosted, Linux, X64, lxc]
             rust_target: x86_64-unknown-linux-gnu
             build_target: x86_64-unknown-linux-gnu.2.28
             binary: agent-browser-linux-x64
             use_zigbuild: true
           - name: Linux ARM64
-            os: ubuntu-latest
+            os: [self-hosted, Linux, X64, lxc]
             rust_target: aarch64-unknown-linux-gnu
             build_target: aarch64-unknown-linux-gnu.2.28
             binary: agent-browser-linux-arm64
             use_zigbuild: true
           - name: Linux musl x64
-            os: ubuntu-latest
+            os: [self-hosted, Linux, X64, lxc]
             rust_target: x86_64-unknown-linux-musl
             build_target: x86_64-unknown-linux-musl
             binary: agent-browser-linux-musl-x64
             use_zigbuild: true
           - name: Linux musl ARM64
-            os: ubuntu-latest
+            os: [self-hosted, Linux, X64, lxc]
             rust_target: aarch64-unknown-linux-musl
             build_target: aarch64-unknown-linux-musl
             binary: agent-browser-linux-musl-arm64
             use_zigbuild: true
           - name: Windows x64
-            os: ubuntu-latest
+            os: [self-hosted, Linux, X64, lxc]
             rust_target: x86_64-pc-windows-gnu
             build_target: x86_64-pc-windows-gnu
             binary: agent-browser-win32-x64.exe
@@ -234,7 +234,7 @@ jobs:
     name: Publish to npm
     needs: [check-release, build-binaries]
     if: needs.check-release.outputs.should_release == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lxc]
     timeout-minutes: 15
     environment: Release
     permissions:
@@ -317,7 +317,7 @@ jobs:
         needs.check-release.outputs.should_release != 'true' ||
         needs.publish.result == 'success'
       )
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lxc]
     timeout-minutes: 10
     environment: Release
     permissions:
@@ -361,7 +361,7 @@ jobs:
         needs.check-release.outputs.should_publish_sandbox != 'true' ||
         needs.publish-sandbox.result == 'success'
       )
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lxc]
     timeout-minutes: 10
     environment: Release
     permissions:
@@ -401,7 +401,7 @@ jobs:
       (needs.publish.result == 'success' || needs.publish.result == 'skipped') &&
       (needs.publish-sandbox.result == 'success' || needs.publish-sandbox.result == 'skipped') &&
       (needs.publish-eve.result == 'success' || needs.publish-eve.result == 'skipped')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, lxc]
     timeout-minutes: 10
     permissions:
       contents: write
