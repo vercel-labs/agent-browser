@@ -3375,6 +3375,29 @@ async fn e2e_diff_snapshot() {
     assert_success(&resp);
     let baseline = get_data(&resp)["snapshot"].as_str().unwrap().to_string();
 
+    // Regression: diffing an unchanged page against its own baseline must
+    // report no changes. diff_snapshot must reset ref IDs like snapshot does,
+    // otherwise every ref'd line shows up as an addition.
+    let resp = execute_command(
+        &json!({ "id": "3b", "action": "diff_snapshot", "baseline": baseline }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(
+        data["additions"], 0,
+        "Unchanged page diff should have no additions"
+    );
+    assert_eq!(
+        data["removals"], 0,
+        "Unchanged page diff should have no removals"
+    );
+    assert_eq!(
+        data["changed"], false,
+        "Unchanged page diff should not be marked changed"
+    );
+
     // Modify the page
     let resp = execute_command(
         &json!({ "id": "4", "action": "evaluate", "script": "document.querySelector('h1').textContent = 'Changed'" }),

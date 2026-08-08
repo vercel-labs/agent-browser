@@ -5746,6 +5746,8 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         selector,
         ..SnapshotOptions::default()
     };
+
+    state.ref_map.clear();
     let current = snapshot::take_snapshot(
         &mgr.client,
         &session_id,
