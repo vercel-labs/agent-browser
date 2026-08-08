@@ -928,6 +928,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--proxy <url>` | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env) |
 | `--proxy-bypass <hosts>` | Hosts to bypass proxy (or `AGENT_BROWSER_PROXY_BYPASS` env) |
 | `--ignore-https-errors` | Ignore HTTPS certificate errors (useful for self-signed certs) |
+| `--ca-cert <path>` | Trust a specific CA certificate for HTTPS interception proxies (or `AGENT_BROWSER_CA_CERT` env) |
 | `--allow-file-access` | Allow file:// URLs to access local files (Chromium only) |
 | `--hide-scrollbars <bool>` | Hide native scrollbars in headless Chromium screenshots, enabled by default (or `AGENT_BROWSER_HIDE_SCROLLBARS` env) |
 | `-p, --provider <name>` | Browser provider, including configured `browser.provider` plugins (or `AGENT_BROWSER_PROVIDER` env) |
@@ -1030,6 +1031,7 @@ Create an `agent-browser.json` file to set persistent defaults instead of repeat
   "userAgent": "my-agent/1.0",
   "hideScrollbars": false,
   "ignoreHttpsErrors": true,
+  "caCert": "/etc/ssl/certs/proxy-ca.crt",
   "plugins": [
     {
       "name": "vault",

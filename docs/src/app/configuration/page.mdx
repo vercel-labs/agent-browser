@@ -84,6 +84,7 @@ Global launch, output, provider, and chat options can be set in the config file 
     <tr><td><code>hideScrollbars</code></td><td><code>--hide-scrollbars</code></td><td>boolean</td></tr>
     <tr><td><code>webgpu</code></td><td><code>--webgpu</code></td><td>boolean</td></tr>
     <tr><td><code>ignoreHttpsErrors</code></td><td><code>--ignore-https-errors</code></td><td>boolean</td></tr>
+    <tr><td><code>caCert</code></td><td><code>--ca-cert</code></td><td>string</td></tr>
     <tr><td><code>allowFileAccess</code></td><td><code>--allow-file-access</code></td><td>boolean</td></tr>
     <tr><td><code>cdp</code></td><td><code>--cdp</code></td><td>string</td></tr>
     <tr><td><code>autoConnect</code></td><td><code>--auto-connect</code></td><td>boolean</td></tr>
@@ -120,6 +121,16 @@ Global launch, output, provider, and chat options can be set in the config file 
 ```
 
 ### Behind a Proxy
+
+```json
+{
+  "proxy": "http://proxy.corp.example.com:8080",
+  "proxyBypass": "localhost,*.internal.com",
+  "caCert": "/etc/ssl/certs/proxy-ca.crt"
+}
+```
+
+`caCert` trusts only that CA and keeps certificate and hostname verification on. Without the CA certificate on hand, fall back to ignoring every certificate error, which is less secure:
 
 ```json
 {

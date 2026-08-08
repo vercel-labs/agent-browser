@@ -499,6 +499,6 @@ That pulls in:
 - `references/profiling.md` — Chrome DevTools tracing and profiling
 - `references/video-recording.md` — video capture options
 - `references/streaming.md` covers live viewport streaming, remote input, per-client frame rate, and the encoding vars that set bandwidth cost
-- `references/proxy-support.md` — proxy configuration
+- `references/proxy-support.md` — proxy configuration, CA certificates for HTTPS interception proxies
 - `references/webgpu.md` — screenshots/video of WebGPU pages (three.js, Babylon.js), Linux/CI setup
 - `templates/*` — starter shell scripts for auth, capture, form automation

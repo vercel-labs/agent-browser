@@ -171,7 +171,20 @@ export HTTP_PROXY="http://user:pass@proxy.example.com:8080"
 
 ### SSL/TLS Errors Through Proxy
 
-Some proxies perform SSL inspection. If you encounter certificate errors:
+Some proxies perform SSL inspection with a custom CA certificate. Trust only that CA:
+
+```bash
+# Recommended: trust the proxy's CA certificate
+agent-browser --ca-cert /etc/ssl/certs/proxy-ca.crt open https://example.com
+
+# Via environment variable
+export AGENT_BROWSER_CA_CERT=/etc/ssl/certs/proxy-ca.crt
+agent-browser open https://example.com
+```
+
+`--ca-cert` computes the certificate's SPKI hash and passes it to Chromium, so only that CA is trusted. Certificate and hostname verification stay on for everything else. Chromium only; not supported with Lightpanda.
+
+Without the CA certificate on hand, fall back to ignoring every certificate error:
 
 ```bash
 # For testing only - not recommended for production
