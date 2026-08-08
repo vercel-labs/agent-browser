@@ -182,7 +182,34 @@ export AGENT_BROWSER_CA_CERT=/etc/ssl/certs/proxy-ca.crt
 agent-browser open https://example.com
 ```
 
-`--ca-cert` computes the certificate's SPKI hash and passes it to Chromium, so only that CA is trusted. Certificate and hostname verification stay on for everything else. Chromium only; not supported with Lightpanda.
+`--ca-cert` computes the certificate's SPKI hash and passes it to Chromium, so only that CA is trusted. Certificate and hostname verification stay on for everything else. The browser side is Chromium only; not supported with Lightpanda.
+
+### Two trust stores
+
+An intercepting proxy can break the connection in two different places, and they need different fixes.
+
+
+| Symptom | Who rejects the certificate | Fix |
+| --- | --- | --- |
+| `net::ERR_CERT_AUTHORITY_INVALID` on a page | Chromium | `--ca-cert` |
+| `CDP WebSocket connect failed: ... UnknownIssuer` | The CLI, before the browser is reached | `--ca-cert` or `--use-system-ca` |
+
+The CLI verifies its own connections (remote CDP over `wss://`, cloud provider APIs) against a root list compiled into the binary, which cannot see a private CA. Two opt-ins widen it:
+
+```bash
+# Use the machine's trust store, where the proxy CA is usually already installed
+export AGENT_BROWSER_USE_SYSTEM_CA=1
+agent-browser --cdp wss://remote.example.com/session open https://example.com
+
+# Or point at the CA bundle directly. SSL_CERT_FILE works too.
+agent-browser --ca-cert /etc/pki/ca-trust/source/anchors/proxy-ca.pem --cdp wss://... open https://example.com
+```
+
+Neither disables verification. Without one of them the CLI keeps using the built-in roots, so nothing changes for setups that work today. `agent-browser doctor` reports which trust store is active.
+
+### Vercel Sandbox
+
+A Vercel Sandbox network policy that rewrites requests terminates TLS and re-signs with the Vercel proxy CA, which the sandbox already installs. Set `AGENT_BROWSER_USE_SYSTEM_CA=1` in the sandbox so the CLI picks it up.
 
 Without the CA certificate on hand, fall back to ignoring every certificate error:
 

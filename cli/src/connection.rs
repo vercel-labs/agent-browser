@@ -441,6 +441,7 @@ pub struct DaemonOptions<'a> {
     pub proxy_password: Option<&'a str>,
     pub ignore_https_errors: bool,
     pub ca_cert: Option<&'a str>,
+    pub use_system_ca: bool,
     pub allow_file_access: bool,
     pub hide_scrollbars: bool,
     pub webgpu: bool,
@@ -511,6 +512,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(ca) = opts.ca_cert {
         cmd.env("AGENT_BROWSER_CA_CERT", ca);
+    }
+    if opts.use_system_ca {
+        cmd.env("AGENT_BROWSER_USE_SYSTEM_CA", "1");
     }
     if opts.allow_file_access {
         cmd.env("AGENT_BROWSER_ALLOW_FILE_ACCESS", "1");
@@ -1253,6 +1257,7 @@ mod tests {
             proxy_password: None,
             ignore_https_errors: false,
             ca_cert: None,
+            use_system_ca: false,
             allow_file_access: false,
             hide_scrollbars: true,
             webgpu: false,

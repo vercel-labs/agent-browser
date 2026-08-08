@@ -200,7 +200,7 @@ pub async fn run_read(raw_url: &str, options: ReadOptions) -> Result<Value, Stri
             attempt.follow()
         }
     });
-    let client = Client::builder()
+    let client = crate::tls::apply_to_reqwest(Client::builder())
         .timeout(Duration::from_millis(options.timeout_ms))
         .redirect(redirect_policy)
         .build()

@@ -101,10 +101,27 @@ impl CdpClient {
             ..Default::default()
         };
 
-        let (ws_stream, _) =
-            tokio_tungstenite::connect_async_with_config(request, Some(ws_config), false)
-                .await
-                .map_err(|e| format!("CDP WebSocket connect failed: {}", e))?;
+        // A remote CDP endpoint reached through an HTTPS-intercepting proxy is
+        // signed by a private CA, which the compiled-in root list cannot see.
+        // `ws_connector` returns None unless the operator opted into a wider
+        // trust store, so the default path is unchanged.
+        //
+        // Only wss:// negotiates TLS. Building a connector for a local ws://
+        // daemon connection would let a trust-store problem break a session
+        // that never performs a handshake.
+        let connector = if request.uri().scheme_str() == Some("wss") {
+            crate::tls::ws_connector()?
+        } else {
+            None
+        };
+        let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
+            request,
+            Some(ws_config),
+            false,
+            connector,
+        )
+        .await
+        .map_err(|e| format!("CDP WebSocket connect failed: {e}"))?;
 
         enable_tcp_keepalive(ws_stream.get_ref());
 

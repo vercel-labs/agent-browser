@@ -81,6 +81,7 @@ pub struct Config {
     pub webgpu: Option<bool>,
     pub ignore_https_errors: Option<bool>,
     pub ca_cert: Option<String>,
+    pub use_system_ca: Option<bool>,
     pub allow_file_access: Option<bool>,
     pub cdp: Option<String>,
     pub auto_connect: Option<bool>,
@@ -152,6 +153,7 @@ impl Config {
             webgpu: other.webgpu.or(self.webgpu),
             ignore_https_errors: other.ignore_https_errors.or(self.ignore_https_errors),
             ca_cert: other.ca_cert.or(self.ca_cert),
+            use_system_ca: other.use_system_ca.or(self.use_system_ca),
             allow_file_access: other.allow_file_access.or(self.allow_file_access),
             cdp: other.cdp.or(self.cdp),
             auto_connect: other.auto_connect.or(self.auto_connect),
@@ -207,7 +209,7 @@ fn read_config_file(path: &Path) -> Option<Config> {
 
 /// Check if a boolean environment variable is set to a truthy value.
 /// Returns false when unset, empty, or set to "0", "false", or "no" (case-insensitive).
-fn env_var_is_truthy(name: &str) -> bool {
+pub fn env_var_is_truthy(name: &str) -> bool {
     match env::var(name) {
         Ok(val) => !matches!(val.to_lowercase().as_str(), "0" | "false" | "no" | ""),
         Err(_) => false,
@@ -352,6 +354,7 @@ pub struct Flags {
     pub provider: Option<String>,
     pub ignore_https_errors: bool,
     pub ca_cert: Option<String>,
+    pub use_system_ca: bool,
     pub allow_file_access: bool,
     pub hide_scrollbars: bool,
     pub webgpu: bool,
@@ -532,6 +535,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
         ignore_https_errors: env_var_is_truthy("AGENT_BROWSER_IGNORE_HTTPS_ERRORS")
             || config.ignore_https_errors.unwrap_or(false),
         ca_cert: env::var("AGENT_BROWSER_CA_CERT").ok().or(config.ca_cert),
+        use_system_ca: env_var_is_truthy("AGENT_BROWSER_USE_SYSTEM_CA")
+            || config.use_system_ca.unwrap_or(false),
         allow_file_access: env_var_is_truthy("AGENT_BROWSER_ALLOW_FILE_ACCESS")
             || config.allow_file_access.unwrap_or(false),
         hide_scrollbars: env_var_bool("AGENT_BROWSER_HIDE_SCROLLBARS")
@@ -837,6 +842,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--use-system-ca" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.use_system_ca = val;
+                if consumed {
+                    i += 1;
+                }
+            }
             "--ca-cert" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.ca_cert = Some(s.clone());
@@ -1032,6 +1044,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--webgpu",
         "--debug",
         "--ignore-https-errors",
+        "--use-system-ca",
         "--allow-file-access",
         "--hide-scrollbars",
         "--auto-connect",
@@ -1894,6 +1907,40 @@ mod tests {
         };
         let merged = user.merge(project);
         assert_eq!(merged.extensions, Some(vec!["/ext2".to_string()]));
+    }
+
+    #[test]
+    fn test_parse_use_system_ca_flag() {
+        let flags = parse_flags(&args("--use-system-ca open example.com"));
+        assert!(flags.use_system_ca);
+    }
+
+    #[test]
+    fn test_use_system_ca_defaults_off() {
+        let flags = parse_flags(&args("open example.com"));
+        assert!(!flags.use_system_ca);
+    }
+
+    #[test]
+    fn test_parse_use_system_ca_explicit_false() {
+        let flags = parse_flags(&args("--use-system-ca false open example.com"));
+        assert!(!flags.use_system_ca);
+    }
+
+    #[test]
+    fn test_clean_args_removes_use_system_ca() {
+        let cleaned = clean_args(&args("--use-system-ca open example.com"));
+        assert_eq!(cleaned, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_config_merge_use_system_ca() {
+        let user = Config {
+            use_system_ca: Some(true),
+            ..Config::default()
+        };
+        let project = Config::default();
+        assert_eq!(user.merge(project).use_system_ca, Some(true));
     }
 
     #[test]

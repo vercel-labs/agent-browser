@@ -13,6 +13,7 @@ mod read;
 mod skills;
 #[cfg(test)]
 mod test_utils;
+mod tls;
 mod upgrade;
 mod validation;
 
@@ -971,6 +972,16 @@ fn main() {
     if let Some(ref namespace) = flags.namespace {
         env::set_var("AGENT_BROWSER_NAMESPACE", namespace);
     }
+    // The trust store is resolved from the environment so that the daemon,
+    // which is a separate process, sees the same configuration. Export the
+    // flag forms here so commands that run in this process (doctor, read,
+    // provider calls) honor them too.
+    if flags.use_system_ca {
+        env::set_var("AGENT_BROWSER_USE_SYSTEM_CA", "1");
+    }
+    if let Some(ref ca) = flags.ca_cert {
+        env::set_var("AGENT_BROWSER_CA_CERT", ca);
+    }
     let clean = clean_args(&args);
 
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
@@ -1281,6 +1292,7 @@ fn main() {
         proxy_password: proxy_password.as_deref(),
         ignore_https_errors: flags.ignore_https_errors,
         ca_cert: flags.ca_cert.as_deref(),
+        use_system_ca: flags.use_system_ca,
         allow_file_access: flags.allow_file_access,
         hide_scrollbars: flags.hide_scrollbars,
         webgpu: flags.webgpu,
