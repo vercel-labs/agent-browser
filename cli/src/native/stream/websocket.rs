@@ -584,7 +584,7 @@ fn keyboard_params(parsed: &Value) -> Value {
             .and_then(|v| v.as_str())
             .unwrap_or("keyDown")),
     );
-    for field in ["key", "code", "text"] {
+    for field in ["key", "code", "text", "unmodifiedText"] {
         if let Some(value) = parsed.get(field).and_then(|v| v.as_str()) {
             params.insert(field.into(), json!(value));
         }
@@ -600,6 +600,13 @@ fn keyboard_params(parsed: &Value) -> Value {
         "modifiers".into(),
         json!(parsed
             .get("modifiers")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)),
+    );
+    params.insert(
+        "nativeVirtualKeyCode".into(),
+        json!(parsed
+            .get("nativeVirtualKeyCode")
             .and_then(|v| v.as_i64())
             .unwrap_or(0)),
     );
@@ -643,6 +650,18 @@ async fn dispatch_input(
                 .send_command_no_wait(
                     "Input.dispatchKeyEvent",
                     Some(keyboard_params(parsed)),
+                    session_id,
+                )
+                .await;
+        }
+        "input_text" => {
+            let Some(text) = parsed.get("text").and_then(|v| v.as_str()) else {
+                return;
+            };
+            let _ = client
+                .send_command(
+                    "Input.insertText",
+                    Some(json!({ "text": text })),
                     session_id,
                 )
                 .await;
@@ -909,10 +928,22 @@ mod tests {
             "absent text must be omitted: {}",
             up
         );
+        assert!(
+            up.get("unmodifiedText").is_none(),
+            "absent unmodifiedText must be omitted: {}",
+            up
+        );
 
         // The documented `char` shape carries only text.
-        let ch = keyboard_params(&json!({ "eventType": "char", "text": "z" }));
+        let ch = keyboard_params(&json!({
+            "eventType": "char",
+            "text": "z",
+            "unmodifiedText": "z",
+            "nativeVirtualKeyCode": 90
+        }));
         assert_eq!(ch["text"], "z");
+        assert_eq!(ch["unmodifiedText"], "z");
+        assert_eq!(ch["nativeVirtualKeyCode"], 90);
         assert!(ch.get("key").is_none() && ch.get("code").is_none());
 
         // A non-string value is dropped rather than forwarded.
@@ -921,6 +952,7 @@ mod tests {
 
         // Numeric fields keep defaults so CDP always receives them.
         assert_eq!(bad["windowsVirtualKeyCode"], 0);
+        assert_eq!(bad["nativeVirtualKeyCode"], 0);
         assert_eq!(bad["modifiers"], 0);
         assert_eq!(keyboard_params(&json!({}))["type"], "keyDown");
     }

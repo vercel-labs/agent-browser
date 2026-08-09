@@ -64,6 +64,18 @@ Configure the MCP client to launch `agent-browser` with `["mcp"]`. The server de
 
 For eve agents, mount the `@agent-browser/eve` extension instead of hand-writing browser tools. It adds namespaced tools such as `browser__navigate`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, and `browser__screenshot`, all backed by agent-browser running inside the eve sandbox. The sandbox bootstrap helpers (`installAgentBrowser`, `agentBrowserRevalidationKey`) ship with the same package under `@agent-browser/eve/sandbox`, so `agent/sandbox.ts` needs no extra dependency.
 
+## Observability dashboard
+
+```bash
+agent-browser dashboard start
+agent-browser open https://example.com
+```
+
+Open `http://localhost:4848` to monitor sessions. Set
+`AGENT_BROWSER_DASHBOARD_VIEWPORT_ONLY=1` before starting the dashboard when
+you only want the live viewport and do not want the session tree or side
+panel.
+
 ## Reading a page
 
 ```bash

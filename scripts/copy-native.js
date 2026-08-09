@@ -5,6 +5,7 @@
  */
 
 import { copyFileSync, existsSync, mkdirSync } from 'fs';
+import { execFileSync } from 'child_process';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
@@ -33,4 +34,12 @@ if (!existsSync(binDir)) {
 }
 
 copyFileSync(sourcePath, targetPath);
+
+if (platform() === 'darwin') {
+  // Re-sign copied Mach-O binaries so macOS does not reject the copied file.
+  execFileSync('codesign', ['--force', '--sign', '-', targetPath], {
+    stdio: 'inherit',
+  });
+}
+
 console.log(`✓ Copied native binary to ${targetPath}`);

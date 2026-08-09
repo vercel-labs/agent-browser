@@ -2965,11 +2965,17 @@ session ports do not need to be exposed.
 Options:
   --port <n>           Port for the dashboard server (default: 4848)
 
+Environment:
+  AGENT_BROWSER_DASHBOARD_VIEWPORT_ONLY=1
+                       Show only the live viewport, without the session tree
+                       or side panel
+
 Global Options:
   --json               Output as JSON
 
 Examples:
   agent-browser dashboard start
+  AGENT_BROWSER_DASHBOARD_VIEWPORT_ONLY=1 agent-browser dashboard start
   agent-browser dashboard start --port 8080
   agent-browser dashboard stop
 "##
@@ -3796,6 +3802,7 @@ Environment:
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete saved states older than N days (default: 30)
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM session encryption
   AGENT_BROWSER_STREAM_PORT      Override WebSocket streaming port (default: OS-assigned)
+  AGENT_BROWSER_DASHBOARD_VIEWPORT_ONLY Show only the dashboard viewport when set to 1
   AGENT_BROWSER_STREAM_QUALITY   JPEG quality 0-100 (default: 80)
   AGENT_BROWSER_STREAM_MAX_WIDTH  Cap frame width in pixels (default: the viewport)
   AGENT_BROWSER_STREAM_MAX_HEIGHT Cap frame height in pixels (default: the viewport)

@@ -1,5 +1,6 @@
 use rust_embed::Embed;
 use serde_json::{json, Value};
+use std::env;
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -151,6 +152,15 @@ fn command_cors_headers(request: &str) -> String {
         ),
         _ => String::new(),
     }
+}
+
+pub(super) fn dashboard_config_json() -> String {
+    json!({
+        "viewportOnly": env::var("AGENT_BROWSER_DASHBOARD_VIEWPORT_ONLY")
+            .map(|value| value == "1")
+            .unwrap_or(false),
+    })
+    .to_string()
 }
 
 async fn write_json_error_response_no_cors(
@@ -320,6 +330,12 @@ pub(super) async fn handle_http_request(
             "200 OK",
             "application/json; charset=utf-8",
             format!(r#"{{"engine":"{}"}}"#, *engine).into_bytes(),
+        )
+    } else if path == "/api/config" {
+        (
+            "200 OK",
+            "application/json; charset=utf-8",
+            dashboard_config_json().into_bytes(),
         )
     } else if path == "/api/chat/status" {
         (
@@ -662,6 +678,36 @@ mod tests {
             !response.contains("Access-Control-Allow-Origin: *"),
             "forbidden command response exposed wildcard CORS: {response}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_config_defaults_to_full_layout() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_DASHBOARD_VIEWPORT_ONLY"]);
+        guard.remove("AGENT_BROWSER_DASHBOARD_VIEWPORT_ONLY");
+
+        let request = "GET /api/config HTTP/1.1\r\nHost: localhost:7777\r\n\r\n";
+        let response = send_request_to_handler(request, "x").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "unexpected response: {response}"
+        );
+        assert!(response.contains(r#""viewportOnly":false"#), "{response}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_config_respects_viewport_only_env() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_DASHBOARD_VIEWPORT_ONLY"]);
+        guard.set("AGENT_BROWSER_DASHBOARD_VIEWPORT_ONLY", "1");
+
+        let request = "GET /api/config HTTP/1.1\r\nHost: localhost:7777\r\n\r\n";
+        let response = send_request_to_handler(request, "x").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "unexpected response: {response}"
+        );
+        assert!(response.contains(r#""viewportOnly":true"#), "{response}");
     }
 
     #[cfg(unix)]

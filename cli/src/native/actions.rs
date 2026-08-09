@@ -913,6 +913,8 @@ impl DaemonState {
         // target without changing iframe topology. Refresh after either kind
         // of event so network capture stays scoped to the active page.
         let active_frame_scope_changed = active_frame_scope_may_have_changed(&drained);
+        let mut target_state_changed = false;
+
         // ACK screencast frames
         if !drained.pending_acks.is_empty() {
             if let Some(ref browser) = self.browser {
@@ -929,6 +931,7 @@ impl DaemonState {
         for target_id in &drained.destroyed_targets {
             if let Some(ref mut mgr) = self.browser {
                 mgr.remove_page_by_target_id(target_id);
+                target_state_changed = true;
             }
         }
 
@@ -1010,8 +1013,8 @@ impl DaemonState {
                         }
                     }
 
-                    if mgr.has_target(&target_info.target_id) {
-                        mgr.update_page_target_info(target_info);
+                    let page_changed = if mgr.has_target(&target_info.target_id) {
+                        mgr.update_page_target_info(target_info)
                     } else {
                         let tab_id = mgr.assign_tab_id();
                         mgr.add_page(super::browser::PageInfo {
@@ -1023,6 +1026,10 @@ impl DaemonState {
                             title: target_info.title.clone(),
                             target_type: target_info.target_type.clone(),
                         });
+                        true
+                    };
+                    if page_changed {
+                        target_state_changed = true;
                     }
 
                     mgr.resume_if_waiting_pub(page_sid).await
@@ -1150,6 +1157,7 @@ impl DaemonState {
                         title: te.target_info.title.clone(),
                         target_type: te.target_info.target_type.clone(),
                     });
+                    target_state_changed = true;
                     mgr.resume_if_waiting_pub(&attach.session_id).await
                 }
                 .await
@@ -1167,8 +1175,14 @@ impl DaemonState {
         // Update changed targets
         for te in &drained.changed_targets {
             if let Some(ref mut mgr) = self.browser {
-                mgr.update_page_target_info(&te.target_info);
+                if mgr.update_page_target_info(&te.target_info) {
+                    target_state_changed = true;
+                }
             }
+        }
+
+        if target_state_changed && self.stream_server.is_some() {
+            self.update_stream_client().await;
         }
 
         // Fetch response bodies for HAR entries that just finished loading,
