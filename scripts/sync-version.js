@@ -68,6 +68,20 @@ if (sandboxPkg.version !== version) {
   console.log(`  packages/@agent-browser/sandbox/package.json already up to date`);
 }
 
+// Update packages/@agent-browser/eve/package.json (version + workspace sandbox dependency)
+const evePkgPath = join(rootDir, "packages", "@agent-browser", "eve", "package.json");
+const evePkg = JSON.parse(readFileSync(evePkgPath, "utf-8"));
+const eveSandboxDependency = "workspace:^";
+if (evePkg.version !== version || evePkg.dependencies["@agent-browser/sandbox"] !== eveSandboxDependency) {
+  const oldVersion = evePkg.version;
+  evePkg.version = version;
+  evePkg.dependencies["@agent-browser/sandbox"] = eveSandboxDependency;
+  writeFileSync(evePkgPath, JSON.stringify(evePkg, null, 2) + "\n");
+  console.log(`  Updated packages/@agent-browser/eve/package.json: ${oldVersion} -> ${version}`);
+} else {
+  console.log(`  packages/@agent-browser/eve/package.json already up to date`);
+}
+
 // Update package runtime version constant
 const sandboxVersionPath = join(
   rootDir,

@@ -1,8 +1,141 @@
 # agent-browser
 
-## 0.31.1
+## 0.33.2
 
 <!-- release:start -->
+### New Features
+
+- Added **input priority and per-client delivery settings** to the stream server: each WebSocket connection now splits into a reader task and a writer loop, so clicks and keystrokes dispatch to the browser without queueing behind a frame write. Adds a per-client `{"type":"config","maxFps":N}` cap (1 to 120, `0` uncapped) and opt-in ack pacing via `{"type":"config","pacing":"ack"}` with `{"type":"ack","seq":N}`, which keeps one frame in flight so a stalled client never drains a backlog. Both settings can also be declared on the connection URL (`?pacing=ack&maxFps=10`), the only way to cover the opening frame. Every frame now carries a monotonic `seq` (#1594)
+- Added **configurable stream encoding**: frames were hardcoded to jpeg quality 80 at the session viewport, so frame rate was the only bandwidth lever. `AGENT_BROWSER_STREAM_QUALITY`, `AGENT_BROWSER_STREAM_MAX_WIDTH` and `AGENT_BROWSER_STREAM_MAX_HEIGHT` are read once per daemon and cut bytes without dropping frames: on a busy page at 1280x720, quality 20 takes a frame from 54 KB to 25 KB, and quality 20 at 640x360 takes it to 9 KB, frame rate unchanged in both. Width and height default to the session viewport, so a larger viewport is never downscaled unless both are set (#1626)
+
+### Behavior Changes
+
+- **Frame delivery is now latest-wins.** The stream server holds only the newest frame and reads it at send time, so frames produced while an earlier one is still being written are skipped. A client that assumed it received every frame from the WebSocket now receives fewer. Nothing in this repo consumes the stream that way, since `record` captures through CDP and the dashboard is a viewer, so this affects external consumers only (#1594)
+- **`metadata.timestamp` now carries a real value.** It was always 0, because CDP sends the capture time as a float in seconds and the code read it as an integer. It is now epoch milliseconds, so a client can measure how stale the frame it is drawing is. A client that treated 0 as unknown is unaffected (#1594)
+
+### Bug Fixes
+
+- Fixed **keyboard input over the stream**, which worked in none of the three shapes the docs publish: an absent `key`, `code`, or `text` reached CDP as an explicit null, which rejects the whole command, so every key release and every non-printable key was silently dropped, the dashboard's own payloads included (#1594)
+- Fixed **click latency behind mouse movement**: input dispatch awaited Chrome's reply before reading the next message, so a click sat one round trip behind every queued mouse move. After a 300-event sweep a click landed 2471ms late; it now lands in 6ms (#1627)
+- Fixed **`stream disable`** returning while a slow client's input reader was still running (#1594)
+
+### Contributors
+
+- @Railly
+- @kevingatera
+- @WebCloud
+<!-- release:end -->
+
+## 0.33.1
+
+### Behavior Changes
+
+- The daemon now ships a **default idle timeout of 1 hour**: after an hour with no commands or dashboard input it saves configured restore state, closes the browser, and exits, so integrations that die without calling `close` no longer leak the daemon and its Chrome tree indefinitely. Sessions without `--restore` or another restore key discard transient browser state and open tabs when they shut down. Set `AGENT_BROWSER_IDLE_TIMEOUT_MS=0` to restore the old always-persist behavior, or any other value to tune it. Dashboard mouse, keyboard, and touch input reset the timer. The default never closes headed browsers, including Safari and iOS WebDriver sessions, or user-attached browsers that may be in direct human use. Provider-owned cloud browsers remain eligible for cleanup, and an explicitly configured timeout applies to all browsers, as before (#1605)
+
+### Bug Fixes
+
+- Fixed **tab recovery and selection** to avoid daemon hangs on Memory Saver-discarded tabs by selecting a live renderer on CDP connect, reviving tabs on switch or after close, treating dialog-blocked tabs as live, preserving refs on rejected operations, and surfacing recovery state across CLI, JSON, and MCP output (#1543)
+- Fixed **a11y selector errors** to report invalid CSS selectors cleanly instead of exposing raw browser evaluation stack traces in text and JSON output (#1604)
+
+### Contributors
+
+- @ctate
+- @Railly
+- @joelhooks
+- @jadenfix
+
+## 0.33.0
+
+### New Features
+
+- Added **axe-core accessibility audits** with `agent-browser a11y [url]`, WCAG tag filtering, selector scoping, iframe-aware text and JSON results, an embedded offline and CSP-safe audit engine, and a matching MCP tool (#1596)
+
+### Contributors
+
+- @ctate
+
+## 0.32.4
+
+### Bug Fixes
+
+- Fixed **find role** to match implicit ARIA roles and browser-computed accessible names through the accessibility tree, so semantic elements like `<h2>` (heading) and `<ul>` (list) resolve, with case-insensitive substring name matching that mirrors Playwright's `getByRole` (#1552)
+- Fixed **element-not-found errors** to preserve the locator detail (selector, role, name, or index) instead of flattening every miss into one generic message, and aligned the advertised `find` actions with the set the dispatcher actually accepts (#1553)
+
+### Contributors
+
+- @Railly
+- @cooleryu
+
+## 0.32.3
+
+### New Features
+
+- Added **HAR response body capture** with text bodies embedded by default and configurable `all`, `text`, and `none` content modes across the CLI and MCP surfaces (#1578)
+- Added a **derive-client skill** for recording browser traffic and generating reusable API clients from HAR request and response data (#1578)
+
+### Contributors
+
+- @ctate
+
+## 0.32.2
+
+### Improvements
+
+- Updated **eve extension packaging** for eve 0.25.1, adopting the new source and dist extension manifest format, updating the eve example to stable AI SDK releases, and keeping extension tests aligned with eve's scoped config registry (#1570)
+
+### Contributors
+
+- @AndrewBarba
+
+## 0.32.1
+
+### Improvements
+
+- Widened **eve compatibility** for `@agent-browser/eve` to accept eve 0.23 and future major releases without peer-resolution warnings (#1563)
+
+### Documentation
+
+- Standardized **eve branding** to use lowercase styling across the docs, examples, package readmes, and release notes (#1557)
+
+### Contributors
+
+- @ctate
+
+## 0.32.0
+
+### New Features
+
+- **eve extension** - Added `@agent-browser/eve`, an eve extension that mounts the agent-browser tool set with namespaced browser tools, sandbox bootstrap helpers, docs, examples, CI, and release packaging (#1547)
+
+### Security
+
+- Hardened **domain allowlists** by blocking WebRTC bypasses, applying network containment across launch modes, workers, popups, restored state, and reused daemon sessions, rejecting unsafe startup arguments, and adding Chrome regression coverage (#1546)
+
+### Bug Fixes
+
+- Fixed **completed-page waits** so load and DOMContentLoaded waits resolve immediately when the current document is already ready, with structured eve wait timeout handling and focused coverage (#1554)
+
+### Contributors
+
+- @ctate
+- @dnukumamras
+
+## 0.31.2
+
+### New Features
+
+- **WebGPU launch preset** - Added `--webgpu` across the CLI, config, environment, and MCP surfaces, with hardware backends on macOS and Windows, software Vulkan on Linux, automatic Xvfb for displayless headed sessions, and a `doctor --webgpu` render and screenshot probe (#1529)
+
+### Improvements
+
+- Added periodic **restore-state autosaves** while the browser remains open, preserving recent state after a browser window is closed by hand and capturing background page changes while honoring the restore save policy. The interval is configurable with `AGENT_BROWSER_AUTOSAVE_INTERVAL_MS` (#1509)
+
+### Contributors
+
+- @ctate
+
+## 0.31.1
+
 ### Bug Fixes
 
 - Fixed the **React renderer** so it picks the react-dom renderer instead of hardcoding renderer id 1, which prevented reading an empty tree on Next.js 16.3 Turbopack (#1491)
@@ -10,7 +143,6 @@
 ### Contributors
 
 - @gaojude
-<!-- release:end -->
 
 ## 0.31.0
 
@@ -54,7 +186,7 @@
 
 ### Improvements
 
-- Defaulted **sandbox system dependency installs** so the Eve and Vercel sandbox helpers install Chromium's required libraries unless explicitly disabled, making first-run sandbox setup simpler (#1469)
+- Defaulted **sandbox system dependency installs** so the eve and Vercel sandbox helpers install Chromium's required libraries unless explicitly disabled, making first-run sandbox setup simpler (#1469)
 
 ### Contributors
 
@@ -64,7 +196,7 @@
 
 ### New Features
 
-- **Sandbox package** - Added `@agent-browser/sandbox` with shared, Eve, and Vercel Sandbox helpers, example projects, and docs for running agent-browser in hosted sandbox environments (#1465)
+- **Sandbox package** - Added `@agent-browser/sandbox` with shared, eve, and Vercel Sandbox helpers, example projects, and docs for running agent-browser in hosted sandbox environments (#1465)
 
 ### Improvements
 
