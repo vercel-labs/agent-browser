@@ -22,7 +22,7 @@ Login flows, session persistence, OAuth, 2FA, and authenticated browsing.
 
 ## Import Auth from Your Browser
 
-The fastest way to authenticate is to reuse cookies from a Chrome session you are already logged into.
+The fastest way to authenticate is to reuse cookies from a supported Chromium browser session you are already logged into. Auto-connect discovers Chrome, Chromium, Brave, and Helium on macOS.
 
 **Step 1: Start Chrome with remote debugging**
 
@@ -44,7 +44,7 @@ Log in to your target site(s) in this Chrome window as you normally would.
 **Step 2: Grab the auth state**
 
 ```bash
-# Auto-discover the running Chrome and save its cookies + localStorage
+# Auto-discover the running supported browser and save its cookies + localStorage
 agent-browser --auto-connect state save ./my-auth.json
 ```
 

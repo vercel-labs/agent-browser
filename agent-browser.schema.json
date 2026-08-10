@@ -130,7 +130,7 @@
     },
     "autoConnect": {
       "type": "boolean",
-      "description": "Auto-discover and connect to a running Chrome instance."
+      "description": "Auto-discover and connect to a supported Chromium browser, including Helium on macOS."
     },
     "annotate": {
       "type": "boolean",

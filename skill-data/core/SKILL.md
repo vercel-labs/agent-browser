@@ -427,7 +427,7 @@ EOF
 --json                  # JSON output (for machine parsing)
 --headed                # show the window (default is headless)
 --webgpu                # enable WebGPU (software Vulkan on Linux, no GPU needed)
---auto-connect          # connect to an already-running Chrome
+--auto-connect          # connect to Chrome, Chromium, Brave, or Helium on macOS
 --cdp <port>            # connect to a specific CDP port
 --profile <name|path>   # use a Chrome profile (login state survives)
 --headers <json>        # HTTP headers scoped to the URL's origin

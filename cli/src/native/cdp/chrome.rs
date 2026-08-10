@@ -974,7 +974,7 @@ pub async fn auto_connect_cdp() -> Result<String, String> {
         }
     }
 
-    Err("No running Chrome instance found. Launch Chrome with --remote-debugging-port or use --cdp.".to_string())
+    Err("No running supported Chromium browser found. Launch Chrome, Chromium, Brave, or Helium with --remote-debugging-port or use --cdp.".to_string())
 }
 
 /// Resolve a CDP WebSocket URL from a DevToolsActivePort entry.
@@ -1027,8 +1027,8 @@ async fn verify_ws_endpoint(ws_url: &str) -> bool {
     matches!(result, Ok(Some(())))
 }
 
-/// Returns the default Chrome user-data directory paths for the current platform.
-/// Includes Chrome, Chrome Canary, Chromium, and Brave.
+/// Returns the default Chromium browser user-data directory paths for the current platform.
+/// Includes Chrome, Chrome Canary, Chromium, Brave, and Helium on macOS.
 pub fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
@@ -1041,6 +1041,7 @@ pub fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
                 "Google/Chrome Canary",
                 "Chromium",
                 "BraveSoftware/Brave-Browser",
+                "net.imput.helium",
             ] {
                 dirs.push(base.join(name));
             }
@@ -2403,6 +2404,16 @@ mod tests {
             result.args.iter().any(|a| a == "--password-store=basic"),
             "profile path should keep keychain flags"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_get_chrome_user_data_dirs_includes_helium() {
+        let dirs = get_chrome_user_data_dirs();
+
+        assert!(dirs
+            .iter()
+            .any(|path| { path.ends_with("Library/Application Support/net.imput.helium") }));
     }
 
     // -------------------------------------------------------------------
