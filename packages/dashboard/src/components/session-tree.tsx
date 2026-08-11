@@ -58,6 +58,7 @@ const ENGINE_LOGOS: Record<string, string> = {
 const PROVIDER_LOGOS: Record<string, string> = {
   agentcore: "/providers/agentcore.svg",
   browserbase: "/providers/browserbase.svg",
+  browsercloud: "/providers/browsercloud.svg",
   browserless: "/providers/browserless.svg",
   "browser-use": "/providers/browser-use.svg",
   kernel: "/providers/kernel.svg",
@@ -70,6 +71,7 @@ const BROWSER_OPTIONS: { id: string; label: string; engine?: string; provider?: 
   { id: "lightpanda", label: "Lightpanda", engine: "lightpanda" },
   { id: "agentcore", label: "AgentCore", provider: "agentcore" },
   { id: "browserbase", label: "Browserbase", provider: "browserbase" },
+  { id: "browsercloud", label: "Browser Cloud", provider: "browsercloud" },
   { id: "browserless", label: "Browserless", provider: "browserless" },
   { id: "browser-use", label: "Browser Use", provider: "browser-use" },
   { id: "kernel", label: "Kernel", provider: "kernel" },
