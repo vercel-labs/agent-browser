@@ -121,9 +121,40 @@ fn is_internal_chrome_target(url: &str) -> bool {
         || url.starts_with("devtools://")
 }
 
+fn is_chrome_new_tab_target(target: &TargetInfo) -> bool {
+    (target.target_type == "page" || target.target_type == "webview")
+        && matches!(
+            target.url.as_str(),
+            "chrome://newtab/" | "chrome://new-tab-page/"
+        )
+}
+
 pub(crate) fn should_track_target(target: &TargetInfo) -> bool {
     (target.target_type == "page" || target.target_type == "webview")
         && (target.url.is_empty() || !is_internal_chrome_target(&target.url))
+}
+
+/// Prefer normal user-facing pages. If Chrome only exposes its user-facing New
+/// Tab Page, adopt that existing target instead of creating a fresh about:blank
+/// tab while keeping the broad internal-target filter intact when a regular
+/// page is available.
+fn select_initial_page_targets(targets: Vec<TargetInfo>) -> Vec<TargetInfo> {
+    let mut page_targets = Vec::new();
+    let mut new_tab_fallbacks = Vec::new();
+
+    for target in targets {
+        if should_track_target(&target) {
+            page_targets.push(target);
+        } else if is_chrome_new_tab_target(&target) {
+            new_tab_fallbacks.push(target);
+        }
+    }
+
+    if page_targets.is_empty() {
+        new_tab_fallbacks
+    } else {
+        page_targets
+    }
 }
 
 fn update_page_target_info_in_pages(pages: &mut [PageInfo], target: &TargetInfo) -> bool {
@@ -649,11 +680,7 @@ impl BrowserManager {
             .send_command_typed("Target.getTargets", &json!({}), None)
             .await?;
 
-        let page_targets: Vec<TargetInfo> = result
-            .target_infos
-            .into_iter()
-            .filter(should_track_target)
-            .collect();
+        let page_targets = select_initial_page_targets(result.target_infos);
 
         if page_targets.is_empty() {
             // Create a new tab
@@ -2485,6 +2512,75 @@ mod tests {
         };
 
         assert!(!should_track_target(&target));
+    }
+
+    #[test]
+    fn test_initial_target_selection_prefers_regular_page_over_new_tab() {
+        let targets = vec![
+            TargetInfo {
+                target_id: "new-tab".to_string(),
+                target_type: "page".to_string(),
+                title: "New Tab".to_string(),
+                url: "chrome://new-tab-page/".to_string(),
+                attached: None,
+                browser_context_id: None,
+            },
+            TargetInfo {
+                target_id: "app".to_string(),
+                target_type: "page".to_string(),
+                title: "App".to_string(),
+                url: "https://example.com".to_string(),
+                attached: None,
+                browser_context_id: None,
+            },
+        ];
+
+        let selected = select_initial_page_targets(targets);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].target_id, "app");
+    }
+
+    #[test]
+    fn test_initial_target_selection_uses_new_tab_as_fallback() {
+        for url in ["chrome://newtab/", "chrome://new-tab-page/"] {
+            let targets = vec![
+                TargetInfo {
+                    target_id: "new-tab".to_string(),
+                    target_type: "page".to_string(),
+                    title: "New Tab".to_string(),
+                    url: url.to_string(),
+                    attached: None,
+                    browser_context_id: None,
+                },
+                TargetInfo {
+                    target_id: "omnibox".to_string(),
+                    target_type: "page".to_string(),
+                    title: String::new(),
+                    url: "chrome://omnibox-popup.top-chrome/".to_string(),
+                    attached: None,
+                    browser_context_id: None,
+                },
+            ];
+
+            let selected = select_initial_page_targets(targets);
+            assert_eq!(selected.len(), 1);
+            assert_eq!(selected[0].target_id, "new-tab");
+            assert_eq!(selected[0].url, url);
+        }
+    }
+
+    #[test]
+    fn test_initial_target_selection_keeps_other_internal_targets_filtered() {
+        let targets = vec![TargetInfo {
+            target_id: "omnibox".to_string(),
+            target_type: "page".to_string(),
+            title: String::new(),
+            url: "chrome://omnibox-popup.top-chrome/".to_string(),
+            attached: None,
+            browser_context_id: None,
+        }];
+
+        assert!(select_initial_page_targets(targets).is_empty());
     }
 
     #[test]
