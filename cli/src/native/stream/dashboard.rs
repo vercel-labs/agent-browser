@@ -697,7 +697,7 @@ async fn exec_cli(body: &str) -> Result<String, String> {
 
     let exe = std::env::current_exe().map_err(|e| format!("Cannot resolve executable: {}", e))?;
 
-    let mut cmd = tokio::process::Command::new(&exe);
+    let mut cmd = crate::native::process::background_tokio_command(&exe);
     cmd.args(&args)
         .arg("--json")
         .env_remove("AGENT_BROWSER_DASHBOARD")
@@ -779,7 +779,7 @@ pub(super) async fn spawn_session(body: &str) -> Result<String, String> {
 
     let exe = std::env::current_exe().map_err(|e| format!("Cannot resolve executable: {}", e))?;
 
-    let mut cmd = tokio::process::Command::new(&exe);
+    let mut cmd = crate::native::process::background_tokio_command(&exe);
     cmd.arg("open")
         .arg("about:blank")
         .arg("--session")

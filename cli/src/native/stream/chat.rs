@@ -503,7 +503,7 @@ pub(crate) async fn execute_chat_tool(session: &str, command: &str) -> String {
     args.extend(global_flags);
     args.extend(cmd_words);
 
-    let mut cmd = tokio::process::Command::new(&exe);
+    let mut cmd = crate::native::process::background_tokio_command(&exe);
     cmd.args(&args)
         .env_remove("AGENT_BROWSER_DASHBOARD")
         .env_remove("AGENT_BROWSER_DASHBOARD_PORT")
