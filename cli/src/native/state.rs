@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
-    AttachToTargetParams, AttachToTargetResult, CloseTargetParams, CreateTargetParams,
-    CreateTargetResult, EvaluateParams,
+    AttachToTargetParams, AttachToTargetResult, CloseTargetParams, CreateTargetResult,
+    EvaluateParams,
 };
 use super::cookies::{self, Cookie};
 use crate::validation::{is_valid_session_name, sanitize_session_component, session_name_error};
@@ -107,22 +107,25 @@ async fn eval_origin_storage(
     parse_origin_storage(&data)
 }
 
+/// Parameters for an invisible scratch target used during state capture.
+fn storage_target_params() -> Value {
+    json!({
+        "url": "about:blank",
+        "background": true,
+        "hidden": true
+    })
+}
+
 /// Create a temporary CDP target, navigate it to each origin to collect localStorage,
-/// then close it. Uses Fetch interception to serve blank HTML instead of making real
-/// network requests.
+/// then close it. The target stays hidden so state autosave cannot flash or focus a blank page.
+/// Uses Fetch interception to serve blank HTML instead of making real network requests.
 async fn collect_storage_via_temp_target(
     client: &CdpClient,
     origins: &[String],
     origin_js: &str,
 ) -> Result<Vec<OriginStorage>, String> {
     let create_result: CreateTargetResult = client
-        .send_command_typed(
-            "Target.createTarget",
-            &CreateTargetParams {
-                url: "about:blank".to_string(),
-            },
-            None,
-        )
+        .send_command_typed("Target.createTarget", &storage_target_params(), None)
         .await?;
 
     let target_id = create_result.target_id;
@@ -849,6 +852,18 @@ pub fn get_sessions_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_storage_target_is_hidden_and_backgrounded() {
+        assert_eq!(
+            storage_target_params(),
+            json!({
+                "url": "about:blank",
+                "background": true,
+                "hidden": true
+            })
+        );
+    }
 
     #[test]
     fn test_storage_state_serialization() {
