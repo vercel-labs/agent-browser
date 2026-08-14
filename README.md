@@ -936,6 +936,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | Option | Description |
 |--------|-------------|
 | `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
+| `--context <name>` | Isolated BrowserContext for cookie/storage isolation in a shared Chrome (or `AGENT_BROWSER_CONTEXT` env) |
 | `--restore [name]` | Auto-save/restore session state. Bare `--restore` uses `--session` as the key |
 | `--restore-save <policy>` | Restore save policy: `auto`, `always`, or `never` |
 | `--restore-check-url <glob>` | Validate restored state against a URL pattern |

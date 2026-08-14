@@ -3701,6 +3701,8 @@ Authentication:
 
 Options:
   --session <name>           Isolated session (or AGENT_BROWSER_SESSION env)
+  --context <name>           Isolated BrowserContext for cookie/storage isolation
+                             in a shared Chrome (or AGENT_BROWSER_CONTEXT env)
   --namespace <name>         Isolate daemon sockets and restore-state directories
                              (or AGENT_BROWSER_NAMESPACE env)
   --executable-path <path>   Custom browser executable (or AGENT_BROWSER_EXECUTABLE_PATH)
@@ -3780,6 +3782,7 @@ Configuration:
 Environment:
   AGENT_BROWSER_CONFIG           Path to config file (or use --config)
   AGENT_BROWSER_SESSION          Session name (default: "default")
+  AGENT_BROWSER_CONTEXT          BrowserContext name for cookie/storage isolation
   AGENT_BROWSER_NAMESPACE        Namespace for daemon sockets and restore state
   AGENT_BROWSER_RESTORE          Auto-save/restore persistence key
   AGENT_BROWSER_RESTORE_SAVE     Restore save policy: auto, always, never

@@ -83,6 +83,7 @@ pub struct Config {
     pub allow_file_access: Option<bool>,
     pub cdp: Option<String>,
     pub auto_connect: Option<bool>,
+    pub context: Option<String>,
     pub pin_tab: Option<bool>,
     pub headers: Option<String>,
     pub annotate: Option<bool>,
@@ -154,6 +155,7 @@ impl Config {
             allow_file_access: other.allow_file_access.or(self.allow_file_access),
             cdp: other.cdp.or(self.cdp),
             auto_connect: other.auto_connect.or(self.auto_connect),
+            context: other.context.or(self.context),
             pin_tab: other.pin_tab.or(self.pin_tab),
             headers: other.headers.or(self.headers),
             annotate: other.annotate.or(self.annotate),
@@ -265,6 +267,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "-p",
         "--provider",
         "--device",
+        "--context",
         "--session-name",
         "--color-scheme",
         "--download-path",
@@ -358,6 +361,7 @@ pub struct Flags {
     pub no_xvfb: bool,
     pub device: Option<String>,
     pub auto_connect: bool,
+    pub context: Option<String>,
     pub pin_tab: bool,
     pub session_name: Option<String>,
     pub annotate: bool,
@@ -543,6 +547,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
             || config.auto_connect.unwrap_or(false),
+        context: env::var("AGENT_BROWSER_CONTEXT").ok().or(config.context),
         pin_tab: env_var_is_truthy("AGENT_BROWSER_PIN_TAB") || config.pin_tab.unwrap_or(false),
         session_name: env::var("AGENT_BROWSER_SESSION_NAME")
             .ok()
@@ -721,6 +726,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--namespace" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.namespace = Some(s.clone());
+                    i += 1;
+                }
+            }
+            "--context" => {
+                if let Some(c) = args.get(i + 1) {
+                    flags.context = c.clone().into();
                     i += 1;
                 }
             }
@@ -1084,6 +1095,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "-p",
         "--provider",
         "--device",
+        "--context",
         "--session-name",
         "--color-scheme",
         "--download-path",
@@ -1212,6 +1224,30 @@ mod tests {
     fn test_parse_no_headers_flag() {
         let flags = parse_flags(&args("open example.com"));
         assert!(flags.headers.is_none());
+    }
+
+    #[test]
+    fn test_parse_context_flag() {
+        let flags = parse_flags(&args("--context tenant-a open example.com"));
+        assert_eq!(flags.context.as_deref(), Some("tenant-a"));
+    }
+
+    #[test]
+    fn test_context_defaults_to_none() {
+        let flags = parse_flags(&args("open example.com"));
+        assert_eq!(flags.context, None);
+    }
+
+    #[test]
+    fn test_clean_args_removes_context_and_its_value() {
+        let input: Vec<String> = vec![
+            "open".to_string(),
+            "example.com".to_string(),
+            "--context".to_string(),
+            "tenant-a".to_string(),
+        ];
+        let clean = clean_args(&input);
+        assert_eq!(clean, vec!["open", "example.com"]);
     }
 
     #[test]
