@@ -4122,6 +4122,33 @@ async fn auto_launch(
     Ok(())
 }
 
+/// Creates an isolated BrowserContext when `--context` was passed, and moves
+/// the session onto a tab inside it. Returns whether isolation was applied.
+async fn maybe_create_browser_context(
+    cmd: &Value,
+    state: &mut DaemonState,
+) -> Result<bool, String> {
+    let Some(context_name) = cmd.get("contextName").and_then(|v| v.as_str()) else {
+        return Ok(false);
+    };
+    let Some(mgr) = state.browser.as_mut() else {
+        return Ok(false);
+    };
+    match mgr.create_browser_context().await {
+        Ok(ctx_id) => {
+            eprintln!(
+                "Created BrowserContext: {} (name: {})",
+                ctx_id, context_name
+            );
+            // Pages discovered on connect belong to the default context, so they
+            // must be replaced with a page inside the new one for real isolation.
+            mgr.replace_pages_with_context_tab().await?;
+            Ok(true)
+        }
+        Err(e) => Err(format!("Failed to create BrowserContext: {}", e)),
+    }
+}
+
 /// Apply AGENT_BROWSER_ENABLE (built-in init scripts like `react-devtools`)
 /// and AGENT_BROWSER_INIT_SCRIPTS (user-provided files) to the browser so the
 /// scripts are registered before any page JS runs on the next navigation.
@@ -4910,6 +4937,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     if let Some(url) = cdp_url {
         state.reset_input_state();
         state.browser = Some(BrowserManager::connect_cdp(url).await?);
+        maybe_create_browser_context(cmd, state).await?;
         state.launch_hash = Some(new_hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -4927,6 +4955,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     if let Some(port) = cdp_port {
         state.reset_input_state();
         state.browser = Some(BrowserManager::connect_cdp(&port.to_string()).await?);
+        maybe_create_browser_context(cmd, state).await?;
         state.launch_hash = Some(new_hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -4944,7 +4973,11 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     if auto_connect {
         state.reset_input_state();
         state.browser = Some(BrowserManager::connect_auto().await?);
-        if !apply_tab_binding_on_attach_or_rollback(state).await? {
+        let isolated = maybe_create_browser_context(cmd, state).await?;
+        // With --context, replace_pages_with_context_tab already left exactly one
+        // fresh tab inside the isolated context. Binding to, or opening, another
+        // tab here would land in the default context and defeat the isolation.
+        if !isolated && !apply_tab_binding_on_attach_or_rollback(state).await? {
             if let Err(e) = open_fresh_tab_for_auto_connect(state).await {
                 let _ = rollback_failed_launch(state).await;
                 return Err(e);
@@ -5013,6 +5046,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                     Ok(mgr) => {
                         state.reset_input_state();
                         state.browser = Some(mgr);
+                        maybe_create_browser_context(cmd, state).await?;
                         state.launch_hash = Some(new_hash);
                         remember_active_provider_session(
                             state,
@@ -5071,6 +5105,14 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     write_extensions_file_from_paths(&state.session_id, launch_options.extensions.as_deref());
     state.reset_input_state();
     state.session_setup = SessionSetup::from_launch_options(&launch_options);
+    if cmd.get("contextName").and_then(|v| v.as_str()).is_some() {
+        eprintln!(
+            "Warning: --context is ignored when launching Chrome directly. \
+             Use --cdp-url or --auto-connect to share a Chrome instance with \
+             context isolation."
+        );
+    }
+
     state.browser = Some(BrowserManager::launch(launch_options, engine.as_deref()).await?);
     state.launch_hash = Some(new_hash);
     state.subscribe_to_browser_events();
