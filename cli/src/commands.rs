@@ -2249,6 +2249,9 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     "-c" | "--compact" => {
                         obj.insert("compact".to_string(), json!(true));
                     }
+                    "-i" | "--interactive" => {
+                        obj.insert("interactive".to_string(), json!(true));
+                    }
                     "-d" | "--depth" => {
                         if let Some(d) = rest.get(i + 1) {
                             match d.parse::<u32>() {
@@ -2276,13 +2279,13 @@ fn parse_diff(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     other if other.starts_with('-') => {
                         return Err(ParseError::InvalidValue {
                             message: format!("Unknown flag: {}", other),
-                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--compact] [--depth <n>]",
+                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--compact] [--interactive] [--depth <n>]",
                         });
                     }
                     other => {
                         return Err(ParseError::InvalidValue {
                             message: format!("Unexpected argument: {}", other),
-                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--compact] [--depth <n>]",
+                            usage: "diff snapshot [--baseline <file>] [--selector <sel>] [--compact] [--interactive] [--depth <n>]",
                         });
                     }
                 }
@@ -5303,6 +5306,16 @@ mod tests {
         assert_eq!(cmd["selector"], "#main");
         assert_eq!(cmd["compact"], true);
         assert_eq!(cmd["maxDepth"], 3);
+    }
+
+    #[test]
+    fn test_diff_snapshot_interactive() {
+        let cmd = parse_command(&args("diff snapshot --interactive"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "diff_snapshot");
+        assert_eq!(cmd["interactive"], true);
+
+        let short = parse_command(&args("diff snapshot -i"), &default_flags()).unwrap();
+        assert_eq!(short["interactive"], true);
     }
 
     #[test]

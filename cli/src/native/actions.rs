@@ -6001,25 +6001,7 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    let compact = cmd
-        .get("compact")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let max_depth = cmd
-        .get("maxDepth")
-        .and_then(|v| v.as_u64())
-        .map(|d| d as usize);
-    let selector = cmd
-        .get("selector")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-
-    let options = SnapshotOptions {
-        compact,
-        depth: max_depth,
-        selector,
-        ..SnapshotOptions::default()
-    };
+    let options = diff_snapshot_options(cmd);
     let current = snapshot::take_snapshot(
         &mgr.client,
         &session_id,
@@ -6048,6 +6030,41 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         "unchanged": result.unchanged,
         "changed": result.changed,
     }))
+}
+
+fn diff_snapshot_options(cmd: &Value) -> SnapshotOptions {
+    SnapshotOptions {
+        compact: cmd
+            .get("compact")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        interactive: cmd
+            .get("interactive")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        depth: cmd
+            .get("maxDepth")
+            .and_then(|value| value.as_u64())
+            .map(|depth| depth as usize),
+        selector: cmd
+            .get("selector")
+            .and_then(|value| value.as_str())
+            .map(String::from),
+        ..SnapshotOptions::default()
+    }
+}
+
+#[cfg(test)]
+mod diff_snapshot_options_tests {
+    use super::*;
+
+    #[test]
+    fn interactive_option_is_forwarded_to_snapshot() {
+        let cmd = json!({ "interactive": true });
+        let options = diff_snapshot_options(&cmd);
+
+        assert!(options.interactive);
+    }
 }
 
 async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {

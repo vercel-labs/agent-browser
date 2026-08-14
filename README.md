@@ -373,6 +373,7 @@ When a JavaScript dialog is pending, all command responses include a `warning` f
 agent-browser diff snapshot                              # Compare current vs last snapshot
 agent-browser diff snapshot --baseline before.txt        # Compare current vs saved snapshot file
 agent-browser diff snapshot --selector "#main" --compact # Scoped snapshot diff
+agent-browser diff snapshot --interactive                # Interactive elements only
 agent-browser diff screenshot --baseline before.png      # Visual pixel diff against baseline
 agent-browser diff screenshot --baseline b.png -o d.png  # Save diff image to custom path
 agent-browser diff screenshot --baseline b.png -t 0.2    # Adjust color threshold (0-1)

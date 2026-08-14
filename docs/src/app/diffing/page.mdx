@@ -33,6 +33,9 @@ agent-browser diff snapshot --baseline before.txt
 
 # Scope to a specific part of the page
 agent-browser diff snapshot --selector "#main" --compact
+
+# Compare only interactive elements
+agent-browser diff snapshot --interactive
 ```
 
 Without `--baseline`, the command automatically compares against the most recent snapshot taken in the current session. This is the primary use case for agents verifying that an action had the intended effect.
@@ -47,6 +50,7 @@ Without `--baseline`, the command automatically compares against the most recent
     <tr><td><code>-b, --baseline &lt;file&gt;</code></td><td>Path to a saved snapshot file to compare against</td></tr>
     <tr><td><code>-s, --selector &lt;sel&gt;</code></td><td>Scope the current snapshot to a CSS selector or @ref</td></tr>
     <tr><td><code>-c, --compact</code></td><td>Use compact snapshot format</td></tr>
+    <tr><td><code>-i, --interactive</code></td><td>Only include interactive elements</td></tr>
     <tr><td><code>-d, --depth &lt;n&gt;</code></td><td>Limit snapshot tree depth</td></tr>
   </tbody>
 </table>
