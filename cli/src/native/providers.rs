@@ -3,11 +3,22 @@
 //! Supports AgentCore, Browserbase, Browserless, Browser Use, and Kernel providers.
 //! Each provider returns a CDP WebSocket URL for connecting via BrowserManager.
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::env;
+use std::time::Duration;
+
+const BROWSER_USE_API_BASE: &str = "https://api.browser-use.com";
+// Browser creation in Cloud can legitimately take tens of seconds. The CLI
+// grants Browser Use launch commands a longer IPC budget so this non-idempotent
+// request is not retried while the daemon is still waiting for its response.
+const BROWSER_USE_API_TIMEOUT: Duration = Duration::from_secs(60);
+const BROWSER_USE_CDP_TIMEOUT: Duration = Duration::from_secs(10);
+const BROWSER_USE_STOP_TIMEOUT: Duration = Duration::from_secs(7);
+const BROWSER_USE_STOP_ATTEMPTS: usize = 3;
 
 /// Provider session info for cleanup on failure.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderSession {
     pub provider: String,
     pub session_id: String,
@@ -104,21 +115,21 @@ pub async fn connect_provider_with_plugins_and_options(
 /// Close a provider session (call on CDP connect failure).
 pub async fn close_provider_session(session: &ProviderSession) {
     let plugins = crate::plugins::plugins_from_env();
-    close_provider_session_with_plugins(session, &plugins).await;
+    let _ = close_provider_session_with_plugins(session, &plugins).await;
 }
 
 /// Close a provider session with the plugin registry that created it.
 pub async fn close_provider_session_with_plugins(
     session: &ProviderSession,
     plugins: &[crate::plugins::PluginConfig],
-) {
+) -> Result<(), String> {
     if let Some(plugin_name) = session.provider.strip_prefix("plugin:") {
         if let Ok(cleanup) = serde_json::from_str::<Value>(&session.session_id) {
             let _ =
                 crate::plugins::close_browser_provider_with_plugins(plugin_name, plugins, cleanup)
                     .await;
         }
-        return;
+        return Ok(());
     }
 
     let client = reqwest::Client::new();
@@ -138,18 +149,10 @@ pub async fn close_provider_session_with_plugins(
             }
         }
         "browser-use" => {
-            if let Ok(api_key) = env::var("BROWSER_USE_API_KEY") {
-                let _ = client
-                    .patch(format!(
-                        "https://api.browser-use.com/api/v2/browsers/{}",
-                        session.session_id
-                    ))
-                    .header("X-Browser-Use-API-Key", &api_key)
-                    .header("Content-Type", "application/json")
-                    .json(&json!({ "action": "stop" }))
-                    .send()
-                    .await;
-            }
+            let api_key = env::var("BROWSER_USE_API_KEY")
+                .map_err(|_| "BROWSER_USE_API_KEY is required to stop the Cloud session")?;
+            stop_browser_use_session(&client, BROWSER_USE_API_BASE, &api_key, &session.session_id)
+                .await?;
         }
         "browserless" => {
             // session_id holds the stop URL for browserless
@@ -176,6 +179,8 @@ pub async fn close_provider_session_with_plugins(
         }
         _ => {}
     }
+
+    Ok(())
 }
 
 pub async fn connect_plugin_provider_with_plugins(
@@ -381,13 +386,302 @@ async fn connect_browserless() -> Result<(String, Option<ProviderSession>), Stri
     ))
 }
 
+async fn stop_browser_use_session(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+    session_id: &str,
+) -> Result<(), String> {
+    let mut last_error = String::new();
+    for attempt in 1..=BROWSER_USE_STOP_ATTEMPTS {
+        let response = client
+            .patch(format!(
+                "{}/api/v4/browsers/{}",
+                api_base.trim_end_matches('/'),
+                session_id
+            ))
+            .header("X-Browser-Use-API-Key", api_key)
+            .header(
+                reqwest::header::USER_AGENT,
+                format!("agent-browser/{}", env!("CARGO_PKG_VERSION")),
+            )
+            .header("Content-Type", "application/json")
+            .json(&json!({ "action": "stop" }))
+            .timeout(BROWSER_USE_STOP_TIMEOUT)
+            .send()
+            .await;
+
+        let retryable = match response {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) => {
+                let status = response.status();
+                let retryable =
+                    status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+                let body = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "failed to read response body".to_string());
+                last_error = format!("Browser Use stop API error ({}): {}", status.as_u16(), body);
+                retryable
+            }
+            Err(error) => {
+                last_error = format!("Browser Use stop request failed: {error}");
+                true
+            }
+        };
+
+        if !retryable || attempt == BROWSER_USE_STOP_ATTEMPTS {
+            return Err(last_error);
+        }
+        tokio::time::sleep(Duration::from_millis(200 * attempt as u64)).await;
+    }
+
+    Err(last_error)
+}
+
+async fn browser_use_error_with_cleanup(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+    session_id: &str,
+    error: String,
+) -> String {
+    match stop_browser_use_session(client, api_base, api_key, session_id).await {
+        Ok(()) => error,
+        Err(cleanup_error) => format!(
+            "{error}; additionally failed to stop Browser Use session {session_id}: {cleanup_error}"
+        ),
+    }
+}
+
+fn parse_browser_use_bool(name: &str, value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(format!(
+            "{name} must be one of: true, false, 1, 0, yes, no, on, off"
+        )),
+    }
+}
+
+/// Build the Browser Use Cloud V4 create body from provider-specific environment variables.
+/// Custom proxies are intentionally not exposed by this integration.
+fn browser_use_create_body_from_lookup<F>(mut lookup: F) -> Result<Value, String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut body = serde_json::Map::new();
+
+    if let Some(profile_id) = lookup("BROWSER_USE_PROFILE_ID") {
+        let profile_id = profile_id.trim();
+        if profile_id.is_empty() {
+            return Err("BROWSER_USE_PROFILE_ID cannot be empty".to_string());
+        }
+        let profile_id = uuid::Uuid::parse_str(profile_id)
+            .map_err(|_| "BROWSER_USE_PROFILE_ID must be a UUID".to_string())?;
+        body.insert("profileId".to_string(), json!(profile_id.to_string()));
+    }
+
+    if let Some(proxy_country) = lookup("BROWSER_USE_PROXY_COUNTRY") {
+        let proxy_country = proxy_country.trim().to_ascii_lowercase();
+        match proxy_country.as_str() {
+            "none" | "direct" => {
+                body.insert("proxyCountryCode".to_string(), Value::Null);
+            }
+            country if country.len() == 2 && country.chars().all(|c| c.is_ascii_alphabetic()) => {
+                body.insert("proxyCountryCode".to_string(), json!(country));
+            }
+            _ => {
+                return Err(
+                    "BROWSER_USE_PROXY_COUNTRY must be a two-letter country code, 'none', or 'direct'; Browser Use Cloud validates country availability"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    if let Some(timeout) = lookup("BROWSER_USE_TIMEOUT_MINUTES") {
+        let timeout = timeout.trim().parse::<u64>().map_err(|_| {
+            "BROWSER_USE_TIMEOUT_MINUTES must be an integer from 1 to 240".to_string()
+        })?;
+        if !(1..=240).contains(&timeout) {
+            return Err("BROWSER_USE_TIMEOUT_MINUTES must be an integer from 1 to 240".to_string());
+        }
+        body.insert("timeout".to_string(), json!(timeout));
+    }
+
+    let screen_width = lookup("BROWSER_USE_SCREEN_WIDTH");
+    let screen_height = lookup("BROWSER_USE_SCREEN_HEIGHT");
+    match (screen_width, screen_height) {
+        (Some(width), Some(height)) => {
+            let width = width.trim().parse::<u64>().map_err(|_| {
+                "BROWSER_USE_SCREEN_WIDTH must be an integer from 320 to 6144".to_string()
+            })?;
+            let height = height.trim().parse::<u64>().map_err(|_| {
+                "BROWSER_USE_SCREEN_HEIGHT must be an integer from 320 to 3456".to_string()
+            })?;
+            if !(320..=6144).contains(&width) {
+                return Err(
+                    "BROWSER_USE_SCREEN_WIDTH must be an integer from 320 to 6144".to_string(),
+                );
+            }
+            if !(320..=3456).contains(&height) {
+                return Err(
+                    "BROWSER_USE_SCREEN_HEIGHT must be an integer from 320 to 3456".to_string(),
+                );
+            }
+            body.insert("browserScreenWidth".to_string(), json!(width));
+            body.insert("browserScreenHeight".to_string(), json!(height));
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(
+                "BROWSER_USE_SCREEN_WIDTH and BROWSER_USE_SCREEN_HEIGHT must be set together"
+                    .to_string(),
+            );
+        }
+        (None, None) => {}
+    }
+
+    for (env_name, field_name) in [
+        ("BROWSER_USE_ALLOW_RESIZING", "allowResizing"),
+        ("BROWSER_USE_ENABLE_RECORDING", "enableRecording"),
+    ] {
+        if let Some(value) = lookup(env_name) {
+            body.insert(
+                field_name.to_string(),
+                json!(parse_browser_use_bool(env_name, &value)?),
+            );
+        }
+    }
+
+    Ok(Value::Object(body))
+}
+
+fn browser_use_create_body_from_env() -> Result<Value, String> {
+    browser_use_create_body_from_lookup(|name| env::var(name).ok())
+}
+
+async fn resolve_browser_use_ws_url(
+    client: &reqwest::Client,
+    cdp_url: &str,
+) -> Result<String, String> {
+    if cdp_url.starts_with("ws://") || cdp_url.starts_with("wss://") {
+        return Ok(cdp_url.to_string());
+    }
+
+    let fallback_url = if let Some(rest) = cdp_url.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = cdp_url.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        return Err(format!("Invalid Browser Use CDP URL: {cdp_url}"));
+    };
+
+    let discovered_url = match client
+        .get(format!("{}/json/version", cdp_url.trim_end_matches('/')))
+        .timeout(BROWSER_USE_CDP_TIMEOUT)
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => {
+            response.json::<Value>().await.ok().and_then(|json| {
+                json.get("webSocketDebuggerUrl")
+                    .and_then(Value::as_str)
+                    .map(String::from)
+            })
+        }
+        _ => None,
+    };
+    let ws_url = discovered_url.unwrap_or(fallback_url);
+
+    if cdp_url.starts_with("https://") {
+        return Ok(ws_url
+            .strip_prefix("ws://")
+            .map(|rest| format!("wss://{rest}"))
+            .unwrap_or(ws_url));
+    }
+
+    Ok(ws_url)
+}
+
+async fn connect_browser_use_with_client(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+    create_body: &Value,
+) -> Result<(String, Option<ProviderSession>), String> {
+    let response = client
+        .post(format!(
+            "{}/api/v4/browsers",
+            api_base.trim_end_matches('/')
+        ))
+        .header("X-Browser-Use-API-Key", api_key)
+        .header(
+            reqwest::header::USER_AGENT,
+            format!("agent-browser/{}", env!("CARGO_PKG_VERSION")),
+        )
+        .header("Content-Type", "application/json")
+        .json(create_body)
+        .timeout(BROWSER_USE_API_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| format!("Browser Use request failed: {}", e))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read Browser Use response: {}", e))?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "Browser Use API error ({}): {}",
+            status.as_u16(),
+            body
+        ));
+    }
+
+    let json: Value =
+        serde_json::from_str(&body).map_err(|e| format!("Invalid Browser Use response: {}", e))?;
+    let session_id = json
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Browser Use response missing id".to_string())?
+        .to_string();
+    let cdp_url = match json.get("cdpUrl").and_then(Value::as_str) {
+        Some(cdp_url) => cdp_url,
+        None => {
+            return Err(browser_use_error_with_cleanup(
+                client,
+                api_base,
+                api_key,
+                &session_id,
+                "Browser Use response missing cdpUrl".to_string(),
+            )
+            .await);
+        }
+    };
+
+    match resolve_browser_use_ws_url(client, cdp_url).await {
+        Ok(ws_url) => Ok((
+            ws_url,
+            Some(ProviderSession {
+                provider: "browser-use".to_string(),
+                session_id,
+            }),
+        )),
+        Err(error) => {
+            Err(browser_use_error_with_cleanup(client, api_base, api_key, &session_id, error).await)
+        }
+    }
+}
+
 async fn connect_browser_use() -> Result<(String, Option<ProviderSession>), String> {
     let api_key = env::var("BROWSER_USE_API_KEY")
         .map_err(|_| "BROWSER_USE_API_KEY environment variable is not set")?;
+    let create_body = browser_use_create_body_from_env()?;
+    let client = reqwest::Client::new();
 
-    let ws_url = format!("wss://connect.browser-use.com?apiKey={}", api_key);
-
-    Ok((ws_url, None))
+    connect_browser_use_with_client(&client, BROWSER_USE_API_BASE, &api_key, &create_body).await
 }
 
 async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
@@ -869,6 +1163,276 @@ mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
 
+    async fn serve_mock_http(
+        listener: tokio::net::TcpListener,
+        responses: Vec<(u16, String)>,
+    ) -> Vec<String> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut requests = Vec::new();
+        for (status, body) in responses {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let bytes_read = stream.read(&mut chunk).await.unwrap();
+                if bytes_read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..bytes_read]);
+
+                if let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let header_end = header_end + 4;
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + content_length {
+                        break;
+                    }
+                }
+            }
+            requests.push(String::from_utf8_lossy(&request).to_string());
+            let reason = match status {
+                200 => "OK",
+                201 => "Created",
+                429 => "Too Many Requests",
+                500 => "Internal Server Error",
+                _ => "Response",
+            };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        }
+        requests
+    }
+
+    #[tokio::test]
+    async fn test_browser_use_v4_connection_and_cleanup() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(serve_mock_http(
+            listener,
+            vec![
+                (
+                    201,
+                    format!(r#"{{"id":"browser-123","cdpUrl":"{api_base}/cdp"}}"#),
+                ),
+                (
+                    200,
+                    r#"{"webSocketDebuggerUrl":"wss://browser.example/devtools/browser/123"}"#
+                        .to_string(),
+                ),
+                (200, "{}".to_string()),
+            ],
+        ));
+        let client = reqwest::Client::new();
+
+        let create_body = json!({
+            "profileId": "00000000-0000-0000-0000-000000000123",
+            "proxyCountryCode": "de",
+            "timeout": 120,
+            "browserScreenWidth": 1440,
+            "browserScreenHeight": 900,
+            "allowResizing": true,
+            "enableRecording": true,
+        });
+        let (ws_url, session) =
+            connect_browser_use_with_client(&client, &api_base, "test-key", &create_body)
+                .await
+                .unwrap();
+        let session = session.unwrap();
+        assert_eq!(ws_url, "wss://browser.example/devtools/browser/123");
+        assert_eq!(session.provider, "browser-use");
+        assert_eq!(session.session_id, "browser-123");
+
+        stop_browser_use_session(&client, &api_base, "test-key", &session.session_id)
+            .await
+            .unwrap();
+        let requests = server.await.unwrap();
+        assert!(requests[0].starts_with("POST /api/v4/browsers HTTP/1.1"));
+        assert!(requests[0]
+            .to_ascii_lowercase()
+            .contains("x-browser-use-api-key: test-key"));
+        assert!(requests[0]
+            .to_ascii_lowercase()
+            .contains("user-agent: agent-browser/"));
+        assert!(requests[0].contains(r#""profileId":"00000000-0000-0000-0000-000000000123""#));
+        assert!(requests[0].contains(r#""proxyCountryCode":"de""#));
+        assert!(requests[0].contains(r#""timeout":120"#));
+        assert!(requests[0].contains(r#""browserScreenWidth":1440"#));
+        assert!(requests[0].contains(r#""browserScreenHeight":900"#));
+        assert!(requests[0].contains(r#""allowResizing":true"#));
+        assert!(requests[0].contains(r#""enableRecording":true"#));
+        assert!(!requests[0].contains("customProxy"));
+        assert!(requests[1].starts_with("GET /cdp/json/version HTTP/1.1"));
+        assert!(requests[2].starts_with("PATCH /api/v4/browsers/browser-123 HTTP/1.1"));
+        assert!(requests[2].contains(r#"{"action":"stop"}"#));
+    }
+
+    #[tokio::test]
+    async fn test_browser_use_stop_retries_transient_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(serve_mock_http(
+            listener,
+            vec![
+                (500, r#"{"detail":"temporary"}"#.to_string()),
+                (200, "{}".to_string()),
+            ],
+        ));
+
+        stop_browser_use_session(
+            &reqwest::Client::new(),
+            &api_base,
+            "test-key",
+            "browser-123",
+        )
+        .await
+        .unwrap();
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests
+            .iter()
+            .all(|request| request.starts_with("PATCH /api/v4/browsers/browser-123 HTTP/1.1")));
+    }
+
+    #[test]
+    fn test_browser_use_create_body_exposes_supported_v4_options() {
+        let values = std::collections::HashMap::from([
+            (
+                "BROWSER_USE_PROFILE_ID",
+                "00000000-0000-0000-0000-000000000123",
+            ),
+            ("BROWSER_USE_PROXY_COUNTRY", "DE"),
+            ("BROWSER_USE_TIMEOUT_MINUTES", "120"),
+            ("BROWSER_USE_SCREEN_WIDTH", "1440"),
+            ("BROWSER_USE_SCREEN_HEIGHT", "900"),
+            ("BROWSER_USE_ALLOW_RESIZING", "true"),
+            ("BROWSER_USE_ENABLE_RECORDING", "1"),
+        ]);
+
+        let body = browser_use_create_body_from_lookup(|name| {
+            values.get(name).map(|value| (*value).to_string())
+        })
+        .unwrap();
+
+        assert_eq!(
+            body,
+            json!({
+                "profileId": "00000000-0000-0000-0000-000000000123",
+                "proxyCountryCode": "de",
+                "timeout": 120,
+                "browserScreenWidth": 1440,
+                "browserScreenHeight": 900,
+                "allowResizing": true,
+                "enableRecording": true,
+            })
+        );
+        assert!(body.get("customProxy").is_none());
+    }
+
+    #[test]
+    fn test_browser_use_create_body_supports_direct_connection() {
+        let body = browser_use_create_body_from_lookup(|name| {
+            (name == "BROWSER_USE_PROXY_COUNTRY").then(|| "direct".to_string())
+        })
+        .unwrap();
+
+        assert_eq!(body, json!({ "proxyCountryCode": null }));
+    }
+
+    #[test]
+    fn test_browser_use_create_body_validates_options_before_provisioning() {
+        let error = browser_use_create_body_from_lookup(|name| {
+            (name == "BROWSER_USE_TIMEOUT_MINUTES").then(|| "241".to_string())
+        })
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "BROWSER_USE_TIMEOUT_MINUTES must be an integer from 1 to 240"
+        );
+
+        let error = browser_use_create_body_from_lookup(|name| {
+            (name == "BROWSER_USE_SCREEN_WIDTH").then(|| "1440".to_string())
+        })
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "BROWSER_USE_SCREEN_WIDTH and BROWSER_USE_SCREEN_HEIGHT must be set together"
+        );
+
+        let error = browser_use_create_body_from_lookup(|name| {
+            (name == "BROWSER_USE_ENABLE_RECORDING").then(|| "sometimes".to_string())
+        })
+        .unwrap_err();
+        assert!(error.starts_with("BROWSER_USE_ENABLE_RECORDING must be one of:"));
+
+        let error = browser_use_create_body_from_lookup(|name| {
+            (name == "BROWSER_USE_PROFILE_ID").then(|| "not-a-uuid".to_string())
+        })
+        .unwrap_err();
+        assert_eq!(error, "BROWSER_USE_PROFILE_ID must be a UUID");
+    }
+
+    #[tokio::test]
+    async fn test_browser_use_websocket_url_does_not_probe() {
+        let client = reqwest::Client::new();
+        let ws_url =
+            resolve_browser_use_ws_url(&client, "wss://browser.example/devtools/browser/123")
+                .await
+                .unwrap();
+        assert_eq!(ws_url, "wss://browser.example/devtools/browser/123");
+    }
+
+    #[tokio::test]
+    async fn test_browser_use_cdp_probe_failure_falls_back_to_websocket_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let cdp_url = format!(
+            "http://{}/devtools/browser/123",
+            listener.local_addr().unwrap()
+        );
+        drop(listener);
+
+        let client = reqwest::Client::new();
+        let ws_url = resolve_browser_use_ws_url(&client, &cdp_url).await.unwrap();
+        assert_eq!(ws_url, cdp_url.replacen("http://", "ws://", 1));
+    }
+
+    #[tokio::test]
+    async fn test_browser_use_missing_cdp_url_stops_created_browser() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(serve_mock_http(
+            listener,
+            vec![
+                (201, r#"{"id":"browser-123"}"#.to_string()),
+                (200, "{}".to_string()),
+            ],
+        ));
+
+        let client = reqwest::Client::new();
+        let error = connect_browser_use_with_client(&client, &api_base, "test-key", &json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(error, "Browser Use response missing cdpUrl");
+
+        let requests = server.await.unwrap();
+        assert!(requests[0].starts_with("POST /api/v4/browsers HTTP/1.1"));
+        assert!(requests[1].starts_with("PATCH /api/v4/browsers/browser-123 HTTP/1.1"));
+        assert!(requests[1].contains(r#"{"action":"stop"}"#));
+    }
+
     #[test]
     fn test_connect_provider_unknown() {
         let guard = EnvGuard::new(&["AGENT_BROWSER_PLUGINS"]);
@@ -983,7 +1547,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             ..crate::plugins::PluginConfig::default()
         }];
 
-        rt.block_on(close_provider_session_with_plugins(&session, &plugins));
+        rt.block_on(close_provider_session_with_plugins(&session, &plugins))
+            .unwrap();
 
         let request = std::fs::read_to_string(marker_path).unwrap();
         assert!(request.contains(r#""type":"browser.close""#));

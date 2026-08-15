@@ -1,6 +1,6 @@
 # Browser Use
 
-[Browser Use](https://browser-use.com) provides cloud browser infrastructure for AI agents. Use it when running agent-browser in environments where a local browser isn't available (serverless, CI/CD, etc.).
+[Browser Use](https://browser-use.com) is an open-source browser automation project for AI agents with [over 100,000 GitHub stars](https://github.com/browser-use/browser-use), plus a managed Cloud browser service. Browser Use Cloud is useful when running agent-browser in environments where a local browser isn't available (serverless, CI/CD, etc.).
 
 ## Setup
 
@@ -17,8 +17,39 @@ export BROWSER_USE_API_KEY="your-api-key"
 agent-browser open https://example.com
 ```
 
+## Browser settings
+
+Configure Browser Use Cloud sessions with optional environment variables:
+
+<table>
+  <thead>
+    <tr><th>Environment variable</th><th>Description</th><th>Default</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>BROWSER_USE_PROFILE_ID</code></td><td>Browser Use profile UUID for persistent cookies and logins</td><td>(none)</td></tr>
+    <tr><td><code>BROWSER_USE_PROXY_COUNTRY</code></td><td>Two-letter proxy country (Cloud validates availability); use <code>none</code> or <code>direct</code> to disable it</td><td><code>us</code></td></tr>
+    <tr><td><code>BROWSER_USE_TIMEOUT_MINUTES</code></td><td>Cloud browser timeout in minutes (<code>1</code>–<code>240</code>)</td><td><code>60</code></td></tr>
+    <tr><td><code>BROWSER_USE_SCREEN_WIDTH</code></td><td>Browser screen width in pixels (<code>320</code>–<code>6144</code>; set with height)</td><td>Cloud default</td></tr>
+    <tr><td><code>BROWSER_USE_SCREEN_HEIGHT</code></td><td>Browser screen height in pixels (<code>320</code>–<code>3456</code>; set with width)</td><td>Cloud default</td></tr>
+    <tr><td><code>BROWSER_USE_ALLOW_RESIZING</code></td><td>Allow browser resizing; this may reduce stealthiness</td><td><code>false</code></td></tr>
+    <tr><td><code>BROWSER_USE_ENABLE_RECORDING</code></td><td>Record the Cloud browser session</td><td><code>false</code></td></tr>
+  </tbody>
+</table>
+
+After creating a profile in the [Browser Use Cloud profile settings](https://cloud.browser-use.com/settings?tab=profiles&utm_source=agent-browser&utm_medium=docs&utm_campaign=provider), reuse it, browse from Germany, and record the session:
+
+```bash
+export BROWSER_USE_API_KEY="your-api-key"
+export BROWSER_USE_PROFILE_ID="your-profile-uuid"
+export BROWSER_USE_PROXY_COUNTRY="de"
+export BROWSER_USE_ENABLE_RECORDING="true"
+agent-browser -p browseruse open https://example.com
+```
+
 The `-p` flag takes precedence over `AGENT_BROWSER_PROVIDER`.
 
-When enabled, agent-browser connects to a Browser Use cloud session instead of launching a local browser. All commands work identically.
+## Lifecycle
 
-Get your API key from the [Browser Use Cloud Dashboard](https://cloud.browser-use.com/settings?tab=api-keys). Free credits are available to get started, with pay-as-you-go pricing after.
+agent-browser creates a session with the Browser Use Cloud V4 API and discovers its CDP WebSocket endpoint. On normal shutdown, agent-browser sends a V4 stop request for the remote session. Normal interaction commands run against the remote browser.
+
+Get your API key from the [Browser Use Cloud Dashboard](https://cloud.browser-use.com/settings?tab=api-keys&utm_source=agent-browser&utm_medium=docs&utm_campaign=provider) and see [current Browser Use pricing](https://browser-use.com/pricing?utm_source=agent-browser&utm_medium=docs&utm_campaign=provider).

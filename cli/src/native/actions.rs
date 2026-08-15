@@ -2036,6 +2036,13 @@ fn has_active_browser_session(state: &DaemonState) -> bool {
     state.browser.is_some() || state.active_provider_session.is_some()
 }
 
+pub(crate) fn pending_provider_session(state: &DaemonState) -> Option<providers::ProviderSession> {
+    state
+        .active_provider_session
+        .as_ref()
+        .map(|active| active.session.clone())
+}
+
 async fn apply_restore_config_after_confirmation(
     cmd: &Value,
     state: &mut DaemonState,
@@ -2045,7 +2052,7 @@ async fn apply_restore_config_after_confirmation(
 
     if restore_key_changed && had_browser {
         let _ = auto_save_restore_state(state).await;
-        let _ = close_current_browser(state).await;
+        close_current_browser(state).await?;
     }
 
     apply_restore_config_from_command(cmd, state)?;
@@ -2064,11 +2071,32 @@ fn remember_active_provider_session(
     });
 }
 
-async fn close_active_provider_session(state: &mut DaemonState) {
-    if let Some(active) = state.active_provider_session.take() {
-        providers::close_provider_session_with_plugins(&active.session, &active.plugins).await;
+async fn close_active_provider_session(state: &mut DaemonState) -> Result<(), String> {
+    if let Some(active) = state.active_provider_session.clone() {
+        providers::close_provider_session_with_plugins(&active.session, &active.plugins).await?;
+        state.active_provider_session = None;
     }
     state.active_provider_connection = false;
+    Ok(())
+}
+
+async fn close_failed_provider_connection(
+    state: &mut DaemonState,
+    session: Option<&providers::ProviderSession>,
+    plugins: &[crate::plugins::PluginConfig],
+) -> Result<(), String> {
+    let Some(session) = session else {
+        return Ok(());
+    };
+
+    if let Err(error) = providers::close_provider_session_with_plugins(session, plugins).await {
+        remember_active_provider_session(state, Some(session.clone()), plugins);
+        return Err(format!(
+            "{error}. The provider session is still tracked; run close to retry cleanup"
+        ));
+    }
+
+    Ok(())
 }
 
 pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(), String> {
@@ -2078,7 +2106,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
         None
     };
 
-    close_active_provider_session(state).await;
+    let provider_close_error = close_active_provider_session(state).await.err();
     state.launch_hash = None;
     state.network_auto_attach_installed = false;
     state.iframe_sessions.clear();
@@ -2089,6 +2117,11 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
 
     if let Some(err) = close_error {
         return Err(err);
+    }
+    if let Some(err) = provider_close_error {
+        return Err(format!(
+            "{err}. The provider session is still tracked; run close again to retry cleanup"
+        ));
     }
     Ok(())
 }
@@ -2449,7 +2482,9 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 || state.active_provider_session.is_some();
             if state.browser.is_some() || state.active_provider_session.is_some() {
                 let _ = auto_save_restore_state(state).await;
-                let _ = close_current_browser(state).await;
+                if let Err(error) = close_current_browser(state).await {
+                    return error_response(&id, &error);
+                }
             }
             if let Err(e) = auto_launch(state, plugins_from_command_or_env(cmd)).await {
                 return error_response(&id, &format!("Auto-launch failed: {}", e));
@@ -3526,10 +3561,13 @@ async fn auto_launch(
         if !p.is_empty() && p != "ios" && p != "safari" {
             let conn = providers::connect_provider_with_plugins(&p, &plugins).await?;
             if conn.direct_page && !allowed_domains.is_empty() {
-                if let Some(ref ps) = conn.session {
-                    providers::close_provider_session_with_plugins(ps, &plugins).await;
+                let error = direct_page_allowed_domains_error();
+                if let Err(cleanup_error) =
+                    close_failed_provider_connection(state, conn.session.as_ref(), &plugins).await
+                {
+                    return Err(format!("{error} (also failed cleanup: {cleanup_error})"));
                 }
-                return Err(direct_page_allowed_domains_error());
+                return Err(error);
             }
             let ws_headers = if p == "agentcore" {
                 providers::take_agentcore_ws_headers()
@@ -3571,8 +3609,13 @@ async fn auto_launch(
                     return Ok(());
                 }
                 Err(e) => {
-                    if let Some(ref ps) = conn.session {
-                        providers::close_provider_session_with_plugins(ps, &plugins).await;
+                    if let Err(cleanup_error) =
+                        close_failed_provider_connection(state, conn.session.as_ref(), &plugins)
+                            .await
+                    {
+                        return Err(format!(
+                            "Provider '{p}' connection failed: {e} (also failed cleanup: {cleanup_error})"
+                        ));
                     }
                     return Err(format!("Provider '{}' connection failed: {}", p, e));
                 }
@@ -4473,11 +4516,19 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                 )
                 .await?;
                 if conn.direct_page && !allowed_domains.is_empty() {
-                    if let Some(ref ps) = conn.session {
-                        providers::close_provider_session_with_plugins(ps, &command_plugins).await;
+                    let error = direct_page_allowed_domains_error();
+                    if let Err(cleanup_error) = close_failed_provider_connection(
+                        state,
+                        conn.session.as_ref(),
+                        &command_plugins,
+                    )
+                    .await
+                    {
+                        restore_domain_filter(state, &previous_domain_filter).await;
+                        return Err(format!("{error} (also failed cleanup: {cleanup_error})"));
                     }
                     restore_domain_filter(state, &previous_domain_filter).await;
-                    return Err(direct_page_allowed_domains_error());
+                    return Err(error);
                 }
                 let provider_metadata = conn.metadata.clone();
 
@@ -4540,9 +4591,16 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                         );
                     }
                     Err(e) => {
-                        if let Some(ref ps) = conn.session {
-                            providers::close_provider_session_with_plugins(ps, &command_plugins)
-                                .await;
+                        if let Err(cleanup_error) = close_failed_provider_connection(
+                            state,
+                            conn.session.as_ref(),
+                            &command_plugins,
+                        )
+                        .await
+                        {
+                            return Err(format!(
+                                "{e} (also failed provider cleanup: {cleanup_error})"
+                            ));
                         }
                         return Err(e);
                     }

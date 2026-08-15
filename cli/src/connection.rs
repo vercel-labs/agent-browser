@@ -770,22 +770,42 @@ fn wait_for_daemon_exit(session: &str, timeout: Duration) -> bool {
     !daemon_ready(session)
 }
 
-fn request_graceful_daemon_shutdown(session: &str) -> bool {
+fn unsupported_internal_shutdown_error(error: &str) -> bool {
+    let normalized = error.trim().to_ascii_lowercase();
+    normalized == "not yet implemented"
+        || (normalized.contains(INTERNAL_DAEMON_SHUTDOWN_ACTION)
+            && (normalized.starts_with("not yet implemented")
+                || normalized.contains("unknown command")
+                || normalized.contains("unknown action")))
+}
+
+fn request_graceful_daemon_shutdown(session: &str) -> Result<bool, String> {
     let close_cmd = json!({
         "id": "restart-close",
         "action": INTERNAL_DAEMON_SHUTDOWN_ACTION
     });
 
     match send_command(close_cmd, session) {
-        Ok(resp) if resp.success => wait_for_daemon_exit(session, Duration::from_secs(5)),
-        _ => false,
+        Ok(resp) if resp.success => Ok(wait_for_daemon_exit(session, Duration::from_secs(5))),
+        Ok(resp) => {
+            let error = resp
+                .error
+                .unwrap_or_else(|| "Daemon refused to shut down cleanly".to_string());
+            if unsupported_internal_shutdown_error(&error) {
+                Ok(false)
+            } else {
+                Err(error)
+            }
+        }
+        Err(_) => Ok(false),
     }
 }
 
-fn stop_existing_daemon_for_restart(session: &str) {
-    if !request_graceful_daemon_shutdown(session) {
+fn stop_existing_daemon_for_restart(session: &str) -> Result<(), String> {
+    if !request_graceful_daemon_shutdown(session)? {
         kill_stale_daemon(session);
     }
+    Ok(())
 }
 
 pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
@@ -808,14 +828,14 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
                 "{} Daemon version mismatch detected, restarting...",
                 crate::color::warning_indicator()
             );
-            stop_existing_daemon_for_restart(session);
+            stop_existing_daemon_for_restart(session)?;
             restarted = true;
             // Fall through to spawn a new daemon below
         } else {
             match ready_existing_daemon_result(session, opts, Duration::from_secs(1)) {
                 Some(result) => return Ok(result),
                 None => {
-                    stop_existing_daemon_for_restart(session);
+                    stop_existing_daemon_for_restart(session)?;
                     restarted = true;
                 }
             }
@@ -1082,6 +1102,10 @@ fn has_os_error(error: &str, code: u32) -> bool {
 }
 
 /// Socket read timeout for one request. Ordinary commands get a 30s floor.
+/// Browser Use provider commands get a 120s floor because Cloud browser
+/// creation is a non-idempotent request that can legitimately take up to 45s;
+/// the client must not time out and resend it while the daemon is still
+/// waiting for the first response.
 /// Commands carrying an operation timeout (the wait family, which
 /// parse_command stamps with AGENT_BROWSER_DEFAULT_TIMEOUT when no explicit
 /// --timeout is given) get that timeout plus margin, so the daemon can report
@@ -1096,7 +1120,16 @@ fn has_os_error(error: &str, code: u32) -> bool {
 /// avoiding the daemon's spawn-time env snapshot drifting from the client.
 fn read_timeout_for(cmd: &Value) -> Duration {
     let op_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(0);
-    Duration::from_millis(op_ms.saturating_add(10_000).max(30_000))
+    let provider = cmd
+        .get("provider")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| env::var("AGENT_BROWSER_PROVIDER").ok());
+    let floor_ms = match provider.as_deref().map(str::to_ascii_lowercase) {
+        Some(provider) if matches!(provider.as_str(), "browser-use" | "browseruse") => 120_000,
+        _ => 30_000,
+    };
+    Duration::from_millis(op_ms.saturating_add(10_000).max(floor_ms))
 }
 
 fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
@@ -1125,6 +1158,29 @@ fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
 mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
+
+    #[test]
+    fn test_browser_use_provider_commands_get_extended_read_timeout() {
+        let cmd = json!({ "action": "launch", "provider": "browseruse" });
+        assert_eq!(read_timeout_for(&cmd), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn test_internal_shutdown_compatibility_errors_allow_force_restart() {
+        assert!(unsupported_internal_shutdown_error("Not yet implemented"));
+        assert!(unsupported_internal_shutdown_error(
+            "Not yet implemented: __agent_browser_internal_shutdown"
+        ));
+        assert!(unsupported_internal_shutdown_error(
+            "Unknown command: __agent_browser_internal_shutdown"
+        ));
+        assert!(!unsupported_internal_shutdown_error(
+            "Browser Use stop request failed"
+        ));
+        assert!(!unsupported_internal_shutdown_error(
+            "Browser Use stop API error (400): unknown action"
+        ));
+    }
 
     #[test]
     fn test_get_socket_dir_explicit_override() {
