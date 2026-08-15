@@ -41,4 +41,6 @@ agent-browser -p browseruse open https://example.com
 
 When enabled, agent-browser creates a Browser Use Cloud V4 session and connects to its CDP endpoint. Existing provider lifecycle handling stops the Cloud session when agent-browser closes it.
 
+The Cloud browser stays active between commands; run `agent-browser close` when the task finishes to stop the session and billing immediately, otherwise it stops when the daemon exits, including after the one-hour default idle timeout.
+
 Get your API key from the [Browser Use Cloud Dashboard](https://cloud.browser-use.com/settings?tab=api-keys).
