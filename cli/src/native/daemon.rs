@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
 use std::fs;
@@ -14,149 +13,12 @@ use tokio::sync::{Notify, RwLock};
 
 use super::actions::{
     auto_save_restore_state, close_all_browser_backends, close_current_browser, execute_command,
-    maybe_autosave_restore_state, pending_provider_session, DaemonState,
+    maybe_autosave_restore_state, DaemonState,
 };
 use super::cdp::client::CdpClient;
-use super::providers::{close_provider_session_with_plugins, ProviderSession};
 use super::state;
 use super::stream::{IdleActivity, StreamServer};
 use crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION;
-
-const PROVIDER_CLEANUP_RETRY_INTERVAL: Duration = Duration::from_secs(60);
-static PENDING_PROVIDER_CLEANUP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct PendingProviderCleanups {
-    sessions: Vec<ProviderSession>,
-}
-
-fn pending_provider_cleanup_path(socket_dir: &std::path::Path, session: &str) -> PathBuf {
-    socket_dir.join(format!("{session}.provider-cleanup.json"))
-}
-
-fn read_pending_provider_cleanups(
-    socket_dir: &std::path::Path,
-    session: &str,
-) -> Result<PendingProviderCleanups, String> {
-    let path = pending_provider_cleanup_path(socket_dir, session);
-    match fs::read_to_string(&path) {
-        Ok(contents) => serde_json::from_str(&contents)
-            .map_err(|error| format!("Failed to parse {}: {error}", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(PendingProviderCleanups::default())
-        }
-        Err(error) => Err(format!("Failed to read {}: {error}", path.display())),
-    }
-}
-
-fn write_pending_provider_cleanups(
-    socket_dir: &std::path::Path,
-    session: &str,
-    pending: &PendingProviderCleanups,
-) -> Result<(), String> {
-    let path = pending_provider_cleanup_path(socket_dir, session);
-    if pending.sessions.is_empty() {
-        return match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!("Failed to remove {}: {error}", path.display())),
-        };
-    }
-
-    let contents = serde_json::to_vec(pending)
-        .map_err(|error| format!("Failed to serialize pending provider cleanup: {error}"))?;
-    let temp_path = path.with_extension("json.tmp");
-    fs::write(&temp_path, contents)
-        .map_err(|error| format!("Failed to write {}: {error}", temp_path.display()))?;
-    fs::rename(&temp_path, &path)
-        .map_err(|error| format!("Failed to replace {}: {error}", path.display()))
-}
-
-async fn append_pending_provider_cleanup(
-    socket_dir: &std::path::Path,
-    session: &str,
-    provider_session: ProviderSession,
-) -> Result<(), String> {
-    let _guard = PENDING_PROVIDER_CLEANUP_LOCK.lock().await;
-    let mut pending = read_pending_provider_cleanups(socket_dir, session)?;
-    if pending.sessions.iter().any(|existing| {
-        existing.provider == provider_session.provider
-            && existing.session_id == provider_session.session_id
-    }) {
-        return Ok(());
-    }
-    pending.sessions.push(provider_session);
-    write_pending_provider_cleanups(socket_dir, session, &pending)
-}
-
-async fn remove_pending_provider_cleanup(
-    socket_dir: &std::path::Path,
-    session: &str,
-    provider_session: &ProviderSession,
-) -> Result<(), String> {
-    let _guard = PENDING_PROVIDER_CLEANUP_LOCK.lock().await;
-    let mut pending = read_pending_provider_cleanups(socket_dir, session)?;
-    pending.sessions.retain(|existing| {
-        existing.provider != provider_session.provider
-            || existing.session_id != provider_session.session_id
-    });
-    write_pending_provider_cleanups(socket_dir, session, &pending)
-}
-
-async fn persist_pending_browser_use_cleanup(
-    socket_dir: &std::path::Path,
-    session: &str,
-    state: &DaemonState,
-) -> Result<(), String> {
-    let Some(provider_session) = pending_provider_session(state) else {
-        return Ok(());
-    };
-    if provider_session.provider != "browser-use" {
-        return Ok(());
-    }
-    append_pending_provider_cleanup(socket_dir, session, provider_session).await
-}
-
-async fn retry_pending_provider_cleanups(socket_dir: &std::path::Path, session: &str) {
-    // Snapshot under the lock, but do not hold it across network retries: an
-    // explicit close or shutdown must still be able to update the durable file.
-    let pending = {
-        let _guard = PENDING_PROVIDER_CLEANUP_LOCK.lock().await;
-        let Ok(pending) = read_pending_provider_cleanups(socket_dir, session) else {
-            return;
-        };
-        pending
-    };
-    if pending.sessions.is_empty() {
-        return;
-    }
-
-    let plugins = crate::plugins::plugins_from_env();
-    let mut outcomes = Vec::new();
-    for provider_session in pending.sessions {
-        let cleaned = close_provider_session_with_plugins(&provider_session, &plugins)
-            .await
-            .is_ok();
-        outcomes.push((provider_session, cleaned));
-    }
-
-    // Merge successful outcomes into the latest file contents. A concurrent
-    // explicit close may already have removed a record, so a failed retry must
-    // never re-add it.
-    let _guard = PENDING_PROVIDER_CLEANUP_LOCK.lock().await;
-    let Ok(mut current) = read_pending_provider_cleanups(socket_dir, session) else {
-        return;
-    };
-    for (provider_session, cleaned) in outcomes {
-        if cleaned {
-            current.sessions.retain(|existing| {
-                existing.provider != provider_session.provider
-                    || existing.session_id != provider_session.session_id
-            });
-        }
-    }
-    let _ = write_pending_provider_cleanups(socket_dir, session, &current);
-}
 
 pub async fn run_daemon(session: &str) {
     let socket_dir = get_daemon_socket_dir();
@@ -200,12 +62,6 @@ pub async fn run_daemon(session: &str) {
             }
         }
     }
-
-    let cleanup_socket_dir = socket_dir.clone();
-    let cleanup_session = session.to_string();
-    tokio::spawn(async move {
-        retry_pending_provider_cleanups(&cleanup_socket_dir, &cleanup_session).await;
-    });
 
     let pid_path = socket_dir.join(format!("{}.pid", session));
     let _ = fs::write(&pid_path, process::id().to_string());
@@ -376,10 +232,10 @@ async fn run_socket_server(
 
     let listener =
         UnixListener::bind(socket_path).map_err(|e| format!("Failed to bind socket: {}", e))?;
-    let socket_dir = socket_path.parent().unwrap_or(std::path::Path::new("."));
 
     let stream_file: Option<PathBuf> = if stream_server.is_some() {
-        Some(socket_dir.join(format!("{}.stream", session)))
+        let dir = socket_path.parent().unwrap_or(std::path::Path::new("."));
+        Some(dir.join(format!("{}.stream", session)))
     } else {
         None
     };
@@ -410,19 +266,8 @@ async fn run_socket_server(
                         let idle_activity = idle_activity.clone();
                         let sf = stream_file.clone();
                         let cn = close_notify.clone();
-                        let cleanup_dir = socket_dir.to_path_buf();
-                        let daemon_session = session.to_string();
                         tokio::spawn(async move {
-                            handle_connection(
-                                stream,
-                                state,
-                                idle_activity,
-                                sf,
-                                cn,
-                                cleanup_dir,
-                                daemon_session,
-                            )
-                            .await;
+                            handle_connection(stream, state, idle_activity, sf, cn).await;
                         });
                     }
                     Err(e) => {
@@ -485,32 +330,8 @@ async fn run_socket_server(
                     );
                 }
                 let _ = auto_save_restore_state(&mut s).await;
-                let provider_session = pending_provider_session(&s);
-                match close_all_browser_backends(&mut s).await {
-                    Ok(()) => {
-                        if let Some(provider_session) = provider_session {
-                            let _ = remove_pending_provider_cleanup(
-                                socket_dir,
-                                session,
-                                &provider_session,
-                            )
-                            .await;
-                        }
-                        break;
-                    }
-                    Err(error) => {
-                        let _ = persist_pending_browser_use_cleanup(socket_dir, session, &s).await;
-                        let _ = writeln!(
-                            std::io::stderr(),
-                            "Provider cleanup failed during idle shutdown; retrying in {}s: {error}",
-                            PROVIDER_CLEANUP_RETRY_INTERVAL.as_secs()
-                        );
-                        idle_sleep_pin = Some(Box::pin(tokio::time::sleep(
-                            PROVIDER_CLEANUP_RETRY_INTERVAL,
-                        )));
-                        continue;
-                    }
-                }
+                let _ = close_all_browser_backends(&mut s).await;
+                break;
             }
             _ = idle_activity.notified(), if idle_timeout_ms.is_some() => {
                 idle_sleep_pin = idle_timeout_ms
@@ -526,27 +347,7 @@ async fn run_socket_server(
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
                 let _ = auto_save_restore_state(&mut s).await;
-                let provider_session = pending_provider_session(&s);
-                if let Err(error) = close_all_browser_backends(&mut s).await {
-                    let persist_error =
-                        persist_pending_browser_use_cleanup(socket_dir, session, &s)
-                            .await
-                            .err();
-                    let _ = writeln!(
-                        std::io::stderr(),
-                        "Provider cleanup failed during signal shutdown: {error}{}",
-                        persist_error
-                            .map(|error| format!("; failed to persist cleanup record: {error}"))
-                            .unwrap_or_default()
-                    );
-                } else if let Some(provider_session) = provider_session {
-                    let _ = remove_pending_provider_cleanup(
-                        socket_dir,
-                        session,
-                        &provider_session,
-                    )
-                    .await;
-                }
+                let _ = close_all_browser_backends(&mut s).await;
                 break;
             }
         }
@@ -619,19 +420,8 @@ async fn run_socket_server(
                         let idle_activity = idle_activity.clone();
                         let sf = stream_file.clone();
                         let cn = close_notify.clone();
-                        let cleanup_dir = socket_dir.to_path_buf();
-                        let daemon_session = session.to_string();
                         tokio::spawn(async move {
-                            handle_connection(
-                                stream,
-                                state,
-                                idle_activity,
-                                sf,
-                                cn,
-                                cleanup_dir,
-                                daemon_session,
-                            )
-                            .await;
+                            handle_connection(stream, state, idle_activity, sf, cn).await;
                         });
                     }
                     Err(e) => {
@@ -684,33 +474,9 @@ async fn run_socket_server(
                     );
                 }
                 let _ = auto_save_restore_state(&mut s).await;
-                let provider_session = pending_provider_session(&s);
-                match close_all_browser_backends(&mut s).await {
-                    Ok(()) => {
-                        if let Some(provider_session) = provider_session {
-                            let _ = remove_pending_provider_cleanup(
-                                socket_dir,
-                                session,
-                                &provider_session,
-                            )
-                            .await;
-                        }
-                        let _ = fs::remove_file(&port_path);
-                        break;
-                    }
-                    Err(error) => {
-                        let _ = persist_pending_browser_use_cleanup(socket_dir, session, &s).await;
-                        let _ = writeln!(
-                            std::io::stderr(),
-                            "Provider cleanup failed during idle shutdown; retrying in {}s: {error}",
-                            PROVIDER_CLEANUP_RETRY_INTERVAL.as_secs()
-                        );
-                        idle_sleep_pin = Some(Box::pin(tokio::time::sleep(
-                            PROVIDER_CLEANUP_RETRY_INTERVAL,
-                        )));
-                        continue;
-                    }
-                }
+                let _ = close_all_browser_backends(&mut s).await;
+                let _ = fs::remove_file(&port_path);
+                break;
             }
             _ = idle_activity.notified(), if idle_timeout_ms.is_some() => {
                 idle_sleep_pin = idle_timeout_ms
@@ -724,27 +490,7 @@ async fn run_socket_server(
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
                 let _ = auto_save_restore_state(&mut s).await;
-                let provider_session = pending_provider_session(&s);
-                if let Err(error) = close_all_browser_backends(&mut s).await {
-                    let persist_error =
-                        persist_pending_browser_use_cleanup(socket_dir, session, &s)
-                            .await
-                            .err();
-                    let _ = writeln!(
-                        std::io::stderr(),
-                        "Provider cleanup failed during signal shutdown: {error}{}",
-                        persist_error
-                            .map(|error| format!("; failed to persist cleanup record: {error}"))
-                            .unwrap_or_default()
-                    );
-                } else if let Some(provider_session) = provider_session {
-                    let _ = remove_pending_provider_cleanup(
-                        socket_dir,
-                        session,
-                        &provider_session,
-                    )
-                    .await;
-                }
+                let _ = close_all_browser_backends(&mut s).await;
                 let _ = fs::remove_file(&port_path);
                 break;
             }
@@ -760,8 +506,6 @@ async fn handle_connection<S>(
     idle_activity: Arc<IdleActivity>,
     stream_file_cleanup: Option<PathBuf>,
     close_notify: Arc<Notify>,
-    cleanup_dir: PathBuf,
-    daemon_session: String,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -805,43 +549,14 @@ async fn handle_connection<S>(
                     .unwrap_or_default()
                     .to_string();
 
-                let (response, closing_provider_session) = {
+                let response = {
                     let mut s = state.lock().await;
-                    let closing_provider_session = matches!(
-                        action.as_str(),
-                        "close" | "confirm" | INTERNAL_DAEMON_SHUTDOWN_ACTION
-                    )
-                    .then(|| pending_provider_session(&s))
-                    .flatten();
-                    let mut response = execute_command(&cmd, &mut s).await;
-                    // Record an active Browser Use session before releasing
-                    // the daemon state lock. Signal and idle shutdown paths
-                    // therefore start with durable cleanup metadata instead
-                    // of waiting until a stop request has already failed.
-                    if let Some(provider_session) = pending_provider_session(&s)
-                        .filter(|session| session.provider == "browser-use")
-                    {
-                        if let Err(error) = append_pending_provider_cleanup(
-                            &cleanup_dir,
-                            &daemon_session,
-                            provider_session,
-                        )
-                        .await
-                        {
-                            response = serde_json::json!({
-                                "id": cmd.get("id").and_then(Value::as_str).unwrap_or_default(),
-                                "success": false,
-                                "error": format!(
-                                    "Browser Use session is active, but durable cleanup tracking failed: {error}. Run close immediately"
-                                ),
-                            });
-                        }
-                    }
+                    let response = execute_command(&cmd, &mut s).await;
                     // Refresh while the state lock is still held. An idle
                     // timer waiting on this command will observe the updated
                     // clock as soon as it acquires the lock.
                     idle_activity.mark();
-                    (response, closing_provider_session)
+                    response
                 };
 
                 let mut resp = serde_json::to_string(&response).unwrap_or_default();
@@ -851,14 +566,6 @@ async fn handle_connection<S>(
                 }
 
                 if close_completed_response(&action, &response) {
-                    if let Some(provider_session) = closing_provider_session {
-                        let _ = remove_pending_provider_cleanup(
-                            &cleanup_dir,
-                            &daemon_session,
-                            &provider_session,
-                        )
-                        .await;
-                    }
                     if let Some(ref path) = stream_file_cleanup {
                         let _ = fs::remove_file(path);
                     }
@@ -969,35 +676,6 @@ fn get_port_for_session(session: &str) -> u16 {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
-
-    #[tokio::test]
-    async fn test_pending_provider_cleanup_record_deduplicates_sessions() {
-        let dir = tempfile::tempdir().unwrap();
-        let provider_session = ProviderSession {
-            provider: "browser-use".to_string(),
-            session_id: "browser-1".to_string(),
-        };
-
-        append_pending_provider_cleanup(dir.path(), "test", provider_session.clone())
-            .await
-            .unwrap();
-        append_pending_provider_cleanup(dir.path(), "test", provider_session)
-            .await
-            .unwrap();
-
-        let pending = read_pending_provider_cleanups(dir.path(), "test").unwrap();
-        assert_eq!(pending.sessions.len(), 1);
-        assert_eq!(pending.sessions[0].provider, "browser-use");
-        assert_eq!(pending.sessions[0].session_id, "browser-1");
-
-        remove_pending_provider_cleanup(dir.path(), "test", &pending.sessions[0])
-            .await
-            .unwrap();
-        assert!(read_pending_provider_cleanups(dir.path(), "test")
-            .unwrap()
-            .sessions
-            .is_empty());
-    }
 
     #[test]
     fn test_resolve_idle_timeout_unset_applies_default() {

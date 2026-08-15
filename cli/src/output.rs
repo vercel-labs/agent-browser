@@ -3814,12 +3814,8 @@ Environment:
   AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless, agentcore, or plugin name)
   BROWSER_USE_API_KEY            Browser Use Cloud API key
   BROWSER_USE_PROFILE_ID         Browser Use profile UUID
-  BROWSER_USE_PROXY_COUNTRY      Two-letter proxy country (Cloud validates availability); none/direct disables it (default: us)
-  BROWSER_USE_TIMEOUT_MINUTES    Browser Use session timeout from 1 to 240 minutes (default: 60)
-  BROWSER_USE_SCREEN_WIDTH       Browser Use screen width from 320 to 6144; requires screen height
-  BROWSER_USE_SCREEN_HEIGHT      Browser Use screen height from 320 to 3456; requires screen width
-  BROWSER_USE_ALLOW_RESIZING     Allow Browser Use screen resizing (default: false)
-  BROWSER_USE_ENABLE_RECORDING   Record the Browser Use Cloud session (default: false)
+  BROWSER_USE_PROXY_COUNTRY      Managed proxy country; none/direct disables proxy
+  BROWSER_USE_ENABLE_RECORDING   Record the Browser Use Cloud session
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_PIN_TAB          Pin the session to its bound tab (strict tab binding)
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files

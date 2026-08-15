@@ -4,9 +4,7 @@
 //! messages. Tool calls are delegated to the current binary in `--json` mode
 //! so MCP behavior stays aligned with the normal CLI command surface. Daemon
 //! lifecycle settings, including the default idle timeout, use the same CLI
-//! parser and daemon as direct commands. Provider-specific environment variables,
-//! including Browser Use Cloud settings, are inherited by the delegated CLI process
-//! and therefore do not need duplicate MCP tool arguments.
+//! parser and daemon as direct commands.
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
