@@ -9,10 +9,10 @@ use std::env;
 use std::time::Duration;
 
 const BROWSER_USE_API_BASE: &str = "https://api.browser-use.com";
-// Browser creation in Cloud can legitimately take tens of seconds. The CLI
-// grants Browser Use launch commands a longer IPC budget so this non-idempotent
-// request is not retried while the daemon is still waiting for its response.
-const BROWSER_USE_API_TIMEOUT: Duration = Duration::from_secs(60);
+// Browser creation can use two Cloud infrastructure attempts (up to roughly
+// 93 seconds including retry cleanup). Keep this below the CLI's 180-second
+// Browser Use IPC floor while allowing the valid server-side retry path.
+const BROWSER_USE_API_TIMEOUT: Duration = Duration::from_secs(105);
 const BROWSER_USE_CDP_TIMEOUT: Duration = Duration::from_secs(10);
 const BROWSER_USE_STOP_TIMEOUT: Duration = Duration::from_secs(7);
 const BROWSER_USE_STOP_ATTEMPTS: usize = 3;

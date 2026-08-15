@@ -21,6 +21,17 @@ use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_I
 
 pub(crate) const INTERNAL_DAEMON_SHUTDOWN_ACTION: &str = "__agent_browser_internal_shutdown";
 
+const BROWSER_USE_DAEMON_ENV: &[&str] = &[
+    "BROWSER_USE_API_KEY",
+    "BROWSER_USE_PROFILE_ID",
+    "BROWSER_USE_PROXY_COUNTRY",
+    "BROWSER_USE_TIMEOUT_MINUTES",
+    "BROWSER_USE_SCREEN_WIDTH",
+    "BROWSER_USE_SCREEN_HEIGHT",
+    "BROWSER_USE_ALLOW_RESIZING",
+    "BROWSER_USE_ENABLE_RECORDING",
+];
+
 #[derive(Serialize)]
 #[allow(dead_code)]
 pub struct Request {
@@ -588,7 +599,22 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
 }
 
-fn daemon_config_fingerprint(opts: &DaemonOptions) -> String {
+fn normalized_provider_name(provider: &str) -> String {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "browseruse" | "browser-use" => "browser-use".to_string(),
+        provider => provider.to_string(),
+    }
+}
+
+fn requested_provider(opts: &DaemonOptions) -> Option<String> {
+    opts.provider
+        .map(str::to_owned)
+        .or_else(|| env::var("AGENT_BROWSER_PROVIDER").ok())
+        .filter(|provider| !provider.trim().is_empty())
+        .map(|provider| normalized_provider_name(&provider))
+}
+
+fn daemon_base_fingerprint(opts: &DaemonOptions) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     opts.debug.hash(&mut hasher);
     opts.action_policy.hash(&mut hasher);
@@ -599,6 +625,42 @@ fn daemon_config_fingerprint(opts: &DaemonOptions) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+fn daemon_provider_fingerprint(provider: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    provider.hash(&mut hasher);
+    if provider == "browser-use" {
+        for name in BROWSER_USE_DAEMON_ENV {
+            name.hash(&mut hasher);
+            env::var(name).ok().hash(&mut hasher);
+        }
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct DaemonConfigSnapshot {
+    base: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_fingerprint: Option<String>,
+}
+
+fn daemon_config_snapshot(opts: &DaemonOptions) -> DaemonConfigSnapshot {
+    let provider = requested_provider(opts);
+    let provider_fingerprint = provider.as_deref().map(daemon_provider_fingerprint);
+    DaemonConfigSnapshot {
+        base: daemon_base_fingerprint(opts),
+        provider,
+        provider_fingerprint,
+    }
+}
+
+fn daemon_config_fingerprint(opts: &DaemonOptions) -> String {
+    serde_json::to_string(&daemon_config_snapshot(opts))
+        .expect("daemon configuration snapshot must serialize")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonConfigStatus {
     Matches,
@@ -607,10 +669,27 @@ enum DaemonConfigStatus {
 }
 
 fn daemon_config_status(session: &str, opts: &DaemonOptions) -> DaemonConfigStatus {
-    let expected = daemon_config_fingerprint(opts);
+    let expected = daemon_config_snapshot(opts);
     match fs::read_to_string(get_config_path(session)) {
-        Ok(actual) if actual.trim() == expected => DaemonConfigStatus::Matches,
-        Ok(_) => DaemonConfigStatus::Different,
+        Ok(actual) => {
+            let Ok(actual) = serde_json::from_str::<DaemonConfigSnapshot>(actual.trim()) else {
+                return DaemonConfigStatus::Different;
+            };
+            if actual.base != expected.base {
+                return DaemonConfigStatus::Different;
+            }
+            // An invocation that explicitly selects a provider must get the
+            // provider and settings from that invocation. With no provider on
+            // the command line or in AGENT_BROWSER_PROVIDER, preserve the
+            // daemon's sticky provider so subsequent commands reuse it.
+            if expected.provider.is_some()
+                && (actual.provider != expected.provider
+                    || actual.provider_fingerprint != expected.provider_fingerprint)
+            {
+                return DaemonConfigStatus::Different;
+            }
+            DaemonConfigStatus::Matches
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => DaemonConfigStatus::Missing,
         Err(_) => DaemonConfigStatus::Different,
     }
@@ -1029,6 +1108,38 @@ fn connect(session: &str) -> Result<Connection, String> {
     }
 }
 
+fn daemon_provider(session: &str) -> Option<String> {
+    let provider_path = get_socket_dir().join(format!("{}.provider", session));
+    fs::read_to_string(provider_path)
+        .ok()
+        .map(|provider| normalized_provider_name(&provider))
+        .filter(|provider| !provider.is_empty())
+        .or_else(|| {
+            fs::read_to_string(get_config_path(session))
+                .ok()
+                .and_then(|config| serde_json::from_str::<DaemonConfigSnapshot>(&config).ok())
+                .and_then(|config| config.provider)
+        })
+}
+
+fn command_provider(cmd: &Value, session: &str) -> Option<String> {
+    cmd.get("provider")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| env::var("AGENT_BROWSER_PROVIDER").ok())
+        .filter(|provider| !provider.trim().is_empty())
+        .map(|provider| normalized_provider_name(&provider))
+        .or_else(|| daemon_provider(session))
+}
+
+fn command_uses_browser_use(cmd: &Value, session: &str) -> bool {
+    command_provider(cmd, session).as_deref() == Some("browser-use")
+}
+
+fn should_retry_transient_command(cmd: &Value, session: &str, error: &str) -> bool {
+    is_transient_error(error) && !command_uses_browser_use(cmd, session)
+}
+
 pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
     // Retry logic for transient errors (EAGAIN/EWOULDBLOCK/connection issues)
     const MAX_RETRIES: u32 = 5;
@@ -1044,11 +1155,15 @@ pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
         match send_command_once(&cmd, session) {
             Ok(response) => return Ok(response),
             Err(e) => {
-                if is_transient_error(&e) {
+                if should_retry_transient_command(&cmd, session, &e) {
                     last_error = e;
                     continue;
                 }
-                // Non-transient error, fail immediately
+                // A Browser Use command may have provisioned a Cloud browser
+                // before the socket read failed. Replaying it without
+                // request-ID deduplication can create a second session, so
+                // surface the transport error instead.
+                // Non-retryable error, fail immediately.
                 return Err(e);
             }
         }
@@ -1102,10 +1217,10 @@ fn has_os_error(error: &str, code: u32) -> bool {
 }
 
 /// Socket read timeout for one request. Ordinary commands get a 30s floor.
-/// Browser Use provider commands get a 120s floor because Cloud browser
-/// creation is a non-idempotent request that can legitimately take up to 45s;
-/// the client must not time out and resend it while the daemon is still
-/// waiting for the first response.
+/// Browser Use provider commands get a 180s floor because Cloud browser
+/// creation may consume two infrastructure attempts plus cleanup, CDP
+/// discovery, and a failed-create stop. The client must not time out while the
+/// daemon is still handling that non-idempotent request.
 /// Commands carrying an operation timeout (the wait family, which
 /// parse_command stamps with AGENT_BROWSER_DEFAULT_TIMEOUT when no explicit
 /// --timeout is given) get that timeout plus margin, so the daemon can report
@@ -1118,16 +1233,12 @@ fn has_os_error(error: &str, code: u32) -> bool {
 /// instead of 30s. Only commands that actually carry a `timeout` field get
 /// the extended budget, and that field is set client-side per invocation,
 /// avoiding the daemon's spawn-time env snapshot drifting from the client.
-fn read_timeout_for(cmd: &Value) -> Duration {
+fn read_timeout_for(cmd: &Value, session: &str) -> Duration {
     let op_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(0);
-    let provider = cmd
-        .get("provider")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .or_else(|| env::var("AGENT_BROWSER_PROVIDER").ok());
-    let floor_ms = match provider.as_deref().map(str::to_ascii_lowercase) {
-        Some(provider) if matches!(provider.as_str(), "browser-use" | "browseruse") => 120_000,
-        _ => 30_000,
+    let floor_ms = if command_uses_browser_use(cmd, session) {
+        180_000
+    } else {
+        30_000
     };
     Duration::from_millis(op_ms.saturating_add(10_000).max(floor_ms))
 }
@@ -1135,7 +1246,9 @@ fn read_timeout_for(cmd: &Value) -> Duration {
 fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
     let mut stream = connect(session)?;
 
-    stream.set_read_timeout(Some(read_timeout_for(cmd))).ok();
+    stream
+        .set_read_timeout(Some(read_timeout_for(cmd, session)))
+        .ok();
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
     let mut json_str = serde_json::to_string(cmd).map_err(|e| e.to_string())?;
@@ -1162,7 +1275,43 @@ mod tests {
     #[test]
     fn test_browser_use_provider_commands_get_extended_read_timeout() {
         let cmd = json!({ "action": "launch", "provider": "browseruse" });
-        assert_eq!(read_timeout_for(&cmd), Duration::from_secs(120));
+        assert_eq!(
+            read_timeout_for(&cmd, "browser-use-test"),
+            Duration::from_secs(180)
+        );
+        assert!(!should_retry_transient_command(
+            &cmd,
+            "browser-use-test",
+            "operation WouldBlock"
+        ));
+    }
+
+    #[test]
+    fn test_implicit_browser_use_provider_gets_safe_ipc_behavior() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_SOCKET_DIR",
+            "AGENT_BROWSER_NAMESPACE",
+            "AGENT_BROWSER_PROVIDER",
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        guard.remove("AGENT_BROWSER_PROVIDER");
+
+        let session = "implicit-browser-use";
+        fs::write(
+            get_socket_dir().join(format!("{session}.provider")),
+            "browser-use",
+        )
+        .unwrap();
+        let cmd = json!({ "action": "snapshot" });
+
+        assert_eq!(read_timeout_for(&cmd, session), Duration::from_secs(180));
+        assert!(!should_retry_transient_command(
+            &cmd,
+            session,
+            "operation WouldBlock"
+        ));
     }
 
     #[test]
@@ -1359,6 +1508,45 @@ mod tests {
             daemon_config_fingerprint(&base),
             daemon_config_fingerprint(&domains_changed),
             "allowed domains are browser launch state, not daemon identity"
+        );
+    }
+
+    #[test]
+    fn test_explicit_browser_use_config_restarts_stale_daemon_but_stays_sticky() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_SOCKET_DIR",
+            "AGENT_BROWSER_NAMESPACE",
+            "AGENT_BROWSER_PROVIDER",
+            "BROWSER_USE_API_KEY",
+            "BROWSER_USE_PROFILE_ID",
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        guard.remove("AGENT_BROWSER_PROVIDER");
+        guard.set("BROWSER_USE_API_KEY", "first-key");
+        guard.remove("BROWSER_USE_PROFILE_ID");
+
+        let session = "browser-use-config";
+        let mut browser_use = test_daemon_options(None, false, None);
+        browser_use.provider = Some("browseruse");
+        fs::create_dir_all(get_socket_dir()).unwrap();
+        write_daemon_config(session, &browser_use);
+
+        let no_provider = test_daemon_options(None, false, None);
+        assert!(
+            daemon_config_matches(session, &no_provider),
+            "omitting -p on a later command must preserve the daemon's provider"
+        );
+
+        let mut same_browser_use = test_daemon_options(None, false, None);
+        same_browser_use.provider = Some("browser-use");
+        assert!(daemon_config_matches(session, &same_browser_use));
+
+        guard.set("BROWSER_USE_PROFILE_ID", "changed-profile");
+        assert!(
+            !daemon_config_matches(session, &same_browser_use),
+            "an explicitly selected provider must not reuse stale settings"
         );
     }
 

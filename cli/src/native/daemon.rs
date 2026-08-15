@@ -79,12 +79,13 @@ async fn append_pending_provider_cleanup(
 ) -> Result<(), String> {
     let _guard = PENDING_PROVIDER_CLEANUP_LOCK.lock().await;
     let mut pending = read_pending_provider_cleanups(socket_dir, session)?;
-    if !pending.sessions.iter().any(|existing| {
+    if pending.sessions.iter().any(|existing| {
         existing.provider == provider_session.provider
             && existing.session_id == provider_session.session_id
     }) {
-        pending.sessions.push(provider_session);
+        return Ok(());
     }
+    pending.sessions.push(provider_session);
     write_pending_provider_cleanups(socket_dir, session, &pending)
 }
 
@@ -812,7 +813,30 @@ async fn handle_connection<S>(
                     )
                     .then(|| pending_provider_session(&s))
                     .flatten();
-                    let response = execute_command(&cmd, &mut s).await;
+                    let mut response = execute_command(&cmd, &mut s).await;
+                    // Record an active Browser Use session before releasing
+                    // the daemon state lock. Signal and idle shutdown paths
+                    // therefore start with durable cleanup metadata instead
+                    // of waiting until a stop request has already failed.
+                    if let Some(provider_session) = pending_provider_session(&s)
+                        .filter(|session| session.provider == "browser-use")
+                    {
+                        if let Err(error) = append_pending_provider_cleanup(
+                            &cleanup_dir,
+                            &daemon_session,
+                            provider_session,
+                        )
+                        .await
+                        {
+                            response = serde_json::json!({
+                                "id": cmd.get("id").and_then(Value::as_str).unwrap_or_default(),
+                                "success": false,
+                                "error": format!(
+                                    "Browser Use session is active, but durable cleanup tracking failed: {error}. Run close immediately"
+                                ),
+                            });
+                        }
+                    }
                     // Refresh while the state lock is still held. An idle
                     // timer waiting on this command will observe the updated
                     // clock as soon as it acquires the lock.
