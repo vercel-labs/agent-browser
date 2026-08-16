@@ -266,6 +266,17 @@ The `frame` command accepts:
 - **CSS selectors** — `frame "#payment-iframe"` finds the iframe by selector
 - **Frame name/URL** — matches against the browser's frame tree
 
+A selected frame also scopes `eval`, so a script can read or set state inside an embedded app:
+
+```bash
+agent-browser frame "#payment-iframe"
+agent-browser eval "localStorage.setItem('mode','test')"   # runs inside the iframe
+agent-browser eval "location.origin"                       # the iframe's origin
+agent-browser frame main
+```
+
+`console` reports messages from cross-origin iframes on the active page alongside the main frame's, so an embedded app's logging and uncaught errors are visible without switching frames.
+
 ## Dialogs
 
 By default, `alert` and `beforeunload` dialogs are automatically accepted so they never block the agent. `confirm` and `prompt` dialogs still require explicit handling. Use `--no-auto-dialog` to disable this behavior.

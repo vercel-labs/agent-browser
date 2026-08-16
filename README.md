@@ -351,9 +351,11 @@ Switching to a tab discarded by Chrome's Memory Saver reactivates it, since a di
 ### Frames
 
 ```bash
-agent-browser frame <sel>             # Switch to iframe
+agent-browser frame <sel>             # Switch to iframe (ref, CSS selector, name or URL)
 agent-browser frame main              # Back to main frame
 ```
+
+Snapshot refs already reach into iframes without switching. Switching additionally scopes `eval`, so a script can read or seed state inside an embedded app, cross-origin ones included. `console` reports cross-origin iframe messages on the active page alongside the main frame's.
 
 ### Dialogs
 

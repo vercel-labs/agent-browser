@@ -2043,6 +2043,7 @@ agent-browser eval - Execute JavaScript
 Usage: agent-browser eval [options] <script>
 
 Executes JavaScript code in the browser context and returns the result.
+Runs in the frame selected by `frame <sel>`, or the main frame otherwise.
 
 Options:
   -b, --base64         Decode script from base64 (avoids shell escaping issues)
@@ -2491,10 +2492,11 @@ agent-browser frame - Switch frame context
 
 Usage: agent-browser frame <selector|main>
 
-Switch to an iframe or back to the main frame.
+Switch to an iframe or back to the main frame. The selection also scopes eval,
+including for cross-origin iframes.
 
 Arguments:
-  <selector>           CSS selector for iframe
+  <selector>           CSS selector, element ref, frame name or URL
   main                 Switch back to main frame
 
 Global Options:
@@ -2504,6 +2506,8 @@ Global Options:
 Examples:
   agent-browser frame "#embed-iframe"
   agent-browser frame "iframe[name='content']"
+  agent-browser frame @e3
+  agent-browser frame "#embed-iframe" && agent-browser eval "location.origin"
   agent-browser frame main
 "##
         }
