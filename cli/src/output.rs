@@ -99,6 +99,22 @@ fn format_storage_value(value: &serde_json::Value) -> String {
         .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default())
 }
 
+fn format_errors_text(data: &serde_json::Value) -> Option<String> {
+    let errors = data.get("errors")?.as_array()?;
+
+    let lines = errors
+        .iter()
+        .map(|err| {
+            // The producer emits `text` (see `NetworkState::get_errors_json`); reading
+            // `message` here printed the indicator with an empty message for every error.
+            let msg = err.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            format!("{} {}", color::error_indicator(), msg)
+        })
+        .collect::<Vec<_>>();
+
+    Some(lines.join("\n"))
+}
+
 fn format_storage_text(data: &serde_json::Value) -> Option<String> {
     if let Some(entries) = data.get("data").and_then(|v| v.as_object()) {
         if entries.is_empty() {
@@ -791,10 +807,9 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             return;
         }
         // Errors
-        if let Some(errors) = data.get("errors").and_then(|v| v.as_array()) {
-            for err in errors {
-                let msg = err.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                println!("{} {}", color::error_indicator(), msg);
+        if let Some(rendered) = format_errors_text(data) {
+            if !rendered.is_empty() {
+                println!("{}", rendered);
             }
             return;
         }
@@ -3972,8 +3987,8 @@ pub fn print_version() {
 #[cfg(test)]
 mod tests {
     use super::{
-        boundary_origin, format_a11y_text, format_storage_text, format_vitals_text,
-        format_with_boundaries, OutputOptions,
+        boundary_origin, format_a11y_text, format_errors_text, format_storage_text,
+        format_vitals_text, format_with_boundaries, OutputOptions,
     };
     use serde_json::json;
 
@@ -4002,6 +4017,46 @@ mod tests {
         let rendered = super::format_stream_status_text(Some("stream_status"), &data).unwrap();
 
         assert_eq!(rendered, "Streaming disabled");
+    }
+
+    #[test]
+    fn test_format_errors_text_renders_the_message_of_each_error() {
+        // Shaped exactly like `NetworkState::get_errors_json` builds it.
+        let data = json!({
+            "errors": [
+                {
+                    "text": "Uncaught TypeError: x is not a function",
+                    "url": "https://example.com/app.js",
+                    "line": 12,
+                    "column": 5
+                },
+                {
+                    "text": "Uncaught (in promise) Error: boom",
+                    "url": "https://example.com/app.js",
+                    "line": 40,
+                    "column": 1
+                }
+            ]
+        });
+
+        let rendered = format_errors_text(&data).unwrap();
+
+        assert!(
+            rendered.contains("Uncaught TypeError: x is not a function"),
+            "first error message missing from {rendered:?}"
+        );
+        assert!(
+            rendered.contains("Uncaught (in promise) Error: boom"),
+            "second error message missing from {rendered:?}"
+        );
+        assert_eq!(rendered.lines().count(), 2);
+    }
+
+    #[test]
+    fn test_format_errors_text_for_empty_and_absent_errors() {
+        assert_eq!(format_errors_text(&json!({ "errors": [] })).unwrap(), "");
+        assert!(format_errors_text(&json!({ "messages": [] })).is_none());
+        assert!(format_errors_text(&json!({ "errors": "nope" })).is_none());
     }
 
     #[test]
