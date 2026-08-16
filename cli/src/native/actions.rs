@@ -257,8 +257,10 @@ pub(super) fn is_active_iframe_console_event(
     session_id: Option<&str>,
     active_iframe_sessions: &HashSet<String>,
 ) -> bool {
-    matches!(method, "Runtime.consoleAPICalled" | "Runtime.exceptionThrown")
-        && session_id.is_some_and(|sid| active_iframe_sessions.contains(sid))
+    matches!(
+        method,
+        "Runtime.consoleAPICalled" | "Runtime.exceptionThrown"
+    ) && session_id.is_some_and(|sid| active_iframe_sessions.contains(sid))
 }
 
 fn active_frame_scope_may_have_changed(drained: &DrainedEvents) -> bool {
@@ -8349,7 +8351,11 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
         let doc = mgr
             .client
-            .send_command("DOM.getDocument", Some(json!({ "depth": 0 })), Some(&session_id))
+            .send_command(
+                "DOM.getDocument",
+                Some(json!({ "depth": 0 })),
+                Some(&session_id),
+            )
             .await?;
         let root_node_id = doc
             .get("root")
