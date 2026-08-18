@@ -61,6 +61,13 @@ function getBinaryName() {
       return null;
   }
 
+  // Windows ARM64 falls back to the x64 binary (runs via Windows' built-in
+  // x64 emulation); no native ARM64 build is published.
+  // Keep in sync with scripts/postinstall.js (effectiveArch).
+  if (osKey === 'win32' && archKey === 'arm64') {
+    archKey = 'x64';
+  }
+
   const ext = os === 'win32' ? '.exe' : '';
   return `agent-browser-${osKey}-${archKey}${ext}`;
 }
