@@ -441,15 +441,53 @@ pub async fn select_option(
     // Matching nothing must be an error, not a silent success: an agent that
     // selects a misspelled option otherwise sees "Done", and only discovers
     // the page state is wrong after more commands. List what was available.
+    //
+    // Matching is also whitespace-insensitive. The accessibility snapshot an
+    // agent reads names an option with invisible characters (zero-width spaces
+    // and U+00A0 / &nbsp;) stripped, so `Capital&nbsp;Federal` is shown as
+    // `CapitalFederal` -- a string equal to neither the raw `value` nor
+    // `textContent`. Each option is matched against its value, label and
+    // textContent in three forms: verbatim, whitespace-collapsed (any run of
+    // whitespace incl. nbsp -> a single space) and invisible-stripped (mirrors
+    // the snapshot). A case-insensitive pass runs only when nothing matched, so
+    // the exact string shown in `snapshot -i` is selectable without over-eager
+    // matching.
     let js = r#"function(vals) {
+            const INVISIBLE = /[\u00A0\u200B\u200C\u200D\u2060\uFEFF]/g;
+            const WS = /[\s\u200B\u200C\u200D\u2060]+/g;
+            const collapse = (s) => (s == null ? "" : String(s)).replace(WS, " ").trim();
+            const strip = (s) => (s == null ? "" : String(s)).replace(INVISIBLE, "").replace(/\s+/g, " ").trim();
+            const forms = (s) => { const r = s == null ? "" : String(s); return [r, r.trim(), collapse(r), strip(r)]; };
+            const candidates = (opt) => {
+                const set = new Set();
+                for (const src of [opt.value, opt.label, opt.textContent]) {
+                    for (const f of forms(src)) set.add(f);
+                }
+                return set;
+            };
             const options = Array.from(this.options);
-            let matched = 0;
-            for (const opt of options) {
-                opt.selected = vals.includes(opt.value) || vals.includes(opt.textContent.trim());
-                if (opt.selected) matched += 1;
-            }
+            const pass = (ci) => {
+                let n = 0;
+                for (const opt of options) {
+                    let cands = candidates(opt);
+                    if (ci) cands = new Set([...cands].map((c) => c.toLowerCase()));
+                    let hit = false;
+                    for (const v of vals) {
+                        for (let f of forms(v)) {
+                            if (ci) f = f.toLowerCase();
+                            if (cands.has(f)) { hit = true; break; }
+                        }
+                        if (hit) break;
+                    }
+                    opt.selected = hit;
+                    if (hit) n += 1;
+                }
+                return n;
+            };
+            let matched = pass(false);
+            if (matched === 0) matched = pass(true);
             if (matched === 0) {
-                const available = options.map(o => o.value + ' ("' + o.textContent.trim() + '")').join(', ');
+                const available = options.map(o => JSON.stringify(o.value) + ' ("' + collapse(o.textContent) + '")').join(', ');
                 return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
             }
             this.dispatchEvent(new Event('change', { bubbles: true }));
