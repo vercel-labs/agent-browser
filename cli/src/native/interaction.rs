@@ -441,6 +441,9 @@ pub async fn select_option(
     // Matching nothing must be an error, not a silent success: an agent that
     // selects a misspelled option otherwise sees "Done", and only discovers
     // the page state is wrong after more commands. List what was available.
+    // A failed match is also non-destructive: the matching options are computed
+    // before anything is mutated, so a select that matches nothing leaves the
+    // element's current value untouched instead of clearing it.
     //
     // Matching is also whitespace-insensitive. The accessibility snapshot an
     // agent reads names an option with invisible characters (zero-width spaces
@@ -466,32 +469,34 @@ pub async fn select_option(
                 return set;
             };
             const options = Array.from(this.options);
-            const pass = (ci) => {
-                let n = 0;
+            // Decide which options match WITHOUT mutating: a failed select must
+            // leave the <select>'s current value untouched, so nothing is
+            // deselected until at least one match is known.
+            const wantedFor = (ci) => {
+                const wanted = new Set();
                 for (const opt of options) {
                     let cands = candidates(opt);
                     if (ci) cands = new Set([...cands].map((c) => c.toLowerCase()));
-                    let hit = false;
                     for (const v of vals) {
+                        let hit = false;
                         for (let f of forms(v)) {
                             if (ci) f = f.toLowerCase();
                             if (cands.has(f)) { hit = true; break; }
                         }
-                        if (hit) break;
+                        if (hit) { wanted.add(opt); break; }
                     }
-                    opt.selected = hit;
-                    if (hit) n += 1;
                 }
-                return n;
+                return wanted;
             };
-            let matched = pass(false);
-            if (matched === 0) matched = pass(true);
-            if (matched === 0) {
+            let wanted = wantedFor(false);
+            if (wanted.size === 0) wanted = wantedFor(true);
+            if (wanted.size === 0) {
                 const available = options.map(o => JSON.stringify(o.value) + ' ("' + collapse(o.textContent) + '")').join(', ');
                 return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
             }
+            for (const opt of options) opt.selected = wanted.has(opt);
             this.dispatchEvent(new Event('change', { bubbles: true }));
-            return { matched };
+            return { matched: wanted.size };
         }"#
     .to_string();
 
