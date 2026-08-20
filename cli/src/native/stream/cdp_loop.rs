@@ -93,6 +93,20 @@ pub(super) async fn cdp_event_loop(
                             session_id.as_deref(),
                         )
                         .await;
+
+                    // Lets the dashboard copy bridge read the remote clipboard.
+                    for name in ["clipboard-read", "clipboard-write"] {
+                        let _ = client_arc
+                            .send_command(
+                                "Browser.setPermission",
+                                Some(json!({
+                                    "permission": { "name": name },
+                                    "setting": "granted",
+                                })),
+                                None,
+                            )
+                            .await;
+                    }
                 }
 
                 {
