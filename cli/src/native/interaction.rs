@@ -25,6 +25,7 @@ pub struct PendingRelease {
     pub button: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn click(
     client: &CdpClient,
     session_id: &str,
@@ -32,6 +33,7 @@ pub async fn click(
     selector_or_ref: &str,
     button: &str,
     click_count: i32,
+    modifiers: Option<i32>,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<ClickResult, String> {
     let (x, y, effective_session_id) = resolve_element_center(
@@ -53,6 +55,7 @@ pub async fn click(
         y,
         button,
         click_count,
+        modifiers,
     )
     .await
 }
@@ -62,6 +65,7 @@ pub async fn dblclick(
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
+    button: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<ClickResult, String> {
     click(
@@ -69,8 +73,9 @@ pub async fn dblclick(
         session_id,
         ref_map,
         selector_or_ref,
-        "left",
+        button,
         2,
+        None,
         iframe_sessions,
     )
     .await
@@ -509,6 +514,7 @@ pub async fn check(
             selector_or_ref,
             "left",
             1,
+            None,
             iframe_sessions,
         )
         .await?;
@@ -561,6 +567,7 @@ pub async fn uncheck(
             selector_or_ref,
             "left",
             1,
+            None,
             iframe_sessions,
         )
         .await?;
@@ -987,6 +994,7 @@ async fn dispatch_mouse_or_dialog(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_click(
     client: &CdpClient,
     session_id: &str,
@@ -995,6 +1003,7 @@ async fn dispatch_click(
     y: f64,
     button: &str,
     click_count: i32,
+    modifiers: Option<i32>,
 ) -> Result<ClickResult, String> {
     // Move
     if dispatch_mouse_or_dialog(
@@ -1042,7 +1051,7 @@ async fn dispatch_click(
             click_count: Some(click_count),
             delta_x: None,
             delta_y: None,
-            modifiers: None,
+            modifiers,
         },
     )
     .await?
@@ -1076,7 +1085,7 @@ async fn dispatch_click(
             click_count: Some(click_count),
             delta_x: None,
             delta_y: None,
-            modifiers: None,
+            modifiers,
         },
     )
     .await?;
