@@ -277,6 +277,9 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_ANNOTATE</code></td><td>Enable annotated screenshots by default.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_CDP</code></td><td>Connect the daemon to a CDP port or WebSocket URL.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_STREAM_PORT</code></td><td>Override the WebSocket streaming port. By default, an OS-assigned port is used. Set this to bind to a specific port (e.g., <code>9223</code>).</td><td>OS-assigned</td></tr>
+    <tr><td><code>AGENT_BROWSER_STREAM_QUALITY</code></td><td>JPEG quality for streamed frames, 0 to 100. Lower values cut bandwidth: quality 20 costs about half the bytes of the default on a busy page.</td><td><code>80</code></td></tr>
+    <tr><td><code>AGENT_BROWSER_STREAM_MAX_WIDTH</code></td><td>Cap the encoded frame width in pixels. Caps the frame only and leaves the page size alone, so pointer coordinates are unaffected.</td><td>the viewport</td></tr>
+    <tr><td><code>AGENT_BROWSER_STREAM_MAX_HEIGHT</code></td><td>Cap the encoded frame height in pixels.</td><td>the viewport</td></tr>
     <tr><td><code>AGENT_BROWSER_IDLE_TIMEOUT_MS</code></td><td>Auto-shutdown the daemon after N ms without commands or dashboard input. Set <code>0</code> to disable. Headed browsers, Safari and iOS WebDriver sessions, and user-attached browsers are exempt from the default. Provider-owned cloud browsers are eligible for cleanup, and an explicit value applies to every browser.</td><td><code>3600000</code> (1 hour)</td></tr>
     <tr><td><code>AGENT_BROWSER_IOS_DEVICE</code></td><td>Default iOS device name for the <code>ios</code> provider.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_IOS_UDID</code></td><td>Default iOS device UDID for the <code>ios</code> provider.</td><td>(none)</td></tr>

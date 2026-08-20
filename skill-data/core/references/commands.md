@@ -328,6 +328,17 @@ agent-browser state save auth.json    # Save cookies, storage, auth state
 agent-browser state load auth.json    # Restore saved state
 ```
 
+## Live Streaming
+
+```bash
+agent-browser stream status --json    # Enabled state, port, client count
+agent-browser stream enable           # Start the WebSocket stream server
+agent-browser stream enable --port 9223
+agent-browser stream disable          # Stop it
+```
+
+Clients connect to `ws://127.0.0.1:<port>` and receive `frame`, `status`, `tabs`, `url`, and `console` messages. They send `input_mouse`, `input_keyboard`, and `input_touch` to drive the page, `{"type":"config","maxFps":N}` (1 to 120, `0` = uncapped) to cap their own frame rate, and `{"type":"config","pacing":"ack"}` to receive one frame at a time, acknowledged with `{"type":"ack","seq":N}`. Both settings can be declared on the URL instead (`ws://127.0.0.1:<port>/?pacing=ack&maxFps=10`). See [streaming.md](streaming.md).
+
 ## MCP Server
 
 ```bash
