@@ -4,10 +4,11 @@ import { atom } from "jotai";
 import { useCallback, useEffect, useRef } from "react";
 import { useAtomCallback } from "jotai/utils";
 import type { SessionInfo } from "@/types";
-import { type ExecResult, execCommand, killSession, sessionArgs } from "@/lib/exec";
+import { execCommand, killSession, sessionArgs } from "@/lib/exec";
 import { getDashboardApiPath, getSessionTabsPath } from "@/lib/dashboard-routes";
 import { tabCacheAtom, engineCacheAtom } from "@/store/tabs";
 import { streamTabsAtom, streamEngineAtom } from "@/store/stream";
+import { execErrorText, reportActionErrorAtom } from "@/store/action-error";
 
 function getPort(): number {
   if (typeof window === "undefined") return 0;
@@ -102,23 +103,22 @@ export const createSessionAtom = atom(
     if (!result.success) {
       set(pendingSessionsAtom, (prev) => prev.filter((p) => p.session !== name));
       killSession(name);
-      return parseExecError(result) || "Failed to create session";
+      return execErrorText(result) || "Failed to create session";
     }
     return null;
   },
 );
 
-function parseExecError(result: ExecResult): string {
-  if (result.stderr) return result.stderr;
-  if (result.stdout) {
-    try {
-      const json = JSON.parse(result.stdout);
-      if (json.error) return json.error;
-    } catch {
-      // stdout wasn't JSON
+/** Fire an action command and surface a banner if it fails. */
+function execAction(
+  set: (atom: typeof reportActionErrorAtom, msg: string) => void,
+  args: string[],
+) {
+  execCommand(args).then((result) => {
+    if (!result.success) {
+      set(reportActionErrorAtom, execErrorText(result) || `Action failed: ${args.join(" ")}`);
     }
-  }
-  return "";
+  });
 }
 
 const CHAT_STORAGE_PREFIX = "dashboard-chat-";
@@ -134,7 +134,7 @@ export const closeSessionAtom = atom(null, (get, set, port: number) => {
   const s = sessions.find((x) => x.port === port)?.session;
   if (s) {
     set(closingSessionsAtom, (prev) => new Set(prev).add(s));
-    execCommand(sessionArgs(s, "close"));
+    execAction(set, sessionArgs(s, "close"));
     clearChatStorage(s);
   }
 });
@@ -154,7 +154,7 @@ export const closeAllSessionsAtom = atom(null, (get, set) => {
   for (const s of sessions) {
     if (!s.pending && !s.closing) {
       set(closingSessionsAtom, (prev) => new Set(prev).add(s.session));
-      execCommand(sessionArgs(s.session, "close"));
+      execAction(set, sessionArgs(s.session, "close"));
       clearChatStorage(s.session);
     }
   }
@@ -162,25 +162,25 @@ export const closeAllSessionsAtom = atom(null, (get, set) => {
 
 export const closeTabAtom = atom(
   null,
-  (get, _set, { port, tabRef }: { port: number; tabRef: string }) => {
+  (get, set, { port, tabRef }: { port: number; tabRef: string }) => {
     const sessions = get(sessionsAtom);
     const s = sessions.find((x) => x.port === port)?.session;
-    if (s) execCommand(sessionArgs(s, "tab", "close", tabRef));
+    if (s) execAction(set, sessionArgs(s, "tab", "close", tabRef));
   },
 );
 
-export const addTabAtom = atom(null, (get, _set, port: number) => {
+export const addTabAtom = atom(null, (get, set, port: number) => {
   const sessions = get(sessionsAtom);
   const s = sessions.find((x) => x.port === port)?.session;
-  if (s) execCommand(sessionArgs(s, "tab", "new"));
+  if (s) execAction(set, sessionArgs(s, "tab", "new"));
 });
 
 export const switchTabAtom = atom(
   null,
-  (get, _set, { port, tabRef }: { port: number; tabRef: string }) => {
+  (get, set, { port, tabRef }: { port: number; tabRef: string }) => {
     const sessions = get(sessionsAtom);
     const s = sessions.find((x) => x.port === port)?.session;
-    if (s) execCommand(sessionArgs(s, "tab", tabRef));
+    if (s) execAction(set, sessionArgs(s, "tab", tabRef));
   },
 );
 

@@ -153,7 +153,7 @@ A `config` message sent later still wins. An unrecognized or unparsable value on
 
 ## Input injection
 
-Send input events to control the browser remotely. Mouse, keyboard, and touch input reset the daemon idle timer, so an actively controlled dashboard or streaming session is not shut down by the default timeout.
+Send input events to control the browser remotely. Mouse, keyboard, and touch input reset the daemon idle timer, and simply having a client connected to the stream also keeps the session alive, so a dashboard or streaming session is not shut down by the default timeout while anyone is watching.
 
 ### Mouse events
 
