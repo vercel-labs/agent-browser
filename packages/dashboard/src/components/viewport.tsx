@@ -190,6 +190,7 @@ export function Viewport() {
   const [actionError, setActionError] = useAtom(actionErrorAtom);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const lastRightPressRef = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasAreaRef = useRef<HTMLDivElement>(null);
   const addressRef = useRef<HTMLInputElement>(null);
@@ -393,12 +394,30 @@ export function Viewport() {
     (e: React.MouseEvent, eventType: string) => {
       const pos = toViewport(e);
       if (!pos) return;
+      if (eventType === "mousePressed" && e.button === 2) {
+        lastRightPressRef.current = Date.now();
+      }
+      // Held-button state from the browser. Chrome needs both fields on
+      // moves during a drag: it reads `button` (not just the bitmask) to
+      // start an HTML5 drag session.
+      const buttons = e.buttons;
+      const button =
+        eventType === "mouseMoved"
+          ? buttons & 1
+            ? "left"
+            : buttons & 2
+              ? "right"
+              : buttons & 4
+                ? "middle"
+                : "none"
+          : cdpButton(e.button);
       sendInput({
         type: "input_mouse",
         eventType,
         x: pos.x,
         y: pos.y,
-        button: cdpButton(e.button),
+        button,
+        buttons,
         clickCount: eventType === "mousePressed" ? 1 : 0,
         modifiers: cdpModifiers(e),
       });
@@ -412,7 +431,7 @@ export function Viewport() {
   const moveThrottleRef = useRef<{
     last: number;
     timer: ReturnType<typeof setTimeout> | null;
-    pending: { x: number; y: number; modifiers: number } | null;
+    pending: { x: number; y: number; button: string; buttons: number; modifiers: number } | null;
   }>({ last: 0, timer: null, pending: null });
 
   useEffect(() => {
@@ -426,15 +445,22 @@ export function Viewport() {
     (e: React.MouseEvent) => {
       const pos = toViewport(e);
       if (!pos) return;
+      // Held-button state from the browser. Chrome needs both fields on
+      // moves during a drag: it reads `button` (not just the bitmask) to
+      // start an HTML5 drag session.
+      const buttons = e.buttons;
+      const button =
+        buttons & 1 ? "left" : buttons & 2 ? "right" : buttons & 4 ? "middle" : "none";
       const modifiers = cdpModifiers(e);
       const state = moveThrottleRef.current;
-      const send = (p: { x: number; y: number; modifiers: number }) =>
+      const send = (p: { x: number; y: number; button: string; buttons: number; modifiers: number }) =>
         sendInput({
           type: "input_mouse",
           eventType: "mouseMoved",
           x: p.x,
           y: p.y,
-          button: "none",
+          button: p.button,
+          buttons: p.buttons,
           clickCount: 0,
           modifiers: p.modifiers,
         });
@@ -442,9 +468,9 @@ export function Viewport() {
       const elapsed = now - state.last;
       if (elapsed >= MOUSEMOVE_INTERVAL_MS) {
         state.last = now;
-        send({ ...pos, modifiers });
+        send({ ...pos, button, buttons, modifiers });
       } else {
-        state.pending = { ...pos, modifiers };
+        state.pending = { ...pos, button, buttons, modifiers };
         if (!state.timer) {
           state.timer = setTimeout(() => {
             state.timer = null;
@@ -457,6 +483,27 @@ export function Viewport() {
           }, MOUSEMOVE_INTERVAL_MS - elapsed);
         }
       }
+    },
+    [toViewport, sendInput],
+  );
+
+  // A two-finger tap on a touchpad often arrives as a lone contextmenu event
+  // with no right mousedown/mouseup pair. Forward the pair ourselves unless a
+  // real right press just went through, so the remote page gets one menu.
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const pos = toViewport(e);
+      if (!pos || Date.now() - lastRightPressRef.current < 500) return;
+      const base = {
+        type: "input_mouse",
+        x: pos.x,
+        y: pos.y,
+        button: "right",
+        modifiers: cdpModifiers(e),
+      };
+      sendInput({ ...base, eventType: "mousePressed", buttons: 2, clickCount: 1 });
+      sendInput({ ...base, eventType: "mouseReleased", buttons: 0, clickCount: 0 });
     },
     [toViewport, sendInput],
   );
@@ -691,7 +738,7 @@ export function Viewport() {
             }}
             onMouseUp={(e) => handleMouseEvent(e, "mouseReleased")}
             onWheel={handleWheel}
-            onContextMenu={(e) => e.preventDefault()}
+            onContextMenu={handleContextMenu}
           />
         ) : (
           <div className="text-center text-sm text-muted-foreground">
