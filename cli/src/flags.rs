@@ -233,6 +233,26 @@ fn env_var_bool(name: &str) -> Option<bool> {
         .map(|val| !matches!(val.to_lowercase().as_str(), "0" | "false" | "no" | ""))
 }
 
+fn resolve_ca_cert(
+    config_ca_cert: Option<String>,
+    config_clear_ca_cert: Option<bool>,
+    env_ca_cert: Option<String>,
+    env_clear_ca_cert: Option<bool>,
+) -> (Option<String>, bool) {
+    if let Some(ca_cert) = env_ca_cert {
+        (Some(ca_cert), false)
+    } else if let Some(clear_ca_cert) = env_clear_ca_cert {
+        (
+            if clear_ca_cert { None } else { config_ca_cert },
+            clear_ca_cert,
+        )
+    } else if let Some(ca_cert) = config_ca_cert {
+        (Some(ca_cert), false)
+    } else {
+        (None, config_clear_ca_cert.unwrap_or(false))
+    }
+}
+
 /// Parse an optional boolean value after a flag. Returns (value, consumed_next_arg).
 /// Recognizes "true" as true, "false" as false. Bare flag defaults to true.
 fn parse_bool_arg(args: &[String], i: usize) -> (bool, bool) {
@@ -494,20 +514,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
         )
         .unwrap_or_else(|| config.plugins.unwrap_or_default());
 
-    let env_ca_cert = env::var("AGENT_BROWSER_CA_CERT").ok();
-    let env_clear_ca_cert = env_var_bool("AGENT_BROWSER_CLEAR_CA_CERT");
-    let (ca_cert, clear_ca_cert) = if let Some(ca_cert) = env_ca_cert {
-        (Some(ca_cert), false)
-    } else if let Some(clear_ca_cert) = env_clear_ca_cert {
-        (
-            if clear_ca_cert { None } else { config.ca_cert },
-            clear_ca_cert,
-        )
-    } else if let Some(ca_cert) = config.ca_cert {
-        (Some(ca_cert), false)
-    } else {
-        (None, config.clear_ca_cert.unwrap_or(false))
-    };
+    let (ca_cert, clear_ca_cert) = resolve_ca_cert(
+        config.ca_cert,
+        config.clear_ca_cert,
+        env::var("AGENT_BROWSER_CA_CERT").ok(),
+        env_var_bool("AGENT_BROWSER_CLEAR_CA_CERT"),
+    );
 
     let mut flags = Flags {
         json: env_var_is_truthy("AGENT_BROWSER_JSON") || config.json.unwrap_or(false),
@@ -2058,23 +2070,63 @@ mod tests {
     }
 
     #[test]
-    fn test_env_ca_cert_overrides_config_clear() {
-        let guard = crate::test_utils::EnvGuard::new(&[
-            "AGENT_BROWSER_CA_CERT",
-            "AGENT_BROWSER_CLEAR_CA_CERT",
-            "AGENT_BROWSER_CONFIG",
-        ]);
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.json");
-        fs::write(&config_path, r#"{"clearCaCert":true}"#).unwrap();
-        guard.set("AGENT_BROWSER_CONFIG", config_path.to_str().unwrap());
-        guard.set("AGENT_BROWSER_CA_CERT", "/env/ca.crt");
-        guard.remove("AGENT_BROWSER_CLEAR_CA_CERT");
+    fn test_ca_cert_precedence() {
+        let cases = [
+            (
+                None,
+                Some(true),
+                Some("/env/ca.crt".to_string()),
+                None,
+                Some("/env/ca.crt".to_string()),
+                false,
+            ),
+            (
+                Some("/config/ca.crt".to_string()),
+                None,
+                None,
+                Some(true),
+                None,
+                true,
+            ),
+            (
+                Some("/config/ca.crt".to_string()),
+                None,
+                None,
+                Some(false),
+                Some("/config/ca.crt".to_string()),
+                false,
+            ),
+            (
+                Some("/config/ca.crt".to_string()),
+                Some(true),
+                None,
+                None,
+                Some("/config/ca.crt".to_string()),
+                false,
+            ),
+            (None, Some(true), None, None, None, true),
+            (None, None, None, None, None, false),
+        ];
 
-        let flags = parse_flags(&[]);
-
-        assert_eq!(flags.ca_cert, Some("/env/ca.crt".to_string()));
-        assert!(!flags.clear_ca_cert);
+        for (
+            config_ca_cert,
+            config_clear_ca_cert,
+            env_ca_cert,
+            env_clear_ca_cert,
+            expected_ca_cert,
+            expected_clear_ca_cert,
+        ) in cases
+        {
+            assert_eq!(
+                resolve_ca_cert(
+                    config_ca_cert,
+                    config_clear_ca_cert,
+                    env_ca_cert,
+                    env_clear_ca_cert,
+                ),
+                (expected_ca_cert, expected_clear_ca_cert)
+            );
+        }
     }
 
     #[test]
