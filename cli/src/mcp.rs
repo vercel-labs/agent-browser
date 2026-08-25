@@ -1501,7 +1501,7 @@ fn parity_tools() -> Vec<Value> {
             TOOL_DIFF_SNAPSHOT,
             "Diff snapshot",
             "Diff current snapshot against last or baseline.",
-            json!({ "baseline": { "type": "string" }, "selector": { "type": "string" }, "compact": { "type": "boolean" }, "depth": { "type": "integer" } }),
+            json!({ "baseline": { "type": "string" }, "selector": { "type": "string" }, "compact": { "type": "boolean" }, "interactive": { "type": "boolean" }, "depth": { "type": "integer" } }),
             &[],
         ),
         tool(
@@ -3052,6 +3052,10 @@ fn call_device(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_diff_snapshot(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, diff_snapshot_args(arguments)?, None)
+}
+
+fn diff_snapshot_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = vec!["diff".to_string(), "snapshot".to_string()];
     if let Some(baseline) = optional_string(arguments, "baseline")? {
         args.push("--baseline".to_string());
@@ -3064,11 +3068,14 @@ fn call_diff_snapshot(arguments: &Value) -> Result<Value, ProtocolError> {
     if optional_bool(arguments, "compact")?.unwrap_or(false) {
         args.push("--compact".to_string());
     }
+    if optional_bool(arguments, "interactive")?.unwrap_or(false) {
+        args.push("--interactive".to_string());
+    }
     if let Some(depth) = optional_u64(arguments, "depth")? {
         args.push("--depth".to_string());
         args.push(depth.to_string());
     }
-    call_cli_tool(arguments, args, None)
+    Ok(args)
 }
 
 fn call_diff_screenshot(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4318,6 +4325,23 @@ mod tests {
         assert_eq!(
             open["inputSchema"]["properties"]["idleTimeout"]["type"],
             "string"
+        );
+    }
+
+    #[test]
+    fn diff_snapshot_tool_forwards_interactive_filter() {
+        let diff_snapshot = tools()
+            .into_iter()
+            .find(|tool| tool["name"].as_str() == Some(TOOL_DIFF_SNAPSHOT))
+            .unwrap();
+        assert_eq!(
+            diff_snapshot["inputSchema"]["properties"]["interactive"]["type"],
+            "boolean"
+        );
+
+        assert_eq!(
+            diff_snapshot_args(&json!({ "interactive": true })).unwrap(),
+            vec!["diff", "snapshot", "--interactive"]
         );
     }
 

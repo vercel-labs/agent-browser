@@ -3152,6 +3152,7 @@ Snapshot Diff:
     -b, --baseline <file>    Compare against a saved snapshot file
     -s, --selector <sel>     Scope snapshot to a CSS selector or @ref
     -c, --compact            Use compact snapshot format
+    -i, --interactive        Only include interactive elements
     -d, --depth <n>          Limit snapshot tree depth
 
   Without --baseline, compares against the last snapshot taken in this session.

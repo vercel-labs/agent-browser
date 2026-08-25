@@ -323,6 +323,16 @@ Other capabilities use the same protocol:
 
 `plugin run` is for `command.run` and custom capabilities. Core capabilities and protocol request types use their dedicated command paths.
 
+## Compare page state
+
+```bash
+agent-browser diff snapshot                  # Compare against the last snapshot
+agent-browser diff snapshot --interactive    # Compare interactive elements only
+agent-browser diff snapshot --baseline before.txt
+```
+
+Snapshot diff accepts the same `-i` / `--interactive` filter as `snapshot`, plus `--selector`, `--compact`, and `--depth`.
+
 ## State Management
 
 ```bash
