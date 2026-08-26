@@ -41,8 +41,8 @@ pub struct CdpClient {
     pending: PendingMap,
     event_tx: broadcast::Sender<CdpEvent>,
     raw_tx: broadcast::Sender<RawCdpMessage>,
-    _reader_handle: tokio::task::JoinHandle<()>,
-    _keepalive_handle: tokio::task::JoinHandle<()>,
+    reader_handle: tokio::task::JoinHandle<()>,
+    keepalive_handle: tokio::task::JoinHandle<()>,
 }
 
 /// Removes a pending entry if `send_command` is cancelled mid-await (e.g. an
@@ -223,9 +223,38 @@ impl CdpClient {
             pending,
             event_tx,
             raw_tx,
-            _reader_handle: reader_handle,
-            _keepalive_handle: keepalive_handle,
+            reader_handle,
+            keepalive_handle,
         })
+    }
+
+    /// Disconnect: send a WebSocket Close frame, then stop the background tasks.
+    ///
+    /// Dropping a `CdpClient` does NOT close its socket. `reader_handle` and
+    /// `keepalive_handle` are detached `JoinHandle`s — dropping a handle leaves its
+    /// task running — and the reader task owns the read half of the split stream, so
+    /// the TCP connection stays open and subscribed for as long as the task lives.
+    /// Against a real Chrome that is invisible, because the only disconnect path is
+    /// `Browser.close`, and Chrome then closes the socket from its side. Against an
+    /// EXTERNAL endpoint (`--cdp` / `--auto-connect`) nothing closes it at all, so
+    /// every reconnect strands one still-subscribed client on the remote: it keeps
+    /// receiving the full event fan-out, and the keepalive task keeps pinging it.
+    /// A CDP multiplexer in front of one browser then re-broadcasts every event once
+    /// per stranded socket, which is a self-amplifying congestion spiral.
+    ///
+    /// Order matters. The keepalive stops first, so it cannot take the `ws_tx` lock or
+    /// ping a socket that is closing. The Close frame goes next, so the peer learns
+    /// this was deliberate. The reader stops last, which drops the read half and ends
+    /// the TCP connection even if the peer never answers the Close.
+    pub async fn close(&self) {
+        self.keepalive_handle.abort();
+        {
+            let mut ws_tx = self.ws_tx.lock().await;
+            // Best effort: a socket that is already dead has nothing to say goodbye to.
+            let _ = ws_tx.send(Message::Close(None)).await;
+            let _ = ws_tx.flush().await;
+        }
+        self.reader_handle.abort();
     }
 
     pub async fn send_command(
@@ -433,4 +462,57 @@ fn enable_tcp_keepalive(stream: &tokio_tungstenite::MaybeTlsStream<tokio::net::T
     let keepalive = keepalive.with_interval(std::time::Duration::from_secs(10));
 
     let _ = sock.set_tcp_keepalive(&keepalive);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    /// `close` must end the socket, and dropping the client must not be mistaken for it.
+    ///
+    /// The regression this pins: `BrowserManager::close` disconnected nothing on an
+    /// external CDP connection, because a dropped `CdpClient` leaves its detached
+    /// reader task holding the read half of the stream. The remote then kept a live,
+    /// still-subscribed client for every reconnect the liveness probe triggered.
+    #[tokio::test]
+    async fn close_ends_the_socket_and_dropping_alone_does_not() {
+        // A server that reports, per connection, how its socket ended.
+        async fn serve(listener: TcpListener) -> String {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            loop {
+                match ws.next().await {
+                    Some(Ok(Message::Close(_))) => return "close-frame".to_string(),
+                    Some(Ok(_)) => continue,
+                    Some(Err(_)) | None => return "stream-ended".to_string(),
+                }
+            }
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/devtools/browser/t", listener.local_addr().unwrap());
+        let server = tokio::spawn(serve(listener));
+        let client = CdpClient::connect(&url).await.unwrap();
+        client.close().await;
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("close() left the socket open")
+            .unwrap();
+        assert_eq!(ended, "close-frame", "close() must send a Close frame");
+
+        // The other half of the contract: a client that is merely DROPPED does not end
+        // the socket. That is exactly why `close` has to be called explicitly, and a
+        // future `Drop` impl that changes it should update this test deliberately.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/devtools/browser/t", listener.local_addr().unwrap());
+        let server = tokio::spawn(serve(listener));
+        drop(CdpClient::connect(&url).await.unwrap());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(750), server)
+                .await
+                .is_err(),
+            "a dropped client is expected to leave the socket open — see close()"
+        );
+    }
 }
