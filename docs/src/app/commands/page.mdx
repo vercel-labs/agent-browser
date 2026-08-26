@@ -285,6 +285,17 @@ agent-browser frame main              # Return to main frame
 
 The `frame` command accepts element refs (`@e3`), CSS selectors (`"#my-iframe"`), or frame name/URL.
 
+A selected frame also scopes `eval`, which is how a script reads or seeds state inside an embedded app:
+
+```bash
+agent-browser frame "#payment-iframe"
+agent-browser eval "localStorage.setItem('mode','test')"   # runs inside the iframe
+agent-browser eval "location.origin"                       # the iframe's origin
+agent-browser frame main
+```
+
+`console` reports messages and uncaught errors from cross-origin iframes on the active page alongside the main frame's, so an embedded app is never silent.
+
 ## Dialogs
 
 ```bash

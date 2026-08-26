@@ -690,6 +690,42 @@ async fn test_frame_context_management() {
     assert!(state.active_frame_id.is_none());
 }
 
+#[test]
+fn test_iframe_console_events_admitted_only_for_active_frame_sessions() {
+    use super::actions::is_active_iframe_console_event;
+
+    let mut active = std::collections::HashSet::new();
+    active.insert("frame-session".to_string());
+
+    assert!(is_active_iframe_console_event(
+        "Runtime.consoleAPICalled",
+        Some("frame-session"),
+        &active
+    ));
+    assert!(is_active_iframe_console_event(
+        "Runtime.exceptionThrown",
+        Some("frame-session"),
+        &active
+    ));
+    // A frame in a background tab is not in the active set.
+    assert!(!is_active_iframe_console_event(
+        "Runtime.consoleAPICalled",
+        Some("other-session"),
+        &active
+    ));
+    // Unrelated events keep flowing through the normal session filter.
+    assert!(!is_active_iframe_console_event(
+        "Network.requestWillBeSent",
+        Some("frame-session"),
+        &active
+    ));
+    assert!(!is_active_iframe_console_event(
+        "Runtime.consoleAPICalled",
+        None,
+        &active
+    ));
+}
+
 #[tokio::test]
 async fn test_addstyle_supports_content_and_url() {
     let mut state = DaemonState::new();

@@ -246,6 +246,23 @@ fn is_active_iframe_network_event(
         && session_id.is_some_and(|sid| active_iframe_sessions.contains(sid))
 }
 
+/// Console output and page errors raised inside a cross-origin iframe arrive on
+/// that iframe's own CDP session, so the top-session filter drops them. An
+/// embedded app (a Forge macro, a payment widget, an OAuth frame) then looks
+/// silent even when it is logging. Admit those two event kinds from iframe
+/// sessions attached to the ACTIVE page — the same subset network tracking
+/// uses, so a background tab's frames stay out.
+pub(super) fn is_active_iframe_console_event(
+    method: &str,
+    session_id: Option<&str>,
+    active_iframe_sessions: &HashSet<String>,
+) -> bool {
+    matches!(
+        method,
+        "Runtime.consoleAPICalled" | "Runtime.exceptionThrown"
+    ) && session_id.is_some_and(|sid| active_iframe_sessions.contains(sid))
+}
+
 fn active_frame_scope_may_have_changed(drained: &DrainedEvents) -> bool {
     !drained.attached_iframe_sessions.is_empty()
         || !drained.detached_iframe_sessions.is_empty()
@@ -1498,7 +1515,14 @@ impl DaemonState {
                             &self.active_iframe_sessions,
                         );
 
-                    if !session_matches && !iframe_network_event {
+                    let iframe_console_event = !session_matches
+                        && is_active_iframe_console_event(
+                            &event.method,
+                            event.session_id.as_deref(),
+                            &self.active_iframe_sessions,
+                        );
+
+                    if !session_matches && !iframe_network_event && !iframe_console_event {
                         continue;
                     }
 
@@ -4907,7 +4931,22 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
         .and_then(|v| v.as_str())
         .ok_or("Missing 'script' parameter")?;
 
-    let result = mgr.evaluate(script, None).await?;
+    // Honor an active `frame <sel>` selection, like element resolution and
+    // `wait` already do. Without this, `frame` reported success and `eval`
+    // still ran in the top document.
+    let result = match state.active_frame_id.as_deref() {
+        Some(frame_id) => match state.iframe_sessions.get(frame_id) {
+            // Cross-origin frame: it owns a dedicated CDP session.
+            Some(frame_session) => mgr.evaluate_in_session(frame_session, script, None).await?,
+            // Same-process frame: no session of its own, reach its realm
+            // through the owning element's contentWindow.
+            None => {
+                let session_id = mgr.active_session_id()?.to_string();
+                mgr.evaluate_in_frame(&session_id, frame_id, script).await?
+            }
+        },
+        None => mgr.evaluate(script, None).await?,
+    };
     let url = mgr.get_url().await.unwrap_or_default();
     Ok(json!({ "result": result, "origin": url }))
 }
@@ -8433,7 +8472,12 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             return Ok(json!({ "frame": label }));
         }
 
-        // CSS selector path
+        // CSS selector path. Resolve the element itself and read the frame id
+        // off the node, the way the ref path does. Matching the frame TREE by
+        // name/id/src only works for same-process frames: a cross-origin child
+        // is a separate target and is absent from the top session's tree, so
+        // `frame "#some-iframe"` used to fail with "Frame not found" for
+        // exactly the embedded apps that most need addressing.
         let js = format!(
             r#"(() => {{
                 const el = document.querySelector({});
@@ -8445,11 +8489,69 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             }})()"#,
             serde_json::to_string(sel).unwrap_or_default()
         );
-        let result = mgr.evaluate(&js, None).await?;
-        let frame_name = result.as_str().ok_or("Could not find frame for selector")?;
-        if let Some(frame_id) = find_frame(frame_tree, Some(frame_name), None) {
+        let label = mgr.evaluate(&js, None).await?;
+        let label = label
+            .as_str()
+            .ok_or("Could not find frame for selector")?
+            .to_string();
+
+        let doc = mgr
+            .client
+            .send_command(
+                "DOM.getDocument",
+                Some(json!({ "depth": 0 })),
+                Some(&session_id),
+            )
+            .await?;
+        let root_node_id = doc
+            .get("root")
+            .and_then(|r| r.get("nodeId"))
+            .and_then(|v| v.as_i64())
+            .ok_or("Could not read the document root")?;
+        let node = mgr
+            .client
+            .send_command(
+                "DOM.querySelector",
+                Some(json!({ "nodeId": root_node_id, "selector": sel })),
+                Some(&session_id),
+            )
+            .await?;
+        let node_id = node
+            .get("nodeId")
+            .and_then(|v| v.as_i64())
+            .filter(|id| *id != 0)
+            .ok_or("Could not find frame for selector")?;
+        let describe = mgr
+            .client
+            .send_command(
+                "DOM.describeNode",
+                Some(json!({ "nodeId": node_id, "depth": 1 })),
+                Some(&session_id),
+            )
+            .await?;
+        let frame_id = describe
+            .get("node")
+            .and_then(|n| n.get("contentDocument"))
+            .and_then(|cd| cd.get("frameId"))
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                describe
+                    .get("node")
+                    .and_then(|n| n.get("frameId"))
+                    .and_then(|v| v.as_str())
+            })
+            .map(|v| v.to_string());
+
+        if let Some(frame_id) = frame_id {
             state.active_frame_id = Some(frame_id);
-            return Ok(json!({ "frame": frame_name }));
+            return Ok(json!({ "frame": label }));
+        }
+
+        // Same-process frames still resolve through the tree when the node
+        // carries no frame id.
+        if let Some(frame_id) = find_frame(frame_tree, Some(&label), None) {
+            state.active_frame_id = Some(frame_id);
+            return Ok(json!({ "frame": label }));
         }
     }
 

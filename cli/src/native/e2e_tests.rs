@@ -9369,3 +9369,164 @@ async fn e2e_find_role_document_matches_root() {
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }
+
+/// Serves a top page with two children on one port: a same-origin frame and a
+/// cross-origin one (`localhost` vs `127.0.0.1` differ as origins). Each child
+/// sets a main-world global and logs, so a test can tell which realm ran.
+async fn start_frame_eval_server() -> (u16, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let handle = tokio::spawn(async move {
+        for _ in 0..100 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+
+                let body = match path {
+                    "/top" => format!(
+                        r#"<!doctype html><html lang="en"><head><title>Top</title></head>
+<body><main><h1>Top</h1>
+<iframe id="same" title="Same" src="/same"></iframe>
+<iframe id="cross" title="Cross" src="http://127.0.0.1:{port}/cross"></iframe>
+</main><script>window.REALM = 'top';</script></body></html>"#
+                    ),
+                    "/same" => r#"<!doctype html><html lang="en"><head><title>Same</title></head>
+<body><main><h1>Same</h1></main><script>window.REALM = 'same';
+console.log('same-frame-log');</script></body></html>"#
+                        .to_string(),
+                    "/cross" => r#"<!doctype html><html lang="en"><head><title>Cross</title></head>
+<body><main><h1>Cross</h1></main><script>window.REALM = 'cross';
+console.log('cross-frame-log');</script></body></html>"#
+                        .to_string(),
+                    _ => "<!doctype html><html lang=\"en\"><body></body></html>".to_string(),
+                };
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+
+    (port, handle)
+}
+
+/// `frame <sel>` used to set the active frame while `eval` kept running in the
+/// top document, so a script aimed at an embedded app silently read the host
+/// page instead. Both frame kinds are covered because they take different code
+/// paths: the cross-origin child owns a CDP session, the same-origin one does
+/// not and is reached through its owner element.
+#[tokio::test]
+#[ignore]
+async fn e2e_eval_runs_inside_the_active_frame() {
+    let (port, server) = start_frame_eval_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": format!("http://localhost:{port}/top") }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let read_realm = |id: &str| json!({ "id": id, "action": "evaluate", "script": "window.REALM" });
+
+    let resp = execute_command(&read_realm("3"), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], json!("top"));
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "frame", "selector": "#same" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&read_realm("5"), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        json!("same"),
+        "eval should run in the same-origin frame after `frame #same`"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "frame", "selector": "#cross" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&read_realm("7"), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        json!("cross"),
+        "eval should run in the cross-origin frame after `frame #cross`"
+    );
+
+    let resp = execute_command(&json!({ "id": "8", "action": "mainframe" }), &mut state).await;
+    assert_success(&resp);
+    let resp = execute_command(&read_realm("9"), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], json!("top"));
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    server.abort();
+}
+
+/// A cross-origin frame logs on its own CDP session, which the top-session
+/// filter dropped. An embedded app then read as silent while it was logging.
+#[tokio::test]
+#[ignore]
+async fn e2e_console_includes_cross_origin_frame_logs() {
+    let (port, server) = start_frame_eval_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": format!("http://localhost:{port}/top") }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "console" }), &mut state).await;
+    assert_success(&resp);
+    let logged = serde_json::to_string(&get_data(&resp)).unwrap_or_default();
+    assert!(
+        logged.contains("same-frame-log"),
+        "same-origin frame logs share the top session and were already captured: {logged}"
+    );
+    assert!(
+        logged.contains("cross-frame-log"),
+        "cross-origin frame logs arrive on the frame's own session and must be admitted: {logged}"
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    server.abort();
+}

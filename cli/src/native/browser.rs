@@ -1195,9 +1195,21 @@ impl BrowserManager {
         Ok(result.as_str().unwrap_or("").to_string())
     }
 
-    pub async fn evaluate(&self, script: &str, _args: Option<Value>) -> Result<Value, String> {
+    pub async fn evaluate(&self, script: &str, args: Option<Value>) -> Result<Value, String> {
         let session_id = self.active_session_id()?.to_string();
+        self.evaluate_in_session(&session_id, script, args).await
+    }
 
+    /// Evaluate in an explicit CDP session. A cross-origin iframe owns a
+    /// dedicated session (Target.setAutoAttach), so passing that session id is
+    /// what makes `frame <sel>` followed by `eval` run inside the iframe
+    /// instead of the top document.
+    pub async fn evaluate_in_session(
+        &self,
+        session_id: &str,
+        script: &str,
+        _args: Option<Value>,
+    ) -> Result<Value, String> {
         let result: EvaluateResult = self
             .client
             .send_command_typed(
@@ -1207,7 +1219,7 @@ impl BrowserManager {
                     return_by_value: Some(true),
                     await_promise: Some(true),
                 },
-                Some(&session_id),
+                Some(session_id),
             )
             .await?;
 
@@ -1221,6 +1233,64 @@ impl BrowserManager {
         }
 
         Ok(result.result.value.unwrap_or(Value::Null))
+    }
+
+    /// Evaluate in a SAME-PROCESS child frame, in its main world.
+    ///
+    /// Such a frame has no dedicated CDP session, so the session id alone
+    /// cannot address it. The chain below reaches its realm without
+    /// subscribing to execution-context events: resolve the owning <iframe>
+    /// element, take its `contentWindow` (legal because the frame is
+    /// same-origin here), and call a function on that window object —
+    /// Runtime.callFunctionOn compiles the function in the realm of the object
+    /// it is called on, so the script runs inside the frame.
+    pub async fn evaluate_in_frame(
+        &self,
+        session_id: &str,
+        frame_id: &str,
+        script: &str,
+    ) -> Result<Value, String> {
+        let owner_object_id =
+            super::element::frame_owner_object_id(&self.client, session_id, frame_id).await?;
+
+        // `contentWindow.eval(...)` and not a function compiled here: an
+        // indirect eval called as a method of the child window runs in THAT
+        // window's realm. Calling a locally-compiled function on the child
+        // window object instead keeps running in the parent's realm, which is
+        // the trap this avoids (measured: it returned the parent's location).
+        let declaration = format!(
+            "function() {{ const w = this.contentWindow; if (!w) throw new Error('frame window unavailable'); return w.eval({}); }}",
+            serde_json::to_string(script).unwrap_or_else(|_| "''".to_string())
+        );
+        let result = self
+            .client
+            .send_command(
+                "Runtime.callFunctionOn",
+                Some(json!({
+                    "objectId": owner_object_id,
+                    "functionDeclaration": declaration,
+                    "returnByValue": true,
+                    "awaitPromise": true,
+                })),
+                Some(session_id),
+            )
+            .await?;
+
+        if let Some(details) = result.get("exceptionDetails") {
+            let msg = details
+                .get("exception")
+                .and_then(|e| e.get("description"))
+                .and_then(|v| v.as_str())
+                .or_else(|| details.get("text").and_then(|v| v.as_str()))
+                .unwrap_or("evaluation failed");
+            return Err(format!("Evaluation error: {}", msg));
+        }
+
+        Ok(result
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .cloned()
+            .unwrap_or(Value::Null))
     }
 
     async fn evaluate_simple(&self, expression: &str) -> Result<Value, String> {
