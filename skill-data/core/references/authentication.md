@@ -60,6 +60,8 @@ agent-browser state load ./my-auth.json
 agent-browser open https://app.example.com/dashboard
 ```
 
+State loading stages `localStorage` and `sessionStorage` before application scripts run at each saved origin, then removes the temporary staging script. Startup authentication checks can therefore read restored values, including large session values, before deciding whether to redirect to login.
+
 This works for any site, including those with complex OAuth flows, SSO, or 2FA, as long as Chrome already has valid session cookies.
 
 > **Security note:** State files contain session tokens in plaintext. Add them to `.gitignore`, delete when no longer needed, and set `AGENT_BROWSER_ENCRYPTION_KEY` for encryption at rest. See [Security Best Practices](#security-best-practices).
