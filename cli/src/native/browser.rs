@@ -1286,6 +1286,14 @@ impl BrowserManager {
                 .await;
         }
 
+        // Actually disconnect. This used to be implicit, and on an external
+        // connection it never happened: dropping the manager drops the `CdpClient`,
+        // whose reader task is detached and owns the read half of the socket, so the
+        // connection stayed open and subscribed for the life of the daemon. Every
+        // reconnect — including the one the 3s `is_connection_alive` probe triggers
+        // before a command — stranded one more still-subscribed socket on the remote.
+        self.client.close().await;
+
         if let Some(mut process) = self.browser_process.take() {
             let timeout = std::time::Duration::from_secs(5);
             let _ = tokio::task::spawn_blocking(move || {
