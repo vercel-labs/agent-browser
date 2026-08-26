@@ -86,6 +86,7 @@ pub struct Config {
     pub cdp: Option<String>,
     pub auto_connect: Option<bool>,
     pub pin_tab: Option<bool>,
+    pub isolate_context: Option<bool>,
     pub headers: Option<String>,
     pub annotate: Option<bool>,
     pub color_scheme: Option<String>,
@@ -168,6 +169,7 @@ impl Config {
             cdp: other.cdp.or(self.cdp),
             auto_connect: other.auto_connect.or(self.auto_connect),
             pin_tab: other.pin_tab.or(self.pin_tab),
+            isolate_context: other.isolate_context.or(self.isolate_context),
             headers: other.headers.or(self.headers),
             annotate: other.annotate.or(self.annotate),
             color_scheme: other.color_scheme.or(self.color_scheme),
@@ -395,6 +397,7 @@ pub struct Flags {
     pub device: Option<String>,
     pub auto_connect: bool,
     pub pin_tab: bool,
+    pub isolate_context: bool,
     pub session_name: Option<String>,
     pub annotate: bool,
     pub color_scheme: Option<String>,
@@ -590,6 +593,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
             || config.auto_connect.unwrap_or(false),
         pin_tab: env_var_is_truthy("AGENT_BROWSER_PIN_TAB") || config.pin_tab.unwrap_or(false),
+        isolate_context: env_var_is_truthy("AGENT_BROWSER_ISOLATE_CONTEXT")
+            || config.isolate_context.unwrap_or(false),
         session_name: env::var("AGENT_BROWSER_SESSION_NAME")
             .ok()
             .or(config.session_name),
@@ -942,6 +947,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--isolate-context" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.isolate_context = val;
+                if consumed {
+                    i += 1;
+                }
+            }
             "--no-pin-tab" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.pin_tab = !val;
@@ -1114,6 +1126,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--auto-connect",
         "--pin-tab",
         "--no-pin-tab",
+        "--isolate-context",
         "--no-ca-cert",
         "--annotate",
         "--content-boundaries",
@@ -1915,6 +1928,17 @@ mod tests {
     fn test_auto_connect_false() {
         let flags = parse_flags(&args("--auto-connect false open"));
         assert!(!flags.auto_connect);
+    }
+
+    #[test]
+    fn test_isolate_context_flag_and_env() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_ISOLATE_CONTEXT"]);
+        guard.remove("AGENT_BROWSER_ISOLATE_CONTEXT");
+        assert!(parse_flags(&args("--isolate-context open")).isolate_context);
+        assert!(!parse_flags(&args("--isolate-context false open")).isolate_context);
+
+        guard.set("AGENT_BROWSER_ISOLATE_CONTEXT", "1");
+        assert!(parse_flags(&args("open")).isolate_context);
     }
 
     #[test]

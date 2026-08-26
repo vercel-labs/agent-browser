@@ -463,6 +463,7 @@ pub struct DaemonOptions<'a> {
     pub engine: Option<&'a str>,
     pub auto_connect: bool,
     pub pin_tab: bool,
+    pub isolate_context: bool,
     pub idle_timeout: Option<&'a str>,
     pub default_timeout: Option<u64>,
     pub cdp: Option<&'a str>,
@@ -570,6 +571,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if opts.pin_tab {
         cmd.env("AGENT_BROWSER_PIN_TAB", "1");
+    }
+    if opts.isolate_context {
+        cmd.env("AGENT_BROWSER_ISOLATE_CONTEXT", "1");
     }
     if let Some(idle) = opts.idle_timeout {
         cmd.env("AGENT_BROWSER_IDLE_TIMEOUT_MS", idle);
@@ -1275,6 +1279,7 @@ mod tests {
             engine: None,
             auto_connect: false,
             pin_tab: false,
+            isolate_context: false,
             idle_timeout,
             default_timeout: None,
             cdp: None,

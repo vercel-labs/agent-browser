@@ -317,7 +317,7 @@ agent-browser --session b fill @e1 "bob@test.com"
 
 `AGENT_BROWSER_SESSION=myapp` sets the default session for the current shell.
 
-When several sessions share one Chrome over `--cdp <port>`, add `--pin-tab` so each session sticks to its own tab. Every session remembers its bound tab across daemon restarts; with `--pin-tab` a command whose bound tab was closed fails with a `tab_gone` error instead of acting on another session's tab. JSON output includes `"code": "tab_gone"`, `data.targetId`, and an optional sanitized `data.lastUrl` for recovery. Recover with `tab new <url>` or pick a tab from `tab list`. The flag is sticky per session, so pass it once (`--no-pin-tab` turns it off again). See `references/session-management.md` for details.
+When several sessions share one Chrome over `--cdp <port>`, add `--isolate-context` for separate cookies, storage, cache, and targets inside one Chrome process. The isolation binding survives daemon restarts. An explicit `close` disposes only that session's context; a Chrome restart creates a clean replacement and reapplies configured state. Add `--pin-tab` when the active tab must also be strict inside the isolated context. See `references/session-management.md` for details.
 
 ### Mock network requests
 
@@ -440,6 +440,7 @@ EOF
 --headed                # show the window (default is headless)
 --webgpu                # enable WebGPU (software Vulkan on Linux, no GPU needed)
 --auto-connect          # connect to an already-running Chrome
+--isolate-context       # isolate this session inside a shared Chrome
 --cdp <port>            # connect to a specific CDP port
 --profile <name|path>   # use a Chrome profile (login state survives)
 --headers <json>        # HTTP headers scoped to the URL's origin

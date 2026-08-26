@@ -526,6 +526,8 @@ pub struct DaemonState {
     /// Sticky per session: persisted in the binding file so later commands
     /// and daemon restarts keep the strict semantics.
     pub pin_tab: bool,
+    pub isolate_context: bool,
+    context_recreated: bool,
     /// Last binding written to disk, so persistence is write-on-change.
     last_persisted_binding: Option<tab_binding::TabBinding>,
 }
@@ -551,6 +553,13 @@ impl DaemonState {
             .ok()
             .flatten()
             .is_some_and(|b| b.pinned);
+        let isolate_context = matches!(
+            env::var("AGENT_BROWSER_ISOLATE_CONTEXT").as_deref(),
+            Ok("1" | "true" | "yes")
+        ) || tab_binding::load(&session_id)
+            .ok()
+            .flatten()
+            .is_some_and(|b| b.browser_context_id.is_some());
         Self {
             browser: None,
             appium: None,
@@ -631,6 +640,8 @@ impl DaemonState {
             active_provider_connection: false,
             confirmed_policy_actions: HashSet::new(),
             pin_tab,
+            isolate_context,
+            context_recreated: false,
             last_persisted_binding: None,
         }
     }
@@ -1130,6 +1141,7 @@ impl DaemonState {
                         page_url,
                         target_info.title.clone(),
                         target_info.target_type.clone(),
+                        target_info.browser_context_id.clone(),
                     );
 
                     mgr.resume_if_waiting_pub(page_sid).await
@@ -1261,6 +1273,7 @@ impl DaemonState {
                         page_url,
                         te.target_info.title.clone(),
                         te.target_info.target_type.clone(),
+                        te.target_info.browser_context_id.clone(),
                     );
                     mgr.resume_if_waiting_pub(&attach.session_id).await
                 }
@@ -1393,7 +1406,11 @@ impl DaemonState {
                             if let Ok(te) =
                                 serde_json::from_value::<TargetCreatedEvent>(event.params.clone())
                             {
-                                if should_track_target(&te.target_info) {
+                                let owned = self
+                                    .browser
+                                    .as_ref()
+                                    .is_none_or(|browser| browser.owns_target(&te.target_info));
+                                if owned && should_track_target(&te.target_info) {
                                     let already_tracked = self
                                         .browser
                                         .as_ref()
@@ -1410,7 +1427,11 @@ impl DaemonState {
                             if let Ok(te) = serde_json::from_value::<TargetInfoChangedEvent>(
                                 event.params.clone(),
                             ) {
-                                if should_track_target(&te.target_info) {
+                                let owned = self
+                                    .browser
+                                    .as_ref()
+                                    .is_none_or(|browser| browser.owns_target(&te.target_info));
+                                if owned && should_track_target(&te.target_info) {
                                     // If this target is not yet tracked (e.g. it was
                                     // initially filtered because its URL was
                                     // chrome://newtab/), promote it to a new target
@@ -1449,6 +1470,13 @@ impl DaemonState {
                                 match serde_json::from_value::<TargetInfo>(
                                     target_info_value.clone(),
                                 ) {
+                                    Ok(target_info)
+                                        if self.browser.as_ref().is_some_and(|browser| {
+                                            !browser.owns_target(&target_info)
+                                        }) =>
+                                    {
+                                        attached_other_sessions.push(sid.to_string());
+                                    }
                                     Ok(target_info) if target_info.target_type == "iframe" => {
                                         // For OOPIF targets, Chrome uses the frameId as
                                         // the targetId, so we can key iframe_sessions by it.
@@ -2093,6 +2121,17 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
     Ok(())
 }
 
+pub(crate) async fn prepare_internal_daemon_shutdown(state: &mut DaemonState) {
+    if state.recording_state.active {
+        let _ = state.stop_recording_task().await;
+        let _ = recording::recording_stop(&mut state.recording_state);
+    }
+    state.recording_state.browser_context_id = None;
+    if let Some(ref mut manager) = state.browser {
+        let _ = manager.dispose_child_contexts().await;
+    }
+}
+
 /// Close every browser backend owned by the daemon.
 ///
 /// Lifecycle shutdown paths use this instead of `close_current_browser`
@@ -2253,8 +2292,18 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     }
 
     if action == INTERNAL_DAEMON_SHUTDOWN_ACTION {
-        let mut resp = match handle_close(state).await {
-            Ok(data) => success_response(&id, data),
+        prepare_internal_daemon_shutdown(state).await;
+        let save_result = auto_save_restore_state(state).await;
+        let mut resp = match close_all_browser_backends(state).await {
+            Ok(()) => success_response(
+                &id,
+                json!({
+                    "closed": true,
+                    "detached": true,
+                    "saveStatus": state.restore_save_status,
+                    "statePath": save_result.ok().flatten()
+                }),
+            ),
             Err(e) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
         };
         inject_lifecycle(&mut resp, state, false, false, false);
@@ -2344,6 +2393,20 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             state.last_persisted_binding = None;
         }
         _ => {}
+    }
+    if cmd.get("isolateContext").and_then(Value::as_bool) == Some(true) {
+        if action != "launch"
+            && state
+                .browser
+                .as_ref()
+                .is_some_and(|manager| !manager.is_isolated())
+        {
+            return error_response(
+                &id,
+                "--isolate-context requires reconnecting with --cdp, --auto-connect, or connect <port|url>",
+            );
+        }
+        state.isolate_context = true;
     }
 
     let skip_launch = skip_launch_action(action);
@@ -2729,8 +2792,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     // session must know its isolation may not survive a daemon restart.
     if let Some(err) = persist_error {
         if let Some(obj) = resp.as_object_mut() {
-            let hint = if state.pin_tab {
-                " --pin-tab isolation may not survive a daemon restart until the binding persists."
+            let hint = if state.pin_tab || state.isolate_context {
+                " Session isolation may not survive a daemon restart until the binding persists."
             } else {
                 ""
             };
@@ -2750,7 +2813,6 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         lifecycle_launched,
         lifecycle_relaunched_browser,
     );
-
     // Re-drain so a dialog opened by THIS command is reflected in the warning
     // below; events are otherwise only drained at the start of a command.
     if let Err(e) = state.drain_cdp_events_background().await {
@@ -2764,6 +2826,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             lifecycle_relaunched_browser,
         );
     }
+    state.context_recreated = false;
 
     // Auto-report pending JavaScript dialog so agents know why commands may hang
     if action != "dialog" {
@@ -2822,6 +2885,7 @@ fn maybe_persist_tab_binding(state: &mut DaemonState) -> Option<String> {
         target_id,
         url: tab_binding::sanitize_url(&url),
         pinned: state.pin_tab,
+        browser_context_id: mgr.isolated_context_id().map(str::to_string),
     };
     if state.last_persisted_binding.as_ref() == Some(&binding) {
         return None;
@@ -2829,6 +2893,9 @@ fn maybe_persist_tab_binding(state: &mut DaemonState) -> Option<String> {
     match tab_binding::save(&state.session_id, &binding) {
         Ok(()) => {
             state.last_persisted_binding = Some(binding);
+            if let Some(ref mut mgr) = state.browser {
+                mgr.mark_isolated_context_persisted();
+            }
             None
         }
         Err(e) => Some(e),
@@ -2865,14 +2932,19 @@ async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, St
     }
     if let Some(ref mut mgr) = state.browser {
         mgr.set_pin_tab(pin);
+        state.context_recreated = mgr.context_recreated();
     }
     let established = match binding {
         Some(b) => {
-            let restored = state
-                .browser
-                .as_mut()
-                .map(|mgr| mgr.restore_target_binding(&b.target_id, &b.url))
-                .unwrap_or(false);
+            let restored = if state.context_recreated {
+                false
+            } else {
+                state
+                    .browser
+                    .as_mut()
+                    .map(|mgr| mgr.restore_target_binding(&b.target_id, &b.url))
+                    .unwrap_or(false)
+            };
             if restored {
                 // Attach only enables the CDP domains on the first target; the
                 // restored tab needs them too (like tab_switch), or
@@ -2883,7 +2955,7 @@ async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, St
                     mgr.revive_and_enable_active().await?;
                 }
             }
-            if restored || pin {
+            if restored || pin || state.isolate_context {
                 // Restored, or entered the tab_gone state (the stale binding
                 // file is intentionally kept so the state is re-derived if
                 // the daemon restarts again before the agent re-binds).
@@ -2897,7 +2969,7 @@ async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, St
             }
         }
         None => {
-            if pin {
+            if pin && !state.isolate_context {
                 // A pinned session never implicitly adopts an existing tab:
                 // start it on a fresh one.
                 if let Some(ref mut mgr) = state.browser {
@@ -2905,7 +2977,7 @@ async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, St
                 }
                 true
             } else {
-                false
+                state.isolate_context
             }
         }
     };
@@ -2913,16 +2985,43 @@ async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, St
         if let Some(err) = maybe_persist_tab_binding(state) {
             // Strict pinning is only as durable as the binding file: fail
             // the attach instead of pretending the pin is in place.
-            if state.pin_tab {
+            if state.pin_tab || state.isolate_context {
                 return Err(format!(
-                    "cannot persist the pinned tab binding: {} — \
-                     --pin-tab requires a writable socket directory",
+                    "cannot persist the session isolation binding: {}. \
+                     --pin-tab and --isolate-context require a writable socket directory",
                     err
                 ));
             }
         }
     }
     Ok(established)
+}
+
+fn persisted_browser_context_id(state: &DaemonState) -> Result<Option<String>, String> {
+    tab_binding::ensure_writable(&state.session_id)?;
+    let binding = tab_binding::load(&state.session_id)?;
+    Ok(binding.and_then(|binding| binding.browser_context_id))
+}
+
+async fn connect_external_cdp(
+    state: &DaemonState,
+    endpoint: &str,
+) -> Result<BrowserManager, String> {
+    if state.isolate_context {
+        let context_id = persisted_browser_context_id(state)?;
+        BrowserManager::connect_cdp_isolated(endpoint, context_id.as_deref()).await
+    } else {
+        BrowserManager::connect_cdp(endpoint).await
+    }
+}
+
+async fn connect_external_auto(state: &DaemonState) -> Result<BrowserManager, String> {
+    if state.isolate_context {
+        let context_id = persisted_browser_context_id(state)?;
+        BrowserManager::connect_auto_isolated(context_id.as_deref()).await
+    } else {
+        BrowserManager::connect_auto().await
+    }
 }
 
 /// Run `apply_tab_binding_on_attach`, but tear the connection down on failure.
@@ -3382,6 +3481,14 @@ async fn auto_launch(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
 ) -> Result<(), String> {
+    if state.isolate_context
+        && env::var("AGENT_BROWSER_CDP").is_err()
+        && env::var("AGENT_BROWSER_AUTO_CONNECT").is_err()
+    {
+        return Err(
+            "--isolate-context requires --cdp, --auto-connect, or connect <port|url>".to_string(),
+        );
+    }
     let mut options = launch_options_from_env();
     let effective_ca_cert = state.effective_ca_cert.clone();
     apply_effective_ca_cert(&mut options, &effective_ca_cert);
@@ -3437,7 +3544,7 @@ async fn auto_launch(
             restore_key: restore_key.as_deref(),
             storage_state,
         })?;
-        let mgr = BrowserManager::connect_cdp(&cdp).await?;
+        let mgr = connect_external_cdp(state, &cdp).await?;
         let hash = launch_hash(
             &options,
             &allowed_domains,
@@ -3486,7 +3593,7 @@ async fn auto_launch(
             None,
         );
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_auto().await?);
+        state.browser = Some(connect_external_auto(state).await?);
         if !apply_tab_binding_on_attach_or_rollback(state).await? {
             if let Err(e) = open_fresh_tab_for_auto_connect(state).await {
                 let _ = rollback_failed_launch(state).await;
@@ -4071,6 +4178,7 @@ pub(crate) async fn auto_save_restore_state(
         &session_name,
         &state.session_id,
         mgr.visited_origins(),
+        mgr.isolated_context_id(),
     )
     .await
     {
@@ -4114,9 +4222,21 @@ async fn load_storage_state(state: &mut DaemonState, path: &Option<String>) -> R
 }
 
 async fn rollback_failed_launch(state: &mut DaemonState) -> Result<(), String> {
+    let dispose_result = if let Some(ref mut manager) = state.browser {
+        manager.dispose_unpersisted_isolated_context().await
+    } else {
+        Ok(())
+    };
     let close_result = close_current_browser(state).await;
     state.ref_map.clear();
-    close_result
+    match (dispose_result, close_result) {
+        (Ok(()), result) => result,
+        (Err(dispose), Ok(())) => Err(dispose),
+        (Err(dispose), Err(close)) => Err(format!(
+            "{} (also failed to detach browser after launch rollback: {})",
+            dispose, close
+        )),
+    }
 }
 
 async fn load_storage_state_or_rollback(
@@ -4161,6 +4281,11 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let provider_name = cmd.get("provider").and_then(|v| v.as_str());
+    if state.isolate_context && cdp_url.is_none() && cdp_port.is_none() && !auto_connect {
+        return Err(
+            "--isolate-context requires --cdp, --auto-connect, or connect <port|url>".to_string(),
+        );
+    }
     let enable_features =
         string_array_from_command(cmd, "enable").unwrap_or_else(launch_enable_features_from_env);
     let init_script_paths = string_array_from_command(cmd, "initScripts")
@@ -4341,8 +4466,10 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         let was_external = mgr.is_cdp_connection();
         let hash_changed = state.launch_hash != Some(new_hash);
         let storage_state_requires_clean_launch = storage_state_owned.is_some() && !is_external;
+        let isolation_changed = is_external && state.isolate_context != mgr.is_isolated();
         is_external != was_external
             || hash_changed
+            || isolation_changed
             || storage_state_requires_clean_launch
             || mgr.has_process_exited()
             || !mgr.is_connection_alive().await
@@ -4394,7 +4521,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     if let Some(url) = cdp_url {
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_cdp(url).await?);
+        state.browser = Some(connect_external_cdp(state, url).await?);
         state.launch_hash = Some(new_hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -4411,7 +4538,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     if let Some(port) = cdp_port {
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_cdp(&port.to_string()).await?);
+        state.browser = Some(connect_external_cdp(state, &port.to_string()).await?);
         state.launch_hash = Some(new_hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -4428,7 +4555,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     if auto_connect {
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_auto().await?);
+        state.browser = Some(connect_external_auto(state).await?);
         if !apply_tab_binding_on_attach_or_rollback(state).await? {
             if let Err(e) = open_fresh_tab_for_auto_connect(state).await {
                 let _ = rollback_failed_launch(state).await;
@@ -4913,7 +5040,17 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
 }
 
 async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
+    prepare_internal_daemon_shutdown(state).await;
     let save_result = auto_save_restore_state(state).await;
+    if let Some(ref mut manager) = state.browser {
+        if manager.is_isolated() {
+            manager.dispose_owned_contexts().await?;
+            tab_binding::clear(&state.session_id);
+            state.last_persisted_binding = None;
+            state.isolate_context = false;
+            state.context_recreated = false;
+        }
+    }
     close_all_browser_backends(state).await?;
 
     // Stop background Fetch handler
@@ -6100,6 +6237,7 @@ async fn handle_state_save(cmd: &Value, state: &DaemonState) -> Result<Value, St
         state.session_name.as_deref(),
         &state.session_id,
         mgr.visited_origins(),
+        mgr.isolated_context_id(),
     )
     .await?;
 
@@ -6795,7 +6933,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         check_url_allowed_by_filter(domain_filter.as_ref(), url)?;
     }
 
-    let (client, new_session_id, nav_url) = {
+    let (client, new_session_id, context_id, nav_url) = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         let old_session_id = mgr.active_session_id()?.to_string();
 
@@ -6826,7 +6964,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
             .and_then(|v| v.as_str())
             .ok_or("Failed to get browserContextId")?
             .to_string();
-
+        mgr.register_owned_context(context_id.clone());
         // Create page in new context
         let create_result: CreateTargetResult = mgr
             .client
@@ -6907,12 +7045,13 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
             label: None,
             target_id: create_result.target_id,
             session_id: new_session_id.clone(),
+            browser_context_id: Some(context_id.clone()),
             url: "about:blank".to_string(),
             title: String::new(),
             target_type: "page".to_string(),
         });
 
-        (mgr.client.clone(), new_session_id, nav_url)
+        (mgr.client.clone(), new_session_id, context_id, nav_url)
     };
 
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
@@ -6933,6 +7072,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
     }
 
     let result = recording::recording_start(&mut state.recording_state, path)?;
+    state.recording_state.browser_context_id = Some(context_id);
     state.start_recording_task(client, new_session_id).await?;
 
     if let Some(ref server) = state.stream_server {
@@ -6945,6 +7085,11 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
 async fn handle_recording_stop(state: &mut DaemonState) -> Result<Value, String> {
     state.stop_recording_task().await?;
     let result = recording::recording_stop(&mut state.recording_state);
+    if let Some(context_id) = state.recording_state.browser_context_id.take() {
+        if let Some(ref mut manager) = state.browser {
+            manager.dispose_browser_context(&context_id).await?;
+        }
+    }
 
     if let Some(ref server) = state.stream_server {
         server.set_recording(false, &state.engine).await;
@@ -6971,30 +7116,19 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         }
     }
 
-    let _ = state.stop_recording_task().await;
     let previous_path = if state.recording_state.active {
-        recording::recording_stop(&mut state.recording_state)
-            .ok()
-            .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
+        let previous = state.recording_state.output_path.clone();
+        let _ = handle_recording_stop(state).await;
+        Some(previous)
     } else {
         None
     };
 
-    let recording_target = if let Some(ref mut browser) = state.browser {
-        if let Some(url) = recording_url {
-            browser.navigate(&url, WaitUntil::Load).await?;
-        }
-        let session_id = browser.active_session_id()?.to_string();
-        Some((browser.client.clone(), session_id))
-    } else {
-        None
-    };
-
-    recording::recording_start(&mut state.recording_state, path)?;
-
-    if let Some((client, session_id)) = recording_target {
-        state.start_recording_task(client, session_id).await?;
+    let mut start_cmd = json!({ "path": path });
+    if let Some(url) = recording_url {
+        start_cmd["url"] = json!(url);
     }
+    handle_recording_start(&start_cmd, state).await?;
 
     Ok(json!({
         "restarted": true,
@@ -9547,22 +9681,27 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
     let (tab_id, session_id) = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
 
-        // Create a new browser context
-        let context_result = mgr
-            .client
-            .send_command_no_params("Target.createBrowserContext", None)
-            .await?;
-        let context_id = context_result
-            .get("browserContextId")
-            .and_then(|v| v.as_str())
-            .ok_or("Failed to create browser context")?
-            .to_string();
+        let context_id = if let Some(context_id) = mgr.isolated_context_id() {
+            context_id.to_string()
+        } else {
+            mgr.client
+                .send_command_no_params("Target.createBrowserContext", None)
+                .await?
+                .get("browserContextId")
+                .and_then(Value::as_str)
+                .ok_or("Failed to create browser context")?
+                .to_string()
+        };
 
         let create_result: super::cdp::types::CreateTargetResult = mgr
             .client
             .send_command_typed(
                 "Target.createTarget",
-                &json!({ "url": "about:blank", "browserContextId": context_id }),
+                &json!({
+                    "url": "about:blank",
+                    "browserContextId": context_id,
+                    "newWindow": true
+                }),
                 None,
             )
             .await?;
@@ -9587,6 +9726,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
             label: None,
             target_id: create_result.target_id,
             session_id: attach.session_id.clone(),
+            browser_context_id: Some(context_id),
             url: "about:blank".to_string(),
             title: String::new(),
             target_type: "page".to_string(),
@@ -11571,6 +11711,7 @@ fn inject_lifecycle(
             "launched": effective_launched,
             "relaunchedBrowser": effective_relaunched,
             "restartedBackground": false,
+            "contextRecreated": state.context_recreated,
             "restoreStatus": state.restore_status,
             "saveStatus": state.restore_save_status,
             "effectiveLaunch": {
@@ -13697,6 +13838,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 label: None,
                 target_id: "target-1".to_string(),
                 session_id: "session-1".to_string(),
+                browser_context_id: None,
                 url: "about:blank".to_string(),
                 title: String::new(),
                 target_type: "page".to_string(),
@@ -13706,6 +13848,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 label: None,
                 target_id: "target-2".to_string(),
                 session_id: "session-2".to_string(),
+                browser_context_id: None,
                 url: "about:blank".to_string(),
                 title: String::new(),
                 target_type: "page".to_string(),
@@ -13715,6 +13858,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 label: None,
                 target_id: "target-3".to_string(),
                 session_id: "session-1".to_string(),
+                browser_context_id: None,
                 url: "about:blank".to_string(),
                 title: String::new(),
                 target_type: "page".to_string(),
@@ -13734,6 +13878,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             label: None,
             target_id: "provider-page".to_string(),
             session_id: String::new(),
+            browser_context_id: None,
             url: String::new(),
             title: String::new(),
             target_type: "page".to_string(),

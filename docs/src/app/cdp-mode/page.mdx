@@ -57,6 +57,17 @@ This is useful when:
 - You want a zero-configuration connection to your existing browser
 - You don't want to track which port Chrome is using
 
+## BrowserContext isolation
+
+Use `--isolate-context` when named sessions sharing one Chrome need separate cookies, storage, cache, and targets:
+
+```bash
+agent-browser --session agent1 --cdp 9222 --isolate-context open https://app.example.com
+agent-browser --session agent2 --cdp 9222 --isolate-context open https://app.example.com
+```
+
+The context is sticky per session and survives daemon restarts. Explicit `close` disposes only that session's context. If Chrome restarts, agent-browser creates a clean replacement, never adopts a default-context tab, reapplies configured state, and reports <code>lifecycle.contextRecreated: true</code> in JSON. Omit the flag when you intentionally want to reuse the attached Chrome's login state.
+
 ## Tab pinning
 
 When several sessions share one browser over CDP, each session remembers which tab it is bound to (by CDP target id, persisted across daemon restarts). A restarted daemon reattaches to the session's own tab instead of adopting whatever tab is currently active, which in a shared browser is usually another session's.
@@ -130,6 +141,7 @@ This enables control of:
     <tr><td><code>{"--cdp <port|url>"}</code></td><td>CDP connection (port or WebSocket URL)</td></tr>
     <tr><td><code>--auto-connect</code></td><td>Auto-discover and connect to running Chrome</td></tr>
     <tr><td><code>--pin-tab</code></td><td>Pin the session to its bound tab (strict tab binding)</td></tr>
+    <tr><td><code>--isolate-context</code></td><td>Use a session-owned BrowserContext for cookie, storage, cache, and target isolation</td></tr>
     <tr><td><code>--no-pin-tab</code></td><td>Disable a sticky pin previously enabled with <code>--pin-tab</code></td></tr>
     <tr><td><code>--color-scheme &lt;scheme&gt;</code></td><td>Persistent color scheme (<code>dark</code>, <code>light</code>, <code>no-preference</code>)</td></tr>
     <tr><td><code>--debug</code></td><td>Debug output</td></tr>

@@ -3204,6 +3204,7 @@ mod tests {
             device: None,
             auto_connect: false,
             pin_tab: false,
+            isolate_context: false,
             session_name: None,
             restore: None,
             restore_save: None,

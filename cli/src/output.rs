@@ -3738,6 +3738,9 @@ Options:
   --headed                   Show browser window (not headless) (or AGENT_BROWSER_HEADED env)
   --webgpu                   Enable WebGPU; uses SwiftShader software Vulkan on Linux, no GPU required (or AGENT_BROWSER_WEBGPU env)
   --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
+  --isolate-context          Isolate cookies, storage, cache, and targets in a session-owned
+                             Chrome BrowserContext for --cdp, --auto-connect, or connect
+                             (or AGENT_BROWSER_ISOLATE_CONTEXT env)
   --pin-tab                  Pin the session to its bound tab (or AGENT_BROWSER_PIN_TAB env)
                              Commands fail with a tab_gone error instead of falling back
                              to another tab when the bound tab is closed. JSON includes
@@ -3814,6 +3817,7 @@ Environment:
   AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless, agentcore, or plugin name)
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_PIN_TAB          Pin the session to its bound tab (strict tab binding)
+  AGENT_BROWSER_ISOLATE_CONTEXT  Use a session-owned BrowserContext for shared Chrome isolation
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
   AGENT_BROWSER_HIDE_SCROLLBARS  Hide scrollbars in headless Chromium screenshots (default: true)
   AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)
@@ -3868,6 +3872,7 @@ Examples:
   agent-browser wait 2000               # Wait for slow pages to settle
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
   agent-browser --cdp 9222 --pin-tab open example.com  # Pin session to its own tab
+  agent-browser --session work --cdp 9222 --isolate-context open example.com  # Isolate storage and targets
   agent-browser --auto-connect snapshot  # Auto-discover running Chrome
   agent-browser stream enable            # Start runtime streaming on an auto-selected port
   agent-browser stream status            # Inspect runtime streaming state

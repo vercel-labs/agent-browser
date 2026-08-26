@@ -144,6 +144,10 @@
       "type": "boolean",
       "description": "Pin the session to its bound tab and fail if that tab is gone."
     },
+    "isolateContext": {
+      "type": "boolean",
+      "description": "Use a session-owned Chrome BrowserContext for cookie and storage isolation when attaching through CDP or auto-connect."
+    },
     "annotate": {
       "type": "boolean",
       "description": "Annotated screenshot with numbered element labels."

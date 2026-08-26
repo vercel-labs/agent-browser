@@ -36,7 +36,31 @@ pub struct TabBinding {
     /// Whether strict pin-tab semantics are enabled for this session.
     #[serde(default)]
     pub pinned: bool,
+    #[serde(skip)]
+    pub browser_context_id: Option<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IsolatedTargetBinding {
+    target_id: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    pinned: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IsolatedBindingV1 {
+    format: String,
+    version: u32,
+    browser_context_id: String,
+    target: IsolatedTargetBinding,
+}
+
+const ISOLATED_BINDING_FORMAT: &str = "agent-browser-isolated-context";
+const ISOLATED_BINDING_VERSION: u32 = 1;
 
 /// Path of the binding file for a session: `{socket_dir}/{session}.target`.
 pub fn binding_path(session: &str) -> PathBuf {
@@ -83,14 +107,32 @@ pub fn load(session: &str) -> Result<Option<TabBinding>, String> {
             ))
         }
     };
-    match serde_json::from_str(&raw) {
-        Ok(binding) => Ok(Some(binding)),
-        Err(e) => Err(format!(
-            "corrupt tab binding file {}: {}",
-            path.display(),
-            e
-        )),
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("corrupt tab binding file {}: {}", path.display(), e))?;
+    if value.get("format").is_some() || value.get("version").is_some() {
+        let isolated: IsolatedBindingV1 = serde_json::from_value(value)
+            .map_err(|e| format!("corrupt tab binding file {}: {}", path.display(), e))?;
+        if isolated.format != ISOLATED_BINDING_FORMAT
+            || isolated.version != ISOLATED_BINDING_VERSION
+        {
+            return Err(format!(
+                "unsupported isolated tab binding in {}: format {}, version {}",
+                path.display(),
+                isolated.format,
+                isolated.version
+            ));
+        }
+        return Ok(Some(TabBinding {
+            target_id: isolated.target.target_id,
+            url: isolated.target.url,
+            pinned: isolated.target.pinned,
+            browser_context_id: Some(isolated.browser_context_id),
+        }));
     }
+    let mut binding: TabBinding = serde_json::from_value(value)
+        .map_err(|e| format!("corrupt tab binding file {}: {}", path.display(), e))?;
+    binding.browser_context_id = None;
+    Ok(Some(binding))
 }
 
 /// Persist the binding for a session (write-on-change is the caller's
@@ -103,8 +145,21 @@ pub fn save(session: &str, binding: &TabBinding) -> Result<(), String> {
     let path = binding_path(session);
     let mut safe_binding = binding.clone();
     safe_binding.url = sanitize_url(&safe_binding.url);
-    let raw = serde_json::to_string(&safe_binding)
-        .map_err(|e| format!("cannot serialize tab binding: {}", e))?;
+    let raw = if let Some(browser_context_id) = safe_binding.browser_context_id.clone() {
+        serde_json::to_string(&IsolatedBindingV1 {
+            format: ISOLATED_BINDING_FORMAT.to_string(),
+            version: ISOLATED_BINDING_VERSION,
+            browser_context_id,
+            target: IsolatedTargetBinding {
+                target_id: safe_binding.target_id,
+                url: safe_binding.url,
+                pinned: safe_binding.pinned,
+            },
+        })
+    } else {
+        serde_json::to_string(&safe_binding)
+    }
+    .map_err(|e| format!("cannot serialize tab binding: {}", e))?;
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create socket dir {}: {}", dir.display(), e))?;
@@ -141,6 +196,31 @@ pub fn save(session: &str, binding: &TabBinding) -> Result<(), String> {
     write_result
 }
 
+pub fn ensure_writable(session: &str) -> Result<(), String> {
+    let path = binding_path(session);
+    let dir = path
+        .parent()
+        .ok_or_else(|| format!("invalid tab binding path {}", path.display()))?;
+    fs::create_dir_all(dir)
+        .map_err(|e| format!("cannot create socket dir {}: {}", dir.display(), e))?;
+    let probe = path.with_extension(format!("target.probe.{}", std::process::id()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(&probe)
+        .map_err(|e| format!("cannot create tab binding probe {}: {}", probe.display(), e))?;
+    file.sync_all()
+        .map_err(|e| format!("cannot sync tab binding probe {}: {}", probe.display(), e))?;
+    drop(file);
+    fs::remove_file(&probe)
+        .map_err(|e| format!("cannot remove tab binding probe {}: {}", probe.display(), e))
+}
+
 /// Remove the persisted binding for a session.
 pub fn clear(session: &str) {
     let _ = fs::remove_file(binding_path(session));
@@ -170,11 +250,83 @@ mod tests {
                 target_id: "4A0B7C4E1F2D3A4B5C6D7E8F90A1B2C3".to_string(),
                 url: "https://example.com/checkout".to_string(),
                 pinned: true,
+                browser_context_id: None,
             };
             save("agent-1", &binding).unwrap();
             assert_eq!(load("agent-1"), Ok(Some(binding)));
             clear("agent-1");
             assert_eq!(load("agent-1"), Ok(None));
+        });
+    }
+
+    #[test]
+    fn test_isolated_binding_round_trip_uses_versioned_shape() {
+        with_socket_dir(|| {
+            let binding = TabBinding {
+                target_id: "AAAA".to_string(),
+                url: "https://example.com/account?token=secret".to_string(),
+                pinned: true,
+                browser_context_id: Some("CONTEXT-A".to_string()),
+            };
+
+            save("isolated", &binding).unwrap();
+
+            let raw = fs::read_to_string(binding_path("isolated")).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(value["format"], ISOLATED_BINDING_FORMAT);
+            assert_eq!(value["version"], ISOLATED_BINDING_VERSION);
+            assert_eq!(value["browserContextId"], "CONTEXT-A");
+            assert!(value.get("targetId").is_none());
+            assert_eq!(value["target"]["targetId"], "AAAA");
+            assert_eq!(value["target"]["url"], "https://example.com/account");
+
+            let mut expected = binding;
+            expected.url = "https://example.com/account".to_string();
+            assert_eq!(load("isolated"), Ok(Some(expected)));
+        });
+    }
+
+    #[test]
+    fn test_old_binding_shape_cannot_parse_isolated_binding() {
+        #[derive(Deserialize)]
+        struct LegacyBinding {
+            #[serde(rename = "targetId")]
+            _target_id: String,
+        }
+
+        with_socket_dir(|| {
+            save(
+                "isolated-old-reader",
+                &TabBinding {
+                    target_id: "AAAA".to_string(),
+                    url: String::new(),
+                    pinned: false,
+                    browser_context_id: Some("CONTEXT-A".to_string()),
+                },
+            )
+            .unwrap();
+
+            let raw = fs::read_to_string(binding_path("isolated-old-reader")).unwrap();
+            assert!(
+                serde_json::from_str::<LegacyBinding>(&raw).is_err(),
+                "pre-isolation readers must fail instead of silently dropping context ownership"
+            );
+        });
+    }
+
+    #[test]
+    fn test_load_rejects_unknown_isolated_binding_version() {
+        with_socket_dir(|| {
+            let path = binding_path("future");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(
+                &path,
+                r#"{"format":"agent-browser-isolated-context","version":2,"browserContextId":"C","target":{"targetId":"T"}}"#,
+            )
+            .unwrap();
+
+            let error = load("future").unwrap_err();
+            assert!(error.contains("unsupported isolated tab binding"));
         });
     }
 
@@ -185,6 +337,7 @@ mod tests {
                 target_id: "AAAA".to_string(),
                 url: "data:text/html,persisted-secret".to_string(),
                 pinned: true,
+                browser_context_id: None,
             };
 
             save("opaque", &binding).unwrap();
@@ -250,6 +403,7 @@ mod tests {
             target_id: "AAAA".to_string(),
             url: String::new(),
             pinned: true,
+            browser_context_id: None,
         };
         assert!(save("blocked", &binding).is_err());
     }
@@ -263,6 +417,7 @@ mod tests {
                 target_id: "AAAA".to_string(),
                 url: String::new(),
                 pinned: false,
+                browser_context_id: None,
             };
             save("perms", &binding).unwrap();
             let mode = fs::metadata(binding_path("perms"))
@@ -280,6 +435,7 @@ mod tests {
                 target_id: "AAAA".to_string(),
                 url: String::new(),
                 pinned: false,
+                browser_context_id: None,
             };
             save("tmpcheck", &binding).unwrap();
             let dir = binding_path("tmpcheck").parent().unwrap().to_path_buf();
@@ -299,11 +455,13 @@ mod tests {
                 target_id: "AAAA".to_string(),
                 url: String::new(),
                 pinned: false,
+                browser_context_id: None,
             };
             let b = TabBinding {
                 target_id: "BBBB".to_string(),
                 url: String::new(),
                 pinned: true,
+                browser_context_id: None,
             };
             save("session-a", &a).unwrap();
             save("session-b", &b).unwrap();

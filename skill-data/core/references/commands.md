@@ -391,6 +391,7 @@ agent-browser --webgpu ...            # Enable WebGPU (SwiftShader software Vulk
 agent-browser --cdp <port> ...        # Connect via Chrome DevTools Protocol
 agent-browser --pin-tab ...           # Pin the session to its bound tab (strict tab binding)
 agent-browser --no-pin-tab ...        # Disable a sticky pin previously enabled with --pin-tab
+agent-browser --isolate-context ...   # Isolate cookies, storage, cache, and targets in shared Chrome
 agent-browser -p <provider> ...       # Browser provider or configured provider plugin
 agent-browser --proxy <url> ...       # Use proxy server
 agent-browser --proxy-bypass <hosts>  # Hosts to bypass proxy

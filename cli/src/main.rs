@@ -106,6 +106,12 @@ fn attach_pin_tab_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
     }
 }
 
+fn attach_isolate_context_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
+    if flags.isolate_context {
+        cmd["isolateContext"] = json!(true);
+    }
+}
+
 fn attach_plugins_to_command(cmd: &mut serde_json::Value, plugins: &[plugins::PluginConfig]) {
     cmd["plugins"] = json!(plugins);
 }
@@ -1251,6 +1257,7 @@ fn main() {
     attach_plugins_to_command(&mut cmd, &flags.plugins);
 
     attach_pin_tab_to_command(&mut cmd, &flags);
+    attach_isolate_context_to_command(&mut cmd, &flags);
     attach_restore_config_to_command(&mut cmd, &flags);
 
     // Validate restore/session persistence name before starting daemon
@@ -1378,6 +1385,7 @@ fn main() {
         engine: flags.engine.as_deref(),
         auto_connect: flags.auto_connect,
         pin_tab: flags.pin_tab,
+        isolate_context: flags.isolate_context,
         idle_timeout: flags.idle_timeout.as_deref(),
         default_timeout: flags.default_timeout,
         cdp: flags.cdp.as_deref(),
@@ -1410,6 +1418,7 @@ fn main() {
         attach_script_launch_options(&mut launch_cmd, &flags);
         attach_allowed_domains_to_launch_command(&mut launch_cmd, &flags);
         attach_pin_tab_to_command(&mut launch_cmd, &flags);
+        attach_isolate_context_to_command(&mut launch_cmd, &flags);
         attach_restore_config_to_command(&mut launch_cmd, &flags);
 
         if flags.ignore_https_errors {
@@ -1510,6 +1519,7 @@ fn main() {
         attach_script_launch_options(&mut launch_cmd, &flags);
         attach_allowed_domains_to_launch_command(&mut launch_cmd, &flags);
         attach_pin_tab_to_command(&mut launch_cmd, &flags);
+        attach_isolate_context_to_command(&mut launch_cmd, &flags);
         attach_restore_config_to_command(&mut launch_cmd, &flags);
 
         if flags.ignore_https_errors {
@@ -1878,6 +1888,7 @@ fn run_batch(
         attach_restore_config_to_command(&mut parsed, flags);
 
         attach_pin_tab_to_command(&mut parsed, flags);
+        attach_isolate_context_to_command(&mut parsed, flags);
 
         match send_command_with_respawn(parsed, &flags.session, daemon_opts) {
             Ok(resp) => {
@@ -2184,6 +2195,10 @@ mod tests {
         assert_eq!(root_pin_tab["type"], "boolean");
         assert_eq!(docs_pin_tab["type"], "boolean");
         assert_eq!(root_pin_tab, docs_pin_tab);
+        let root_isolate = &root_schema["properties"]["isolateContext"];
+        let docs_isolate = &docs_schema["properties"]["isolateContext"];
+        assert_eq!(root_isolate["type"], "boolean");
+        assert_eq!(root_isolate, docs_isolate);
     }
 
     #[test]

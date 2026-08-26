@@ -16,7 +16,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::test_utils::EnvGuard;
 
 use super::actions::{
-    close_current_browser, execute_command, maybe_autosave_restore_state, DaemonState,
+    close_current_browser, execute_command, maybe_autosave_restore_state,
+    prepare_internal_daemon_shutdown, DaemonState,
 };
 
 fn assert_success(resp: &Value) {
@@ -8735,12 +8736,14 @@ fn binding_test_env() -> (EnvGuard<'static>, tempfile::TempDir) {
         "AGENT_BROWSER_NAMESPACE",
         "AGENT_BROWSER_SESSION",
         "AGENT_BROWSER_PIN_TAB",
+        "AGENT_BROWSER_ISOLATE_CONTEXT",
     ]);
     let dir = tempfile::tempdir().unwrap();
     guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
     guard.remove("XDG_RUNTIME_DIR");
     guard.remove("AGENT_BROWSER_NAMESPACE");
     guard.remove("AGENT_BROWSER_PIN_TAB");
+    guard.remove("AGENT_BROWSER_ISOLATE_CONTEXT");
     (guard, dir)
 }
 
@@ -8797,6 +8800,113 @@ async fn attach_pinned_session(
     .await;
     assert_success(&resp);
     state
+}
+
+async fn attach_isolated_session(
+    guard: &EnvGuard<'static>,
+    session: &str,
+    ws_url: &str,
+    url: &str,
+    restore_key: Option<&str>,
+) -> DaemonState {
+    guard.set("AGENT_BROWSER_SESSION", session);
+    let mut state = DaemonState::new();
+    let mut launch = json!({
+        "id": format!("{}-launch", session),
+        "action": "launch",
+        "cdpUrl": ws_url,
+        "isolateContext": true
+    });
+    if let Some(key) = restore_key {
+        launch["restoreKey"] = json!(key);
+    }
+    let resp = execute_command(&launch, &mut state).await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": format!("{}-nav", session), "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    state
+}
+
+async fn set_isolation_probe(state: &mut DaemonState, value: &str) {
+    let script = format!(
+        r#"(async () => {{
+            document.cookie = "context_cookie={value}; Path=/; SameSite=Lax";
+            localStorage.setItem("context_value", "{value}");
+            sessionStorage.setItem("context_value", "{value}");
+            await new Promise((resolve, reject) => {{
+                const request = indexedDB.open("context_db", 1);
+                request.onupgradeneeded = () => request.result.createObjectStore("values");
+                request.onerror = () => reject(request.error);
+                request.onsuccess = () => {{
+                    const tx = request.result.transaction("values", "readwrite");
+                    tx.objectStore("values").put("{value}", "context_value");
+                    tx.oncomplete = () => resolve();
+                    tx.onerror = () => reject(tx.error);
+                }};
+            }});
+            const cache = await caches.open("context_cache");
+            await cache.put("/context-value", new Response("{value}"));
+            return true;
+        }})()"#
+    );
+    let resp = execute_command(
+        &json!({ "id": format!("set-{value}"), "action": "evaluate", "script": script }),
+        state,
+    )
+    .await;
+    assert_success(&resp);
+}
+
+async fn read_isolation_probe(state: &mut DaemonState, id: &str) -> Value {
+    let resp = execute_command(
+        &json!({
+            "id": id,
+            "action": "evaluate",
+            "script": r#"(async () => {
+                const indexedDb = await new Promise((resolve, reject) => {
+                    const request = indexedDB.open("context_db", 1);
+                    request.onerror = () => reject(request.error);
+                    request.onsuccess = () => {
+                        const tx = request.result.transaction("values", "readonly");
+                        const get = tx.objectStore("values").get("context_value");
+                        get.onsuccess = () => resolve(get.result ?? null);
+                        get.onerror = () => reject(get.error);
+                    };
+                });
+                const cached = await (await caches.open("context_cache").then(
+                    cache => cache.match("/context-value")
+                ))?.text() ?? null;
+                return {
+                    cookie: document.cookie,
+                    local: localStorage.getItem("context_value"),
+                    session: sessionStorage.getItem("context_value"),
+                    indexedDb,
+                    cached
+                };
+            })()"#
+        }),
+        state,
+    )
+    .await;
+    assert_success(&resp);
+    get_data(&resp)["result"].clone()
+}
+
+fn assert_isolation_probe(value: &Value, expected: &str) {
+    assert!(
+        value["cookie"]
+            .as_str()
+            .is_some_and(|cookie| cookie.contains(&format!("context_cookie={expected}"))),
+        "cookie mismatch: {value}"
+    );
+    assert_eq!(value["local"], expected);
+    assert_eq!(value["session"], expected);
+    assert_eq!(value["indexedDb"], expected);
+    assert_eq!(value["cached"], expected);
 }
 
 async fn current_url(state: &mut DaemonState, id: &str) -> Value {
@@ -8897,6 +9007,511 @@ async fn e2e_pin_tab_rebinds_after_daemon_restart() {
 
     let resp = execute_command(&json!({ "id": "host-99", "action": "close" }), &mut host).await;
     assert_success(&resp);
+}
+
+#[test]
+#[ignore]
+fn e2e_isolated_contexts_separate_storage_targets_restart_and_close() {
+    std::thread::Builder::new()
+        .name("e2e-isolated-contexts".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let (guard, _dir) = binding_test_env();
+                    let (base_url, _server) = start_cookie_login_server().await;
+                    let alias_url = base_url.replace("127.0.0.1", "localhost");
+                    let (mut host, ws_url) = launch_binding_host(&guard).await;
+
+                    let resp = execute_command(
+                        &json!({ "id": "host-nav", "action": "navigate", "url": base_url }),
+                        &mut host,
+                    )
+                    .await;
+                    assert_success(&resp);
+                    set_isolation_probe(&mut host, "HOST").await;
+                    let resp = execute_command(
+                        &json!({ "id": "host-alias-nav", "action": "navigate", "url": alias_url }),
+                        &mut host,
+                    )
+                    .await;
+                    assert_success(&resp);
+                    set_isolation_probe(&mut host, "HOST-ALIAS").await;
+                    let resp = execute_command(
+                        &json!({ "id": "host-back", "action": "navigate", "url": base_url }),
+                        &mut host,
+                    )
+                    .await;
+                    assert_success(&resp);
+                    let host_target_id = get_data(&resp)["targetId"].as_str().unwrap().to_string();
+                    let resp = execute_command(
+                        &json!({
+                            "id": "late-isolation",
+                            "action": "tab_list",
+                            "isolateContext": true
+                        }),
+                        &mut host,
+                    )
+                    .await;
+                    assert_eq!(resp["success"], false);
+                    assert!(resp["error"]
+                        .as_str()
+                        .is_some_and(|error| error.contains("requires reconnecting")));
+                    assert!(!host.isolate_context);
+
+                    let state_a =
+                        attach_isolated_session(&guard, "e2e-isolated-a", &ws_url, &base_url, None)
+                            .await;
+                    let mut state_b =
+                        attach_isolated_session(&guard, "e2e-isolated-b", &ws_url, &base_url, None)
+                            .await;
+                    let context_a = state_a
+                        .browser
+                        .as_ref()
+                        .and_then(|mgr| mgr.isolated_context_id())
+                        .expect("session A should own a context")
+                        .to_string();
+                    let context_b = state_b
+                        .browser
+                        .as_ref()
+                        .and_then(|mgr| mgr.isolated_context_id())
+                        .expect("session B should own a context")
+                        .to_string();
+                    assert_ne!(context_a, context_b);
+
+                    let mut state_a = state_a;
+                    let resp = execute_command(
+                        &json!({
+                            "id": "read-empty-a",
+                            "action": "evaluate",
+                            "script": r#"({
+                cookie: document.cookie,
+                local: localStorage.getItem("context_value")
+            })"#
+                        }),
+                        &mut state_a,
+                    )
+                    .await;
+                    assert_success(&resp);
+                    assert_ne!(get_data(&resp)["result"]["cookie"], "context_cookie=HOST");
+                    assert_ne!(get_data(&resp)["result"]["local"], "HOST");
+                    set_isolation_probe(&mut state_a, "A").await;
+                    set_isolation_probe(&mut state_b, "B").await;
+                    assert_isolation_probe(
+                        &read_isolation_probe(&mut state_a, "read-a").await,
+                        "A",
+                    );
+                    assert_isolation_probe(
+                        &read_isolation_probe(&mut state_b, "read-b").await,
+                        "B",
+                    );
+                    let resp = execute_command(
+            &json!({ "id": "host-switch", "action": "tab_switch", "tabId": host_target_id }),
+            &mut host,
+        )
+        .await;
+                    assert_success(&resp);
+                    assert_isolation_probe(
+                        &read_isolation_probe(&mut host, "read-host").await,
+                        "HOST",
+                    );
+
+                    let resp = execute_command(
+                        &json!({ "id": "a-alias-nav", "action": "navigate", "url": alias_url }),
+                        &mut state_a,
+                    )
+                    .await;
+                    assert_success(&resp);
+                    set_isolation_probe(&mut state_a, "A-ALIAS").await;
+                    let resp = execute_command(
+                        &json!({ "id": "a-back", "action": "navigate", "url": base_url }),
+                        &mut state_a,
+                    )
+                    .await;
+                    assert_success(&resp);
+
+                    let foreign_target = host
+                        .browser
+                        .as_ref()
+                        .expect("host browser should be running")
+                        .client
+                        .send_command(
+                            "Target.createTarget",
+                            Some(json!({ "url": format!("{base_url}/foreign") })),
+                            None,
+                        )
+                        .await
+                        .expect("foreign target should be created");
+                    let foreign_target_id = foreign_target["targetId"]
+                        .as_str()
+                        .expect("foreign target id")
+                        .to_string();
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+                    let resp = execute_command(
+                        &json!({ "id": "tabs-a", "action": "tab_list" }),
+                        &mut state_a,
+                    )
+                    .await;
+                    assert_success(&resp);
+                    assert!(
+                        get_data(&resp)["tabs"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .all(|tab| tab["targetId"] != foreign_target_id),
+                        "foreign default-context target leaked into isolated tab list: {resp}"
+                    );
+                    let host_client = host.browser.as_ref().unwrap().client.clone();
+                    let attached = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        host_client.send_command(
+                            "Target.attachToTarget",
+                            Some(json!({ "targetId": foreign_target_id, "flatten": true })),
+                            None,
+                        ),
+                    )
+                    .await
+                    .expect("foreign target should not remain paused")
+                    .expect("host should attach to foreign target");
+                    let foreign_session = attached["sessionId"].as_str().unwrap();
+                    tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            host_client.send_command(
+                "Runtime.evaluate",
+                Some(json!({ "expression": "document.readyState", "returnByValue": true })),
+                Some(foreign_session),
+            ),
+        )
+        .await
+        .expect("foreign target should have been resumed")
+        .expect("foreign target should answer Runtime.evaluate");
+
+                    let temp_state = tempfile::NamedTempFile::new().unwrap();
+                    let temp_path = temp_state.path().to_string_lossy().to_string();
+                    drop(temp_state);
+                    let resp = execute_command(
+                        &json!({ "id": "save-a", "action": "state_save", "path": temp_path }),
+                        &mut state_a,
+                    )
+                    .await;
+                    assert_success(&resp);
+                    let saved: Value =
+                        serde_json::from_str(&std::fs::read_to_string(&temp_path).unwrap())
+                            .unwrap();
+                    let saved_values: Vec<&str> = saved["origins"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .flat_map(|origin| origin["localStorage"].as_array().unwrap())
+                        .filter_map(|entry| entry["value"].as_str())
+                        .collect();
+                    assert!(saved_values.contains(&"A"));
+                    assert!(saved_values.contains(&"A-ALIAS"));
+                    assert!(!saved_values.contains(&"B"));
+                    assert!(!saved_values.contains(&"HOST"));
+                    assert!(!saved_values.contains(&"HOST-ALIAS"));
+
+                    let binding_before =
+                        load_binding("e2e-isolated-a", "isolated session binding should persist");
+                    let shutdown = execute_command(
+                        &json!({
+                            "id": "shutdown-a",
+                            "action": crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION
+                        }),
+                        &mut state_a,
+                    )
+                    .await;
+                    assert_success(&shutdown);
+                    drop(state_a);
+
+                    guard.set("AGENT_BROWSER_SESSION", "e2e-isolated-a");
+                    let mut state_a2 = DaemonState::new();
+                    let resp = execute_command(
+                        &json!({ "id": "restart-a", "action": "launch", "cdpUrl": ws_url }),
+                        &mut state_a2,
+                    )
+                    .await;
+                    assert_success(&resp);
+                    assert_eq!(
+                        state_a2
+                            .browser
+                            .as_ref()
+                            .and_then(|mgr| mgr.isolated_context_id()),
+                        Some(context_a.as_str())
+                    );
+                    let binding_after =
+                        load_binding("e2e-isolated-a", "binding should survive restart");
+                    assert_eq!(binding_after.target_id, binding_before.target_id);
+                    assert_isolation_probe(
+                        &read_isolation_probe(&mut state_a2, "read-a2").await,
+                        "A",
+                    );
+                    let resp = execute_command(
+                        &json!({ "id": "tabs-a2", "action": "tab_list" }),
+                        &mut state_a2,
+                    )
+                    .await;
+                    assert_success(&resp);
+                    assert!(
+                        get_data(&resp)["tabs"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .all(|tab| tab["targetId"] != foreign_target_id),
+                        "foreign target leaked through restart discovery: {resp}"
+                    );
+
+                    let resp = execute_command(
+                        &json!({ "id": "close-a", "action": "close" }),
+                        &mut state_a2,
+                    )
+                    .await;
+                    assert_success(&resp);
+                    assert!(
+                        super::tab_binding::load("e2e-isolated-a")
+                            .unwrap()
+                            .is_none(),
+                        "explicit close should clear the isolated binding"
+                    );
+                    assert_isolation_probe(
+                        &read_isolation_probe(&mut state_b, "read-b-after-close").await,
+                        "B",
+                    );
+                    let contexts = host
+                        .browser
+                        .as_ref()
+                        .unwrap()
+                        .client
+                        .send_command_no_params("Target.getBrowserContexts", None)
+                        .await
+                        .unwrap();
+                    let context_ids = contexts["browserContextIds"].as_array().unwrap();
+                    assert!(!context_ids.iter().any(|id| id == &context_a));
+                    assert!(context_ids.iter().any(|id| id == &context_b));
+
+                    let resp = execute_command(
+                        &json!({ "id": "close-b", "action": "close" }),
+                        &mut state_b,
+                    )
+                    .await;
+                    assert_success(&resp);
+                    let resp = execute_command(
+                        &json!({ "id": "host-close", "action": "close" }),
+                        &mut host,
+                    )
+                    .await;
+                    assert_success(&resp);
+                    let _ = std::fs::remove_file(temp_path);
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_isolated_context_recreates_after_chrome_restart_and_restores_state() {
+    let (guard, _dir) = binding_test_env();
+    let (base_url, _server) = start_cookie_login_server().await;
+    let restore_key = format!(
+        "e2e-isolated-recreate-{}",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
+    let (mut host, ws_url) = launch_binding_host(&guard).await;
+    let mut isolated = attach_isolated_session(
+        &guard,
+        "e2e-isolated-recreate",
+        &ws_url,
+        &base_url,
+        Some(&restore_key),
+    )
+    .await;
+    set_isolation_probe(&mut isolated, "RESTORED").await;
+
+    isolated.last_command_finished =
+        std::time::Instant::now().checked_sub(std::time::Duration::from_secs(10));
+    maybe_autosave_restore_state(&mut isolated, 1).await;
+    assert_eq!(isolated.restore_save_status, "saved");
+    let old_context = isolated
+        .browser
+        .as_ref()
+        .and_then(|mgr| mgr.isolated_context_id())
+        .unwrap()
+        .to_string();
+
+    let _ = host
+        .browser
+        .as_ref()
+        .unwrap()
+        .client
+        .send_command_no_params("Browser.close", None)
+        .await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !host
+        .browser
+        .as_mut()
+        .expect("host browser manager")
+        .has_process_exited()
+        && std::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let _ = close_current_browser(&mut host).await;
+    let _ = close_current_browser(&mut isolated).await;
+
+    let (mut host2, ws_url2) = launch_binding_host(&guard).await;
+    guard.set("AGENT_BROWSER_SESSION", "e2e-isolated-recreate");
+    let mut recreated = DaemonState::new();
+    let resp = execute_command(
+        &json!({
+            "id": "recreate",
+            "action": "launch",
+            "cdpUrl": ws_url2,
+            "restoreKey": restore_key
+        }),
+        &mut recreated,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["lifecycle"]["contextRecreated"], true);
+    assert_eq!(get_data(&resp)["lifecycle"]["restoreStatus"], "loaded");
+    let new_context = recreated
+        .browser
+        .as_ref()
+        .and_then(|mgr| mgr.isolated_context_id())
+        .unwrap();
+    assert_ne!(new_context, old_context);
+
+    let resp = execute_command(
+        &json!({ "id": "nav-restored", "action": "navigate", "url": base_url }),
+        &mut recreated,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({
+            "id": "read-restored",
+            "action": "evaluate",
+            "script": r#"({
+                cookie: document.cookie,
+                local: localStorage.getItem("context_value"),
+                session: sessionStorage.getItem("context_value")
+            })"#
+        }),
+        &mut recreated,
+    )
+    .await;
+    assert_success(&resp);
+    let restored = &get_data(&resp)["result"];
+    assert_eq!(restored["cookie"], "context_cookie=RESTORED");
+    assert_eq!(restored["local"], "RESTORED");
+    assert_eq!(restored["session"], "RESTORED");
+
+    let resp = execute_command(
+        &json!({ "id": "close-recreated", "action": "close" }),
+        &mut recreated,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "close-host2", "action": "close" }),
+        &mut host2,
+    )
+    .await;
+    assert_success(&resp);
+    cleanup_restore_state_files(&restore_key);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_isolated_shutdown_cleans_recording_child_and_close_disposes_primary() {
+    let (guard, _dir) = binding_test_env();
+    let (base_url, _server) = start_cookie_login_server().await;
+    let (mut host, ws_url) = launch_binding_host(&guard).await;
+    let mut isolated =
+        attach_isolated_session(&guard, "e2e-isolated-recording", &ws_url, &base_url, None).await;
+    let output = tempfile::Builder::new().suffix(".mp4").tempfile().unwrap();
+    let output_path = output.path().to_string_lossy().to_string();
+    drop(output);
+
+    let resp = execute_command(
+        &json!({
+            "id": "recording-start",
+            "action": "recording_start",
+            "path": output_path
+        }),
+        &mut isolated,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let contexts = host
+        .browser
+        .as_ref()
+        .unwrap()
+        .client
+        .send_command_no_params("Target.getBrowserContexts", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        contexts["browserContextIds"].as_array().unwrap().len(),
+        2,
+        "isolated session should own primary and recording contexts"
+    );
+
+    let primary_context = isolated
+        .browser
+        .as_ref()
+        .and_then(|manager| manager.isolated_context_id())
+        .expect("isolated session should own a primary context")
+        .to_string();
+    prepare_internal_daemon_shutdown(&mut isolated).await;
+    let contexts = host
+        .browser
+        .as_ref()
+        .unwrap()
+        .client
+        .send_command_no_params("Target.getBrowserContexts", None)
+        .await
+        .unwrap();
+    let remaining = contexts["browserContextIds"].as_array().unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert!(remaining.iter().any(|id| id == &primary_context));
+
+    let resp = execute_command(
+        &json!({ "id": "isolated-close", "action": "close" }),
+        &mut isolated,
+    )
+    .await;
+    assert_success(&resp);
+    let contexts = host
+        .browser
+        .as_ref()
+        .unwrap()
+        .client
+        .send_command_no_params("Target.getBrowserContexts", None)
+        .await
+        .unwrap();
+    assert!(
+        contexts["browserContextIds"].as_array().unwrap().is_empty(),
+        "explicit close should dispose primary and recording contexts"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "host-version", "action": "cdp_url" }),
+        &mut host,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "host-close", "action": "close" }), &mut host).await;
+    assert_success(&resp);
+    let _ = std::fs::remove_file(output_path);
 }
 
 // Real-Chrome smoke test: a foreign tab opened via `window.open` inside the

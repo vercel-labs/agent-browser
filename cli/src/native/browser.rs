@@ -254,6 +254,7 @@ pub struct PageInfo {
     pub label: Option<String>,
     pub target_id: String,
     pub session_id: String,
+    pub browser_context_id: Option<String>,
     pub url: String,
     pub title: String,
     pub target_type: String, // "page" or "webview"
@@ -421,6 +422,10 @@ pub struct BrowserManager {
     /// (externally, or found missing at attach time): `(target_id, last_url)`.
     /// While set, commands that need the active page fail with `tab_gone`.
     bound_target_gone: Option<(String, String)>,
+    primary_browser_context_id: Option<String>,
+    owned_browser_context_ids: HashSet<String>,
+    context_recreated: bool,
+    isolated_context_unpersisted: bool,
     /// Whether the daemon-spawned browser actually runs headless after
     /// launch rules such as extension-forced headed mode. Meaningless for
     /// attached browsers (browser_process is None).
@@ -536,6 +541,10 @@ impl BrowserManager {
                 pin_tab: false,
                 bound_target_id: None,
                 bound_target_gone: None,
+                primary_browser_context_id: None,
+                owned_browser_context_ids: HashSet::new(),
+                context_recreated: false,
+                isolated_context_unpersisted: false,
                 headless,
             };
             manager.discover_and_attach_targets().await?;
@@ -592,26 +601,40 @@ impl BrowserManager {
     }
 
     pub async fn connect_cdp(url: &str) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, false, None).await
+        Self::connect_cdp_inner(url, false, None, None).await
+    }
+
+    pub async fn connect_cdp_isolated(
+        url: &str,
+        persisted_context_id: Option<&str>,
+    ) -> Result<Self, String> {
+        Self::connect_cdp_inner(
+            url,
+            false,
+            None,
+            Some(persisted_context_id.map(str::to_string)),
+        )
+        .await
     }
 
     /// Connect to a provider CDP proxy where the WebSocket IS the page session.
     /// Skips browser-level Target.* commands that most proxies don't support.
     pub async fn connect_cdp_direct(url: &str) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, true, None).await
+        Self::connect_cdp_inner(url, true, None, None).await
     }
 
     pub async fn connect_cdp_with_headers(
         url: &str,
         headers: Option<Vec<(String, String)>>,
     ) -> Result<Self, String> {
-        Self::connect_cdp_inner(url, false, headers).await
+        Self::connect_cdp_inner(url, false, headers, None).await
     }
 
     async fn connect_cdp_inner(
         url: &str,
         direct_page: bool,
         headers: Option<Vec<(String, String)>>,
+        isolation: Option<Option<String>>,
     ) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url).await?;
         let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
@@ -630,16 +653,26 @@ impl BrowserManager {
             pin_tab: false,
             bound_target_id: None,
             bound_target_gone: None,
+            primary_browser_context_id: None,
+            owned_browser_context_ids: HashSet::new(),
+            context_recreated: false,
+            isolated_context_unpersisted: false,
             headless: true,
         };
 
         if direct_page {
+            if isolation.is_some() {
+                return Err(
+                    "--isolate-context is not supported by direct-page CDP providers".to_string(),
+                );
+            }
             let tab_id = manager.assign_tab_id();
             manager.pages.push(PageInfo {
                 tab_id,
                 label: None,
                 target_id: "provider-page".to_string(),
                 session_id: String::new(),
+                browser_context_id: None,
                 url: String::new(),
                 title: String::new(),
                 target_type: "page".to_string(),
@@ -647,7 +680,15 @@ impl BrowserManager {
             manager.active_page_index = 0;
             manager.enable_domains_direct().await?;
         } else {
-            manager.discover_and_attach_targets().await?;
+            if let Some(persisted_context_id) = isolation {
+                manager
+                    .initialize_isolated_context(persisted_context_id.as_deref())
+                    .await?;
+            }
+            if let Err(error) = manager.discover_and_attach_targets().await {
+                let _ = manager.dispose_unpersisted_isolated_context().await;
+                return Err(error);
+            }
         }
         Ok(manager)
     }
@@ -655,6 +696,45 @@ impl BrowserManager {
     pub async fn connect_auto() -> Result<Self, String> {
         let ws_url = auto_connect_cdp().await?;
         Self::connect_cdp(&ws_url).await
+    }
+
+    pub async fn connect_auto_isolated(persisted_context_id: Option<&str>) -> Result<Self, String> {
+        let ws_url = auto_connect_cdp().await?;
+        Self::connect_cdp_isolated(&ws_url, persisted_context_id).await
+    }
+
+    async fn initialize_isolated_context(
+        &mut self,
+        persisted_context_id: Option<&str>,
+    ) -> Result<(), String> {
+        let existing = self
+            .client
+            .send_command_no_params("Target.getBrowserContexts", None)
+            .await?
+            .get("browserContextIds")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let persisted_exists = persisted_context_id
+            .is_some_and(|wanted| existing.iter().any(|id| id.as_str() == Some(wanted)));
+        let context_id = if persisted_exists {
+            persisted_context_id.unwrap().to_string()
+        } else {
+            let result = self
+                .client
+                .send_command_no_params("Target.createBrowserContext", None)
+                .await?;
+            self.context_recreated = persisted_context_id.is_some();
+            result
+                .get("browserContextId")
+                .and_then(Value::as_str)
+                .ok_or("Target.createBrowserContext did not return browserContextId")?
+                .to_string()
+        };
+        self.primary_browser_context_id = Some(context_id.clone());
+        self.owned_browser_context_ids.insert(context_id);
+        self.isolated_context_unpersisted = !persisted_exists;
+        Ok(())
     }
 
     async fn discover_and_attach_targets(&mut self) -> Result<(), String> {
@@ -674,7 +754,7 @@ impl BrowserManager {
         let page_targets: Vec<TargetInfo> = result
             .target_infos
             .into_iter()
-            .filter(should_track_target)
+            .filter(|target| should_track_target(target) && self.owns_target(target))
             .collect();
 
         if page_targets.is_empty() {
@@ -685,6 +765,7 @@ impl BrowserManager {
                     "Target.createTarget",
                     &CreateTargetParams {
                         url: "about:blank".to_string(),
+                        browser_context_id: self.primary_browser_context_id.clone(),
                     },
                     None,
                 )
@@ -709,6 +790,7 @@ impl BrowserManager {
                 label: None,
                 target_id: result.target_id,
                 session_id: attach_result.session_id.clone(),
+                browser_context_id: self.primary_browser_context_id.clone(),
                 url: "about:blank".to_string(),
                 title: String::new(),
                 target_type: "page".to_string(),
@@ -737,6 +819,7 @@ impl BrowserManager {
                     label: None,
                     target_id: target.target_id.clone(),
                     session_id: attach_result.session_id.clone(),
+                    browser_context_id: target.browser_context_id.clone(),
                     url: target.url.clone(),
                     title: target.title.clone(),
                     target_type: target.target_type.clone(),
@@ -1364,6 +1447,90 @@ impl BrowserManager {
         self.direct_page
     }
 
+    pub fn isolated_context_id(&self) -> Option<&str> {
+        self.primary_browser_context_id.as_deref()
+    }
+
+    pub fn context_recreated(&self) -> bool {
+        self.context_recreated
+    }
+
+    pub fn is_isolated(&self) -> bool {
+        self.primary_browser_context_id.is_some()
+    }
+
+    pub fn owns_target(&self, target: &TargetInfo) -> bool {
+        self.primary_browser_context_id.is_none()
+            || target
+                .browser_context_id
+                .as_ref()
+                .is_some_and(|id| self.owned_browser_context_ids.contains(id))
+    }
+
+    pub fn register_owned_context(&mut self, context_id: String) {
+        self.owned_browser_context_ids.insert(context_id);
+    }
+
+    pub fn unregister_owned_context(&mut self, context_id: &str) {
+        self.owned_browser_context_ids.remove(context_id);
+        if self.primary_browser_context_id.as_deref() == Some(context_id) {
+            self.primary_browser_context_id = None;
+            self.isolated_context_unpersisted = false;
+        }
+    }
+
+    pub fn mark_isolated_context_persisted(&mut self) {
+        self.isolated_context_unpersisted = false;
+    }
+
+    pub async fn dispose_unpersisted_isolated_context(&mut self) -> Result<(), String> {
+        if !self.isolated_context_unpersisted {
+            return Ok(());
+        }
+        let Some(context_id) = self.primary_browser_context_id.clone() else {
+            return Ok(());
+        };
+        self.dispose_browser_context(&context_id).await
+    }
+
+    pub async fn dispose_browser_context(&mut self, context_id: &str) -> Result<(), String> {
+        self.client
+            .send_command(
+                "Target.disposeBrowserContext",
+                Some(json!({ "browserContextId": context_id })),
+                None,
+            )
+            .await?;
+        self.unregister_owned_context(context_id);
+        self.pages
+            .retain(|page| page.browser_context_id.as_deref() != Some(context_id));
+        self.update_active_page_if_needed();
+        Ok(())
+    }
+
+    pub async fn dispose_owned_contexts(&mut self) -> Result<(), String> {
+        let primary = self.primary_browser_context_id.clone();
+        self.dispose_child_contexts().await?;
+        if let Some(context_id) = primary {
+            self.dispose_browser_context(&context_id).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn dispose_child_contexts(&mut self) -> Result<(), String> {
+        let primary = self.primary_browser_context_id.clone();
+        let children: Vec<String> = self
+            .owned_browser_context_ids
+            .iter()
+            .filter(|id| Some(id.as_str()) != primary.as_deref())
+            .cloned()
+            .collect();
+        for context_id in children {
+            self.dispose_browser_context(&context_id).await?;
+        }
+        Ok(())
+    }
+
     /// Ensures the browser has at least one page. If `pages` is empty, creates a new
     /// about:blank page and attaches to it.
     pub async fn ensure_page(&mut self) -> Result<(), String> {
@@ -1383,6 +1550,7 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: "about:blank".to_string(),
+                    browser_context_id: self.primary_browser_context_id.clone(),
                 },
                 None,
             )
@@ -1407,6 +1575,7 @@ impl BrowserManager {
             label: None,
             target_id: result.target_id,
             session_id: attach_result.session_id.clone(),
+            browser_context_id: self.primary_browser_context_id.clone(),
             url: "about:blank".to_string(),
             title: String::new(),
             target_type: "page".to_string(),
@@ -1548,6 +1717,7 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: target_url.to_string(),
+                    browser_context_id: self.primary_browser_context_id.clone(),
                 },
                 None,
             )
@@ -1577,6 +1747,7 @@ impl BrowserManager {
             label: label.clone(),
             target_id: result.target_id,
             session_id: attach.session_id,
+            browser_context_id: self.primary_browser_context_id.clone(),
             url: target_url.to_string(),
             title: String::new(),
             target_type: "page".to_string(),
@@ -2106,11 +2277,13 @@ impl BrowserManager {
         url: String,
         title: String,
         target_type: String,
+        browser_context_id: Option<String>,
     ) -> bool {
         if let Some(p) = self.pages.iter_mut().find(|p| p.target_id == target_id) {
             p.url = url;
             p.title = title;
             p.target_type = target_type;
+            p.browser_context_id = browser_context_id;
             return false;
         }
         let tab_id = self.assign_tab_id();
@@ -2123,6 +2296,7 @@ impl BrowserManager {
                 label: None,
                 target_id: target_id.to_string(),
                 session_id: session_id.to_string(),
+                browser_context_id,
                 url,
                 title,
                 target_type,
@@ -2306,6 +2480,10 @@ async fn initialize_lightpanda_manager(
             pin_tab: false,
             bound_target_id: None,
             bound_target_gone: None,
+            primary_browser_context_id: None,
+            owned_browser_context_ids: HashSet::new(),
+            context_recreated: false,
+            isolated_context_unpersisted: false,
             headless: true,
         };
 
@@ -2516,6 +2694,7 @@ mod tests {
             label: None,
             target_id: "popup-1".to_string(),
             session_id: "session-1".to_string(),
+            browser_context_id: None,
             url: String::new(),
             title: String::new(),
             target_type: "page".to_string(),
@@ -2532,6 +2711,31 @@ mod tests {
         assert!(update_page_target_info_in_pages(&mut pages, &target));
         assert_eq!(pages[0].url, "https://example.com/popup");
         assert_eq!(pages[0].title, "Popup");
+    }
+
+    #[tokio::test]
+    async fn test_isolated_target_membership_uses_owned_contexts() {
+        let mut mgr = test_manager(vec![]).await;
+        mgr.primary_browser_context_id = Some("primary".to_string());
+        mgr.owned_browser_context_ids.insert("primary".to_string());
+        mgr.register_owned_context("recording".to_string());
+
+        let target = |context: Option<&str>| TargetInfo {
+            target_id: "target".to_string(),
+            target_type: "page".to_string(),
+            title: String::new(),
+            url: "about:blank".to_string(),
+            attached: None,
+            browser_context_id: context.map(str::to_string),
+        };
+
+        assert!(mgr.owns_target(&target(Some("primary"))));
+        assert!(mgr.owns_target(&target(Some("recording"))));
+        assert!(!mgr.owns_target(&target(Some("foreign"))));
+        assert!(!mgr.owns_target(&target(None)));
+
+        mgr.unregister_owned_context("recording");
+        assert!(!mgr.owns_target(&target(Some("recording"))));
     }
 
     #[test]
@@ -2975,6 +3179,7 @@ mod tests {
             label: None,
             target_id: target_id.to_string(),
             session_id: format!("session-{}", tab_id),
+            browser_context_id: None,
             url: url.to_string(),
             title: String::new(),
             target_type: "page".to_string(),
@@ -3010,6 +3215,10 @@ mod tests {
             pin_tab: false,
             bound_target_id: None,
             bound_target_gone: None,
+            primary_browser_context_id: None,
+            owned_browser_context_ids: HashSet::new(),
+            context_recreated: false,
+            isolated_context_unpersisted: false,
             headless: true,
         }
     }
@@ -3251,6 +3460,7 @@ mod tests {
             "https://popup.example".to_string(),
             String::new(),
             "page".to_string(),
+            None,
         );
 
         assert!(newly_added, "an untracked target must be registered");
@@ -3277,6 +3487,7 @@ mod tests {
             "https://foreign.example".to_string(),
             String::new(),
             "page".to_string(),
+            None,
         );
 
         assert!(newly_added, "an untracked target must be registered");
@@ -3358,6 +3569,7 @@ mod tests {
             "https://foreign.example".to_string(),
             String::new(),
             "page".to_string(),
+            None,
         );
         assert!(
             newly_added,
@@ -3394,6 +3606,7 @@ mod tests {
             "https://mine.example/updated".to_string(),
             "Updated Title".to_string(),
             "page".to_string(),
+            None,
         );
 
         assert!(

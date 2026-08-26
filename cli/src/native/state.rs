@@ -114,12 +114,14 @@ async fn collect_storage_via_temp_target(
     client: &CdpClient,
     origins: &[String],
     origin_js: &str,
+    browser_context_id: Option<&str>,
 ) -> Result<Vec<OriginStorage>, String> {
     let create_result: CreateTargetResult = client
         .send_command_typed(
             "Target.createTarget",
             &CreateTargetParams {
                 url: "about:blank".to_string(),
+                browser_context_id: browser_context_id.map(str::to_string),
             },
             None,
         )
@@ -252,6 +254,7 @@ pub async fn save_state(
     session_name: Option<&str>,
     session_id_str: &str,
     visited_origins: &HashSet<String>,
+    browser_context_id: Option<&str>,
 ) -> Result<String, String> {
     let cookies = cookies::get_all_cookies(client, session_id).await?;
 
@@ -299,7 +302,7 @@ pub async fn save_state(
     if !all_origins.is_empty() {
         let remaining: Vec<String> = all_origins.into_iter().collect();
         if let Ok(temp_origins) =
-            collect_storage_via_temp_target(client, &remaining, origin_js).await
+            collect_storage_via_temp_target(client, &remaining, origin_js, browser_context_id).await
         {
             origins.extend(temp_origins);
         }
@@ -343,6 +346,7 @@ pub async fn save_auto_state_transactional(
     session_name: &str,
     session_id_str: &str,
     visited_origins: &HashSet<String>,
+    browser_context_id: Option<&str>,
 ) -> Result<String, String> {
     if !is_valid_session_name(session_name) {
         return Err(session_name_error(session_name));
@@ -382,6 +386,7 @@ pub async fn save_auto_state_transactional(
         Some(session_name),
         session_id_str,
         visited_origins,
+        browser_context_id,
     )
     .await?;
 

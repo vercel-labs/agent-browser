@@ -48,9 +48,22 @@ Each session has independent:
 - Browsing history
 - Open tabs
 
-## Tab Pinning in a Shared Browser
+## Isolated contexts in a shared browser
 
-Full isolation applies when each session launches its own browser. When sessions instead share one Chrome over `--cdp <port>`, cookies and storage are shared, and only the tab selection separates the sessions. Add `--pin-tab` so each session sticks to its own tab:
+By default, sessions attached to one Chrome share its login state. Add `--isolate-context` when each named session needs separate cookies, localStorage, sessionStorage, IndexedDB, cache, and targets without launching another Chrome process:
+
+```bash
+agent-browser --session agent1 --cdp 9222 --isolate-context open https://app.example.com
+agent-browser --session agent2 --cdp 9222 --isolate-context open https://app.example.com
+```
+
+The context binding is sticky for the named session and survives daemon restarts. Internal daemon shutdown detaches without deleting the context. An explicit `agent-browser --session agent1 close` disposes only agent1's context. If Chrome restarts, the next command creates a clean replacement context, reports `lifecycle.contextRecreated: true` in JSON, and applies configured `--state` or `--restore` data. The session never falls back to Chrome's default context.
+
+Do not use `--isolate-context` when the workflow deliberately needs the login state from the attached Chrome. The flag applies to `--cdp`, `--auto-connect`, and `connect`.
+
+## Tab pinning in a shared browser
+
+Without `--isolate-context`, cookies and storage remain shared and only tab selection separates sessions. Add `--pin-tab` so each session sticks to its own tab:
 
 ```bash
 agent-browser --session agent1 --cdp 9222 --pin-tab open https://site-a.com

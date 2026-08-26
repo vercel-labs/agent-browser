@@ -1610,10 +1610,11 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_CONNECT,
             "Connect CDP",
-            "Connect to a browser over CDP. With pinTab, the session is strictly bound to its own tab: it re-binds by target id after restarts and fails with a tab_gone error instead of adopting another tab. Structured errors include code=tab_gone, data.targetId, and optional sanitized data.lastUrl. Pass pinTab: false to explicitly disable a sticky pin; omit it to keep the current state.",
+            "Connect to a browser over CDP. isolateContext creates or reconnects to a session-owned Chrome BrowserContext for cookie and storage isolation. With pinTab, the session is strictly bound to its own tab.",
             json!({
                 "target": { "type": "string", "description": "CDP port or URL." },
-                "pinTab": { "type": "boolean", "description": "Strict session-to-tab binding (sticky for the session). Explicit false disables a sticky pin; omitted leaves it unchanged." }
+                "pinTab": { "type": "boolean", "description": "Strict session-to-tab binding (sticky for the session). Explicit false disables a sticky pin; omitted leaves it unchanged." },
+                "isolateContext": { "type": "boolean", "description": "Use a session-owned Chrome BrowserContext for cookie and storage isolation." }
             }),
             &["target"],
         ),
@@ -2344,7 +2345,7 @@ fn call_one_string(arguments: &Value, command: &str, key: &str) -> Result<Value,
     call_cli_tool(arguments, args, None)
 }
 
-fn call_connect(arguments: &Value) -> Result<Value, ProtocolError> {
+fn connect_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = vec!["connect".to_string()];
     args.push(required_string(arguments, "target")?);
     match arguments.get("pinTab").and_then(|v| v.as_bool()) {
@@ -2352,7 +2353,14 @@ fn call_connect(arguments: &Value) -> Result<Value, ProtocolError> {
         Some(false) => args.push("--no-pin-tab".to_string()),
         None => {}
     }
-    call_cli_tool(arguments, args, None)
+    if arguments.get("isolateContext").and_then(|v| v.as_bool()) == Some(true) {
+        args.push("--isolate-context".to_string());
+    }
+    Ok(args)
+}
+
+fn call_connect(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, connect_args(arguments)?, None)
 }
 
 fn call_optional_one(arguments: &Value, parts: &[&str], key: &str) -> Result<Value, ProtocolError> {
@@ -4132,6 +4140,17 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["click", "@e1", "--new-tab"]);
+    }
+
+    #[test]
+    fn connect_args_include_isolate_context() {
+        let args = connect_args(&json!({
+            "target": "9222",
+            "isolateContext": true,
+        }))
+        .unwrap();
+
+        assert_eq!(args, vec!["connect", "9222", "--isolate-context"]);
     }
 
     #[test]

@@ -793,6 +793,7 @@ async fn test_daemon_state_new_reads_sticky_pinned_binding() {
             target_id: "ABCDEF0123456789".to_string(),
             url: "https://example.com".to_string(),
             pinned: true,
+            browser_context_id: None,
         },
     )
     .unwrap();
@@ -833,6 +834,7 @@ async fn test_pin_tab_false_disables_persisted_pin_across_restart() {
             target_id: "ABCDEF0123456789".to_string(),
             url: "https://example.com".to_string(),
             pinned: true,
+            browser_context_id: None,
         },
     )
     .unwrap();

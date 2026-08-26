@@ -13,7 +13,7 @@ use tokio::sync::{Notify, RwLock};
 
 use super::actions::{
     auto_save_restore_state, close_all_browser_backends, close_current_browser, execute_command,
-    maybe_autosave_restore_state, DaemonState,
+    maybe_autosave_restore_state, prepare_internal_daemon_shutdown, DaemonState,
 };
 use super::cdp::client::CdpClient;
 use super::state;
@@ -329,6 +329,7 @@ async fn run_socket_server(
                         DEFAULT_IDLE_TIMEOUT_MS / 60_000
                     );
                 }
+                prepare_internal_daemon_shutdown(&mut s).await;
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_all_browser_backends(&mut s).await;
                 break;
@@ -346,6 +347,7 @@ async fn run_socket_server(
             }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
+                prepare_internal_daemon_shutdown(&mut s).await;
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_all_browser_backends(&mut s).await;
                 break;
@@ -473,6 +475,7 @@ async fn run_socket_server(
                         DEFAULT_IDLE_TIMEOUT_MS / 60_000
                     );
                 }
+                prepare_internal_daemon_shutdown(&mut s).await;
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_all_browser_backends(&mut s).await;
                 let _ = fs::remove_file(&port_path);
@@ -489,6 +492,7 @@ async fn run_socket_server(
             }
             _ = shutdown_signal() => {
                 let mut s = state.lock().await;
+                prepare_internal_daemon_shutdown(&mut s).await;
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_all_browser_backends(&mut s).await;
                 let _ = fs::remove_file(&port_path);

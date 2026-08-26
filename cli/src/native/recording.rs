@@ -19,6 +19,7 @@ pub struct RecordingState {
     pub capture_task: Option<tokio::task::JoinHandle<Result<(), String>>>,
     pub shared_frame_count: Option<Arc<AtomicU64>>,
     pub cancel_tx: Option<oneshot::Sender<()>>,
+    pub browser_context_id: Option<String>,
 }
 
 impl RecordingState {
@@ -30,6 +31,7 @@ impl RecordingState {
             capture_task: None,
             shared_frame_count: None,
             cancel_tx: None,
+            browser_context_id: None,
         }
     }
 }
