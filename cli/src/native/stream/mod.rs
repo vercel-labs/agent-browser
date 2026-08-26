@@ -437,6 +437,11 @@ impl StreamServer {
         self.port
     }
 
+    /// True while at least one dashboard client is connected to the stream.
+    pub async fn has_connected_clients(&self) -> bool {
+        *self.client_count.lock().await > 0
+    }
+
     /// Broadcast a raw frame string (legacy). The caller owns the payload, so
     /// the id is read back out of it. A payload without one is delivered but
     /// never held for an ack.

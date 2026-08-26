@@ -169,9 +169,10 @@ pub async fn run_daemon(session: &str) {
 /// its Chrome tree indefinitely (issue: leaked daemons observed running for
 /// days). Socket commands and dashboard input reset the timer. Unlike an
 /// explicit timeout, the default never closes a headed browser (including
-/// Safari and iOS WebDriver sessions) or a user-attached browser because those
-/// may be in direct human use that the daemon cannot observe. Provider-owned
-/// CDP browsers remain eligible for cleanup.
+/// Safari and iOS WebDriver sessions), a user-attached browser, or a session
+/// with a connected stream client because those may be in direct human use
+/// that the daemon cannot observe. Provider-owned CDP browsers remain
+/// eligible for cleanup.
 pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 
 #[derive(Clone, Copy)]
@@ -322,6 +323,17 @@ async fn run_socket_server(
                         .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
                     continue;
                 }
+                // A connected dashboard stream is active use of the session;
+                // don't kill it out from under someone watching.
+                if idle_timeout.is_some_and(|t| t.is_default) {
+                    if let Some(ref server) = s.stream_server {
+                        if server.has_connected_clients().await {
+                            idle_sleep_pin = idle_timeout_ms
+                                .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
+                            continue;
+                        }
+                    }
+                }
                 if idle_timeout.is_some_and(|t| t.is_default) {
                     let _ = writeln!(
                         std::io::stderr(),
@@ -465,6 +477,17 @@ async fn run_socket_server(
                     idle_sleep_pin = idle_timeout_ms
                         .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
                     continue;
+                }
+                // A connected dashboard stream is active use of the session;
+                // don't kill it out from under someone watching.
+                if idle_timeout.is_some_and(|t| t.is_default) {
+                    if let Some(ref server) = s.stream_server {
+                        if server.has_connected_clients().await {
+                            idle_sleep_pin = idle_timeout_ms
+                                .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
+                            continue;
+                        }
+                    }
                 }
                 if idle_timeout.is_some_and(|t| t.is_default) {
                     let _ = writeln!(
