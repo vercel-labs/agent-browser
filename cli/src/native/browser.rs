@@ -1286,6 +1286,8 @@ impl BrowserManager {
                 .await;
         }
 
+        self.client.close().await;
+
         if let Some(mut process) = self.browser_process.take() {
             let timeout = std::time::Duration::from_secs(5);
             let _ = tokio::task::spawn_blocking(move || {
@@ -3012,6 +3014,64 @@ mod tests {
             bound_target_gone: None,
             headless: true,
         }
+    }
+
+    #[tokio::test]
+    async fn test_close_external_manager_disconnects_without_closing_browser() {
+        use futures_util::StreamExt;
+        use tokio::io::AsyncReadExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut browser_close_seen = false;
+
+            loop {
+                match ws.next().await {
+                    Some(Ok(Message::Text(text))) => {
+                        let command: Value = serde_json::from_str(&text).unwrap();
+                        browser_close_seen |= command["method"] == "Browser.close";
+                    }
+                    Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) | None => break,
+                }
+            }
+
+            let mut byte = [0u8; 1];
+            let count = tokio::time::timeout(Duration::from_secs(1), ws.get_mut().read(&mut byte))
+                .await
+                .expect("external manager close should shut down TCP")
+                .expect("external manager TCP read should succeed");
+            (browser_close_seen, count)
+        });
+
+        let client = CdpClient::connect(&format!("ws://{}", addr)).await.unwrap();
+        let mut manager = BrowserManager {
+            client: Arc::new(client),
+            browser_process: None,
+            ws_url: format!("ws://{}", addr),
+            pages: Vec::new(),
+            active_page_index: 0,
+            default_timeout_ms: 25_000,
+            download_path: None,
+            ignore_https_errors: false,
+            visited_origins: HashSet::new(),
+            next_tab_id: 1,
+            direct_page: false,
+            pin_tab: false,
+            bound_target_id: None,
+            bound_target_gone: None,
+            headless: true,
+        };
+        manager.close().await.unwrap();
+
+        let (browser_close_seen, count) = server.await.unwrap();
+        assert!(!browser_close_seen);
+        assert_eq!(count, 0);
     }
 
     const TARGET_A: &str = "AAAA0000BBBB1111CCCC2222DDDD3333";
