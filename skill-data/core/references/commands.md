@@ -40,6 +40,11 @@ agent-browser batch \
 
 `open` with no URL gives you a clean launch so any interception, cookies, or init scripts you register take effect on the *first* real navigation. Use for SSR-only debug (`--resource-type script`), protected-origin auth, or capturing fresh `react suspense`/`vitals` state without noise from a prior page.
 
+For batches that carry confidential values on stdin, combine `--json` with
+`--omit-command`. Every success or error row then uses a stable zero-based
+`index` instead of echoing the raw command array. Default JSON output keeps the
+existing `command` field, and `--bail` remains supported.
+
 ## Snapshot (page analysis)
 
 ```bash

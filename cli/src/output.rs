@@ -3210,6 +3210,7 @@ separated by blank lines (or as a JSON array with --json).
 Options:
   --bail               Stop on first error (default: continue all commands)
   --json               Output results as a JSON array
+  --omit-command       With --json, replace each raw command with its zero-based index
 
 Argument Mode:
   Each quoted argument is a full command string:
@@ -3229,6 +3230,7 @@ Examples:
   agent-browser batch "open https://example.com" "screenshot"
   agent-browser batch --bail "open https://example.com" "click @e1" "screenshot"
   echo '[["open", "https://example.com"], ["snapshot"]]' | agent-browser batch
+  echo '[["fill", "#password", "secret"]]' | agent-browser batch --json --omit-command
   agent-browser batch --bail < commands.json
 "##
         }
@@ -3630,8 +3632,9 @@ Init scripts:
   removeinitscript <id>      Remove a script registered via --init-script or addinitscript
 
 Batch:
-  batch [--bail] ["cmd" ...]  Execute multiple commands sequentially (args or stdin)
+  batch [options] ["cmd" ...] Execute multiple commands sequentially (args or stdin)
                               --bail stops on first error (default: continue all)
+                              --omit-command hides raw commands in JSON results
 
 Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)

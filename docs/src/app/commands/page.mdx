@@ -619,6 +619,11 @@ echo '[
   ["click", "@e1"],
   ["screenshot", "result.png"]
 ]' | agent-browser batch --json
+
+# Avoid echoing raw command arrays that contain confidential stdin values.
+# Rows use a zero-based index instead.
+echo '[["fill", "#password", "secret"]]' | \
+  agent-browser batch --json --omit-command
 ```
 
 <table>
@@ -628,8 +633,12 @@ echo '[
   <tbody>
     <tr><td><code>--bail</code></td><td>Stop on first error (default: continue all commands)</td></tr>
     <tr><td><code>--json</code></td><td>Output results as a JSON array</td></tr>
+    <tr><td><code>--omit-command</code></td><td>With <code>--json</code>, replace each raw command with its zero-based index</td></tr>
   </tbody>
 </table>
+
+`--omit-command` applies to successful and failed rows, including `--bail`
+output. Without it, JSON output keeps the existing `command` field.
 
 ## MCP server
 
