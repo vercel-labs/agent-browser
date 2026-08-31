@@ -1680,7 +1680,8 @@ agent-browser select - Select a dropdown option
 
 Usage: agent-browser select <selector> <value...>
 
-Selects one or more options in a <select> dropdown by value.
+Selects one or more options in a <select> dropdown by value or visible label.
+Label matching normalizes whitespace such as non-breaking spaces.
 
 Global Options:
   --json               Output as JSON
@@ -3547,7 +3548,7 @@ Core Commands:
   focus <sel>                Focus element
   check <sel>                Check checkbox
   uncheck <sel>              Uncheck checkbox
-  select <sel> <val...>      Select dropdown option
+  select <sel> <val...>      Select dropdown by value or visible label
   drag <src> <dst>           Drag and drop
   upload <sel> <files...>    Upload files
   download <sel> <path>      Download file by clicking element

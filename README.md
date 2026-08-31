@@ -123,7 +123,7 @@ agent-browser keyboard inserttext <text>  # Insert text without key events (no s
 agent-browser keydown <key>           # Hold key down
 agent-browser keyup <key>             # Release key
 agent-browser hover <sel>             # Hover element
-agent-browser select <sel> <val>      # Select dropdown option
+agent-browser select <sel> <val>      # Select dropdown by value or visible label
 agent-browser check <sel>             # Check checkbox
 agent-browser uncheck <sel>           # Uncheck checkbox
 agent-browser scroll <dir> [px]       # Scroll (up/down/left/right, --selector <sel>)

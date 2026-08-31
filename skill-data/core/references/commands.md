@@ -66,13 +66,15 @@ agent-browser keyup Shift         # Release key
 agent-browser hover @e1           # Hover
 agent-browser check @e1           # Check checkbox
 agent-browser uncheck @e1         # Uncheck checkbox
-agent-browser select @e1 "value"  # Select dropdown option
+agent-browser select @e1 "value"  # Select by value or visible label
 agent-browser select @e1 "a" "b"  # Select multiple options
 agent-browser scroll down 500     # Scroll page (default: down 300px)
 agent-browser scrollintoview @e1  # Scroll element into view (alias: scrollinto)
 agent-browser drag @e1 @e2        # Drag and drop
 agent-browser upload @e1 file.pdf # Upload files
 ```
+
+Visible-label matching treats non-breaking and ordinary spaces equivalently.
 
 Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, run a fresh snapshot, then retry the original action.
 

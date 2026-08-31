@@ -65,14 +65,23 @@ const STRUCTURAL_ROLES: &[&str] = &[
     "RootWebArea",
 ];
 
-const INVISIBLE_CHARS: &[char] = &[
+const ZERO_WIDTH_CHARS: &[char] = &[
     '\u{FEFF}', // BOM / Zero Width No-Break Space
     '\u{200B}', // Zero Width Space
     '\u{200C}', // Zero Width Non-Joiner
     '\u{200D}', // Zero Width Joiner
     '\u{2060}', // Word Joiner
-    '\u{00A0}', // Non-Breaking Space (&nbsp;)
 ];
+
+fn normalize_snapshot_name(name: &str) -> String {
+    name.chars()
+        .filter_map(|ch| match ch {
+            '\u{00A0}' => Some(' '),
+            ch if ZERO_WIDTH_CHARS.contains(&ch) => None,
+            ch => Some(ch),
+        })
+        .collect()
+}
 
 #[derive(Default)]
 pub struct SnapshotOptions {
@@ -1084,7 +1093,7 @@ fn render_tree(
     // Reduce unnecessary indentation and rendering
     if node.role.is_empty()
         || (node.role == "generic" && !node.has_ref && node.children.len() <= 1)
-        || (node.role == "StaticText" && node.name.replace(INVISIBLE_CHARS, "").is_empty())
+        || (node.role == "StaticText" && normalize_snapshot_name(&node.name).trim().is_empty())
     {
         // Ignored node -- still render children
         for &child in &node.children {
@@ -1133,8 +1142,10 @@ fn render_tree(
         &node.name
     };
     if !unescaped_display_name.is_empty() {
-        if let Ok(display_name) = serde_json::to_string(&unescaped_display_name) {
-            line.push_str(&format!(" {}", display_name.replace(INVISIBLE_CHARS, "")));
+        if let Ok(display_name) =
+            serde_json::to_string(&normalize_snapshot_name(unescaped_display_name))
+        {
+            line.push_str(&format!(" {}", display_name));
         }
     }
 
@@ -1358,6 +1369,15 @@ fn collect_backend_node_ids(node: &Value, ids: &mut std::collections::HashSet<i6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalize_snapshot_name_preserves_word_boundaries() {
+        assert_eq!(
+            normalize_snapshot_name("Capital\u{00A0}Federal"),
+            "Capital Federal"
+        );
+        assert_eq!(normalize_snapshot_name("zero\u{200B}width"), "zerowidth");
+    }
 
     #[test]
     fn test_interactive_roles() {

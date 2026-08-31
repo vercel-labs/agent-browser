@@ -32,6 +32,29 @@ fn get_data(resp: &Value) -> &Value {
     resp.get("data").expect("Missing 'data' in response")
 }
 
+async fn select_values(
+    state: &mut DaemonState,
+    id: &str,
+    selector: &str,
+    values: &[&str],
+) -> Value {
+    execute_command(
+        &json!({ "id": id, "action": "select", "selector": selector, "values": values }),
+        state,
+    )
+    .await
+}
+
+async fn assert_evaluate(state: &mut DaemonState, id: &str, script: &str, expected: Value) {
+    let resp = execute_command(
+        &json!({ "id": id, "action": "evaluate", "script": script }),
+        state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], expected);
+}
+
 fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
@@ -879,6 +902,140 @@ async fn e2e_form_interaction() {
     );
     assert!(snap.contains("textbox"), "Snapshot should show textbox");
     assert!(snap.contains("button"), "Snapshot should show button");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_select_option_normalized_names() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<html><body></body></html>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let script = r#"(() => {
+        const add = (select, value, label, selected = false) => {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = label;
+            option.selected = selected;
+            select.appendChild(option);
+        };
+        const province = document.createElement('select');
+        province.id = 'province';
+        add(province, '', 'Provincia');
+        add(province, 'B', 'Buenos\u00A0Aires', true);
+        add(province, 'C', 'Capital\u00A0Federal');
+        add(province, 'Z', 'Zero\u200BWidth');
+        province.dataset.changes = '0';
+        province.addEventListener('change', () => province.dataset.changes++);
+        document.body.appendChild(province);
+
+        const collision = document.createElement('select');
+        collision.id = 'collision';
+        add(collision, 'ascii', 'Alpha Beta', true);
+        add(collision, 'nbsp', 'Alpha\u00A0Beta');
+        document.body.appendChild(collision);
+
+        const cases = document.createElement('select');
+        cases.id = 'cases';
+        add(cases, 'US', 'Upper');
+        add(cases, 'us', 'Lower');
+        document.body.appendChild(cases);
+
+        const multi = document.createElement('select');
+        multi.id = 'multi';
+        multi.multiple = true;
+        add(multi, 'a', 'One\u00A0A');
+        add(multi, 'b', 'Two B');
+        document.body.appendChild(multi);
+    })()"#;
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": script }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "4", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(snapshot.contains("option \"Capital Federal\""));
+    assert!(!snapshot.contains("CapitalFederal"));
+    assert!(snapshot.contains("option \"ZeroWidth\""));
+
+    let resp = select_values(&mut state, "5", "#province", &["Capital Federal"]).await;
+    assert_success(&resp);
+    assert_evaluate(
+        &mut state,
+        "6",
+        "({ value: province.value, changes: province.dataset.changes })",
+        json!({ "value": "C", "changes": "1" }),
+    )
+    .await;
+
+    let resp = select_values(&mut state, "7", "#province", &["missing"]).await;
+    assert_eq!(resp["success"], false);
+    assert_evaluate(
+        &mut state,
+        "8",
+        "({ value: province.value, changes: province.dataset.changes })",
+        json!({ "value": "C", "changes": "1" }),
+    )
+    .await;
+
+    let resp = select_values(&mut state, "9", "#collision", &["Alpha Beta"]).await;
+    assert_success(&resp);
+    assert_evaluate(&mut state, "10", "collision.value", json!("ascii")).await;
+
+    let resp = select_values(&mut state, "11", "#collision", &["Alpha  Beta"]).await;
+    assert_eq!(resp["success"], false);
+    assert!(resp["error"]
+        .as_str()
+        .unwrap()
+        .contains("Multiple options matched"));
+    assert_evaluate(&mut state, "12", "collision.value", json!("ascii")).await;
+
+    let resp = select_values(&mut state, "13", "#cases", &["us"]).await;
+    assert_success(&resp);
+    assert_evaluate(&mut state, "14", "cases.value", json!("us")).await;
+
+    let resp = select_values(&mut state, "15", "#multi", &["One A", "b"]).await;
+    assert_success(&resp);
+    assert_evaluate(
+        &mut state,
+        "16",
+        "[...multi.selectedOptions].map(option => option.value)",
+        json!(["a", "b"]),
+    )
+    .await;
+
+    let resp = select_values(&mut state, "17", "#multi", &["a", "missing"]).await;
+    assert_eq!(resp["success"], false);
+    assert_evaluate(
+        &mut state,
+        "18",
+        "[...multi.selectedOptions].map(option => option.value)",
+        json!(["a", "b"]),
+    )
+    .await;
+
+    let resp = select_values(&mut state, "19", "#province", &["ZeroWidth"]).await;
+    assert_success(&resp);
+    assert_evaluate(&mut state, "20", "province.value", json!("Z")).await;
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);

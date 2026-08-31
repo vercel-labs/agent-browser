@@ -135,7 +135,7 @@ agent-browser press Enter                 # press a key at current focus
 agent-browser press Control+a             # key combination
 agent-browser check @e3                   # check checkbox
 agent-browser uncheck @e3                 # uncheck
-agent-browser select @e4 "option-value"   # select dropdown option
+agent-browser select @e4 "option-value"   # select by value or visible label
 agent-browser select @e4 "a" "b"          # select multiple
 agent-browser upload @e5 file1.pdf        # upload file(s)
 agent-browser scroll down 500             # scroll page (up/down/left/right)
