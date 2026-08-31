@@ -221,7 +221,8 @@ async fn resolve_center_in_same_process_frame(
             if (!el) return null;
             if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded(true);
             else el.scrollIntoView({{ block: 'center', inline: 'center' }});
-            const rect = el.getBoundingClientRect();
+            const clickRect = {CLICK_RECT_JS};
+            const rect = clickRect(el);
             let x = rect.x + rect.width / 2;
             let y = rect.y + rect.height / 2;
             let win = doc.defaultView;
@@ -328,7 +329,7 @@ pub async fn resolve_element_center(
 
             if let Ok(r) = result {
                 let (x, y) = box_model_center(&r.model);
-                check_node_interception(
+                let (x, y) = aim_and_check_click_point(
                     client,
                     effective_session_id,
                     backend_node_id,
@@ -366,7 +367,7 @@ pub async fn resolve_element_center(
             )
             .await?;
         let (x, y) = box_model_center(&result.model);
-        check_node_interception(
+        let (x, y) = aim_and_check_click_point(
             client,
             effective_session_id,
             fresh_id,
@@ -395,18 +396,19 @@ pub async fn resolve_element_center(
     Ok((x, y, session_id.to_string()))
 }
 
-/// Hit-test a ref-resolved node at its computed click point and error if an
-/// unrelated element (overlay, banner, sticky header) would receive the input
-/// instead. Best effort: resolution failures skip the check rather than block
-/// the interaction.
-async fn check_node_interception(
+/// Correct a ref-resolved node's click point onto a line box the node
+/// actually covers, then hit-test it and error if an unrelated element
+/// (overlay, banner, sticky header) would receive the input instead. Returns
+/// the point to aim at. Best effort: resolution failures leave the point
+/// unchanged rather than block the interaction.
+async fn aim_and_check_click_point(
     client: &CdpClient,
     session_id: &str,
     backend_node_id: i64,
     target: &str,
     x: f64,
     y: f64,
-) -> Result<(), String> {
+) -> Result<(f64, f64), String> {
     let resolved: Result<DomResolveNodeResult, String> = client
         .send_command_typed(
             "DOM.resolveNode",
@@ -419,23 +421,32 @@ async fn check_node_interception(
         )
         .await;
     let Ok(resolved) = resolved else {
-        return Ok(());
+        return Ok((x, y));
     };
     let Some(object_id) = resolved.object.object_id else {
-        return Ok(());
+        return Ok((x, y));
     };
     // Box-model coordinates are in the top-level viewport space, so the
     // hit-test starts from the top document. For an OOPIF node the
     // frameElement walk stops at the process boundary, where the frame's own
     // document and session-local coordinates are already consistent.
+    //
+    // The client rects read here are in this document's space rather than that
+    // one, so the aim correction is applied as the delta between two centers
+    // measured in the same space, leaving the caller's coordinate space alone.
     let function = format!(
         r#"function(x, y) {{
+            const clickRect = {CLICK_RECT_JS};
+            const union = this.getBoundingClientRect();
+            const aim = clickRect(this);
+            const dx = (aim.x + aim.width / 2) - (union.x + union.width / 2);
+            const dy = (aim.y + aim.height / 2) - (union.y + union.height / 2);
             let topDoc = this.ownerDocument || document;
             while (topDoc.defaultView && topDoc.defaultView.frameElement) {{
                 topDoc = topDoc.defaultView.frameElement.ownerDocument;
             }}
             const blockerAt = {BLOCKER_AT_JS};
-            return blockerAt(topDoc, this, x, y);
+            return {{ dx: dx, dy: dy, blocker: blockerAt(topDoc, this, x + dx, y + dy) }};
         }}"#,
     );
     let result = client
@@ -450,16 +461,25 @@ async fn check_node_interception(
             Some(session_id),
         )
         .await;
-    if let Ok(value) = result {
-        if let Some(blocker) = value
-            .get("result")
-            .and_then(|r| r.get("value"))
-            .and_then(|v| v.as_str())
-        {
-            return Err(intercepted_error(target, blocker));
-        }
+    let Ok(value) = result else {
+        return Ok((x, y));
+    };
+    let value = value.get("result").and_then(|r| r.get("value"));
+    if let Some(blocker) = value
+        .and_then(|v| v.get("blocker"))
+        .and_then(|v| v.as_str())
+    {
+        return Err(intercepted_error(target, blocker));
     }
-    Ok(())
+    let dx = value
+        .and_then(|v| v.get("dx"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let dy = value
+        .and_then(|v| v.get("dy"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    Ok((x + dx, y + dy))
 }
 
 /// Coordinates from DOM.getBoxModel are viewport-relative, and input events
@@ -721,6 +741,23 @@ fn build_count_elements_js(selector: &str) -> String {
     }
 }
 
+/// Pick the rect to aim a click at. An inline element that wraps across lines
+/// has one border box per line fragment, and both `DOM.getBoxModel` and
+/// `getBoundingClientRect` report only their union. The union's center sits in
+/// the gap between the fragments, so a click aimed there lands on whatever is
+/// painted behind the element (usually its own parent) instead of on the
+/// element. Aim at the largest individual client rect, which is a point the
+/// element actually covers, and fall back to the union for elements that have
+/// no client rects of their own.
+const CLICK_RECT_JS: &str = r#"(el) => {
+    let best = null;
+    for (const r of el.getClientRects()) {
+        if (r.width <= 0 || r.height <= 0) continue;
+        if (!best || r.width * r.height > best.width * best.height) best = r;
+    }
+    return best || el.getBoundingClientRect();
+}"#;
+
 /// JS function source for `blockerAt(doc, el, x, y)`: returns a short
 /// description of the element that would actually receive a click at (x, y)
 /// when that element is unrelated to `el`, or null when the click would land
@@ -774,10 +811,11 @@ fn build_selector_js(selector: &str) -> String {
                 r.bottom > 0 && r.right > 0 &&
                 r.top < (window.innerHeight || document.documentElement.clientHeight) &&
                 r.left < (window.innerWidth || document.documentElement.clientWidth);
-            let rect = el.getBoundingClientRect();
+            const clickRect = {CLICK_RECT_JS};
+            let rect = clickRect(el);
             if (!inView(rect)) {{
                 el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
-                rect = el.getBoundingClientRect();
+                rect = clickRect(el);
             }}
             const x = rect.x + rect.width / 2;
             const y = rect.y + rect.height / 2;

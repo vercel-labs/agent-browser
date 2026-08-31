@@ -9369,3 +9369,125 @@ async fn e2e_find_role_document_matches_root() {
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }
+
+// ---------------------------------------------------------------------------
+// Regression: clicking an inline element that wraps across lines.
+//
+// Such an element has one border box per line fragment, and both
+// DOM.getBoxModel (the ref path) and getBoundingClientRect (the selector path)
+// report only their union. The union's center sits in the gap between the
+// fragments, so a click aimed there is delivered to the parent instead. The
+// hit test does not catch it, because an ancestor at the click point counts as
+// "lands on el", and the command reports success while nothing happens.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_inline_element_wrapped_across_lines() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The 150px column forces the anchor onto two lines. Both the anchor and
+    // its paragraph record who received the click, so a miss is visible rather
+    // than silent.
+    let html = concat!(
+        "data:text/html,<html><body style='font:16px/2.4 serif;margin:40px'>",
+        "<div style='width:150px'>",
+        "<p id='para'>He won the ",
+        "<a id='link' href='x'>Nobel Prize in Literature</a> in 1953.</p>",
+        "</div>",
+        "<script>",
+        "window.hits=[];",
+        "document.getElementById('link').addEventListener('click',function(e){",
+        "e.preventDefault();window.hits.push('link')});",
+        "document.getElementById('para').addEventListener('click',function(e){",
+        "if(e.target.id!=='link')window.hits.push('para')});",
+        "</script>",
+        "</body></html>"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Guard the fixture: the point of the test is gone if the anchor happens
+    // to fit on one line in this browser's default metrics.
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "evaluate",
+            "script": "document.getElementById('link').getClientRects().length"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"], 2,
+        "fixture must wrap the anchor onto two lines"
+    );
+
+    // Selector path.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "click", "selector": "#link" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": "window.hits.join(',')" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"], "link",
+        "selector click landed off the wrapped anchor"
+    );
+
+    // Ref path, which computes its point from DOM.getBoxModel instead.
+    let resp = execute_command(&json!({ "id": "6", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(
+        snapshot.contains("Nobel Prize in Literature"),
+        "snapshot should expose the anchor"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "evaluate", "script": "window.hits=[];'ok'" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "click", "selector": "e1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "evaluate", "script": "window.hits.join(',')" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"], "link",
+        "ref click landed off the wrapped anchor"
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
