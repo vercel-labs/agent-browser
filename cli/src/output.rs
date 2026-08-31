@@ -117,6 +117,10 @@ fn format_storage_text(data: &serde_json::Value) -> Option<String> {
     Some(format!("{}: {}", key, format_storage_value(value)))
 }
 
+fn page_error_text(error: &serde_json::Value) -> &str {
+    error.get("text").and_then(|v| v.as_str()).unwrap_or("")
+}
+
 fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
     match action {
         Some("stream_disable") => data
@@ -793,7 +797,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         // Errors
         if let Some(errors) = data.get("errors").and_then(|v| v.as_array()) {
             for err in errors {
-                let msg = err.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                let msg = page_error_text(err);
                 println!("{} {}", color::error_indicator(), msg);
             }
             return;
@@ -4004,7 +4008,7 @@ pub fn print_version() {
 mod tests {
     use super::{
         boundary_origin, format_a11y_text, format_storage_text, format_vitals_text,
-        format_with_boundaries, OutputOptions,
+        format_with_boundaries, page_error_text, OutputOptions,
     };
     use serde_json::json;
 
@@ -4070,6 +4074,13 @@ mod tests {
         let rendered = format_storage_text(&data).unwrap();
 
         assert_eq!(rendered, "No storage entries");
+    }
+
+    #[test]
+    fn test_page_error_text_uses_event_tracker_field() {
+        let error = json!({ "text": "Error: detached rejection" });
+
+        assert_eq!(page_error_text(&error), "Error: detached rejection");
     }
 
     #[test]
