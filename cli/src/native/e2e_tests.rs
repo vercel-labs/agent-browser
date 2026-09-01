@@ -77,6 +77,15 @@ async fn e2e_webmcp_discovery_invocation_and_cancellation() {
     )
     .await;
     assert_success(&resp);
+    assert_eq!(get_data(&resp)["webmcp"]["experimental"], true);
+    assert_eq!(get_data(&resp)["webmcp"]["available"], true);
+    assert!(
+        get_data(&resp)["webmcp"]["toolCount"]
+            .as_u64()
+            .is_some_and(|count| count >= 4),
+        "navigation did not advertise the fixture's WebMCP tools: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
     let child_ready = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
         loop {
             let resp = execute_command(
@@ -423,6 +432,7 @@ async fn e2e_webmcp_discovery_invocation_and_cancellation() {
 #[tokio::test]
 #[ignore]
 async fn e2e_webmcp_opt_out_returns_no_tools() {
+    let (fixture_url, fixture_server) = start_webmcp_server().await;
     let mut state = DaemonState::new();
     let resp = execute_command(
         &json!({
@@ -440,8 +450,17 @@ async fn e2e_webmcp_opt_out_returns_no_tools() {
     assert_success(&resp);
     assert_eq!(get_data(&resp)["tools"], json!([]));
 
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": fixture_url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(get_data(&resp).get("webmcp").is_none());
+
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
+    fixture_server.abort();
 }
 
 fn native_test_fixture_url(name: &str) -> String {

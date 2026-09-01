@@ -338,6 +338,7 @@ agent-browser stream enable           # Start the WebSocket stream server
 agent-browser stream enable --port 9223
 
 # Experimental WebMCP page tools
+# Successful navigation advertises availability; JSON includes data.webmcp.toolCount
 agent-browser webmcp list
 agent-browser webmcp invoke <tool> --params '{"key":"value"}'
 agent-browser webmcp invoke <tool> --params @input.json --detach

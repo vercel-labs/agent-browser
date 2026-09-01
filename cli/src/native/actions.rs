@@ -447,6 +447,8 @@ pub struct DaemonState {
     pub recording_state: RecordingState,
     event_rx: Option<broadcast::Receiver<CdpEvent>>,
     pub webmcp: webmcp::RuntimeState,
+    /// Whether the active launch opted into Chrome's experimental WebMCP features.
+    pub webmcp_enabled: bool,
     pub screencasting: bool,
     pub policy: Option<ActionPolicy>,
     pub pending_confirmation: Option<PendingConfirmation>,
@@ -589,6 +591,7 @@ impl DaemonState {
             recording_state: RecordingState::new(),
             event_rx: None,
             webmcp: webmcp::RuntimeState::default(),
+            webmcp_enabled: false,
             screencasting: false,
             policy: ActionPolicy::load_if_exists(),
             pending_confirmation: None,
@@ -2174,6 +2177,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
 
     close_active_provider_session(state).await;
     state.launch_hash = None;
+    state.webmcp_enabled = false;
     state.network_auto_attach_installed = false;
     state.iframe_sessions.clear();
     state.active_iframe_sessions.clear();
@@ -2552,6 +2556,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 let context = auto_launch_error_context(env::var("AGENT_BROWSER_CDP").is_ok());
                 return error_response(&id, &format!("{}: {}", context, e));
             }
+            state.webmcp_enabled = launch_options_from_env().webmcp;
             lifecycle_launched = true;
         } else {
             lifecycle_reused = true;
@@ -2629,7 +2634,17 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     }
 
     let result = match action {
-        "launch" => handle_launch(cmd, state).await,
+        "launch" => {
+            let webmcp_enabled = cmd
+                .get("webmcp")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| launch_options_from_env().webmcp);
+            let result = handle_launch(cmd, state).await;
+            if result.is_ok() {
+                state.webmcp_enabled = webmcp_enabled;
+            }
+            result
+        }
         "navigate" => handle_navigate(cmd, state).await,
         "read" => handle_read(cmd, state).await,
         "url" => handle_url(state).await,
@@ -2866,6 +2881,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             lifecycle_relaunched_browser,
         );
     }
+    attach_webmcp_availability(&mut resp, action, state).await;
 
     // Auto-report pending JavaScript dialog so agents know why commands may hang
     if action != "dialog" {
@@ -3515,7 +3531,6 @@ async fn auto_launch(
     let init_script_paths = launch_init_script_paths_from_env();
     let allowed_domains = current_allowed_domains(state).await;
     options.restrict_webrtc = !allowed_domains.is_empty();
-
     // Extract storage_state before options is moved into BrowserManager::launch.
     let storage_state_path = options.storage_state.clone();
     let restore_key = state.session_name.clone();
@@ -11914,6 +11929,58 @@ fn success_response(id: &str, data: Value) -> Value {
     })
 }
 
+async fn attach_webmcp_availability(resp: &mut Value, action: &str, state: &DaemonState) {
+    if action != "navigate"
+        || resp.get("success").and_then(Value::as_bool) != Some(true)
+        || matches!(state.backend_type, BackendType::WebDriver)
+        || state.engine != "chrome"
+        || !state.webmcp_enabled
+    {
+        return;
+    }
+    let Some(session_id) = state
+        .browser
+        .as_ref()
+        .and_then(|browser| browser.active_session_id().ok())
+    else {
+        return;
+    };
+    let Ok(tools) = state.webmcp.tools(session_id) else {
+        return;
+    };
+    let domain_filter = state.domain_filter.read().await;
+    attach_webmcp_availability_from_tools(resp, action, &tools, domain_filter.as_ref());
+}
+
+fn attach_webmcp_availability_from_tools(
+    resp: &mut Value,
+    action: &str,
+    tools: &[webmcp::ToolRecord],
+    domain_filter: Option<&DomainFilter>,
+) {
+    if action != "navigate" || resp.get("success").and_then(Value::as_bool) != Some(true) {
+        return;
+    }
+    let tool_count = tools
+        .iter()
+        .filter(|tool| domain_filter.is_none_or(|filter| filter.check_url(&tool.origin).is_ok()))
+        .count();
+    if tool_count == 0 {
+        return;
+    }
+    let Some(data) = resp.get_mut("data").and_then(Value::as_object_mut) else {
+        return;
+    };
+    data.insert(
+        "webmcp".to_string(),
+        json!({
+            "experimental": true,
+            "available": true,
+            "toolCount": tool_count,
+        }),
+    );
+}
+
 fn inject_lifecycle(
     resp: &mut Value,
     state: &DaemonState,
@@ -13635,6 +13702,89 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         assert_eq!(resp["success"], true);
         assert!(resp["data"].is_object());
         assert_eq!(resp["data"]["url"], "https://example.com");
+    }
+
+    fn webmcp_tool(name: &str, origin: &str) -> webmcp::ToolRecord {
+        webmcp::ToolRecord {
+            name: name.to_string(),
+            description: String::new(),
+            input_schema: json!({}),
+            annotations: json!({}),
+            origin: origin.to_string(),
+            frame_id: "frame-1".to_string(),
+            backend_node_id: None,
+        }
+    }
+
+    #[test]
+    fn test_navigation_advertises_cached_webmcp_tools() {
+        let mut resp = success_response(
+            "cmd-webmcp",
+            json!({"url": "https://example.com", "title": "Example"}),
+        );
+        let tools = vec![
+            webmcp_tool("search", "https://example.com"),
+            webmcp_tool("checkout", "https://example.com"),
+        ];
+
+        attach_webmcp_availability_from_tools(&mut resp, "navigate", &tools, None);
+
+        assert_eq!(
+            resp["data"]["webmcp"],
+            json!({
+                "experimental": true,
+                "available": true,
+                "toolCount": 2,
+            })
+        );
+    }
+
+    #[test]
+    fn test_navigation_without_cached_webmcp_tools_is_unchanged() {
+        let mut resp = success_response("cmd-webmcp", json!({"url": "https://example.com"}));
+        let expected = resp.clone();
+
+        attach_webmcp_availability_from_tools(&mut resp, "navigate", &[], None);
+
+        assert_eq!(resp, expected);
+    }
+
+    #[test]
+    fn test_non_navigation_response_does_not_advertise_webmcp_tools() {
+        let mut resp = success_response("cmd-webmcp", json!({"url": "https://example.com"}));
+        let expected = resp.clone();
+        let tools = vec![webmcp_tool("search", "https://example.com")];
+
+        attach_webmcp_availability_from_tools(&mut resp, "launch", &tools, None);
+
+        assert_eq!(resp, expected);
+    }
+
+    #[test]
+    fn test_navigation_does_not_count_disallowed_webmcp_origins() {
+        let mut resp = success_response("cmd-webmcp", json!({"url": "https://allowed.example"}));
+        let tools = vec![
+            webmcp_tool("search", "https://allowed.example"),
+            webmcp_tool("checkout", "https://blocked.example"),
+        ];
+        let domain_filter = DomainFilter::new("allowed.example");
+
+        attach_webmcp_availability_from_tools(&mut resp, "navigate", &tools, Some(&domain_filter));
+
+        assert_eq!(resp["data"]["webmcp"]["toolCount"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_navigation_does_not_advertise_when_webmcp_is_disabled() {
+        let mut state = DaemonState::new();
+        state.engine = "chrome".to_string();
+        state.webmcp_enabled = false;
+        let mut resp = success_response("cmd-webmcp", json!({"url": "https://example.com"}));
+        let expected = resp.clone();
+
+        attach_webmcp_availability(&mut resp, "navigate", &state).await;
+
+        assert_eq!(resp, expected);
     }
 
     #[test]

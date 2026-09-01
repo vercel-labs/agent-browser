@@ -2,6 +2,20 @@
 
 WebMCP support is experimental. agent-browser enables Chrome's current WebMCP launch features by default for locally managed Chrome sessions. Pass `--no-webmcp` or set `AGENT_BROWSER_NO_WEBMCP=1` to opt out.
 
+After a successful navigation, text output advertises when the page has allowed WebMCP tools and points to `agent-browser webmcp list`. JSON output adds this metadata only when one or more tools are available:
+
+```json
+{
+  "data": {
+    "webmcp": {
+      "experimental": true,
+      "available": true,
+      "toolCount": 4
+    }
+  }
+}
+```
+
 ```bash
 agent-browser open https://example.com
 agent-browser webmcp list

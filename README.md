@@ -151,7 +151,7 @@ agent-browser chat                    # AI chat: interactive REPL mode
 
 ### WebMCP (experimental)
 
-WebMCP tools are ready by default in agent-browser-managed Chrome. Use `--no-webmcp` to disable the launch features.
+WebMCP tools are ready by default in agent-browser-managed Chrome. Use `--no-webmcp` to disable the launch features. After a successful navigation, text output advertises when tools are available. JSON output includes `data.webmcp` with `experimental`, `available`, and `toolCount`.
 
 ```bash
 agent-browser open https://example.com
