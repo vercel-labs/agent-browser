@@ -94,6 +94,14 @@ fn attach_script_launch_options(launch_cmd: &mut serde_json::Value, flags: &Flag
     }
 }
 
+fn attach_ios_device_to_launch_command(launch_cmd: &mut serde_json::Value, flags: &Flags) {
+    if flags.provider.as_deref() == Some("ios") {
+        if let Some(ref device) = flags.device {
+            launch_cmd["deviceNameOrUdid"] = json!(device);
+        }
+    }
+}
+
 fn attach_allowed_domains_to_launch_command(launch_cmd: &mut serde_json::Value, flags: &Flags) {
     if let Some(ref domains) = flags.allowed_domains {
         launch_cmd["allowedDomains"] = json!(domains);
@@ -129,6 +137,7 @@ fn build_provider_launch_command(provider: &str, flags: &Flags) -> serde_json::V
         "action": "launch",
         "provider": provider
     });
+    attach_ios_device_to_launch_command(&mut launch_cmd, flags);
     launch_cmd["plugins"] = json!(flags.plugins.clone());
     attach_script_launch_options(&mut launch_cmd, flags);
     attach_allowed_domains_to_launch_command(&mut launch_cmd, flags);
@@ -2483,6 +2492,29 @@ mod tests {
             cmd["allowedDomains"],
             json!(["example.com", "*.example.org"])
         );
+    }
+
+    #[test]
+    fn test_attach_ios_device_to_launch_command() {
+        let args = ["-p", "ios", "--device", "TARGET-UDID"].map(str::to_string);
+        let flags = parse_flags(&args);
+        let mut cmd = json!({ "action": "launch", "provider": "ios" });
+
+        attach_ios_device_to_launch_command(&mut cmd, &flags);
+
+        assert_eq!(cmd["deviceNameOrUdid"], "TARGET-UDID");
+    }
+
+    #[test]
+    fn test_attach_ios_device_does_not_modify_other_provider_commands() {
+        let mut flags = neutral_launch_config_flags();
+        flags.provider = Some("browserbase".to_string());
+        flags.device = Some("TARGET-UDID".to_string());
+        let mut cmd = json!({ "action": "launch", "provider": "browserbase" });
+
+        attach_ios_device_to_launch_command(&mut cmd, &flags);
+
+        assert!(cmd.get("deviceNameOrUdid").is_none());
     }
 
     #[test]

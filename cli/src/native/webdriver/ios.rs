@@ -116,6 +116,15 @@ pub fn list_all_devices() -> Result<Vec<IosDevice>, String> {
     Ok(all)
 }
 
+fn matches_name_or_udid(device: &IosDevice, selector: &str) -> bool {
+    device.udid == selector
+        || device.name == selector
+        || device
+            .name
+            .to_lowercase()
+            .contains(&selector.to_lowercase())
+}
+
 pub fn boot_simulator(udid: &str) -> Result<(), String> {
     let output = Command::new("xcrun")
         .args(["simctl", "boot", udid])
@@ -148,21 +157,31 @@ pub fn shutdown_simulator(udid: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn select_device(device_name: Option<&str>, udid: Option<&str>) -> Result<IosDevice, String> {
+fn select_explicit_device(
+    devices: Vec<IosDevice>,
+    name_or_udid: Option<&str>,
+    udid: Option<&str>,
+) -> Result<IosDevice, String> {
     if let Some(u) = udid {
-        let devices = list_all_devices()?;
         return devices
             .into_iter()
             .find(|d| d.udid == u)
-            .ok_or_else(|| format!("Device with UDID '{}' not found", u));
+            .ok_or_else(|| format!("No iOS device with UDID '{}' was found", u));
     }
 
-    if let Some(name) = device_name {
-        let devices = list_all_devices()?;
+    if let Some(selector) = name_or_udid {
         return devices
             .into_iter()
-            .find(|d| d.name.to_lowercase().contains(&name.to_lowercase()))
-            .ok_or_else(|| format!("Device '{}' not found", name));
+            .find(|d| matches_name_or_udid(d, selector))
+            .ok_or_else(|| format!("No iOS device matched selector '{}'", selector));
+    }
+
+    Err("No iOS device selector provided".to_string())
+}
+
+pub fn select_device(name_or_udid: Option<&str>, udid: Option<&str>) -> Result<IosDevice, String> {
+    if name_or_udid.is_some() || udid.is_some() {
+        return select_explicit_device(list_all_devices()?, name_or_udid, udid);
     }
 
     // Default: prefer most recent iPhone, prefer Pro
@@ -231,5 +250,38 @@ mod tests {
         }];
         let json = to_device_json(&devices);
         assert!(json.get("devices").unwrap().as_array().unwrap().len() == 1);
+    }
+
+    #[test]
+    fn name_or_udid_selector_accepts_name_or_exact_udid() {
+        let device = IosDevice {
+            name: "iPhone 15 Pro".to_string(),
+            udid: "ABC-123".to_string(),
+            state: "Shutdown".to_string(),
+            runtime: "iOS-17".to_string(),
+            is_real: false,
+        };
+
+        assert!(matches_name_or_udid(&device, "iPhone 15"));
+        assert!(matches_name_or_udid(&device, "ABC-123"));
+        assert!(!matches_name_or_udid(&device, "DEF-456"));
+    }
+
+    #[test]
+    fn missing_explicit_selector_returns_error_without_default_fallback() {
+        let device = IosDevice {
+            name: "iPhone 15 Pro".to_string(),
+            udid: "ABC-123".to_string(),
+            state: "Shutdown".to_string(),
+            runtime: "iOS-17".to_string(),
+            is_real: false,
+        };
+
+        let result = select_explicit_device(vec![device], Some("iPhone 99"), None);
+
+        assert_eq!(
+            result.unwrap_err(),
+            "No iOS device matched selector 'iPhone 99'"
+        );
     }
 }

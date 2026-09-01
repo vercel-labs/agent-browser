@@ -1231,6 +1231,16 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_device_overrides_ios_device_environment() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_IOS_DEVICE"]);
+        guard.set("AGENT_BROWSER_IOS_DEVICE", "env-name-or-udid");
+
+        let flags = parse_flags(&args("--device cli-name-or-udid open example.com"));
+
+        assert_eq!(flags.device.as_deref(), Some("cli-name-or-udid"));
+    }
+
+    #[test]
     fn test_parse_idle_timeout_raw_ms() {
         assert_eq!(parse_idle_timeout("10").unwrap(), "10");
     }
