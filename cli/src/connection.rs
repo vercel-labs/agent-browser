@@ -1,4 +1,5 @@
 use crate::validation::sanitize_session_component;
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::env;
@@ -11,6 +12,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use socket2::{Domain, Socket, Type};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
@@ -157,8 +160,102 @@ fn get_config_path(session: &str) -> PathBuf {
     get_socket_dir().join(format!("{}.config", session))
 }
 
+/// Lifetime ownership marker for a session daemon. A daemon holds an advisory
+/// exclusive lock on this file before touching endpoint sidecars and releases
+/// it only after its listener and browser resources are gone. The file's PID
+/// is diagnostic metadata, not the liveness authority: PIDs are reusable.
+/// The advisory lock prevents a spawn-race loser or a client that sees a
+/// saturated endpoint from unlinking a live winner.
+pub(crate) fn get_owner_lock_path(session: &str) -> PathBuf {
+    get_socket_dir().join(format!("{}.lock", session))
+}
+
+pub(crate) fn daemon_owner_is_live(session: &str) -> bool {
+    let path = get_owner_lock_path(session);
+    let file = match fs::OpenOptions::new().read(true).write(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        // Do not remove a marker we cannot inspect. This is conservative for
+        // a daemon owned by a different user, and unlike a PID probe it cannot
+        // mistake an unrelated reused PID for the daemon.
+        Err(_) => return true,
+    };
+
+    match file.try_lock_exclusive() {
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
+        Err(_) => true,
+        Ok(()) => {
+            // A creator locks before writing its PID. Keep the short grace
+            // only for that empty startup marker, never for a PID marker:
+            // an unlocked marker containing a live unrelated PID is stale.
+            let marker_is_empty = fs::read_to_string(&path)
+                .map(|contents| contents.trim().is_empty())
+                .unwrap_or(false);
+            let recently_created = fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age < Duration::from_secs(5));
+            let _ = FileExt::unlock(&file);
+            marker_is_empty && recently_created
+        }
+    }
+}
+
+/// Claim the session ownership lock briefly while inspecting or removing stale
+/// sidecars. This uses the same stable inode as the daemon lifetime lock, so
+/// cleanup cannot unlink a socket that a replacement daemon just bound.
+fn try_lock_owner_marker(session: &str) -> Result<Option<fs::File>, std::io::Error> {
+    let path = get_owner_lock_path(session);
+    let (file, already_existed) = match fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(file) => (file, false),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
+            fs::OpenOptions::new().read(true).write(true).open(&path)?,
+            true,
+        ),
+        Err(error) => return Err(error),
+    };
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            // `create` and `flock` cannot be one syscall. If a daemon won
+            // the atomic create immediately before us, leave its fresh empty
+            // marker alone until it has a chance to acquire the lock and
+            // write its diagnostic PID.
+            let marker_is_empty = fs::read_to_string(&path)
+                .map(|contents| contents.trim().is_empty())
+                .unwrap_or(false);
+            let recently_created = fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age < Duration::from_secs(5));
+            if already_existed && marker_is_empty && recently_created {
+                let _ = FileExt::unlock(&file);
+                Ok(None)
+            } else {
+                Ok(Some(file))
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Clean up stale socket and PID files for a session
 pub fn cleanup_stale_files(session: &str) {
+    let Ok(Some(_lock)) = try_lock_owner_marker(session) else {
+        // A live owner may be between binding and accepting, or temporarily
+        // saturated. Its sidecars are not stale just because a probe failed.
+        return;
+    };
+    // Hold the marker's lock while cleanup runs. Once every old endpoint is
+    // gone it is safe to remove this stale inode: a later daemon will create
+    // and lock a fresh marker only after this cleanup has finished.
     let pid_path = get_pid_path(session);
     let _ = fs::remove_file(&pid_path);
     let version_path = get_version_path(session);
@@ -179,6 +276,32 @@ pub fn cleanup_stale_files(session: &str) {
         let port_path = get_port_path(session);
         let _ = fs::remove_file(&port_path);
     }
+    let _ = fs::remove_file(get_owner_lock_path(session));
+}
+
+/// Remove sidecars only after the caller has verified that the daemon owner
+/// exited. Lifecycle fallback uses this after terminating the recorded owner;
+/// unlike `cleanup_stale_files`, it must not be called while a live lock is
+/// present.
+fn cleanup_verified_dead_owner_files(session: &str) {
+    let Ok(Some(_lock)) = try_lock_owner_marker(session) else {
+        return;
+    };
+    // Keep the advisory lock while the endpoints are removed, then remove
+    // this verified-dead marker so the next daemon starts with a clean owner
+    // sidecar rather than inheriting a stale diagnostic PID.
+    let _ = fs::remove_file(get_pid_path(session));
+    let _ = fs::remove_file(get_version_path(session));
+    let _ = fs::remove_file(get_config_path(session));
+    let _ = fs::remove_file(get_socket_dir().join(format!("{}.stream", session)));
+    let _ = fs::remove_file(get_socket_dir().join(format!("{}.engine", session)));
+    let _ = fs::remove_file(get_socket_dir().join(format!("{}.provider", session)));
+    let _ = fs::remove_file(get_socket_dir().join(format!("{}.extensions", session)));
+    #[cfg(unix)]
+    let _ = fs::remove_file(get_socket_path(session));
+    #[cfg(windows)]
+    let _ = fs::remove_file(get_port_path(session));
+    let _ = fs::remove_file(get_owner_lock_path(session));
 }
 
 /// Returns whether a process with the given PID is currently alive.
@@ -263,8 +386,9 @@ pub fn read_session_version(session: &str) -> Option<String> {
 /// Walk the socket directory and classify each `.pid` / `.sock` entry.
 ///
 /// - Live daemons go into `sessions` with their `.version` file contents.
-/// - Stale entries (process gone, unreadable pid, orphaned `.sock`) are
-///   cleaned via [`cleanup_stale_files`] and recorded in `cleaned`.
+/// - Stale entries (released ownership lock, unreadable pid, orphaned
+///   `.sock`) are cleaned via [`cleanup_stale_files`] and recorded in
+///   `cleaned`. A PID is diagnostic only because it can be reused.
 /// - `dashboard.pid` lands in `dashboard` with liveness info; if the
 ///   process is gone, the pid file is removed and a `DashboardGone` entry
 ///   is added to `cleaned`.
@@ -321,7 +445,7 @@ pub fn walk_daemons() -> DaemonInventory {
             }
         };
 
-        if !is_pid_alive(pid) {
+        if !daemon_owner_is_live(&session_name) {
             cleanup_stale_files(&session_name);
             inventory.cleaned.push(CleanedSession {
                 name: session_name,
@@ -348,7 +472,7 @@ pub fn walk_daemons() -> DaemonInventory {
                     continue;
                 }
                 let pid_path = socket_dir.join(format!("{}.pid", session_name));
-                if !pid_path.exists() {
+                if !pid_path.exists() && !daemon_owner_is_live(session_name) {
                     cleanup_stale_files(session_name);
                     inventory.cleaned.push(CleanedSession {
                         name: session_name.to_string(),
@@ -405,7 +529,7 @@ pub fn daemon_ready(session: &str) -> bool {
     #[cfg(unix)]
     {
         let socket_path = get_socket_path(session);
-        UnixStream::connect(&socket_path).is_ok()
+        connect_unix_timeout(&socket_path, Duration::from_millis(100)).is_ok()
     }
     #[cfg(windows)]
     {
@@ -714,14 +838,8 @@ fn daemon_version_matches(session: &str) -> bool {
 
 /// Kill a running daemon by reading its PID file and sending a kill signal.
 fn kill_stale_daemon(session: &str) {
-    // Remove the socket first so no new connections reach the old daemon
-    #[cfg(unix)]
-    {
-        let socket_path = get_socket_path(session);
-        let _ = fs::remove_file(&socket_path);
-    }
-
     let pid_path = get_pid_path(session);
+    let mut stopped = true;
     if let Ok(pid_str) = fs::read_to_string(&pid_path) {
         if let Ok(pid) = pid_str.trim().parse::<u32>() {
             #[cfg(unix)]
@@ -753,11 +871,16 @@ fn kill_stale_daemon(session: &str) {
                     .status();
                 thread::sleep(Duration::from_millis(500));
             }
+            stopped = !is_pid_alive(pid);
         }
     }
 
-    // Clean up leftover files regardless
-    cleanup_stale_files(session);
+    // Do not unlink a listener before stopping its verified owner. A live but
+    // saturated daemon must keep its endpoint and lock so no second daemon can
+    // bind a new inode for the same session.
+    if stopped && !daemon_owner_is_live(session) {
+        cleanup_verified_dead_owner_files(session);
+    }
 }
 
 fn wait_for_daemon_exit(session: &str, timeout: Duration) -> bool {
@@ -821,6 +944,13 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
                 }
             }
         }
+    }
+
+    if daemon_owner_is_live(session) {
+        return Err(format!(
+            "Daemon owner for session '{}' exists but its control endpoint is busy or unresponsive. Retry the command or use close to recover the session.",
+            session
+        ));
     }
 
     // Clean up any stale socket/pid files before starting fresh
@@ -997,7 +1127,7 @@ fn connect(session: &str) -> Result<Connection, String> {
     #[cfg(unix)]
     {
         let socket_path = get_socket_path(session);
-        UnixStream::connect(&socket_path)
+        connect_unix_timeout(&socket_path, Duration::from_secs(1))
             .map(Connection::Unix)
             .map_err(|e| format!("Failed to connect: {}", e))
     }
@@ -1010,8 +1140,18 @@ fn connect(session: &str) -> Result<Connection, String> {
     }
 }
 
+#[cfg(unix)]
+fn connect_unix_timeout(path: &std::path::Path, timeout: Duration) -> std::io::Result<UnixStream> {
+    let socket = Socket::new(Domain::UNIX, Type::STREAM, None)?;
+    socket.connect_timeout(&socket2::SockAddr::unix(path)?, timeout)?;
+    socket.set_nonblocking(false)?;
+    Ok(socket.into())
+}
+
 pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
-    // Retry logic for transient errors (EAGAIN/EWOULDBLOCK/connection issues)
+    // Retrying after a write or read timeout can replay a non-idempotent
+    // browser action. Only failures known to happen before dispatch are safe
+    // to retry against the same daemon.
     const MAX_RETRIES: u32 = 5;
     const RETRY_DELAY_MS: u64 = 200;
 
@@ -1024,13 +1164,12 @@ pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
 
         match send_command_once(&cmd, session) {
             Ok(response) => return Ok(response),
-            Err(e) => {
-                if is_transient_error(&e) {
-                    last_error = e;
+            Err(error) => {
+                if !error.dispatched && is_transient_error(&error.message) {
+                    last_error = error.message;
                     continue;
                 }
-                // Non-transient error, fail immediately
-                return Err(e);
+                return Err(error.message);
             }
         }
     }
@@ -1082,12 +1221,11 @@ fn has_os_error(error: &str, code: u32) -> bool {
     error.contains(&format!("(os error {})", code))
 }
 
-/// Socket read timeout for one request. Ordinary commands get a 30s floor.
-/// Commands carrying an operation timeout (the wait family, which
-/// parse_command stamps with AGENT_BROWSER_DEFAULT_TIMEOUT when no explicit
-/// --timeout is given) get that timeout plus margin, so the daemon can report
-/// a proper operation timeout instead of the client dying with EAGAIN at 30s
-/// and the retry loop re-sending the whole long-running command.
+/// End-to-end read budget for one dispatched request. Ordinary commands get a
+/// 30s floor. Commands carrying an operation timeout get that timeout plus a
+/// margin so the daemon can report a proper operation result. A read timeout
+/// is deliberately not retried: the daemon may already have performed a
+/// non-idempotent browser action.
 ///
 /// The env var is deliberately NOT consulted here. Reading it would apply a
 /// long wait budget to every command, so a genuinely hung daemon on a simple
@@ -1100,26 +1238,47 @@ fn read_timeout_for(cmd: &Value) -> Duration {
     Duration::from_millis(op_ms.saturating_add(10_000).max(30_000))
 }
 
-fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
-    let mut stream = connect(session)?;
+struct DispatchError {
+    message: String,
+    dispatched: bool,
+}
+
+fn send_command_once(cmd: &Value, session: &str) -> Result<Response, DispatchError> {
+    let mut stream = connect(session).map_err(|message| DispatchError {
+        message,
+        dispatched: false,
+    })?;
 
     stream.set_read_timeout(Some(read_timeout_for(cmd))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
-    let mut json_str = serde_json::to_string(cmd).map_err(|e| e.to_string())?;
+    let mut json_str = serde_json::to_string(cmd).map_err(|e| DispatchError {
+        message: e.to_string(),
+        dispatched: false,
+    })?;
     json_str.push('\n');
 
     stream
         .write_all(json_str.as_bytes())
-        .map_err(|e| format!("Failed to send: {}", e))?;
+        .map_err(|e| DispatchError {
+            message: format!("Failed to send: {}", e),
+            // A partial write may already have been received and dispatched.
+            dispatched: true,
+        })?;
 
     let mut reader = BufReader::new(stream);
     let mut response_line = String::new();
     reader
         .read_line(&mut response_line)
-        .map_err(|e| format!("Failed to read: {}", e))?;
+        .map_err(|e| DispatchError {
+            message: format!("Failed to read: {}", e),
+            dispatched: true,
+        })?;
 
-    serde_json::from_str(&response_line).map_err(|e| format!("Invalid response: {}", e))
+    serde_json::from_str(&response_line).map_err(|e| DispatchError {
+        message: format!("Invalid response: {}", e),
+        dispatched: true,
+    })
 }
 
 #[cfg(test)]
@@ -1182,9 +1341,11 @@ mod tests {
         _guard.remove("XDG_RUNTIME_DIR");
 
         let result = get_socket_dir();
-        assert!(result.to_string_lossy().ends_with(".agent-browser"));
-        assert!(
-            result.to_string_lossy().contains("home") || result.to_string_lossy().contains("Users")
+        assert_eq!(
+            result,
+            dirs::home_dir()
+                .map(|home| home.join(".agent-browser"))
+                .unwrap_or_else(|| env::temp_dir().join("agent-browser"))
         );
     }
 
@@ -1230,12 +1391,22 @@ mod tests {
         let pid = std::process::id().to_string();
         fs::write(ns_one.join("current.pid"), &pid).unwrap();
         fs::write(ns_two.join("other.pid"), &pid).unwrap();
+        let owner_lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(ns_one.join("current.lock"))
+            .unwrap();
+        owner_lock.try_lock_exclusive().unwrap();
 
         _guard.set("AGENT_BROWSER_NAMESPACE", "one");
         let inventory = walk_daemons();
 
         assert_eq!(inventory.sessions.len(), 1);
         assert_eq!(inventory.sessions[0].name, "current");
+
+        FileExt::unlock(&owner_lock).unwrap();
     }
 
     fn test_daemon_options<'a>(
@@ -1509,6 +1680,74 @@ mod tests {
         assert!(!is_transient_error("Invalid JSON syntax"));
         assert!(!is_transient_error("Permission denied"));
         assert!(!is_transient_error("Daemon not found"));
+    }
+
+    #[test]
+    fn dispatched_failures_are_not_retryable() {
+        let read_timeout = DispatchError {
+            message: "Failed to read: Resource temporarily unavailable (os error 11)".to_string(),
+            dispatched: true,
+        };
+        assert!(is_transient_error(&read_timeout.message));
+        assert!(
+            read_timeout.dispatched,
+            "read timeouts may follow a browser action"
+        );
+
+        let connect_failure = DispatchError {
+            message: "Failed to connect: Connection refused (os error 111)".to_string(),
+            dispatched: false,
+        };
+        assert!(!connect_failure.dispatched);
+        assert!(daemon_unreachable(&connect_failure.message));
+    }
+
+    #[test]
+    fn unlocked_owner_marker_with_reused_pid_is_stale() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("XDG_RUNTIME_DIR");
+        fs::create_dir_all(get_socket_dir()).unwrap();
+
+        let session = "owned";
+        let socket = get_socket_path(session);
+        // The current test process is certainly live, but this marker does
+        // not hold an advisory lock. It therefore models a crashed daemon
+        // whose numeric PID has since been reused by an unrelated process.
+        fs::write(get_owner_lock_path(session), std::process::id().to_string()).unwrap();
+        fs::write(&socket, "not-a-real-socket").unwrap();
+        cleanup_stale_files(session);
+        assert!(!daemon_owner_is_live(session));
+        assert!(!socket.exists());
+        assert!(!get_owner_lock_path(session).exists());
+    }
+
+    #[test]
+    fn locked_owner_marker_prevents_live_sidecar_cleanup() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("XDG_RUNTIME_DIR");
+        fs::create_dir_all(get_socket_dir()).unwrap();
+
+        let session = "locked-owner";
+        let socket = get_socket_path(session);
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(get_owner_lock_path(session))
+            .unwrap();
+        lock.try_lock_exclusive().unwrap();
+        fs::write(&socket, "not-a-real-socket").unwrap();
+
+        cleanup_stale_files(session);
+        assert!(daemon_owner_is_live(session));
+        assert!(socket.exists());
+
+        FileExt::unlock(&lock).unwrap();
     }
 
     #[test]

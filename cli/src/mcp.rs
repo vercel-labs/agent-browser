@@ -3507,6 +3507,8 @@ fn call_eval(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_close(arguments: &Value) -> Result<Value, ProtocolError> {
+    // Delegate through the CLI so MCP receives the same `session_busy`,
+    // cancellation, and bounded lifecycle results as direct callers.
     let mut args = vec!["close".to_string()];
     if optional_bool(arguments, "all")?.unwrap_or(false) {
         args.push("--all".to_string());

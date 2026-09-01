@@ -2141,6 +2141,11 @@ Usage: agent-browser close [options]
 
 Closes the browser instance for the current session.
 
+Commands in a session run one at a time. If another command is in progress,
+the daemon returns a JSON `session_busy` error instead of queueing it. Retry
+the command shortly, or use close to cancel an unresponsive operation; close
+uses bounded best-effort persistence before releasing owned resources.
+
 Aliases: quit, exit
 
 Options:

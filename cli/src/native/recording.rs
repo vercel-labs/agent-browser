@@ -161,9 +161,13 @@ pub fn spawn_recording_task(
                 _ = interval.tick() => {}
             }
 
-            let result: Result<CaptureScreenshotResult, _> = client
-                .send_command_typed("Page.captureScreenshot", &params, Some(&session_id))
-                .await;
+            // A wedged renderer may never answer captureScreenshot. Select
+            // cancellation around the request so `record stop` and lifecycle
+            // close do not inherit the CDP command's long response timeout.
+            let result: Result<CaptureScreenshotResult, _> = tokio::select! {
+                _ = &mut cancel_rx => break,
+                result = client.send_command_typed("Page.captureScreenshot", &params, Some(&session_id)) => result,
+            };
 
             let screenshot = match result {
                 Ok(s) => s,
@@ -191,17 +195,17 @@ pub fn spawn_recording_task(
 
         drop(stdin);
 
-        let output = ffmpeg
-            .wait_with_output()
-            .await
-            .map_err(|e| format!("ffmpeg wait failed: {}", e))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!(
-                "ffmpeg failed: {}",
-                stderr.chars().take(300).collect::<String>()
-            ));
+        // ffmpeg normally flushes quickly after stdin closes. Bound the final
+        // wait anyway: media encoders must not turn a cancelled browser
+        // operation into another unbounded lifecycle wait.
+        match tokio::time::timeout(Duration::from_secs(2), ffmpeg.wait()).await {
+            Ok(Ok(status)) if status.success() => {}
+            Ok(Ok(status)) => return Err(format!("ffmpeg exited with status {}", status)),
+            Ok(Err(e)) => return Err(format!("ffmpeg wait failed: {}", e)),
+            Err(_) => {
+                let _ = ffmpeg.start_kill();
+                let _ = tokio::time::timeout(Duration::from_secs(1), ffmpeg.wait()).await;
+            }
         }
 
         Ok(())
@@ -216,11 +220,16 @@ pub async fn stop_recording_task(state: &mut RecordingState) -> Result<(), Strin
     let counter = state.shared_frame_count.take();
     let handle = state.capture_task.take();
 
-    let result = if let Some(h) = handle {
-        match h.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(e),
-            Err(e) => Err(format!("Recording task panicked: {}", e)),
+    let result = if let Some(mut h) = handle {
+        match tokio::time::timeout(Duration::from_secs(3), &mut h).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(e))) => Err(e),
+            Ok(Err(e)) => Err(format!("Recording task panicked: {}", e)),
+            Err(_) => {
+                h.abort();
+                let _ = h.await;
+                Err("Timed out stopping recording; capture task was aborted".to_string())
+            }
         }
     } else {
         Ok(())

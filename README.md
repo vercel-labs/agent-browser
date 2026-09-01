@@ -1151,7 +1151,7 @@ Auto-discovered config files that are missing are silently ignored. If `--config
 
 ## Default Timeout
 
-The default timeout for standard operations (clicks, waits, fills, etc.) is 25 seconds. This is intentionally below the CLI's 30-second IPC read timeout so that the daemon returns a proper error instead of the CLI timing out with EAGAIN.
+The default timeout for standard operations (clicks, waits, fills, etc.) is 25 seconds. Requests carry their own bounded IPC budget so the daemon can return the operation result instead of relying on a client read timeout for recovery.
 
 Override the default timeout via environment variable:
 
@@ -1160,7 +1160,7 @@ Override the default timeout via environment variable:
 export AGENT_BROWSER_DEFAULT_TIMEOUT=45000
 ```
 
-> **Note:** Setting this above 30000 (30s) may cause EAGAIN errors on slow operations because the CLI's read timeout will expire before the daemon responds. The CLI retries transient errors automatically, but response times will increase.
+> **Note:** A command with an explicit timeout gets an IPC margin above that operation timeout. A timed-out or disconnected response is not blindly replayed because the browser action may already have run.
 
 | Variable                        | Description                              |
 | ------------------------------- | ---------------------------------------- |
@@ -1624,6 +1624,8 @@ agent-browser uses a client-daemon architecture:
 2. **Rust Daemon** - Pure Rust daemon using direct CDP, no Node.js required
 
 The daemon starts automatically on first command and persists between commands for fast subsequent operations. After **1 hour** with no commands or dashboard input it saves configured restore state, closes the browser, and exits, so an integration that dies without calling `close` cannot leak the daemon and its browser indefinitely; the next command starts a fresh daemon and configured state restore works as usual. A session without `--restore` or another restore key does not save browser state, so its transient state and open tabs are discarded at shutdown. Set `--idle-timeout` to a duration such as `30s`, `5m`, or `1h`, or set `AGENT_BROWSER_IDLE_TIMEOUT_MS` to a value in milliseconds. Use `0` to disable idle shutdown entirely. The default never closes a headed browser, including Safari and iOS WebDriver sessions, or a user-attached browser because those may be in direct human use. Provider-owned cloud browsers remain eligible for cleanup. An explicitly set timeout applies to every browser.
+
+Each session serializes browser commands to keep its tab, frame, and reference state consistent. An overlapping command receives a bounded JSON error with `code: "session_busy"`; retry it after the active operation completes. `close` remains a priority recovery action: once policy and any required confirmation allow it, it cancels an active operation, attempts a bounded transactional restore save, and force-cleans resources owned by the daemon if graceful shutdown stalls. Attached browsers are detached, never killed.
 
 **Browser Engine:** Uses Chrome (from Chrome for Testing) by default. The `--engine` flag selects between `chrome` and `lightpanda`. Supported browsers: Chromium/Chrome (via CDP) and Safari (via WebDriver for iOS).
 

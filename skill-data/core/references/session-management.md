@@ -59,6 +59,8 @@ agent-browser --session agent2 --cdp 9222 --pin-tab open https://site-b.com
 
 Every session remembers which tab it is bound to (by CDP target id, persisted in the session's state directory), so a restarted daemon reattaches to the session's own tab instead of adopting the most recently active one. `--pin-tab` (env `AGENT_BROWSER_PIN_TAB=1`) additionally makes the binding strict:
 
+Commands within one session are serialized so active tab, frame, and element-reference state cannot race. An overlapping command returns a bounded JSON response with `"code": "session_busy"`; retry it after the active command completes. `close` is a priority lifecycle operation: after policy approval it cancels the active command, attempts a bounded final restore-state save, and cleans up owned resources. An attached CDP browser is only detached, never terminated.
+
 - Attaching with no binding opens a fresh tab instead of adopting an existing one
 - If the bound tab is closed, commands fail with a `tab_gone` error instead of silently acting on another tab. JSON output includes `"code": "tab_gone"`, `data.targetId`, and optional `data.lastUrl`
 - Recovery commands still work in that state: run `tab new <url>` to bind a fresh tab, or `tab list` and switch to an existing one

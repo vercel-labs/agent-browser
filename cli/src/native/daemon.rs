@@ -1,21 +1,24 @@
+use fs2::FileExt;
 use serde_json::Value;
 use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::signal;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{watch, Notify, RwLock};
 
 use super::actions::{
-    auto_save_restore_state, close_all_browser_backends, close_current_browser, execute_command,
-    maybe_autosave_restore_state, DaemonState,
+    close_current_browser, close_for_lifecycle, execute_command, maybe_autosave_restore_state,
+    DaemonState,
 };
 use super::cdp::client::CdpClient;
+use super::policy::{ActionPolicy, ConfirmActions, PolicyResult};
 use super::state;
 use super::stream::{IdleActivity, StreamServer};
 use crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION;
@@ -25,6 +28,27 @@ pub async fn run_daemon(session: &str) {
     if !socket_dir.exists() {
         let _ = fs::create_dir_all(&socket_dir);
     }
+
+    // Claim ownership before creating or removing any session sidecar. The
+    // advisory lock, rather than the diagnostic PID in its contents, remains
+    // held for this daemon's entire lifetime so a reused PID cannot strand a
+    // stale endpoint or let another daemon replace a saturated live one.
+    let owner_lock = match acquire_daemon_owner_lock(session) {
+        Ok(Some(file)) => file,
+        Ok(None) => return,
+        Err(error) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "Failed to acquire daemon ownership: {}",
+                error
+            );
+            return;
+        }
+    };
+    // Keep the locked marker handle open until final sidecar cleanup. Its PID
+    // is visible before endpoint binding for diagnostics, but lock ownership
+    // is the only liveness authority.
+    let _owner_lock = owner_lock;
 
     // When debug mode is on, redirect stderr to a log file so daemon
     // output can be inspected (the daemon normally has stderr piped to its
@@ -157,11 +181,69 @@ pub async fn run_daemon(session: &str) {
     let _ = fs::remove_file(socket_dir.join(format!("{}.engine", session)));
     let _ = fs::remove_file(socket_dir.join(format!("{}.provider", session)));
     let _ = fs::remove_file(socket_dir.join(format!("{}.extensions", session)));
+    let _ = fs::remove_file(socket_dir.join(format!("{}.config", session)));
+    // All endpoints and owned resources are gone while `_owner_lock` still
+    // protects this inode, so removing the marker here cannot split ownership
+    // with a live daemon. A subsequent daemon creates and locks a fresh one.
+    let _ = fs::remove_file(crate::connection::get_owner_lock_path(session));
 
     if let Err(e) = result {
         let _ = writeln!(std::io::stderr(), "Daemon error: {}", e);
         process::exit(1);
     }
+}
+
+fn acquire_daemon_owner_lock(session: &str) -> Result<Option<fs::File>, String> {
+    use std::fs::OpenOptions;
+
+    let path = crate::connection::get_owner_lock_path(session);
+    let (mut file, already_existed) = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(file) => (file, false),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(|error| error.to_string())?,
+            true,
+        ),
+        Err(error) => return Err(error.to_string()),
+    };
+    match file.try_lock_exclusive() {
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+        Ok(()) => {}
+    }
+    if already_existed {
+        // `create_new` and `flock` are separate system calls. An empty marker
+        // that has just appeared belongs to a racing creator which has not
+        // yet locked it. Do not steal that startup window.
+        let marker_is_empty = fs::read_to_string(&path)
+            .map(|contents| contents.trim().is_empty())
+            .unwrap_or(false);
+        let recently_created = fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age < Duration::from_secs(5));
+        if marker_is_empty && recently_created {
+            let _ = FileExt::unlock(&file);
+            return Ok(None);
+        }
+    }
+    // An unlocked PID marker always belongs to a crashed former owner. PID
+    // liveness is deliberately ignored because the OS can reuse it for an
+    // unrelated process before a client reaches this recovery path.
+    file.set_len(0).map_err(|error| error.to_string())?;
+    file.write_all(process::id().to_string().as_bytes())
+        .map_err(|error| error.to_string())?;
+    file.sync_data().map_err(|error| error.to_string())?;
+    Ok(Some(file))
 }
 
 /// Idle timeout applied when AGENT_BROWSER_IDLE_TIMEOUT_MS is unset, so an
@@ -181,6 +263,369 @@ struct IdleTimeout {
     /// explicit AGENT_BROWSER_IDLE_TIMEOUT_MS. Only the default exempts
     /// headed and user-attached browsers from shutdown.
     is_default: bool,
+}
+
+/// One daemon owns one mutable browser state. Normal commands are admitted
+/// without waiting, which preserves the established tab/frame serialization
+/// invariant while preventing a stuck command from filling the socket and
+/// mutex queues. Lifecycle work owns a separate priority path and cancels the
+/// normal future before taking the state.
+struct DaemonCoordinator {
+    state: Arc<tokio::sync::Mutex<DaemonState>>,
+    closing: AtomicBool,
+    active: StdMutex<Option<ActiveCommand>>,
+    cancel_tx: watch::Sender<bool>,
+    lifecycle_gate: StdMutex<LifecycleGate>,
+    terminal_response: StdMutex<Option<Value>>,
+    lifecycle_finished: Notify,
+}
+
+#[derive(Clone)]
+struct ActiveCommand {
+    action: String,
+    started: Instant,
+}
+
+struct LifecycleGate {
+    policy: Option<ActionPolicy>,
+    confirm_actions: Option<ConfirmActions>,
+    pending_close_confirmation: Option<String>,
+}
+
+enum LifecycleAdmission {
+    Normal,
+    Response(Value),
+    Close { confirmed: bool },
+}
+
+impl LifecycleGate {
+    fn new() -> Self {
+        Self {
+            policy: ActionPolicy::load_if_exists(),
+            confirm_actions: ConfirmActions::from_env(),
+            pending_close_confirmation: None,
+        }
+    }
+
+    fn confirmation_response(id: &str) -> Value {
+        serde_json::json!({
+            "id": id,
+            "success": true,
+            "data": {
+                "confirmation_required": true,
+                "confirmation_id": id,
+                "action": "close"
+            }
+        })
+    }
+
+    fn admit(&mut self, cmd: &Value) -> LifecycleAdmission {
+        let action = cmd
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let id = cmd.get("id").and_then(Value::as_str).unwrap_or_default();
+
+        if action == INTERNAL_DAEMON_SHUTDOWN_ACTION {
+            return LifecycleAdmission::Close { confirmed: false };
+        }
+
+        if action == "confirm" || action == "deny" {
+            let confirmation_id = cmd
+                .get("confirmationId")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if self.pending_close_confirmation.as_deref() != Some(confirmation_id) {
+                return LifecycleAdmission::Normal;
+            }
+            self.pending_close_confirmation = None;
+            return if action == "confirm" {
+                // The policy is deliberately checked again at confirmation
+                // time. A hot reload that denies close must not be bypassed
+                // merely because an older policy previously requested a
+                // confirmation.
+                if let Some(policy) = self.policy.as_mut() {
+                    let _ = policy.reload();
+                    if let PolicyResult::Deny(reason) = policy.check("close") {
+                        return LifecycleAdmission::Response(serde_json::json!({
+                            "id": id,
+                            "success": false,
+                            "error": format!("Action 'close' denied by policy: {}", reason)
+                        }));
+                    }
+                }
+                LifecycleAdmission::Close { confirmed: true }
+            } else {
+                LifecycleAdmission::Response(serde_json::json!({
+                    "id": id,
+                    "success": true,
+                    "data": { "denied": true, "action": "close" }
+                }))
+            };
+        }
+
+        if action != "close" {
+            return LifecycleAdmission::Normal;
+        }
+
+        if let Some(policy) = self.policy.as_mut() {
+            let _ = policy.reload();
+            match policy.check("close") {
+                PolicyResult::Allow => {}
+                PolicyResult::Deny(reason) => {
+                    return LifecycleAdmission::Response(serde_json::json!({
+                        "id": id,
+                        "success": false,
+                        "error": format!("Action 'close' denied by policy: {}", reason)
+                    }));
+                }
+                PolicyResult::RequiresConfirmation => {
+                    self.pending_close_confirmation = Some(id.to_string());
+                    return LifecycleAdmission::Response(Self::confirmation_response(id));
+                }
+            }
+        }
+        if self
+            .confirm_actions
+            .as_ref()
+            .is_some_and(|actions| actions.requires_confirmation("close"))
+        {
+            self.pending_close_confirmation = Some(id.to_string());
+            return LifecycleAdmission::Response(Self::confirmation_response(id));
+        }
+        LifecycleAdmission::Close { confirmed: false }
+    }
+}
+
+impl DaemonCoordinator {
+    fn new(state: DaemonState) -> Arc<Self> {
+        let (cancel_tx, _) = watch::channel(false);
+        Arc::new(Self {
+            state: Arc::new(tokio::sync::Mutex::new(state)),
+            closing: AtomicBool::new(false),
+            active: StdMutex::new(None),
+            cancel_tx,
+            lifecycle_gate: StdMutex::new(LifecycleGate::new()),
+            terminal_response: StdMutex::new(None),
+            lifecycle_finished: Notify::new(),
+        })
+    }
+
+    fn is_closing(&self) -> bool {
+        self.closing.load(Ordering::Acquire)
+    }
+
+    fn begin_closing(&self) -> bool {
+        let won = self
+            .closing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok();
+        if won {
+            let _ = self.cancel_tx.send(true);
+        }
+        won
+    }
+
+    fn active_data(&self) -> Value {
+        let active = self.active.lock().expect("active command mutex poisoned");
+        match active.as_ref() {
+            Some(command) => serde_json::json!({
+                "activeAction": command.action,
+                "elapsedMs": command.started.elapsed().as_millis() as u64,
+            }),
+            None => serde_json::json!({}),
+        }
+    }
+
+    fn busy_response(&self, id: &str) -> Value {
+        serde_json::json!({
+            "id": id,
+            "success": false,
+            "code": "session_busy",
+            "error": "Session is busy running another command; retry shortly or use close to cancel it.",
+            "data": self.active_data(),
+        })
+    }
+
+    fn closing_response(id: &str) -> Value {
+        serde_json::json!({
+            "id": id,
+            "success": false,
+            "code": "session_closing",
+            "error": "Session is closing; no new commands can be started.",
+        })
+    }
+
+    fn cancelled_response(id: &str) -> Value {
+        serde_json::json!({
+            "id": id,
+            "success": false,
+            "code": "operation_cancelled",
+            "error": "Operation was cancelled because the session is closing.",
+        })
+    }
+
+    fn with_response_id(mut response: Value, id: &str) -> Value {
+        response["id"] = Value::String(id.to_string());
+        response
+    }
+
+    async fn cancelled(cancel_rx: &mut watch::Receiver<bool>) {
+        if !*cancel_rx.borrow() {
+            let _ = cancel_rx.changed().await;
+        }
+    }
+
+    fn clear_active(&self) {
+        let mut active = self.active.lock().expect("active command mutex poisoned");
+        *active = None;
+    }
+
+    async fn execute(self: &Arc<Self>, cmd: &Value, idle_activity: &IdleActivity) -> Value {
+        let id = cmd.get("id").and_then(Value::as_str).unwrap_or_default();
+        let action = cmd
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+
+        if self.is_closing() {
+            if matches!(
+                action,
+                "close" | "confirm" | INTERNAL_DAEMON_SHUTDOWN_ACTION
+            ) {
+                return self.await_terminal_response(id).await;
+            }
+            return Self::closing_response(id);
+        }
+
+        let lifecycle = self
+            .lifecycle_gate
+            .lock()
+            .expect("lifecycle gate mutex poisoned")
+            .admit(cmd);
+        match lifecycle {
+            LifecycleAdmission::Response(response) => return response,
+            LifecycleAdmission::Close { confirmed } => return self.close(id, confirmed).await,
+            LifecycleAdmission::Normal => {}
+        }
+
+        let Ok(mut state) = self.state.clone().try_lock_owned() else {
+            return self.busy_response(id);
+        };
+        if self.is_closing() {
+            return Self::closing_response(id);
+        }
+
+        {
+            let mut active = self.active.lock().expect("active command mutex poisoned");
+            *active = Some(ActiveCommand {
+                action: action.to_string(),
+                started: Instant::now(),
+            });
+        }
+        let mut cancel_rx = self.cancel_tx.subscribe();
+        let response = tokio::select! {
+            response = execute_command(cmd, &mut state) => response,
+            _ = Self::cancelled(&mut cancel_rx) => Self::cancelled_response(id),
+        };
+        self.clear_active();
+        idle_activity.mark();
+        response
+    }
+
+    async fn await_terminal_response(&self, id: &str) -> Value {
+        if let Some(response) = self
+            .terminal_response
+            .lock()
+            .expect("terminal response mutex poisoned")
+            .clone()
+        {
+            return Self::with_response_id(response, id);
+        }
+        let _ =
+            tokio::time::timeout(Duration::from_secs(7), self.lifecycle_finished.notified()).await;
+        self.terminal_response
+            .lock()
+            .expect("terminal response mutex poisoned")
+            .clone()
+            .map(|response| Self::with_response_id(response, id))
+            .unwrap_or_else(|| Self::closing_response(id))
+    }
+
+    async fn close(self: &Arc<Self>, id: &str, confirmed: bool) -> Value {
+        if !self.begin_closing() {
+            return self.await_terminal_response(id).await;
+        }
+        let mut state = self.state.lock().await;
+        // Cancellation causes the command task to drop its state guard before
+        // this priority lane can acquire it. Clear metadata here as well so a
+        // close response never reports a command that can no longer run.
+        self.clear_active();
+        let response = match close_for_lifecycle(&mut state).await {
+            Ok(data) => serde_json::json!({ "id": id, "success": true, "data": data }),
+            Err(error) => serde_json::json!({ "id": id, "success": false, "error": error }),
+        };
+        *self
+            .terminal_response
+            .lock()
+            .expect("terminal response mutex poisoned") = Some(response.clone());
+        self.lifecycle_finished.notify_waiters();
+        if confirmed {
+            serde_json::json!({
+                "id": id,
+                "success": true,
+                "data": { "confirmed": true, "action": "close", "result": response }
+            })
+        } else {
+            response
+        }
+    }
+
+    /// Maintenance never waits for an active command. If it wins the state it
+    /// still listens for lifecycle cancellation so a stuck background CDP
+    /// drain cannot delay shutdown.
+    async fn maintenance(self: &Arc<Self>, autosave_interval_ms: u64) {
+        if self.is_closing() {
+            return;
+        }
+        let Ok(mut state) = self.state.clone().try_lock_owned() else {
+            return;
+        };
+        if self.is_closing() {
+            return;
+        }
+        let mut cancel_rx = self.cancel_tx.subscribe();
+        tokio::select! {
+            _ = Self::cancelled(&mut cancel_rx) => {}
+            _ = async {
+                let process_exited = state.browser.as_mut().map(|mgr| mgr.has_process_exited()).unwrap_or(false);
+                if process_exited {
+                    let _ = close_current_browser(&mut state).await;
+                } else if state.browser.is_some() {
+                    if let Err(error) = state.drain_cdp_events_background().await {
+                        let _ = writeln!(std::io::stderr(), "Failed to apply browser network controls: {}", error);
+                    } else {
+                        maybe_autosave_restore_state(&mut state, autosave_interval_ms).await;
+                    }
+                }
+            } => {}
+        }
+    }
+
+    async fn idle_shutdown_with_state(
+        self: &Arc<Self>,
+        mut state: tokio::sync::OwnedMutexGuard<DaemonState>,
+        default_timeout: bool,
+    ) -> bool {
+        if default_timeout && state.blocks_default_idle_shutdown() {
+            return false;
+        }
+        if !self.begin_closing() {
+            return false;
+        }
+        let _ = close_for_lifecycle(&mut state).await;
+        true
+    }
 }
 
 /// Resolve AGENT_BROWSER_IDLE_TIMEOUT_MS into an effective idle timeout:
@@ -239,12 +684,11 @@ async fn run_socket_server(
     } else {
         None
     };
-    let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> =
-        std::sync::Arc::new(tokio::sync::Mutex::new(DaemonState::new_with_stream(
-            stream_client,
-            stream_server,
-            idle_activity.clone(),
-        )));
+    let coordinator = DaemonCoordinator::new(DaemonState::new_with_stream(
+        stream_client,
+        stream_server,
+        idle_activity.clone(),
+    ));
 
     // Notifier used by handle_connection to signal the daemon loop to exit
     // after a "close" command, instead of calling process::exit() which skips
@@ -262,12 +706,12 @@ async fn run_socket_server(
             accept_result = listener.accept() => {
                 match accept_result {
                     Ok((stream, _)) => {
-                        let state = state.clone();
+                        let coordinator = coordinator.clone();
                         let idle_activity = idle_activity.clone();
                         let sf = stream_file.clone();
                         let cn = close_notify.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, idle_activity, sf, cn).await;
+                            handle_connection(stream, coordinator, idle_activity, sf, cn).await;
                         });
                     }
                     Err(e) => {
@@ -276,25 +720,13 @@ async fn run_socket_server(
                 }
             }
             _ = drain_interval.tick() => {
-                let mut s = state.lock().await;
-                let process_exited = s
-                    .browser
-                    .as_mut()
-                    .map(|mgr| mgr.has_process_exited())
-                    .unwrap_or(false);
-                if process_exited {
-                    let _ = close_current_browser(&mut s).await;
-                } else if s.browser.is_some() {
-                    if let Err(error) = s.drain_cdp_events_background().await {
-                        let _ = writeln!(
-                            std::io::stderr(),
-                            "Failed to apply browser network controls: {}",
-                            error
-                        );
-                    } else {
-                        maybe_autosave_restore_state(&mut s, autosave_interval_ms).await;
-                    }
-                }
+                // A maintenance CDP call may be blocked by the renderer.
+                // Run it outside the listener select so accepting a priority
+                // close or a bounded busy response is never delayed by it.
+                let coordinator = coordinator.clone();
+                tokio::spawn(async move {
+                    coordinator.maintenance(autosave_interval_ms).await;
+                });
             }
             _ = async {
                 match idle_sleep_pin {
@@ -302,10 +734,14 @@ async fn run_socket_server(
                     None => std::future::pending::<()>().await,
                 }
             }, if idle_timeout_ms.is_some() => {
-                let mut s = state.lock().await;
+                // Idle shutdown only claims the lane when it is already idle;
+                // it never queues behind or cancels a live browser command.
+                let Ok(s) = coordinator.state.clone().try_lock_owned() else {
+                    idle_sleep_pin = idle_timeout_ms.map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
+                    continue;
+                };
                 // The timer may have expired while a command held the state
-                // lock. Command completion refreshes the shared activity
-                // clock before releasing that lock, so re-check it here.
+                // lane. Re-check activity after nonblocking admission.
                 if let Some(remaining) =
                     remaining_idle_timeout(&idle_activity, idle_timeout_ms.unwrap_or_default())
                 {
@@ -315,9 +751,7 @@ async fn run_socket_server(
                 // The default timeout is a leak backstop, not a lifecycle
                 // policy: never pull a headed, WebDriver, or attached browser
                 // out from under a human. Re-arm and keep waiting instead.
-                if idle_timeout.is_some_and(|t| t.is_default)
-                    && s.blocks_default_idle_shutdown()
-                {
+                if idle_timeout.is_some_and(|t| t.is_default) && s.blocks_default_idle_shutdown() {
                     idle_sleep_pin = idle_timeout_ms
                         .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
                     continue;
@@ -329,9 +763,11 @@ async fn run_socket_server(
                         DEFAULT_IDLE_TIMEOUT_MS / 60_000
                     );
                 }
-                let _ = auto_save_restore_state(&mut s).await;
-                let _ = close_all_browser_backends(&mut s).await;
-                break;
+                if coordinator.idle_shutdown_with_state(s, idle_timeout.is_some_and(|t| t.is_default)).await {
+                    break;
+                }
+                idle_sleep_pin = idle_timeout_ms.map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
+                continue;
             }
             _ = idle_activity.notified(), if idle_timeout_ms.is_some() => {
                 idle_sleep_pin = idle_timeout_ms
@@ -345,9 +781,7 @@ async fn run_socket_server(
                 break;
             }
             _ = shutdown_signal() => {
-                let mut s = state.lock().await;
-                let _ = auto_save_restore_state(&mut s).await;
-                let _ = close_all_browser_backends(&mut s).await;
+                let _ = coordinator.close("signal-shutdown", false).await;
                 break;
             }
         }
@@ -393,12 +827,11 @@ async fn run_socket_server(
     } else {
         None
     };
-    let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> =
-        std::sync::Arc::new(tokio::sync::Mutex::new(DaemonState::new_with_stream(
-            stream_client,
-            stream_server,
-            idle_activity.clone(),
-        )));
+    let coordinator = DaemonCoordinator::new(DaemonState::new_with_stream(
+        stream_client,
+        stream_server,
+        idle_activity.clone(),
+    ));
 
     let close_notify = Arc::new(Notify::new());
 
@@ -416,12 +849,12 @@ async fn run_socket_server(
             accept_result = listener.accept() => {
                 match accept_result {
                     Ok((stream, _)) => {
-                        let state = state.clone();
+                        let coordinator = coordinator.clone();
                         let idle_activity = idle_activity.clone();
                         let sf = stream_file.clone();
                         let cn = close_notify.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, idle_activity, sf, cn).await;
+                            handle_connection(stream, coordinator, idle_activity, sf, cn).await;
                         });
                     }
                     Err(e) => {
@@ -430,18 +863,10 @@ async fn run_socket_server(
                 }
             }
             _ = drain_interval.tick() => {
-                let mut s = state.lock().await;
-                let process_exited = s
-                    .browser
-                    .as_mut()
-                    .map(|mgr| mgr.has_process_exited())
-                    .unwrap_or(false);
-                if process_exited {
-                    let _ = close_current_browser(&mut s).await;
-                } else if s.browser.is_some() {
-                    s.drain_cdp_events_background().await;
-                    maybe_autosave_restore_state(&mut s, autosave_interval_ms).await;
-                }
+                let coordinator = coordinator.clone();
+                tokio::spawn(async move {
+                    coordinator.maintenance(autosave_interval_ms).await;
+                });
             }
             _ = async {
                 match idle_sleep_pin {
@@ -449,7 +874,10 @@ async fn run_socket_server(
                     None => std::future::pending::<()>().await,
                 }
             }, if idle_timeout_ms.is_some() => {
-                let mut s = state.lock().await;
+                let Ok(s) = coordinator.state.clone().try_lock_owned() else {
+                    idle_sleep_pin = idle_timeout_ms.map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
+                    continue;
+                };
                 if let Some(remaining) =
                     remaining_idle_timeout(&idle_activity, idle_timeout_ms.unwrap_or_default())
                 {
@@ -459,9 +887,7 @@ async fn run_socket_server(
                 // The default timeout is a leak backstop, not a lifecycle
                 // policy: never pull a headed, WebDriver, or attached browser
                 // out from under a human. Re-arm and keep waiting instead.
-                if idle_timeout.is_some_and(|t| t.is_default)
-                    && s.blocks_default_idle_shutdown()
-                {
+                if idle_timeout.is_some_and(|t| t.is_default) && s.blocks_default_idle_shutdown() {
                     idle_sleep_pin = idle_timeout_ms
                         .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
                     continue;
@@ -473,10 +899,12 @@ async fn run_socket_server(
                         DEFAULT_IDLE_TIMEOUT_MS / 60_000
                     );
                 }
-                let _ = auto_save_restore_state(&mut s).await;
-                let _ = close_all_browser_backends(&mut s).await;
-                let _ = fs::remove_file(&port_path);
-                break;
+                if coordinator.idle_shutdown_with_state(s, idle_timeout.is_some_and(|t| t.is_default)).await {
+                    let _ = fs::remove_file(&port_path);
+                    break;
+                }
+                idle_sleep_pin = idle_timeout_ms.map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
+                continue;
             }
             _ = idle_activity.notified(), if idle_timeout_ms.is_some() => {
                 idle_sleep_pin = idle_timeout_ms
@@ -488,9 +916,7 @@ async fn run_socket_server(
                 break;
             }
             _ = shutdown_signal() => {
-                let mut s = state.lock().await;
-                let _ = auto_save_restore_state(&mut s).await;
-                let _ = close_all_browser_backends(&mut s).await;
+                let _ = coordinator.close("signal-shutdown", false).await;
                 let _ = fs::remove_file(&port_path);
                 break;
             }
@@ -502,7 +928,7 @@ async fn run_socket_server(
 
 async fn handle_connection<S>(
     stream: S,
-    state: std::sync::Arc<tokio::sync::Mutex<DaemonState>>,
+    coordinator: Arc<DaemonCoordinator>,
     idle_activity: Arc<IdleActivity>,
     stream_file_cleanup: Option<PathBuf>,
     close_notify: Arc<Notify>,
@@ -549,15 +975,7 @@ async fn handle_connection<S>(
                     .unwrap_or_default()
                     .to_string();
 
-                let response = {
-                    let mut s = state.lock().await;
-                    let response = execute_command(&cmd, &mut s).await;
-                    // Refresh while the state lock is still held. An idle
-                    // timer waiting on this command will observe the updated
-                    // clock as soon as it acquires the lock.
-                    idle_activity.mark();
-                    response
-                };
+                let response = coordinator.execute(&cmd, &idle_activity).await;
 
                 let mut resp = serde_json::to_string(&response).unwrap_or_default();
                 resp.push('\n');
@@ -676,6 +1094,110 @@ fn get_port_for_session(session: &str) -> u16 {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+
+    #[tokio::test]
+    async fn coordinator_returns_busy_and_close_cancels_active_command() {
+        let activity = Arc::new(IdleActivity::new());
+        let coordinator = DaemonCoordinator::new(DaemonState::new());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+
+        // Hold the state lane exactly like a renderer command, with the
+        // coordinator's active metadata visible to a concurrent request.
+        let holder = coordinator.clone();
+        tokio::spawn(async move {
+            let _state = holder.state.clone().lock_owned().await;
+            *holder.active.lock().unwrap() = Some(ActiveCommand {
+                action: "evaluate".to_string(),
+                started: Instant::now(),
+            });
+            let mut cancellation = holder.cancel_tx.subscribe();
+            let _ = started_tx.send(());
+            tokio::select! {
+                _ = release_rx => {}
+                _ = DaemonCoordinator::cancelled(&mut cancellation) => {}
+            }
+            *holder.active.lock().unwrap() = None;
+        });
+        started_rx.await.unwrap();
+
+        let busy = coordinator
+            .execute(
+                &serde_json::json!({"id":"busy", "action":"tab_list"}),
+                &activity,
+            )
+            .await;
+        assert_eq!(busy["code"], "session_busy");
+        assert_eq!(busy["data"]["activeAction"], "evaluate");
+
+        let close = tokio::time::timeout(
+            Duration::from_secs(1),
+            coordinator.execute(
+                &serde_json::json!({"id":"close", "action":"close"}),
+                &activity,
+            ),
+        )
+        .await
+        .expect("close must not wait for the active command");
+        assert_eq!(close["success"], true);
+
+        let after = coordinator
+            .execute(
+                &serde_json::json!({"id":"after", "action":"tab_list"}),
+                &activity,
+            )
+            .await;
+        assert_eq!(after["code"], "session_closing");
+        let _ = release_tx.send(());
+    }
+
+    #[test]
+    fn lifecycle_gate_keeps_close_policy_and_confirmation_before_cancellation() {
+        let mut gate = LifecycleGate::new();
+        gate.confirm_actions = Some(ConfirmActions {
+            categories: ["close".to_string()].into_iter().collect(),
+        });
+        let pending = gate.admit(&serde_json::json!({"id":"close-1", "action":"close"}));
+        assert!(matches!(pending, LifecycleAdmission::Response(_)));
+        assert!(matches!(
+            gate.admit(
+                &serde_json::json!({"id":"wrong", "action":"confirm", "confirmationId":"wrong"})
+            ),
+            LifecycleAdmission::Normal
+        ));
+        assert!(matches!(
+            gate.admit(
+                &serde_json::json!({"id":"confirm", "action":"confirm", "confirmationId":"close-1"})
+            ),
+            LifecycleAdmission::Close { confirmed: true }
+        ));
+    }
+
+    #[test]
+    fn lifecycle_gate_rechecks_a_reloaded_close_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("policy.json");
+        fs::write(&policy_path, r#"{"confirm":["close"]}"#).unwrap();
+        let mut gate = LifecycleGate {
+            policy: Some(ActionPolicy::load(policy_path.to_str().unwrap()).unwrap()),
+            confirm_actions: None,
+            pending_close_confirmation: None,
+        };
+        assert!(matches!(
+            gate.admit(&serde_json::json!({"id":"close-1", "action":"close"})),
+            LifecycleAdmission::Response(_)
+        ));
+        fs::write(&policy_path, r#"{"deny":["close"]}"#).unwrap();
+        let response = match gate.admit(&serde_json::json!({
+            "id":"confirm",
+            "action":"confirm",
+            "confirmationId":"close-1"
+        })) {
+            LifecycleAdmission::Response(response) => response,
+            _ => panic!("reloaded denial must not enter the lifecycle lane"),
+        };
+        assert_eq!(response["success"], false);
+    }
 
     #[test]
     fn test_resolve_idle_timeout_unset_applies_default() {

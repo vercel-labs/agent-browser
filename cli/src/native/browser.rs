@@ -1305,6 +1305,18 @@ impl BrowserManager {
         Ok(())
     }
 
+    /// Immediately detach from CDP and kill only a browser process launched by
+    /// this manager. Lifecycle recovery uses this after its graceful deadline
+    /// expires, so it must not issue another potentially blocked CDP request.
+    /// Attached browsers have no `browser_process` and are therefore left
+    /// running for their owner.
+    pub async fn force_close(&mut self) {
+        if let Some(mut process) = self.browser_process.take() {
+            let _ = tokio::task::spawn_blocking(move || process.kill()).await;
+        }
+        self.pages.clear();
+    }
+
     pub fn has_pages(&self) -> bool {
         !self.pages.is_empty()
     }

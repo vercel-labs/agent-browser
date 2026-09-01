@@ -40,6 +40,8 @@ Each session has its own:
 
 Full isolation applies when each session launches its own browser. When sessions instead share one Chrome over `--cdp`, only the tab selection separates them. Each session remembers which tab it is bound to (by CDP target id, persisted across daemon restarts), so a restarted daemon reattaches to the session's own tab instead of adopting the most recently active one.
 
+Browser commands within a session are serialized to preserve tab, frame, and element-reference consistency. A concurrent command receives a bounded JSON error with <code>code: "session_busy"</code>; retry it after the active command completes. `close` is a priority recovery operation that can cancel an unresponsive command, make a bounded best-effort restore save, and clean up daemon-owned resources. A user-attached CDP browser is disconnected but never terminated.
+
 Add `--pin-tab` (or set `AGENT_BROWSER_PIN_TAB=1`) to make the binding strict:
 
 ```bash
