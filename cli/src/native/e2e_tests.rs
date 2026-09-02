@@ -7242,9 +7242,9 @@ async fn e2e_recording_inherits_viewport() {
 // ---------------------------------------------------------------------------
 
 /// Verify that `recording_start` honors an explicit frame rate and that the
-/// frame count tracks wall clock. Frames are paced against the clock, so a
-/// capture that overruns its budget holds the previous picture instead of
-/// shortening playback: roughly `fps * seconds` frames must reach ffmpeg.
+/// frame count tracks wall clock. Screencast frames arrive only when the page
+/// repaints, and the ticker holds the last frame through gaps, so roughly
+/// `fps * seconds` frames must reach ffmpeg even for a static page.
 #[tokio::test]
 #[ignore]
 async fn e2e_recording_honors_requested_fps() {
@@ -7282,6 +7282,16 @@ async fn e2e_recording_honors_requested_fps() {
     assert_success(&resp);
     assert_eq!(get_data(&resp)["fps"].as_u64(), Some(FPS));
 
+    // The recorder screencasts on its own CDP session attached to the
+    // recording page. That attachment must not surface as a tab.
+    let resp = execute_command(&json!({ "id": "3b", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    let tabs = get_data(&resp)["tabs"].as_array().unwrap().len();
+    assert_eq!(
+        tabs, 2,
+        "original page plus the recording page, nothing else"
+    );
+
     tokio::time::sleep(tokio::time::Duration::from_millis(RECORD_MS)).await;
 
     let resp = execute_command(
@@ -7298,6 +7308,13 @@ async fn e2e_recording_honors_requested_fps() {
     assert!(
         frames >= expected / 2 && frames <= expected * 2,
         "expected roughly {expected} frames at {FPS} fps over {RECORD_MS}ms, got {frames}"
+    );
+    // A static page repaints once, so the file is one captured frame held
+    // for the whole take.
+    let captured = data["capturedFrames"].as_u64().unwrap();
+    assert!(
+        (1..frames).contains(&captured),
+        "static page should yield a few captured frames held across {frames} written, got {captured}"
     );
 
     let size = std::fs::metadata(&rec_path).map(|m| m.len()).unwrap_or(0);

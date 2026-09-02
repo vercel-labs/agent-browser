@@ -1030,21 +1030,28 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 return;
             }
         }
-        // Recording restart (has "stopped" field - from recording_restart action)
-        if data.get("stopped").is_some() {
+        // Recording restart (has "restarted" field - from recording_restart action)
+        if data.get("restarted").is_some() {
             let path = data
                 .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
+            let rate = recording_fps_suffix(data);
             if let Some(prev_path) = data.get("previousPath").and_then(|v| v.as_str()) {
                 println!(
-                    "{} Recording restarted: {} (previous saved to {})",
+                    "{} Recording restarted: {}{} (previous saved to {})",
                     color::success_indicator(),
                     path,
+                    rate,
                     prev_path
                 );
             } else {
-                println!("{} Recording started: {}", color::success_indicator(), path);
+                println!(
+                    "{} Recording started: {}{}",
+                    color::success_indicator(),
+                    path,
+                    rate
+                );
             }
             return;
         }

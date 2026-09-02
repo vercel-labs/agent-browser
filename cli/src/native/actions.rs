@@ -710,6 +710,7 @@ impl DaemonState {
         let routes = self.routes.clone();
         let origin_headers = self.origin_headers.clone();
         let proxy_credentials = self.proxy_credentials.clone();
+        let capture_session = self.recording_state.capture_session.clone();
 
         self.fetch_handler_task = Some(tokio::spawn(async move {
             loop {
@@ -765,6 +766,16 @@ impl DaemonState {
                         let target_info = event.params.get("targetInfo").and_then(|value| {
                             serde_json::from_value::<TargetInfo>(value.clone()).ok()
                         });
+                        // The recorder's screencast session shares a target
+                        // with a page session that already carries the
+                        // controls; installing them twice would pause every
+                        // request twice.
+                        let is_recorder_session = target_info.as_ref().is_some_and(|target| {
+                            recording::owns_attachment(&capture_session, &target.target_id, &sid)
+                        });
+                        if is_recorder_session {
+                            continue;
+                        }
                         let target_needs_controls = target_info
                             .as_ref()
                             .is_some_and(target_supports_network_controls);
@@ -960,24 +971,42 @@ impl DaemonState {
         }
     }
 
-    /// Spawn a background task that polls screenshots and pipes them to ffmpeg.
+    /// Attach the recorder's own CDP session to the page behind `session_id`
+    /// and spawn the task that screencasts it into ffmpeg.
     async fn start_recording_task(
         &mut self,
         client: Arc<CdpClient>,
         session_id: String,
     ) -> Result<(), String> {
+        let capture_session = match recording::attach_capture_session(
+            &client,
+            &session_id,
+            &self.recording_state.capture_session,
+        )
+        .await
+        {
+            Ok(capture_session) => capture_session,
+            Err(e) => {
+                // `recording_start` already marked the state active.
+                self.recording_state.active = false;
+                return Err(e);
+            }
+        };
         let shared_count = Arc::new(AtomicU64::new(0));
+        let shared_captured = Arc::new(AtomicU64::new(0));
         let (cancel_tx, cancel_rx) = oneshot::channel();
         let handle = recording::spawn_recording_task(
             client,
-            session_id,
+            capture_session,
             self.recording_state.output_path.clone(),
             self.recording_state.fps,
             shared_count.clone(),
+            shared_captured.clone(),
             cancel_rx,
         );
         self.recording_state.capture_task = Some(handle);
         self.recording_state.shared_frame_count = Some(shared_count);
+        self.recording_state.shared_captured_count = Some(shared_captured);
         self.recording_state.cancel_tx = Some(cancel_tx);
         Ok(())
     }
@@ -1473,6 +1502,13 @@ impl DaemonState {
                                 match serde_json::from_value::<TargetInfo>(
                                     target_info_value.clone(),
                                 ) {
+                                    // The recorder's own screencast session
+                                    // is not a tab and must not have page
+                                    // domains enabled on it.
+                                    Ok(target_info)
+                                        if self
+                                            .recording_state
+                                            .owns_attachment(&target_info.target_id, sid) => {}
                                     Ok(target_info) if target_info.target_type == "iframe" => {
                                         // For OOPIF targets, Chrome uses the frameId as
                                         // the targetId, so we can key iframe_sessions by it.
@@ -1866,6 +1902,14 @@ impl DaemonState {
                         // stream server's background CDP event loop. Here we just
                         // collect acks as a fallback for non-streaming mode.
                         "Page.screencastFrame" if self.stream_server.is_none() => {
+                            // The recorder acks its own frames.
+                            let from_recorder = event
+                                .session_id
+                                .as_deref()
+                                .is_some_and(|sid| self.recording_state.owns_session(sid));
+                            if from_recorder {
+                                continue;
+                            }
                             if let Some(sid) =
                                 event.params.get("sessionId").and_then(|v| v.as_i64())
                             {

@@ -323,7 +323,12 @@ pub(super) async fn cdp_event_loop(
                                                 }
                                             }
                                         }
-                                    } else if evt.method == "Page.screencastFrame" {
+                                    } else if evt.method == "Page.screencastFrame"
+                                        && session_matches(session_id.as_deref(), evt.session_id.as_deref())
+                                    {
+                                        // Video recording runs its own screencast on a
+                                        // separate session of the same page; those frames
+                                        // are not the stream's to ack or broadcast.
                                         if let Some(sid) = evt.params.get("sessionId").and_then(|v| v.as_i64()) {
                                             let _ = client_arc.send_command(
                                                 "Page.screencastFrameAck",

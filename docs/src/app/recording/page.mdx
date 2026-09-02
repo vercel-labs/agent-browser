@@ -45,7 +45,9 @@ agent-browser record start ./soak.webm --fps 10
   </tbody>
 </table>
 
-Valid rates are 1 to 60. The saved file always carries the requested rate and its duration matches the wall clock time it recorded: when a capture takes longer than one frame budget, the frame already on screen is held for the gap rather than dropped, so playback never runs fast. On a busy page or a loaded machine, the number of distinct frames can fall below the requested rate even though timing stays correct.
+Valid rates are 1 to 60. Frames come from Chrome's screencast, which delivers a new frame every time the page repaints, up to the display rate, so a 60 fps recording of a scroll or animation holds 60 distinct pictures per second rather than repeats of the last screenshot. The file's duration matches the wall clock time it recorded: while the page is static the last frame is held, so playback never runs fast. A gap longer than five seconds (a hung page, a tab left in the background) is held for five seconds and the rest is left out.
+
+`record stop` reports both `frames`, the number written to the file, and `capturedFrames`, the number of distinct frames the page produced. A static page shows a small `capturedFrames` against a full `frames` count; that is the hold working, not a problem.
 
 ## Commands
 
@@ -118,6 +120,6 @@ Screenshots and videos work well together: screenshots capture precise still sta
 
 - Recording adds overhead to automation, and higher frame rates add more.
 - Long recordings can use significant disk space; 60 fps roughly doubles the bitrate of 30 fps.
-- Distinct frames per second are bounded by how fast the browser can produce screenshots, so a heavy page may repeat frames at 60 fps.
+- Distinct frames per second are bounded by how often the page repaints, so a page that renders below 60 fps records below it too.
 - Use `record stop` before closing a session if you need the file flushed.
 - Some constrained headless environments may have codec or GPU limitations.
