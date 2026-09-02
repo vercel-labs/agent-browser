@@ -433,6 +433,15 @@ fn format_a11y_target(target: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// Render a recording's capture rate as a trailing " (30 fps)", or nothing
+/// when the payload predates the field.
+fn recording_fps_suffix(data: &serde_json::Value) -> String {
+    data.get("fps")
+        .and_then(|v| v.as_u64())
+        .map(|fps| format!(" ({} fps)", fps))
+        .unwrap_or_default()
+}
+
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     if opts.json {
         if opts.content_boundaries {
@@ -1005,10 +1014,16 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                         println!("{} HAR recording started", color::success_indicator());
                     }
                     _ => {
+                        let rate = recording_fps_suffix(data);
                         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
-                            println!("{} Recording started: {}", color::success_indicator(), path);
+                            println!(
+                                "{} Recording started: {}{}",
+                                color::success_indicator(),
+                                path,
+                                rate
+                            );
                         } else {
-                            println!("{} Recording started", color::success_indicator());
+                            println!("{} Recording started{}", color::success_indicator(), rate);
                         }
                     }
                 }
@@ -1044,7 +1059,12 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                         error
                     );
                 } else {
-                    println!("{} Recording saved to {}", color::success_indicator(), path);
+                    println!(
+                        "{} Recording saved to {}{}",
+                        color::success_indicator(),
+                        path,
+                        recording_fps_suffix(data)
+                    );
                 }
             } else {
                 println!("{} Recording stopped", color::success_indicator());
@@ -2742,18 +2762,25 @@ The output file can be viewed in:
             r##"
 agent-browser record - Record browser session to video
 
-Usage: agent-browser record start <path.webm> [url]
+Usage: agent-browser record start <path.webm> [url] [--fps <n>]
        agent-browser record stop
-       agent-browser record restart <path.webm> [url]
+       agent-browser record restart <path.webm> [url] [--fps <n>]
 
 Record the browser to a WebM video file.
 Creates a fresh browser context but preserves cookies and localStorage.
 If no URL is provided, automatically navigates to your current page.
 
+Recording captures 30 fps, which keeps scrolls and CSS transitions smooth.
+Raise it to 60 for short, motion-heavy takes (drag interactions, animation
+work); lower it for long sessions where file size matters more than motion.
+
 Operations:
   start <path> [url]     Start recording (defaults to current URL if omitted)
   stop                   Stop recording and save video
   restart <path> [url]   Stop current recording (if any) and start a new one
+
+Options:
+  --fps <n>            Capture rate, 1-60 (default: 30)
 
 Global Options:
   --json               Output as JSON
@@ -2769,6 +2796,12 @@ Examples:
 
   # Or specify a different URL
   agent-browser record start ./demo.webm https://example.com
+
+  # 60 fps for a scroll or animation capture
+  agent-browser record start ./scroll.webm --fps 60
+
+  # 10 fps for a long session where size matters more than motion
+  agent-browser record start ./soak.webm --fps 10
 
   # Restart recording with a new file (stops previous, starts new)
   agent-browser record restart ./take2.webm
@@ -3672,7 +3705,7 @@ Debug:
   trace start                Start Chrome DevTools trace
   trace stop [path]          Stop and save Chrome DevTools trace
   profiler start|stop [path] Record Chrome DevTools profile
-  record start <path> [url]  Start video recording (WebM)
+  record start <path> [url]  Start video recording (WebM, 30 fps; --fps 1-60)
   record stop                Stop and save video
   console [--clear]          View console logs
   errors [--clear]           View page errors

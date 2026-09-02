@@ -1672,52 +1672,28 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "record" => {
             const VALID: &[&str] = &["start", "stop", "restart"];
             match rest.first().copied() {
-                Some("start") => {
-                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "record start".to_string(),
-                        usage: "record start <output.webm> [url]",
-                    })?;
-                    // Optional URL parameter
-                    let url = rest.get(2);
-                    let mut cmd = json!({ "id": id, "action": "recording_start", "path": path });
-                    if let Some(u) = url {
-                        // Add https:// prefix if needed (preserve special schemes)
-                        let url_str = if u.starts_with("http") || u.contains("://") {
-                            u.to_string()
-                        } else {
-                            format!("https://{}", u)
-                        };
-                        cmd["url"] = json!(url_str);
-                    }
-                    Ok(cmd)
-                }
+                Some("start") => parse_record_take(
+                    &id,
+                    "recording_start",
+                    &rest[1..],
+                    "record start",
+                    "record start <output.webm> [url] [--fps <n>]",
+                ),
                 Some("stop") => Ok(json!({ "id": id, "action": "recording_stop" })),
-                Some("restart") => {
-                    let path = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                        context: "record restart".to_string(),
-                        usage: "record restart <output.webm> [url]",
-                    })?;
-                    // Optional URL parameter
-                    let url = rest.get(2);
-                    let mut cmd = json!({ "id": id, "action": "recording_restart", "path": path });
-                    if let Some(u) = url {
-                        // Add https:// prefix if needed (preserve special schemes)
-                        let url_str = if u.starts_with("http") || u.contains("://") {
-                            u.to_string()
-                        } else {
-                            format!("https://{}", u)
-                        };
-                        cmd["url"] = json!(url_str);
-                    }
-                    Ok(cmd)
-                }
+                Some("restart") => parse_record_take(
+                    &id,
+                    "recording_restart",
+                    &rest[1..],
+                    "record restart",
+                    "record restart <output.webm> [url] [--fps <n>]",
+                ),
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
                     valid_options: VALID,
                 }),
                 None => Err(ParseError::MissingArguments {
                     context: "record".to_string(),
-                    usage: "record <start|stop|restart> [path] [url]",
+                    usage: "record <start|stop|restart> [path] [url] [--fps <n>]",
                 }),
             }
         }
@@ -2341,6 +2317,93 @@ fn parse_read(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseErro
     }
     if let Some(ref allowed_domains) = flags.allowed_domains {
         cmd["allowedDomains"] = json!(allowed_domains);
+    }
+    Ok(cmd)
+}
+
+/// Parse the arguments shared by `record start` and `record restart`:
+/// `<path> [url] [--fps <n>]`.
+///
+/// `rest` excludes the subcommand. Recording defaults to
+/// `recording::DEFAULT_FPS`; `--fps` accepts anything up to
+/// `recording::MAX_FPS`, with 60 reserved for motion-heavy takes.
+fn parse_record_take(
+    id: &str,
+    action: &str,
+    rest: &[&str],
+    context: &str,
+    usage: &'static str,
+) -> Result<Value, ParseError> {
+    let max_fps = crate::native::recording::MAX_FPS;
+    let mut path: Option<&str> = None;
+    let mut url: Option<&str> = None;
+    let mut fps: Option<u32> = None;
+
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--fps" => {
+                let value = rest
+                    .get(i + 1)
+                    .ok_or_else(|| ParseError::MissingArguments {
+                        context: format!("{} --fps", context),
+                        usage,
+                    })?;
+                let parsed = value.parse::<u32>().map_err(|_| ParseError::InvalidValue {
+                    message: format!("Invalid fps: '{}' is not a valid integer", value),
+                    usage,
+                })?;
+                if parsed == 0 || parsed > max_fps {
+                    return Err(ParseError::InvalidValue {
+                        message: format!(
+                            "Invalid fps: {} is out of range (valid range: 1-{})",
+                            parsed, max_fps
+                        ),
+                        usage,
+                    });
+                }
+                fps = Some(parsed);
+                i += 2;
+            }
+            flag if flag.starts_with("--") => {
+                return Err(ParseError::InvalidValue {
+                    message: format!("Unknown flag for {}: {}", context, flag),
+                    usage,
+                });
+            }
+            positional => {
+                if path.is_none() {
+                    path = Some(positional);
+                } else if url.is_none() {
+                    url = Some(positional);
+                } else {
+                    return Err(ParseError::InvalidValue {
+                        message: format!("Unexpected argument for {}: {}", context, positional),
+                        usage,
+                    });
+                }
+                i += 1;
+            }
+        }
+    }
+
+    let path = path.ok_or_else(|| ParseError::MissingArguments {
+        context: context.to_string(),
+        usage,
+    })?;
+
+    let mut cmd = json!({ "id": id, "action": action, "path": path });
+    if let Some(u) = url {
+        // Add https:// prefix if needed (preserve special schemes)
+        let url_str = if u.starts_with("http") || u.contains("://") {
+            u.to_string()
+        } else {
+            format!("https://{}", u)
+        };
+        cmd["url"] = json!(url_str);
+    }
+    if let Some(rate) = fps {
+        cmd["fps"] = json!(rate);
     }
     Ok(cmd)
 }
@@ -4790,6 +4853,110 @@ mod tests {
         assert_eq!(cmd["action"], "recording_start");
         assert_eq!(cmd["path"], "output.webm");
         assert!(cmd.get("url").is_none());
+        // Omitting --fps lets the daemon apply its 30 fps default.
+        assert!(cmd.get("fps").is_none());
+    }
+
+    #[test]
+    fn test_record_start_with_fps() {
+        let cmd =
+            parse_command(&args("record start output.webm --fps 60"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "recording_start");
+        assert_eq!(cmd["path"], "output.webm");
+        assert_eq!(cmd["fps"], 60);
+    }
+
+    #[test]
+    fn test_record_start_with_url_and_fps() {
+        let cmd = parse_command(
+            &args("record start demo.webm example.com --fps 24"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["path"], "demo.webm");
+        assert_eq!(cmd["url"], "https://example.com");
+        assert_eq!(cmd["fps"], 24);
+    }
+
+    #[test]
+    fn test_record_start_with_fps_before_url() {
+        let cmd = parse_command(
+            &args("record start demo.webm --fps 60 https://example.com"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["path"], "demo.webm");
+        assert_eq!(cmd["url"], "https://example.com");
+        assert_eq!(cmd["fps"], 60);
+    }
+
+    #[test]
+    fn test_record_start_rejects_fps_above_max() {
+        let result = parse_command(&args("record start demo.webm --fps 120"), &default_flags());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_record_start_rejects_zero_fps() {
+        let result = parse_command(&args("record start demo.webm --fps 0"), &default_flags());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_record_start_rejects_non_numeric_fps() {
+        let result = parse_command(&args("record start demo.webm --fps fast"), &default_flags());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_record_start_rejects_fps_without_value() {
+        let result = parse_command(&args("record start demo.webm --fps"), &default_flags());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_record_start_rejects_unknown_flag() {
+        let result = parse_command(&args("record start demo.webm --smooth"), &default_flags());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_record_start_rejects_extra_positional() {
+        let result = parse_command(
+            &args("record start demo.webm example.com extra"),
+            &default_flags(),
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn test_record_restart_with_fps() {
+        let cmd = parse_command(
+            &args("record restart take2.webm --fps 60"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "recording_restart");
+        assert_eq!(cmd["path"], "take2.webm");
+        assert_eq!(cmd["fps"], 60);
     }
 
     #[test]

@@ -22,6 +22,31 @@ agent-browser record start ./demo.webm https://example.com
 
 If no URL is provided, recording starts from the current page. The recording context copies cookies from the active session.
 
+## Frame rate
+
+Recording captures 30 frames per second by default, which is enough for scrolling, hover states, and CSS transitions to read as motion rather than as a slideshow. Use `--fps` to change it:
+
+```bash
+# 60 fps for a short, motion-heavy take
+agent-browser record start ./scroll.webm --fps 60
+
+# 10 fps for a long soak run where file size matters more than motion
+agent-browser record start ./soak.webm --fps 10
+```
+
+<table>
+  <thead>
+    <tr><th>Rate</th><th>When to use it</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>60</td><td>Drag interactions, animation and scroll polish work, anything where a single frame is the evidence. Best on short clips.</td></tr>
+    <tr><td>30 (default)</td><td>Everything else: flows, CI evidence, walkthroughs.</td></tr>
+    <tr><td>1 to 15</td><td>Long sessions where the video is a timeline rather than a motion study.</td></tr>
+  </tbody>
+</table>
+
+Valid rates are 1 to 60. The saved file always carries the requested rate and its duration matches the wall clock time it recorded: when a capture takes longer than one frame budget, the frame already on screen is held for the gap rather than dropped, so playback never runs fast. On a busy page or a loaded machine, the number of distinct frames can fall below the requested rate even though timing stays correct.
+
 ## Commands
 
 <table>
@@ -29,9 +54,9 @@ If no URL is provided, recording starts from the current page. The recording con
     <tr><th>Command</th><th>Description</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>record start &lt;path.webm&gt; [url]</code></td><td>Start recording to a WebM file</td></tr>
+    <tr><td><code>record start &lt;path.webm&gt; [url] [--fps &lt;n&gt;]</code></td><td>Start recording to a WebM file</td></tr>
     <tr><td><code>record stop</code></td><td>Stop the active recording and save the file</td></tr>
-    <tr><td><code>record restart &lt;path.webm&gt; [url]</code></td><td>Stop the current recording and immediately start another</td></tr>
+    <tr><td><code>record restart &lt;path.webm&gt; [url] [--fps &lt;n&gt;]</code></td><td>Stop the current recording and immediately start another</td></tr>
   </tbody>
 </table>
 
@@ -83,6 +108,7 @@ Screenshots and videos work well together: screenshots capture precise still sta
   <tbody>
     <tr><td>Container</td><td>WebM</td></tr>
     <tr><td>Common extension</td><td><code>.webm</code></td></tr>
+    <tr><td>Frame rate</td><td>30 fps by default, 1 to 60 with <code>--fps</code></td></tr>
     <tr><td>Viewport</td><td>Uses the active browser viewport settings</td></tr>
     <tr><td>State</td><td>Copies cookies from the active session</td></tr>
   </tbody>
@@ -90,7 +116,8 @@ Screenshots and videos work well together: screenshots capture precise still sta
 
 ## Limitations
 
-- Recording adds overhead to automation.
-- Long recordings can use significant disk space.
+- Recording adds overhead to automation, and higher frame rates add more.
+- Long recordings can use significant disk space; 60 fps roughly doubles the bitrate of 30 fps.
+- Distinct frames per second are bounded by how fast the browser can produce screenshots, so a heavy page may repeat frames at 60 fps.
 - Use `record stop` before closing a session if you need the file flushed.
 - Some constrained headless environments may have codec or GPU limitations.

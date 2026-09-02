@@ -7238,6 +7238,125 @@ async fn e2e_recording_inherits_viewport() {
 }
 
 // ---------------------------------------------------------------------------
+// Recording: requested frame rate
+// ---------------------------------------------------------------------------
+
+/// Verify that `recording_start` honors an explicit frame rate and that the
+/// frame count tracks wall clock. Frames are paced against the clock, so a
+/// capture that overruns its budget holds the previous picture instead of
+/// shortening playback: roughly `fps * seconds` frames must reach ffmpeg.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_honors_requested_fps() {
+    const FPS: u64 = 60;
+    const RECORD_MS: u64 = 1000;
+
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>Frame rate</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let tmp_dir = std::env::temp_dir();
+    let rec_path = tmp_dir.join(format!("ab-e2e-rec-fps-{}.webm", std::process::id()));
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "recording_start",
+            "path": rec_path.to_string_lossy(),
+            "fps": FPS,
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["fps"].as_u64(), Some(FPS));
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(RECORD_MS)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["fps"].as_u64(), Some(FPS));
+
+    let frames = data["frames"].as_u64().unwrap();
+    let expected = FPS * RECORD_MS / 1000;
+    assert!(
+        frames >= expected / 2 && frames <= expected * 2,
+        "expected roughly {expected} frames at {FPS} fps over {RECORD_MS}ms, got {frames}"
+    );
+
+    let size = std::fs::metadata(&rec_path).map(|m| m.len()).unwrap_or(0);
+    assert!(size > 0, "recording file should not be empty");
+
+    let _ = std::fs::remove_file(&rec_path);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Verify that an out-of-range frame rate is rejected before the recorder
+/// builds its context, leaving no file and no active recording behind.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_rejects_invalid_fps() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let tmp_dir = std::env::temp_dir();
+    let rec_path = tmp_dir.join(format!("ab-e2e-rec-badfps-{}.webm", std::process::id()));
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "recording_start",
+            "path": rec_path.to_string_lossy(),
+            "fps": 240,
+        }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(|v| v.as_bool()),
+        Some(false),
+        "240 fps should be rejected: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
+    let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(err.contains("fps"), "error should name the field: {}", err);
+    assert!(!rec_path.exists(), "no file should be created");
+
+    // Nothing was started, so there is nothing to stop.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp.get("success").and_then(|v| v.as_bool()), Some(false));
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
 // --state / storageState flag: cookies should be loaded at launch time
 // ---------------------------------------------------------------------------
 

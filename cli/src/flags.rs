@@ -1457,6 +1457,14 @@ mod tests {
     }
 
     #[test]
+    fn test_clean_args_keeps_record_fps() {
+        // --fps belongs to `record`, so it must reach the command parser even
+        // when global flags are mixed in.
+        let cleaned = clean_args(&args("--json record start demo.webm --fps 60"));
+        assert_eq!(cleaned, vec!["record", "start", "demo.webm", "--fps", "60"]);
+    }
+
+    #[test]
     fn test_parse_idle_timeout_flag_converts_to_ms() {
         let flags = parse_flags(&args("--idle-timeout 10s open example.com"));
         assert_eq!(flags.idle_timeout.as_deref(), Some("10000"));

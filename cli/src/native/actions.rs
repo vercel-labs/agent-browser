@@ -972,6 +972,7 @@ impl DaemonState {
             client,
             session_id,
             self.recording_state.output_path.clone(),
+            self.recording_state.fps,
             shared_count.clone(),
             cancel_rx,
         );
@@ -6916,6 +6917,21 @@ async fn handle_profiler_stop(cmd: &Value, state: &mut DaemonState) -> Result<Va
     native_tracing::profiler_stop(&mgr.client, &session_id, &mut state.tracing_state, path).await
 }
 
+/// Read an optional `fps` field from a recording command, rejecting rates the
+/// recorder cannot honor before any browser work happens.
+fn recording_fps_from_command(cmd: &Value) -> Result<Option<u32>, String> {
+    match cmd.get("fps") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let raw = value
+                .as_u64()
+                .filter(|v| *v <= u32::MAX as u64)
+                .ok_or_else(|| format!("Invalid fps: {} is not a positive integer", value))?;
+            recording::validate_fps(raw as u32).map(Some)
+        }
+    }
+}
+
 async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let path = cmd
         .get("path")
@@ -6926,6 +6942,10 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         .get("url")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
+
+    // Validate the rate before spinning up a recording context so a bad value
+    // costs nothing.
+    let fps = recording_fps_from_command(cmd)?;
 
     let viewport = state.viewport;
     let domain_filter = state.domain_filter.read().await.clone();
@@ -7070,7 +7090,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         }
     }
 
-    let result = recording::recording_start(&mut state.recording_state, path)?;
+    let result = recording::recording_start(&mut state.recording_state, path, fps)?;
     state.start_recording_task(client, new_session_id).await?;
 
     if let Some(ref server) = state.stream_server {
@@ -7102,6 +7122,9 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         .filter(|s| !s.is_empty())
         .map(String::from);
 
+    // Validate the rate before stopping the in-flight take.
+    let fps = recording_fps_from_command(cmd)?;
+
     {
         let domain_filter = state.domain_filter.read().await;
         if let Some(ref url) = recording_url {
@@ -7128,7 +7151,7 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         None
     };
 
-    recording::recording_start(&mut state.recording_state, path)?;
+    recording::recording_start(&mut state.recording_state, path, fps)?;
 
     if let Some((client, session_id)) = recording_target {
         state.start_recording_task(client, session_id).await?;
@@ -7138,6 +7161,7 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         "restarted": true,
         "previousPath": previous_path,
         "path": path,
+        "fps": state.recording_state.fps,
     }))
 }
 
@@ -10085,16 +10109,19 @@ async fn handle_video_start(cmd: &Value, state: &mut DaemonState) -> Result<Valu
         return Err("A recording is already in progress".to_string());
     }
 
+    let fps = recording_fps_from_command(cmd)?;
+
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    recording::recording_start(&mut state.recording_state, path)?;
+    recording::recording_start(&mut state.recording_state, path, fps)?;
     state
         .start_recording_task(mgr.client.clone(), session_id)
         .await?;
 
     Ok(json!({
         "started": true,
+        "fps": state.recording_state.fps,
         "note": "Video recording started. Use video_stop to save the recording."
     }))
 }

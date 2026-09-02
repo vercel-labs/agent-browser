@@ -1368,8 +1368,17 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_RECORD_START,
             "Record start",
-            "Start video recording.",
-            json!({ "path": { "type": "string" }, "url": { "type": "string" } }),
+            "Start video recording. Captures 30 fps by default; pass fps up to 60 for motion-heavy takes.",
+            json!({
+                "path": { "type": "string" },
+                "url": { "type": "string" },
+                "fps": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": crate::native::recording::MAX_FPS,
+                    "description": "Capture rate in frames per second (default 30, max 60).",
+                },
+            }),
             &["path"],
         ),
         tool(
@@ -1382,8 +1391,17 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_RECORD_RESTART,
             "Record restart",
-            "Restart video recording.",
-            json!({ "path": { "type": "string" }, "url": { "type": "string" } }),
+            "Restart video recording. Captures 30 fps by default; pass fps up to 60 for motion-heavy takes.",
+            json!({
+                "path": { "type": "string" },
+                "url": { "type": "string" },
+                "fps": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": crate::native::recording::MAX_FPS,
+                    "description": "Capture rate in frames per second (default 30, max 60).",
+                },
+            }),
             &["path"],
         ),
         tool(
@@ -3052,12 +3070,21 @@ fn call_profiler_start(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool(arguments, args, None)
 }
 
-fn call_record_start(arguments: &Value, action: &str) -> Result<Value, ProtocolError> {
+fn record_command_args(arguments: &Value, action: &str) -> Result<Vec<String>, ProtocolError> {
     let path = required_string(arguments, "path")?;
     let mut args = vec!["record".to_string(), action.to_string(), path];
     if let Some(url) = optional_string(arguments, "url")? {
         args.push(url);
     }
+    if let Some(fps) = optional_u64(arguments, "fps")? {
+        args.push("--fps".to_string());
+        args.push(fps.to_string());
+    }
+    Ok(args)
+}
+
+fn call_record_start(arguments: &Value, action: &str) -> Result<Value, ProtocolError> {
+    let args = record_command_args(arguments, action)?;
     call_cli_tool(arguments, args, None)
 }
 
@@ -4513,6 +4540,46 @@ mod tests {
             .unwrap();
         // Must stay in sync with the CLI parser's accepted --content values.
         assert_eq!(modes, &vec![json!("all"), json!("text"), json!("none")]);
+    }
+
+    #[test]
+    fn record_schema_and_args_include_fps() {
+        for name in [TOOL_RECORD_START, TOOL_RECORD_RESTART] {
+            let tool = tools()
+                .into_iter()
+                .find(|tool| tool["name"].as_str() == Some(name))
+                .unwrap();
+            let fps = &tool["inputSchema"]["properties"]["fps"];
+            assert_eq!(fps["type"], "integer");
+            assert_eq!(fps["minimum"], json!(1));
+            // Must stay in sync with the CLI parser's --fps ceiling.
+            assert_eq!(fps["maximum"], json!(crate::native::recording::MAX_FPS));
+        }
+
+        assert_eq!(
+            record_command_args(&json!({ "path": "demo.webm", "fps": 60 }), "start").unwrap(),
+            vec!["record", "start", "demo.webm", "--fps", "60"]
+        );
+        assert_eq!(
+            record_command_args(
+                &json!({ "path": "take2.webm", "url": "https://example.com", "fps": 24 }),
+                "restart"
+            )
+            .unwrap(),
+            vec![
+                "record",
+                "restart",
+                "take2.webm",
+                "https://example.com",
+                "--fps",
+                "24"
+            ]
+        );
+        // Omitting fps leaves the default to the CLI parser and daemon.
+        assert_eq!(
+            record_command_args(&json!({ "path": "demo.webm" }), "start").unwrap(),
+            vec!["record", "start", "demo.webm"]
+        );
     }
 
     #[test]

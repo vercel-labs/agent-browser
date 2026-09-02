@@ -8,6 +8,7 @@ Capture browser automation as video for debugging, documentation, or verificatio
 
 - [Basic Recording](#basic-recording)
 - [Recording Commands](#recording-commands)
+- [Frame Rate](#frame-rate)
 - [Use Cases](#use-cases)
 - [Best Practices](#best-practices)
 - [Output Format](#output-format)
@@ -35,15 +36,41 @@ agent-browser record stop
 # Launch a session first
 agent-browser open
 
-# Start recording to file
+# Start recording to file (30 fps)
 agent-browser record start ./output.webm
+
+# Start recording at a specific rate (1-60)
+agent-browser record start ./output.webm --fps 60
 
 # Stop current recording
 agent-browser record stop
 
 # Restart with new file (stops current + starts new)
-agent-browser record restart ./take2.webm
+agent-browser record restart ./take2.webm --fps 60
 ```
+
+## Frame Rate
+
+Recording captures 30 fps by default, so scrolling, hover states, and CSS transitions read as motion instead of a slideshow. `--fps` takes any rate from 1 to 60.
+
+| Rate | Use it for |
+| --- | --- |
+| 60 | Short, motion-heavy takes: drag interactions, animation, scroll polish work |
+| 30 (default) | Flows, CI evidence, walkthroughs |
+| 1-15 | Long sessions where the video is a timeline, not a motion study |
+
+```bash
+# Animation review
+agent-browser record start ./transition.webm --fps 60
+agent-browser click @e1
+agent-browser wait 1500
+agent-browser record stop
+
+# Hour-long soak run
+agent-browser record start ./soak.webm --fps 5
+```
+
+The saved file carries the requested rate, and its duration matches the wall clock time it recorded: a capture that overruns its frame budget holds the current frame rather than dropping it, so playback never runs fast. On a heavy page the number of distinct frames can still fall short of the requested rate. 60 fps roughly doubles the bitrate of 30 fps.
 
 ## Use Cases
 
@@ -165,11 +192,13 @@ agent-browser record stop
 ## Output Format
 
 - Default format: WebM (VP8/VP9 codec)
+- Default frame rate: 30 fps (`--fps` accepts 1 to 60)
 - Compatible with all modern browsers and video players
 - Compressed but high quality
 
 ## Limitations
 
-- Recording adds slight overhead to automation
-- Large recordings can consume significant disk space
+- Recording adds slight overhead to automation, and higher frame rates add more
+- Large recordings can consume significant disk space; 60 fps roughly doubles the bitrate of 30 fps
+- Distinct frames per second are bounded by how fast the browser produces screenshots, so a heavy page may repeat frames at 60 fps
 - Some headless environments may have codec limitations
