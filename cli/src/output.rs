@@ -1748,10 +1748,12 @@ Usage: agent-browser select <selector> <value...>
 
 Selects options in a native <select> or supported role="combobox"/role="listbox"
 control by exact value, label, or normalized accessible text, then verifies the
-resulting selection state.
-Single-select ARIA controls accept one value. Multiple values are accepted only
-by an explicitly multiselectable ARIA listbox. Unmatched, disabled, unsupported,
-or unverified controls return an actionable error.
+resulting selection state. Input-backed comboboxes receive the requested value
+as a filter before their associated options are queried.
+Single-select native and ARIA controls accept one value. Native multiple selects
+retain multi-value behavior; multiple ARIA values require an explicitly
+multiselectable listbox and represent its final set. Unmatched, disabled,
+unsupported, or unverified controls return an actionable error.
 
 Global Options:
   --json               Output as JSON

@@ -683,6 +683,9 @@ async fn select_native_option(
             if (this.matches(':disabled')) {
                 return { error: 'the native select is disabled' };
             }
+            if (this.multiple !== true && vals.length > 1) {
+                return { error: 'multiple values were requested from a single-select native select' };
+            }
             const options = Array.from(this.options || []);
             const describe = option => {
                 const label = normalize(option.label);
@@ -845,6 +848,9 @@ const ARIA_STATE_FUNCTION: &str = r#"function(vals) {
     const formControl = this.matches && this.matches('input,textarea,select')
         ? this
         : (this.querySelector && this.querySelector('input,textarea,select'));
+    const input = this.matches && this.matches('input,textarea')
+        ? this
+        : (this.querySelector && this.querySelector('input,textarea'));
     if (formControl && typeof formControl.value === 'string') {
         committed.push(normalize(formControl.value));
     }
@@ -857,11 +863,25 @@ const ARIA_STATE_FUNCTION: &str = r#"function(vals) {
         associated: roots.length > 0,
         options: state,
         committed: committed.filter(Boolean),
+        inputBacked: !!input,
+        inputValue: input && typeof input.value === 'string' ? normalize(input.value) : null,
         // aria-activedescendant is navigation state, not a committed value.
         // Keep it separate so keyboard-operated widgets are committed with
         // Enter before selection can be reported as successful.
         hasCommittedState: committed.length > 0,
         activeIndex: activeIndex >= 0 ? activeIndex : null,
+    };
+}"#;
+
+const ARIA_FOCUS_INPUT_FUNCTION: &str = r#"function() {
+    const input = this.matches && this.matches('input,textarea')
+        ? this
+        : (this.querySelector && this.querySelector('input,textarea'));
+    if (!input) return { focused: false, value: null };
+    input.focus();
+    return {
+        focused: input.ownerDocument.activeElement === input,
+        value: typeof input.value === 'string' ? input.value : ''
     };
 }"#;
 
@@ -897,6 +917,15 @@ struct AriaSelectionRequest<'a> {
     timeout_ms: u64,
 }
 
+#[derive(Default)]
+struct AriaSelectionVerification<'a> {
+    requested_options_seen: bool,
+    committed_before_activation: Option<&'a [String]>,
+    committed_before_filter: Option<&'a [String]>,
+    activation_attempted: bool,
+    filter_input_sent: bool,
+}
+
 async fn select_aria_option(
     client: &CdpClient,
     request: AriaSelectionRequest<'_>,
@@ -920,6 +949,9 @@ async fn select_aria_option(
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
     let mut opened = false;
     let mut requested_options_seen = false;
+    let mut filter_input_sent = false;
+    let mut activation_attempted = false;
+    let mut committed_before_filter: Option<Vec<String>> = None;
     // A combobox's input/display can contain the requested text while the
     // popup is only filtering options. Keep the pre-activation committed state
     // so that fallback verification requires an actual commit transition.
@@ -966,6 +998,9 @@ async fn select_aria_option(
             }
             Err(error) => return Err(error),
         };
+        if committed_before_filter.is_none() {
+            committed_before_filter = selection_committed_values(&state);
+        }
         let state_role = state
             .get("role")
             .and_then(Value::as_str)
@@ -1064,10 +1099,70 @@ async fn select_aria_option(
             expected_kind,
             values,
             multiselectable,
-            requested_options_seen,
-            committed_before_activation.as_deref(),
+            &AriaSelectionVerification {
+                requested_options_seen,
+                committed_before_activation: committed_before_activation.as_deref(),
+                committed_before_filter: committed_before_filter.as_deref(),
+                activation_attempted,
+                filter_input_sent,
+            },
         ) {
             return Ok(SelectionResult::default());
+        }
+
+        // Input-backed comboboxes commonly render no options until the user
+        // types a filter. Use the same trusted keyboard input as `type`, then
+        // continue polling and re-resolving the option nodes. This remains
+        // limited to standard ARIA comboboxes; opaque custom controls are not
+        // inferred from arbitrary page attributes.
+        if expected_kind == SelectionControlKind::AriaCombobox
+            && !filter_input_sent
+            && state
+                .get("inputBacked")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            && !values.iter().all(|value| {
+                options.iter().any(|option| {
+                    option
+                        .get("available")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                        && option_matches_requested_value(option, value)
+                })
+            })
+        {
+            let focus_result = call_selection_function(
+                client,
+                &effective_session_id,
+                &object_id,
+                ARIA_FOCUS_INPUT_FUNCTION,
+                None,
+                target,
+            )
+            .await?;
+            if !focus_result
+                .get("focused")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Err(selection_error(
+                    target,
+                    "the combobox input could not receive keyboard input",
+                ));
+            }
+            let current_value = focus_result
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !current_value.is_empty() {
+                let modifier = if cfg!(target_os = "macos") { 4 } else { 2 };
+                press_key_with_modifiers(client, &effective_session_id, "a", Some(modifier))
+                    .await?;
+                press_key(client, &effective_session_id, "Backspace").await?;
+            }
+            type_text_into_active_context(client, &effective_session_id, &values[0], None).await?;
+            filter_input_sent = true;
+            continue;
         }
 
         let available = options
@@ -1169,6 +1264,7 @@ async fn select_aria_option(
             if committed_before_activation.is_none() {
                 committed_before_activation = selection_committed_values(&state);
             }
+            activation_attempted = true;
             press_key(client, &effective_session_id, "Enter").await?;
             continue;
         }
@@ -1284,6 +1380,7 @@ async fn select_aria_option(
         if committed_before_activation.is_none() {
             committed_before_activation = selection_committed_values(&state);
         }
+        activation_attempted = true;
         let click_result = dispatch_click(
             client,
             &effective_session_id,
@@ -1422,9 +1519,20 @@ fn aria_selection_confirmed(
     kind: SelectionControlKind,
     values: &[String],
     multiselectable: bool,
-    requested_options_seen: bool,
-    committed_before_activation: Option<&[String]>,
+    verification: &AriaSelectionVerification<'_>,
 ) -> bool {
+    let AriaSelectionVerification {
+        requested_options_seen,
+        committed_before_activation,
+        committed_before_filter,
+        activation_attempted,
+        filter_input_sent,
+    } = verification;
+    let requested_options_seen = *requested_options_seen;
+    let committed_before_activation = *committed_before_activation;
+    let committed_before_filter = *committed_before_filter;
+    let activation_attempted = *activation_attempted;
+    let filter_input_sent = *filter_input_sent;
     let options = state
         .get("options")
         .and_then(Value::as_array)
@@ -1503,8 +1611,17 @@ fn aria_selection_confirmed(
     // choice. In that case the exact input/display or associated form value
     // is the only remaining standard postcondition, so it must not depend on
     // the option node still being mounted.
+    let committed_after_activation = committed_state_changed(state, committed_before_activation);
+    let committed_after_filter = filter_input_sent
+        && activation_attempted
+        && committed_state_changed(state, committed_before_filter)
+        && !state
+            .get("expanded")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     requested_options_seen
-        && committed_state_changed(state, committed_before_activation)
+        && activation_attempted
+        && (committed_after_activation || committed_after_filter)
         && state
             .get("committed")
             .and_then(Value::as_array)
@@ -2516,16 +2633,20 @@ mod tests {
             SelectionControlKind::AriaListbox,
             &["blue".to_string()],
             false,
-            true,
-            None
+            &AriaSelectionVerification {
+                requested_options_seen: true,
+                ..Default::default()
+            }
         ));
         assert!(!aria_selection_confirmed(
             &state,
             SelectionControlKind::AriaListbox,
             &["blu".to_string()],
             false,
-            true,
-            None
+            &AriaSelectionVerification {
+                requested_options_seen: true,
+                ..Default::default()
+            }
         ));
 
         let no_state = serde_json::json!({
@@ -2538,8 +2659,7 @@ mod tests {
             SelectionControlKind::AriaListbox,
             &["blue".to_string()],
             false,
-            false,
-            None
+            &AriaSelectionVerification::default()
         ));
 
         let disabled_selected = serde_json::json!({
@@ -2557,8 +2677,10 @@ mod tests {
             SelectionControlKind::AriaCombobox,
             &["blue".to_string()],
             false,
-            true,
-            None
+            &AriaSelectionVerification {
+                requested_options_seen: true,
+                ..Default::default()
+            }
         ));
 
         let hidden_selected_after_observation = serde_json::json!({
@@ -2576,8 +2698,10 @@ mod tests {
             SelectionControlKind::AriaCombobox,
             &["blue".to_string()],
             false,
-            true,
-            None
+            &AriaSelectionVerification {
+                requested_options_seen: true,
+                ..Default::default()
+            }
         ));
 
         let committed_without_popup = serde_json::json!({
@@ -2591,8 +2715,13 @@ mod tests {
             SelectionControlKind::AriaCombobox,
             &["Blue Label".to_string()],
             false,
-            true,
-            Some(&previous_committed)
+            &AriaSelectionVerification {
+                requested_options_seen: true,
+                committed_before_activation: Some(&previous_committed),
+                committed_before_filter: Some(&previous_committed),
+                activation_attempted: true,
+                ..Default::default()
+            }
         ));
 
         let transient_input = serde_json::json!({
@@ -2612,8 +2741,13 @@ mod tests {
             SelectionControlKind::AriaCombobox,
             &["Blue".to_string()],
             false,
-            true,
-            Some(&same_committed)
+            &AriaSelectionVerification {
+                requested_options_seen: true,
+                committed_before_activation: Some(&same_committed),
+                committed_before_filter: Some(&same_committed),
+                filter_input_sent: true,
+                ..Default::default()
+            }
         ));
     }
 

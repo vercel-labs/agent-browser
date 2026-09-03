@@ -1283,6 +1283,26 @@ async fn e2e_form_interaction() {
     assert_success(&resp);
     assert_eq!(get_data(&resp)["result"], "red,green");
 
+    // A native single-select cannot represent more than one requested value.
+    // Reject the request before changing the existing selection.
+    let resp = execute_command(
+        &json!({ "id": "15d", "action": "select", "selector": "#color", "values": ["red", "blue"] }),
+        &mut state,
+    )
+    .await;
+    assert!(!resp["success"].as_bool().unwrap_or(true));
+    assert!(resp["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("single-select native select"));
+    let resp = execute_command(
+        &json!({ "id": "15e", "action": "evaluate", "script": "document.getElementById('color').value" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "blue");
+
     // Check checkbox
     let resp = execute_command(
         &json!({ "id": "16", "action": "check", "selector": "#agree" }),
@@ -1503,6 +1523,63 @@ async fn e2e_aria_select_controls() {
     .await;
     assert!(!resp["success"].as_bool().unwrap_or(true));
 
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_aria_select_filtered_input_combobox() {
+    let mut state = DaemonState::new();
+    state.default_timeout_ms = 2_000;
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let html = format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode(concat!(
+            "<html><body>",
+            "<label for='combo'>Color</label>",
+            "<input id='combo' role='combobox' aria-expanded='false' aria-controls='popup' autocomplete='off'>",
+            "<div id='popup' role='listbox' hidden></div>",
+            "<script>",
+            "const combo=document.getElementById('combo'),popup=document.getElementById('popup');",
+            "function wireOption(){const option=popup.querySelector('[role=option]');if(option)option.onclick=()=>{option.setAttribute('aria-selected','true');combo.dataset.committed=option.getAttribute('value');combo.setAttribute('aria-expanded','false');};}",
+            "function render(){popup.hidden=false;popup.innerHTML=combo.value==='Blue' ? \"<div id='blue' role='option' value='blue' aria-selected='false'>Blue</div>\" : '';wireOption();}",
+            "combo.addEventListener('click',()=>{combo.setAttribute('aria-expanded','true');render();});",
+            "combo.addEventListener('input',render);",
+            "</script></body></html>"
+        ))
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": html }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#combo", "values": ["Blue"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["selected"], json!(["Blue"]));
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "JSON.stringify({value:combo.value,committed:combo.dataset.committed,selected:document.getElementById('blue').getAttribute('aria-selected')})" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        r#"{"value":"Blue","committed":"blue","selected":"true"}"#
+    );
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
 }
 

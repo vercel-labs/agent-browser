@@ -143,7 +143,7 @@ agent-browser scrollintoview @e1          # scroll element into view
 agent-browser drag @e1 @e2                # drag and drop
 ```
 
-For a native `<select>` or standard ARIA `combobox`/`listbox`, use `select` with an exact option value or label. Closed comboboxes are opened with real browser input, dynamically rendered associated options are re-queried, and the command verifies selected state, a committed combobox value/display, or an associated form value before returning success. Use one value for a single-select control. Multiple values are a final set and require `aria-multiselectable="true"` on a listbox. After a widget opens or rerenders, take a fresh snapshot before using any newly exposed refs. The action uses CDP-managed browser sessions; WebDriver backends report it as unsupported.
+For a native `<select>` or standard ARIA `combobox`/`listbox`, use `select` with an exact option value or label. Closed comboboxes are opened with real browser input; input-backed comboboxes receive the requested value as a filter when needed; dynamically rendered associated options are re-queried; and the command verifies selected state, a committed combobox value/display, or an associated form value before returning success. Use one value for a single-select control. Native multiple selects retain multi-value behavior; multiple ARIA values are a final set and require `aria-multiselectable="true"` on a listbox. After a widget opens or rerenders, take a fresh snapshot before using any newly exposed refs. The action uses CDP-managed browser sessions; WebDriver backends report it as unsupported.
 
 ### When refs don't work or you don't want to snapshot
 

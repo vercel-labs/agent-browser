@@ -126,7 +126,7 @@ agent-browser snapshot -i          # See dropdown items
 agent-browser click @e7            # Select item
 ```
 
-`select @e1 "value"` also supports a native `<select>` or a standard ARIA `combobox`/`listbox`. It opens closed comboboxes, waits for associated options, matches exact values or labels, and verifies selected or committed state. Use a single value for single-select controls. Multiple values require `aria-multiselectable="true"` on a listbox and represent its final set. If the widget rerenders, `select` re-resolves its associated options; take a fresh snapshot before using any newly shown option refs. The action uses CDP-managed browser sessions; WebDriver backends report it as unsupported.
+`select @e1 "value"` also supports a native `<select>` or a standard ARIA `combobox`/`listbox`. It opens closed comboboxes, types into input-backed filters when needed, waits for associated options, matches exact values or labels, and verifies selected or committed state. Use a single value for single-select controls. Native multiple selects retain multi-value behavior; multiple ARIA values require `aria-multiselectable="true"` on a listbox and represent its final set. If the widget rerenders, `select` re-resolves its associated options; take a fresh snapshot before using any newly shown option refs. The action uses CDP-managed browser sessions; WebDriver backends report it as unsupported.
 
 ### 4. Snapshot Specific Regions
 
