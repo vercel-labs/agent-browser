@@ -9936,3 +9936,126 @@ async fn e2e_find_role_document_matches_root() {
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }
+
+// ---------------------------------------------------------------------------
+// Select with &nbsp; option labels and opaque values
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_select_option_nbsp_and_accessible_name() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<html><body></body></html>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // A province <select> whose option labels contain non-breaking spaces and
+    // whose values are opaque codes. This is the shape that broke `select`: the
+    // accessibility snapshot renders "Capital<nbsp>Federal" as "CapitalFederal"
+    // (nbsp stripped), a string that equals neither the value ("C") nor the raw
+    // textContent. The nbsp is inserted via char code so the source stays ASCII
+    // and does not depend on data-URL entity decoding.
+    let build = r#"(() => {
+        const sel = document.createElement('select');
+        sel.id = 'prov';
+        const nbsp = String.fromCharCode(0xA0);
+        const mk = (v, t) => { const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o); };
+        mk('', 'Provincia');
+        mk('B', 'Buenos' + nbsp + 'Aires');
+        mk('C', 'Capital' + nbsp + 'Federal');
+        document.body.appendChild(sel);
+        return sel.options.length;
+    })()"#;
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": build }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], 3);
+
+    // 1. Select by the exact accessible name the snapshot shows (nbsp stripped,
+    //    so the two words are joined). This is what an agent copies from the
+    //    tree and previously matched nothing.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "select", "selector": "#prov", "values": ["CapitalFederal"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": "document.getElementById('prov').value" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "C");
+
+    // 2. The human-normal label (single ASCII space) also resolves, even though
+    //    the DOM label uses a non-breaking space.
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "select", "selector": "#prov", "values": ["Buenos Aires"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "evaluate", "script": "document.getElementById('prov').value" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "B");
+
+    // 3. Selecting by the opaque value still works.
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "select", "selector": "#prov", "values": ["C"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "evaluate", "script": "document.getElementById('prov').value" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "C");
+
+    // 4. A value that matches no option fails loudly and lists what was
+    //    available, instead of silently succeeding.
+    let resp = execute_command(
+        &json!({ "id": "10", "action": "select", "selector": "#prov", "values": ["Montevideo"] }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false);
+    let error = resp["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("No option matched") && error.contains("Capital Federal"),
+        "expected available-options error, got: {error}"
+    );
+
+    // The failed select must not have changed the current selection.
+    let resp = execute_command(
+        &json!({ "id": "11", "action": "evaluate", "script": "document.getElementById('prov').value" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "C");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
