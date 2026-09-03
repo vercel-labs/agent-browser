@@ -117,7 +117,7 @@ Stale sidecar files are always cleaned. Destructive actions are opt-in via `--fi
 <tbody>
 <tr><td>Chrome missing</td><td>Runs <code>agent-browser install</code></td></tr>
 <tr><td>Version-mismatched daemons</td><td>Sends <code>close</code> to each and cleans files</td></tr>
-<tr><td>Old state files</td><td>Deletes state files older than <code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code> (default 30)</td></tr>
+<tr><td>Old state files</td><td>Deletes state files older than <code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code> (default 30); setting it to <code>0</code> disables expiration</td></tr>
 <tr><td>Missing encryption key</td><td>Generates a new key at <code>~/.agent-browser/.encryption-key</code> (0600, unix); never overwrites an existing key</td></tr>
 </tbody>
 </table>
