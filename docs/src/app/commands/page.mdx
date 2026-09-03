@@ -450,6 +450,19 @@ agent-browser dashboard stop          # Stop the dashboard server
 
 Loopback dashboard origins are accepted by default without an access token. For a reverse-proxied or forwarded URL, pass its exact browser origin with `--allowed-origins` or set `AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS`. Every configured origin must be a valid exact HTTPS origin. Ports must be integers from 1 to 65535. Unknown options, missing values, invalid ports, and malformed origins fail without starting the server. The command prints private tokenized access URLs only for external origins; open the matching URL once to establish the browser session and do not share it. Open the normal `http://localhost:<port>` URL for local access. The browser stays on the dashboard origin; per-session tabs, status, and stream traffic are proxied internally, so session ports do not need to be exposed. Stop the running dashboard before changing the port or allowed origins.
 
+## Install
+
+Install or validate the current Chrome for Testing stable version. Add `--with-deps` to install Linux system dependencies. Add `--prune` to remove obsolete agent-browser-managed Chrome versions after successful validation.
+
+```bash
+agent-browser install
+agent-browser install --with-deps
+agent-browser close --all
+agent-browser install --prune
+```
+
+Pruning is opt-in, refuses while sessions are active, and preserves the current manifest version plus unknown entries, symlinks, files, other engines, and user state. See [Pruning old Chrome versions](/installation#pruning-old-chrome-versions) for the full safety boundary.
+
 ## Doctor
 
 Diagnose your install, auto-clean stale daemon files, and optionally repair common problems.

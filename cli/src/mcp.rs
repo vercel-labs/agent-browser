@@ -1843,7 +1843,7 @@ fn parity_tools() -> Vec<Value> {
             TOOL_INSTALL,
             "Install",
             "Install browser binaries.",
-            json!({ "withDeps": { "type": "boolean" } }),
+            json!({ "withDeps": { "type": "boolean" }, "prune": { "type": "boolean", "description": "Remove obsolete agent-browser-managed Chrome versions after validating the current version. Refuses while sessions are active." } }),
             &[],
         ),
         tool(
@@ -3498,12 +3498,19 @@ fn call_dashboard_start(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool(arguments, dashboard_start_args(arguments)?, None)
 }
 
-fn call_install(arguments: &Value) -> Result<Value, ProtocolError> {
+fn call_install_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = vec!["install".to_string()];
     if optional_bool(arguments, "withDeps")?.unwrap_or(false) {
         args.push("--with-deps".to_string());
     }
-    call_cli_tool(arguments, args, None)
+    if optional_bool(arguments, "prune")?.unwrap_or(false) {
+        args.push("--prune".to_string());
+    }
+    Ok(args)
+}
+
+fn call_install(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, call_install_args(arguments)?, None)
 }
 
 fn call_chat(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4142,6 +4149,21 @@ mod tests {
         assert_eq!(
             doctor_args(&json!({ "debug": true })).unwrap(),
             vec!["doctor", "--debug", "true"]
+        );
+    }
+
+    #[test]
+    fn install_tool_exposes_and_forwards_prune_option() {
+        let tools = tools();
+        let install = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some(TOOL_INSTALL))
+            .unwrap();
+        assert!(install["inputSchema"]["properties"].get("prune").is_some());
+
+        assert_eq!(
+            call_install_args(&json!({ "withDeps": true, "prune": true })).unwrap(),
+            vec!["install", "--with-deps", "--prune"]
         );
     }
 

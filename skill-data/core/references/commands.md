@@ -335,6 +335,17 @@ agent-browser state save auth.json    # Save cookies, storage, auth state
 agent-browser state load auth.json    # Restore saved state
 ```
 
+## Browser installation
+
+```bash
+agent-browser install                 # Install or validate current Chrome for Testing
+agent-browser install --with-deps     # Also install Linux system dependencies
+agent-browser close --all
+agent-browser install --prune         # Remove obsolete managed Chrome versions
+```
+
+`install --prune` is opt-in and refuses while sessions are active. It retains the exact current version resolved from the Chrome for Testing manifest and preserves unknown entries, malformed directory names, symlinks, files, other engines, profiles, and session data.
+
 ## Live Streaming
 
 ```bash

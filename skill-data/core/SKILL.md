@@ -40,6 +40,10 @@ npm i -g agent-browser && agent-browser install
 # Linux hosts can install required browser libraries too
 agent-browser install --with-deps
 
+# Remove obsolete managed Chrome versions after closing active sessions
+agent-browser close --all
+agent-browser install --prune
+
 # Take a screenshot of a page
 agent-browser open https://example.com
 agent-browser screenshot home.png
@@ -382,6 +386,8 @@ agent-browser dialog dismiss          # cancel
 ```
 
 ## Diagnosing install issues
+
+To reclaim old agent-browser-managed Chrome installations, close active sessions and run `agent-browser install --prune`. Pruning happens only after the manifest-resolved current Chrome executable is installed or validated. Unknown entries, symlinks, other engines, profiles, and session data are preserved.
 
 If a command fails unexpectedly (`Unknown command`, `Failed to connect`, stale daemons, version mismatches after `upgrade`, missing Chrome, etc.) run `doctor` before anything else:
 

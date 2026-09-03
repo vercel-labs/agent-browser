@@ -1139,6 +1139,8 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--verbose",
         "-q",
         "--quiet",
+        // install-specific flags; harmless on other commands (ignored)
+        "--prune",
         // doctor-specific flags; harmless on other commands (ignored)
         "--offline",
         "--quick",
@@ -1953,6 +1955,14 @@ mod tests {
     fn test_clean_args_removes_bare_bool_flag() {
         let cleaned = clean_args(&args("--headed --debug open example.com"));
         assert_eq!(cleaned, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_clean_args_accepts_install_prune() {
+        assert_eq!(
+            clean_args(&args("install --prune")),
+            vec!["install".to_string()]
+        );
     }
 
     // === Extensions merge tests ===
