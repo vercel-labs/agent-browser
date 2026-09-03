@@ -921,9 +921,7 @@ struct AriaSelectionRequest<'a> {
 struct AriaSelectionVerification<'a> {
     requested_options_seen: bool,
     committed_before_activation: Option<&'a [String]>,
-    committed_before_filter: Option<&'a [String]>,
     activation_attempted: bool,
-    filter_input_sent: bool,
 }
 
 async fn select_aria_option(
@@ -951,7 +949,6 @@ async fn select_aria_option(
     let mut requested_options_seen = false;
     let mut filter_input_sent = false;
     let mut activation_attempted = false;
-    let mut committed_before_filter: Option<Vec<String>> = None;
     // A combobox's input/display can contain the requested text while the
     // popup is only filtering options. Keep the pre-activation committed state
     // so that fallback verification requires an actual commit transition.
@@ -998,9 +995,6 @@ async fn select_aria_option(
             }
             Err(error) => return Err(error),
         };
-        if committed_before_filter.is_none() {
-            committed_before_filter = selection_committed_values(&state);
-        }
         let state_role = state
             .get("role")
             .and_then(Value::as_str)
@@ -1102,9 +1096,7 @@ async fn select_aria_option(
             &AriaSelectionVerification {
                 requested_options_seen,
                 committed_before_activation: committed_before_activation.as_deref(),
-                committed_before_filter: committed_before_filter.as_deref(),
                 activation_attempted,
-                filter_input_sent,
             },
         ) {
             return Ok(SelectionResult::default());
@@ -1524,15 +1516,11 @@ fn aria_selection_confirmed(
     let AriaSelectionVerification {
         requested_options_seen,
         committed_before_activation,
-        committed_before_filter,
         activation_attempted,
-        filter_input_sent,
     } = verification;
     let requested_options_seen = *requested_options_seen;
     let committed_before_activation = *committed_before_activation;
-    let committed_before_filter = *committed_before_filter;
     let activation_attempted = *activation_attempted;
-    let filter_input_sent = *filter_input_sent;
     let options = state
         .get("options")
         .and_then(Value::as_array)
@@ -1610,18 +1598,13 @@ fn aria_selection_confirmed(
     // A combobox commonly removes its popup options after committing a
     // choice. In that case the exact input/display or associated form value
     // is the only remaining standard postcondition, so it must not depend on
-    // the option node still being mounted.
+    // the option node still being mounted. The value must have changed after
+    // activation; a filter-only input value and popup closure are not a
+    // selection commit.
     let committed_after_activation = committed_state_changed(state, committed_before_activation);
-    let committed_after_filter = filter_input_sent
-        && activation_attempted
-        && committed_state_changed(state, committed_before_filter)
-        && !state
-            .get("expanded")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
     requested_options_seen
         && activation_attempted
-        && (committed_after_activation || committed_after_filter)
+        && committed_after_activation
         && state
             .get("committed")
             .and_then(Value::as_array)
@@ -2718,9 +2701,7 @@ mod tests {
             &AriaSelectionVerification {
                 requested_options_seen: true,
                 committed_before_activation: Some(&previous_committed),
-                committed_before_filter: Some(&previous_committed),
                 activation_attempted: true,
-                ..Default::default()
             }
         ));
 
@@ -2744,9 +2725,32 @@ mod tests {
             &AriaSelectionVerification {
                 requested_options_seen: true,
                 committed_before_activation: Some(&same_committed),
-                committed_before_filter: Some(&same_committed),
-                filter_input_sent: true,
                 ..Default::default()
+            }
+        ));
+
+        let filter_only_closed_popup = serde_json::json!({
+            "options": [{
+                "index": 0,
+                "matchValues": ["Blue"],
+                "selected": false,
+                "available": false,
+                "visible": false,
+                "hasSelectedState": true
+            }],
+            "committed": ["Blue"],
+            "hasCommittedState": true,
+            "expanded": false
+        });
+        assert!(!aria_selection_confirmed(
+            &filter_only_closed_popup,
+            SelectionControlKind::AriaCombobox,
+            &["Blue".to_string()],
+            false,
+            &AriaSelectionVerification {
+                requested_options_seen: true,
+                committed_before_activation: Some(&same_committed),
+                activation_attempted: true,
             }
         ));
     }

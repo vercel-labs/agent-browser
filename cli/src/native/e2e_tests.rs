@@ -1585,6 +1585,63 @@ async fn e2e_aria_select_filtered_input_combobox() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_aria_select_rejects_filter_only_closed_combobox() {
+    let mut state = DaemonState::new();
+    state.default_timeout_ms = 500;
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let html = format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode(concat!(
+            "<html><body>",
+            "<input id='combo' role='combobox' aria-expanded='false' aria-controls='popup' autocomplete='off'>",
+            "<div id='popup' role='listbox' hidden></div>",
+            "<script>",
+            "const combo=document.getElementById('combo'),popup=document.getElementById('popup');",
+            "function render(){popup.hidden=false;popup.innerHTML=combo.value==='Blue' ? \"<div id='blue' role='option' value='blue' aria-selected='false'>Blue</div>\" : '';combo.setAttribute('aria-expanded','true');const option=popup.querySelector('[role=option]');if(option)option.onclick=()=>combo.setAttribute('aria-expanded','false');}",
+            "combo.addEventListener('click',render);combo.addEventListener('input',render);",
+            "</script></body></html>"
+        ))
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": html }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#combo", "values": ["Blue"] }),
+        &mut state,
+    )
+    .await;
+    assert!(!resp["success"].as_bool().unwrap_or(true));
+    assert!(resp["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("verification"));
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "JSON.stringify({value:combo.value,expanded:combo.getAttribute('aria-expanded'),selected:document.getElementById('blue')?.getAttribute('aria-selected')})" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        r#"{"value":"Blue","expanded":"false","selected":"false"}"#
+    );
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_aria_select_rejects_unsupported_and_unverified_controls() {
     let mut state = DaemonState::new();
     state.default_timeout_ms = 200;
