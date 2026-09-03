@@ -5012,6 +5012,13 @@ mod tests {
     }
 
     #[test]
+    fn test_errors_clear() {
+        let cmd = parse_command(&args("errors --clear"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "errors");
+        assert_eq!(cmd["clear"], true);
+    }
+
+    #[test]
     fn test_record_restart() {
         let cmd = parse_command(&args("record restart output.webm"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "recording_restart");
