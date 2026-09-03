@@ -10,7 +10,7 @@
 
 ### Improvements
 
-- **Recording captures the current page** - `record start` attaches to the active page as-is instead of creating a fresh browser context and cold-loading the URL, so recordings no longer open with a second of hydration jank, no extra tab appears during a recording, and the page keeps its state. Passing a URL navigates the active tab. Use `tab new` first if you want a separate tab (#1776)
+- **Recording captures the current page** - `record start` attaches to the active page as-is instead of creating a fresh browser context and cold-loading the URL, so a recording starts from the warm page you were already on, keeps its state, and no longer adds a second tab. Passing a URL navigates the active tab. Use `tab new` first if you want a separate tab (#1776)
 - **Clearer recording errors** - `record start` rejects an output path with no extension up front instead of failing at `record stop`, `.WEBM` is matched case-insensitively so it encodes VP8, and an ffmpeg failure now shows the tail of its output instead of the version banner (#1778)
 
 ### Bug Fixes
