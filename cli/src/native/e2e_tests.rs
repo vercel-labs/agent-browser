@@ -7374,6 +7374,122 @@ async fn e2e_recording_rejects_invalid_fps() {
 }
 
 // ---------------------------------------------------------------------------
+// tab new: session setup inheritance
+// ---------------------------------------------------------------------------
+
+/// `tab new <url>` must replay the session's setup onto the new tab before
+/// its first document: an init script registered on the primary page has to
+/// run on the initial load, not only after a later navigation.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_new_inherits_init_script_on_first_load() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "addinitscript", "script": "window.__abTab = 'seeded';" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3", "action": "tab_new",
+            "url": "data:text/html,<script>document.title = String(window.__abTab)</script>",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.title" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        "seeded",
+        "init script should run on the new tab's first document"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// The launch `--user-agent` (Emulation.setUserAgentOverride) and global
+/// `set headers` (Network.setExtraHTTPHeaders) are per CDP session. A new tab
+/// opened with a URL must send both on its very first document request.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_new_inherits_user_agent_and_headers() {
+    let (base_url, _server) = start_echo_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({
+            "id": "1", "action": "launch", "headless": true,
+            "userAgent": "ab-tab-new-test/1.0",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "headers", "headers": { "X-Global": "global" } }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "tab_new", "url": format!("{}/tab", base_url) }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "4", "action": "evaluate",
+            "script": "JSON.parse(document.body.innerText)",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let headers = &get_data(&resp)["result"]["headers"];
+    assert_eq!(
+        headers["X-Global"], "global",
+        "global `headers` should apply to the new tab's first document request, got {headers}"
+    );
+    assert_eq!(
+        headers["User-Agent"], "ab-tab-new-test/1.0",
+        "new tab's first document request should carry the launch user agent, got {headers}"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": "navigator.userAgent" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "ab-tab-new-test/1.0");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
 // --state / storageState flag: cookies should be loaded at launch time
 // ---------------------------------------------------------------------------
 
