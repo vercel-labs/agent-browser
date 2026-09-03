@@ -123,7 +123,7 @@ agent-browser record start ./scroll.webm --fps 60  # 60 fps for motion-heavy tak
 agent-browser record start ./soak.webm --fps 10    # Lower rate for long sessions
 ```
 
-`--fps` accepts 1 to 60 and defaults to 30. Playback duration always matches the wall clock time recorded, so a slow page holds frames instead of speeding the video up.
+Needs `ffmpeg` on PATH; use a `.webm` or `.mp4` path (other extensions go to ffmpeg as-is, an extensionless path is rejected). `--fps` accepts 1 to 60 and defaults to 30. Playback duration always matches the wall clock time recorded, so a slow page holds frames instead of speeding the video up.
 
 ## Wait
 

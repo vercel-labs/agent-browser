@@ -7162,7 +7162,8 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         .filter(|s| !s.is_empty())
         .map(String::from);
 
-    // Validate the rate before stopping the in-flight take.
+    // Validate the path and rate before stopping the in-flight take.
+    recording::validate_output_path(path)?;
     let fps = recording_fps_from_command(cmd)?;
 
     {

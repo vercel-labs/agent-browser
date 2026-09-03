@@ -2769,13 +2769,18 @@ The output file can be viewed in:
             r##"
 agent-browser record - Record browser session to video
 
-Usage: agent-browser record start <path.webm> [url] [--fps <n>]
+Usage: agent-browser record start <path.webm|path.mp4> [url] [--fps <n>]
        agent-browser record stop
-       agent-browser record restart <path.webm> [url] [--fps <n>]
+       agent-browser record restart <path.webm|path.mp4> [url] [--fps <n>]
 
-Record the browser to a WebM video file.
+Record the browser to a video file. Supported formats are .webm (VP8 via
+libvpx) and .mp4 (H.264 via libx264); any other extension is handed to
+ffmpeg as-is with H.264 video. A path with no extension is rejected.
 Creates a fresh browser context but preserves cookies and localStorage.
 If no URL is provided, automatically navigates to your current page.
+
+Requires ffmpeg on PATH with the libvpx and libx264 encoders (brew install
+ffmpeg, or apt install ffmpeg). Run `agent-browser doctor` to check.
 
 Recording captures 30 fps, which keeps scrolls and CSS transitions smooth.
 Raise it to 60 for short, motion-heavy takes (drag interactions, animation
@@ -3712,7 +3717,7 @@ Debug:
   trace start                Start Chrome DevTools trace
   trace stop [path]          Stop and save Chrome DevTools trace
   profiler start|stop [path] Record Chrome DevTools profile
-  record start <path> [url]  Start video recording (WebM, 30 fps; --fps 1-60)
+  record start <path> [url]  Start video recording (.webm/.mp4; --fps 1-60; needs ffmpeg)
   record stop                Stop and save video
   console [--clear]          View console logs
   errors [--clear]           View page errors
