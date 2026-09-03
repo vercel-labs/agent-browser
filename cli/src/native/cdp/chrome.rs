@@ -1031,6 +1031,33 @@ fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
     )
 }
 
+#[cfg(any(target_os = "macos", test))]
+const MACOS_BROWSER_EXECUTABLES: [&str; 4] = [
+    "Google Chrome.app/Contents/MacOS/Google Chrome",
+    "Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+    "Chromium.app/Contents/MacOS/Chromium",
+    "Brave Browser.app/Contents/MacOS/Brave Browser",
+];
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_browser_candidates(home_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut application_dirs = vec![PathBuf::from("/Applications")];
+    if let Some(home_dir) = home_dir {
+        application_dirs.push(home_dir.join("Applications"));
+    }
+
+    let mut candidates =
+        Vec::with_capacity(application_dirs.len() * MACOS_BROWSER_EXECUTABLES.len());
+    for application_dir in application_dirs {
+        candidates.extend(
+            MACOS_BROWSER_EXECUTABLES
+                .iter()
+                .map(|executable| application_dir.join(executable)),
+        );
+    }
+    candidates
+}
+
 pub fn find_chrome() -> Option<PathBuf> {
     // 1. Check Chrome downloaded by `agent-browser install`
     if let Some(p) = crate::install::find_installed_chrome() {
@@ -1052,14 +1079,7 @@ pub fn find_chrome() -> Option<PathBuf> {
     // 2. Check system-installed Chrome
     #[cfg(target_os = "macos")]
     {
-        let candidates = [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-        ];
-        for c in &candidates {
-            let p = PathBuf::from(c);
+        for p in macos_browser_candidates(dirs::home_dir().as_deref()) {
             if p.exists() {
                 return Some(p);
             }
@@ -1816,6 +1836,26 @@ mod tests {
             if let Some(path) = result {
                 assert!(path.exists());
             }
+        }
+    }
+
+    #[test]
+    fn test_macos_browser_candidates_include_user_applications() {
+        let home_dir = Path::new("test-home");
+        let system_candidates = macos_browser_candidates(None);
+        let candidates = macos_browser_candidates(Some(home_dir));
+
+        assert_eq!(system_candidates.len(), MACOS_BROWSER_EXECUTABLES.len());
+        assert_eq!(candidates.len(), MACOS_BROWSER_EXECUTABLES.len() * 2);
+        assert_eq!(
+            &candidates[..system_candidates.len()],
+            system_candidates.as_slice()
+        );
+        for executable in MACOS_BROWSER_EXECUTABLES {
+            assert!(
+                candidates.contains(&home_dir.join("Applications").join(executable)),
+                "missing user-local browser candidate: {executable}"
+            );
         }
     }
 
