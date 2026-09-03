@@ -5023,9 +5023,11 @@ fn open_url_in_browser(url: &str) {
     #[cfg(target_os = "linux")]
     let result = std::process::Command::new("xdg-open").arg(url).spawn();
     #[cfg(target_os = "windows")]
-    let result = std::process::Command::new("cmd")
-        .args(["/c", "start", "", url])
-        .spawn();
+    let result = {
+        let mut command = crate::native::process::background_std_command("cmd");
+        command.args(["/c", "start", "", url]);
+        command.spawn()
+    };
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     let result: Result<std::process::Child, std::io::Error> = Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
