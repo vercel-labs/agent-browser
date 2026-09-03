@@ -179,6 +179,7 @@ Without a manifest, users must pass `--capability` flags during add.
   </thead>
   <tbody>
     <tr><td><code>credential.read</code></td><td><code>credential.resolve</code></td><td><code>auth login --credential-provider &lt;name&gt;</code></td><td><code>credential</code></td></tr>
+    <tr><td><code>credential.challenge</code></td><td><code>credential.resolve.challenge</code></td><td>Staged <code>auth login</code></td><td><code>challenge</code></td></tr>
     <tr><td><code>browser.provider</code></td><td><code>browser.launch</code>, <code>browser.close</code></td><td><code>--provider &lt;name&gt;</code></td><td><code>browser</code></td></tr>
     <tr><td><code>launch.mutate</code></td><td><code>launch.mutate</code></td><td>Any local launch</td><td><code>launch</code></td></tr>
     <tr><td><code>command.run</code></td><td>Custom request type</td><td><code>plugin run &lt;name&gt; &lt;type&gt;</code></td><td><code>data</code></td></tr>
@@ -310,6 +311,61 @@ Return `credential`:
   }
 }
 ```
+
+For staged TOTP, declare both `credential.read` and `credential.challenge`. A credential that needs a second step includes `stagedChallenge`; its selector is optional:
+
+```json
+{
+  "protocol": "agent-browser.plugin.v1",
+  "success": true,
+  "credential": {
+    "username": "alice@example.com",
+    "password": "secret",
+    "url": "https://app.example.com/login",
+    "usernameSelector": "#username",
+    "passwordSelector": "#password",
+    "submitSelector": "button[type=submit]",
+    "stagedChallenge": {
+      "kind": "totp",
+      "selector": "#otp",
+      "challengeRef": "provider-defined-opaque-value"
+    }
+  }
+}
+```
+
+agent-browser waits for the OTP field before sending the same configured plugin a second request. Selector precedence matches username and password: `--otp-selector`, then the optional provider selector, then common OTP selectors including one-time-code metadata and a `123456` placeholder. The request origin is derived from the current page rather than provider metadata. If the primary response includes an opaque `challengeRef`, agent-browser returns it unchanged to the same provider:
+
+```json
+{
+  "protocol": "agent-browser.plugin.v1",
+  "type": "credential.resolve.challenge",
+  "capability": "credential.challenge",
+  "request": {
+    "profileName": "my-app",
+    "kind": "totp",
+    "purpose": "authentication.otp",
+    "origin": "https://app.example.com",
+    "challengeRef": "provider-defined-opaque-value"
+  }
+}
+```
+
+Return a non-empty ASCII-digit code and its expiry:
+
+```json
+{
+  "protocol": "agent-browser.plugin.v1",
+  "success": true,
+  "challenge": {
+    "kind": "totp",
+    "code": "481516",
+    "expiresAtUnixMs": 1785513630000
+  }
+}
+```
+
+Immediately before filling, agent-browser rejects a challenge whose `expiresAtUnixMs` has passed. It uses the same browser modes, caller overrides, and selector-based interaction path as username and password. It does not submit the OTP field or return the code.
 
 Use it for one login:
 

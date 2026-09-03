@@ -2631,11 +2631,17 @@ Plugin Login Options:
   --username-selector <s>   Username selector override for this login
   --password-selector <s>   Password selector override for this login
   --submit-selector <s>     Submit selector override for this login
+  --otp-selector <s>        OTP selector override for this login
 
 Login behavior:
   auth login waits for form selectors to appear before filling/clicking.
   Selector wait timeout follows the default action timeout.
   Plugin credentials are resolved just-in-time and are not saved locally.
+  Providers declaring credential.challenge may resolve a TOTP after an OTP
+  field appears. The normal auth login browser and selector behavior applies.
+  Common detection includes one-time-code metadata and a 123456 placeholder.
+  An optional challengeRef is echoed only to the same provider.
+  The field is filled without submitting and loggedIn=false is reported.
 
 Global Options:
   --json                   Output as JSON
@@ -3580,6 +3586,7 @@ capabilities. Use --capability when adding older plugins without a manifest.
 
 Capabilities:
   credential.read          Resolve credentials for auth login
+  credential.challenge     Resolve a staged TOTP after its field appears
   browser.provider         Launch/connect an external browser provider
   launch.mutate            Append local launch args, extensions, or init scripts
   command.run              Accept arbitrary namespaced plugin requests
@@ -3587,6 +3594,8 @@ Capabilities:
 Core capabilities and protocol request types use dedicated command paths.
 Use auth login for credential.read, --provider for browser.provider, and
 a local launch for launch.mutate.
+Staged credentials may include an opaque challengeRef that is echoed only to
+the same provider in the credential.resolve.challenge request.
 
 Example config:
   {{
@@ -3768,8 +3777,12 @@ Auth Vault:
   auth login <name>          Login using saved credentials (waits for form fields)
   auth login <name> --credential-provider <plugin> [--item <ref>] [--url <url>]
                              Resolve credentials from a configured plugin
+                             credential.challenge providers can fill an OTP
+                             after its field appears without submitting it
   auth login <name> --username-selector <s> --password-selector <s>
                              Override selectors for one login
+  auth login <name> --otp-selector <s>
+                             Override the staged OTP selector for one login
   auth list                  List saved auth profiles
   auth show <name>           Show auth profile metadata
   auth delete <name>         Delete auth profile
