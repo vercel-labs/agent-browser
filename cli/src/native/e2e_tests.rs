@@ -1176,6 +1176,7 @@ async fn e2e_form_interaction() {
         "<input id='name' type='text' placeholder='Name'>",
         "<input id='email' type='email'>",
         "<select id='color'><option value='red'>Red</option><option value='blue'>Blue</option></select>",
+        "<select id='whitespace'><option value='us'>United\nStates</option></select>",
         "<select id='colors' multiple><option value='red'>Red</option><option value='blue'>Blue</option><option value='green'>Green</option></select>",
         "<input id='agree' type='checkbox'>",
         "<textarea id='bio'></textarea>",
@@ -1238,6 +1239,20 @@ async fn e2e_form_interaction() {
     .await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["result"], "blue");
+
+    let resp = execute_command(
+        &json!({ "id": "15a", "action": "select", "selector": "#whitespace", "values": ["United States"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "15aa", "action": "evaluate", "script": "document.getElementById('whitespace').value" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "us");
 
     let resp = execute_command(
         &json!({ "id": "15b", "action": "select", "selector": "#colors", "values": ["red", "green"] }),
@@ -1334,7 +1349,8 @@ async fn e2e_aria_select_controls() {
         "</div>",
         "<script>",
         "const country=document.getElementById('country'), popup=document.getElementById('country-options');",
-        "country.onclick=()=>{country.setAttribute('aria-expanded','true');popup.hidden=false;setTimeout(()=>{popup.innerHTML=\"<div id='us' role='option' value='us' aria-selected='false'>United States</div><div role='option' value='ca' aria-selected='false'>Canada</div><div role='option' value='mx' aria-disabled='true' aria-selected='false'>Mexico</div>\";popup.querySelectorAll('[role=option]').forEach(o=>o.onclick=()=>{popup.querySelectorAll('[role=option]').forEach(x=>x.setAttribute('aria-selected',x===o?'true':'false'));country.textContent=o.textContent;country.setAttribute('aria-activedescendant',o.id||'');country.dataset.value=o.getAttribute('value');});},100)};",
+        "const wireCountry=()=>popup.querySelectorAll('[role=option]').forEach(o=>o.onclick=()=>{popup.querySelectorAll('[role=option]').forEach(x=>x.setAttribute('aria-selected',x===o?'true':'false'));country.textContent=o.textContent;country.setAttribute('aria-activedescendant',o.id||'');country.dataset.value=o.getAttribute('value');});",
+        "country.onclick=()=>{country.setAttribute('aria-expanded','true');popup.hidden=false;popup.innerHTML=\"<div role='option' value='one' aria-selected='false'>One</div>\";wireCountry();setTimeout(()=>{popup.insertAdjacentHTML('beforeend',\"<div id='us' role='option' value='us' aria-selected='false'>United States</div><div role='option' value='ca' aria-selected='false'>Canada</div><div role='option' value='mx' aria-disabled='true' aria-selected='false'>Mexico</div>\");wireCountry();},100)};",
         "document.querySelectorAll('#fruits [role=option]').forEach(o=>o.onclick=()=>o.setAttribute('aria-selected',o.getAttribute('aria-selected')!=='true'));",
         "document.querySelectorAll('#single [role=option]').forEach(o=>o.onclick=()=>{document.querySelectorAll('#single [role=option]').forEach(x=>x.setAttribute('aria-selected',x===o?'true':'false'));});",
         "</script></body></html>"
@@ -1538,8 +1554,10 @@ async fn e2e_aria_select_active_descendant_focuses_control() {
             "<html><body>",
             "<div id='combo' role='combobox' tabindex='0' aria-expanded='true' aria-controls='popup' aria-activedescendant='blue'>Current</div>",
             "<div id='popup' role='listbox'><div id='blue' role='option' aria-selected='false'>Blue</div></div>",
+            "<div id='list' role='listbox' tabindex='0' aria-activedescendant='list-blue'><div id='list-blue' role='option' aria-selected='false'>List Blue</div></div>",
             "<script>",
             "combo.addEventListener('keydown',event=>{if(event.key==='Enter'&&document.activeElement===combo){blue.setAttribute('aria-selected','true');combo.textContent='Blue';combo.dataset.committed='blue';}});",
+            "document.getElementById('list-blue').onclick=()=>document.getElementById('list-blue').setAttribute('aria-selected','true');",
             "</script></body></html>"
         ))
     );
@@ -1568,6 +1586,21 @@ async fn e2e_aria_select_active_descendant_focuses_control() {
         get_data(&resp)["result"],
         r#"{"active":"combo","selected":"true","committed":"blue"}"#
     );
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "select", "selector": "#list", "values": ["List Blue"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "document.getElementById('list-blue').getAttribute('aria-selected')" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "true");
 
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
 }

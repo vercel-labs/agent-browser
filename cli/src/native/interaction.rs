@@ -676,7 +676,7 @@ async fn select_native_option(
         session_id,
         object_id,
         r#"function(vals) {
-            const trim = value => String(value || '').trim();
+            const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
             if ((this.tagName || '').toLowerCase() !== 'select') {
                 return { error: 'target is not a native select' };
             }
@@ -684,23 +684,23 @@ async fn select_native_option(
                 return { error: 'the native select is disabled' };
             }
             const options = Array.from(this.options || []);
-            const describe = option => `${option.value} ("${trim(option.textContent)}")${option.matches(':disabled') ? ' [disabled]' : ''}`;
+            const describe = option => `${option.value} ("${normalize(option.textContent)}")${option.matches(':disabled') ? ' [disabled]' : ''}`;
             const available = options.map(describe);
             const enabledMatch = value => options.some(option =>
                 !option.matches(':disabled') &&
-                (option.value === value || trim(option.textContent) === trim(value))
+                (option.value === value || normalize(option.textContent) === normalize(value))
             );
             const missing = vals.filter(value => !enabledMatch(value));
             if (missing.length) {
                 return { error: 'No enabled option matched ' + JSON.stringify(missing), available };
             }
             for (const option of options) {
-                option.selected = !option.matches(':disabled') && (vals.includes(option.value) || vals.some(value => trim(option.textContent) === trim(value)));
+                option.selected = !option.matches(':disabled') && (vals.includes(option.value) || vals.some(value => normalize(option.textContent) === normalize(value)));
             }
             this.dispatchEvent(new Event('input', { bubbles: true }));
             this.dispatchEvent(new Event('change', { bubbles: true }));
             return {
-                selected: Array.from(this.selectedOptions || []).map(option => ({ value: option.value, label: trim(option.textContent) })),
+                selected: Array.from(this.selectedOptions || []).map(option => ({ value: option.value, label: normalize(option.textContent) })),
                 multiple: this.multiple === true
             };
         }"#,
@@ -736,12 +736,12 @@ async fn select_native_option(
         session_id,
         object_id,
         r#"function(vals) {
-            const trim = value => String(value || '').trim();
+            const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
             if ((this.tagName || '').toLowerCase() !== 'select') return { verified: false, selected: [] };
-            const selected = Array.from(this.selectedOptions || []).map(option => ({ value: option.value, label: trim(option.textContent) }));
-            const matches = entry => vals.some(value => entry.value === value || entry.label === trim(value));
+            const selected = Array.from(this.selectedOptions || []).map(option => ({ value: option.value, label: normalize(option.textContent) }));
+            const matches = entry => vals.some(value => entry.value === value || entry.label === normalize(value));
             const verified = this.multiple === true
-                ? vals.every(value => selected.some(entry => entry.value === value || entry.label === trim(value)))
+                ? vals.every(value => selected.some(entry => entry.value === value || entry.label === normalize(value)))
                 : selected.some(matches);
             return { verified, selected };
         }"#,
@@ -1096,14 +1096,21 @@ async fn select_aria_option(
             .cloned()
             .collect::<Vec<_>>();
         if !missing.is_empty() {
-            return Err(selection_error(
-                target,
-                &format!(
-                    "no visible, enabled option matched {}. Available options: {}",
-                    serde_json::to_string(&missing).unwrap_or_else(|_| "[]".to_string()),
-                    bounded_available_options(&aria_option_descriptions(&options))
-                ),
-            ));
+            if tokio::time::Instant::now() >= deadline {
+                return Err(selection_error(
+                    target,
+                    &format!(
+                        "no visible, enabled option matched {} before the timeout. Available options: {}",
+                        serde_json::to_string(&missing).unwrap_or_else(|_| "[]".to_string()),
+                        bounded_available_options(&aria_option_descriptions(&options))
+                    ),
+                ));
+            }
+            // A visible option does not prove that an asynchronously rendered
+            // or virtualized option set is complete. Keep polling so a later
+            // option can become matchable within the configured timeout.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            continue;
         }
 
         let click_index = aria_next_click_index(&state, expected_kind, values, multiselectable);
@@ -1124,16 +1131,12 @@ async fn select_aria_option(
         // Keyboard-operated comboboxes may expose the requested option as the
         // active descendant without making the option itself clickable. Enter
         // is the normal commit action for that standard widget contract.
-        if state
-            .get("activeIndex")
-            .and_then(Value::as_u64)
-            .map(|index| index as usize)
-            == Some(click_index)
-        {
-            // aria-activedescendant is navigation state on the combobox, so
+        if aria_active_descendant_matches(&state, expected_kind, click_index) {
+            // aria-activedescendant is navigation state on a combobox, so
             // Enter must be delivered to the focused control rather than to
-            // the option node. This also covers controls that were already
-            // open when select started and were not focused by the caller.
+            // the option node. Listboxes still receive the normal option
+            // click path because an active descendant does not define their
+            // selection commitment semantics.
             let focused = call_selection_function(
                 client,
                 &effective_session_id,
@@ -1292,6 +1295,19 @@ fn is_stale_selection_error(error: &str) -> bool {
     ]
     .iter()
     .any(|marker| error.contains(marker))
+}
+
+fn aria_active_descendant_matches(
+    state: &Value,
+    kind: SelectionControlKind,
+    click_index: usize,
+) -> bool {
+    kind == SelectionControlKind::AriaCombobox
+        && state
+            .get("activeIndex")
+            .and_then(Value::as_u64)
+            .map(|index| index as usize)
+            == Some(click_index)
 }
 
 fn aria_option_descriptions(options: &[Value]) -> Vec<String> {
@@ -2435,6 +2451,12 @@ mod tests {
             Some("United States"),
             "United States"
         ));
+        assert!(selection_option_matches(
+            "United States",
+            Some("us"),
+            None,
+            "United\nStates"
+        ));
     }
 
     #[test]
@@ -2542,5 +2564,20 @@ mod tests {
             ),
             Some(0)
         );
+    }
+
+    #[test]
+    fn active_descendant_commit_is_reserved_for_comboboxes() {
+        let state = serde_json::json!({ "activeIndex": 1 });
+        assert!(aria_active_descendant_matches(
+            &state,
+            SelectionControlKind::AriaCombobox,
+            1
+        ));
+        assert!(!aria_active_descendant_matches(
+            &state,
+            SelectionControlKind::AriaListbox,
+            1
+        ));
     }
 }
