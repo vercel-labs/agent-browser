@@ -1370,7 +1370,10 @@ fn parity_tools() -> Vec<Value> {
             "Record start",
             "Start video recording of the current active page. Captures 30 fps by default; pass fps up to 60 for motion-heavy takes. Pass url to navigate the active tab there first. Use agent_browser_tab_new beforehand to record in a separate tab.",
             json!({
-                "path": { "type": "string" },
+                "path": {
+                    "type": "string",
+                    "description": "Output file; .webm (VP8) and .mp4 (H.264) are the supported formats, other extensions are handed to ffmpeg as-is with H.264 video. Must have an extension. Needs ffmpeg on PATH.",
+                },
                 "url": { "type": "string", "description": "Navigate the active tab to this URL before recording starts." },
                 "fps": {
                     "type": "integer",
@@ -1393,7 +1396,10 @@ fn parity_tools() -> Vec<Value> {
             "Record restart",
             "Restart video recording. Captures 30 fps by default; pass fps up to 60 for motion-heavy takes.",
             json!({
-                "path": { "type": "string" },
+                "path": {
+                    "type": "string",
+                    "description": "Output file; .webm (VP8) and .mp4 (H.264) are the supported formats, other extensions are handed to ffmpeg as-is with H.264 video. Must have an extension. Needs ffmpeg on PATH.",
+                },
                 "url": { "type": "string" },
                 "fps": {
                     "type": "integer",
@@ -4557,6 +4563,21 @@ mod tests {
             assert_eq!(fps["minimum"], json!(1));
             // Must stay in sync with the CLI parser's --fps ceiling.
             assert_eq!(fps["maximum"], json!(crate::native::recording::MAX_FPS));
+
+            // The parser requires an extension and the two tuned formats are
+            // the ones to steer callers toward.
+            let path_desc = tool["inputSchema"]["properties"]["path"]["description"]
+                .as_str()
+                .unwrap();
+            for needle in [".webm", ".mp4", "ffmpeg"] {
+                assert!(
+                    path_desc.contains(needle),
+                    "{} path description should mention {}: {}",
+                    name,
+                    needle,
+                    path_desc
+                );
+            }
         }
 
         assert_eq!(

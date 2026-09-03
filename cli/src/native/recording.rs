@@ -49,6 +49,53 @@ const SCREENCAST_QUALITY: u32 = 80;
 /// The page may already be gone by the time a recording stops.
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Characters of ffmpeg's stderr kept in a failure message. ffmpeg prints
+/// the cause last, after the banner and stream summaries, so the tail is
+/// the part worth showing.
+const FFMPEG_STDERR_TAIL_CHARS: usize = 400;
+
+/// Lower-cased extension of `path`, if it has one.
+fn output_extension(path: &str) -> Option<String> {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+}
+
+/// Reject output paths with no extension. ffmpeg picks the container from
+/// the extension, so a bare name fails at `record stop` with the take
+/// already lost. Anything with an extension is handed to ffmpeg as-is:
+/// `.webm` gets libvpx, everything else libx264 in whatever container
+/// ffmpeg knows for that extension.
+pub fn validate_output_path(path: &str) -> Result<(), String> {
+    match output_extension(path) {
+        Some(ext) if !ext.is_empty() => Ok(()),
+        _ => Err(format!(
+            "Invalid output path: '{}' has no extension (use .webm or .mp4)",
+            path
+        )),
+    }
+}
+
+/// The last [`FFMPEG_STDERR_TAIL_CHARS`] of `stderr`, cut at a line boundary
+/// where one falls inside the window, with trailing whitespace removed.
+fn ffmpeg_error_tail(stderr: &str) -> String {
+    let trimmed = stderr.trim_end();
+    let total = trimmed.chars().count();
+    if total <= FFMPEG_STDERR_TAIL_CHARS {
+        return trimmed.to_string();
+    }
+    let tail: String = trimmed
+        .chars()
+        .skip(total - FFMPEG_STDERR_TAIL_CHARS)
+        .collect();
+    // Drop the partial first line so the message starts on a whole one.
+    match tail.find(['\n', '\r']) {
+        Some(cut) if cut + 1 < tail.len() => tail[cut + 1..].trim_start().to_string(),
+        _ => tail,
+    }
+}
+
 /// Reject frame rates the pipeline cannot honor.
 pub fn validate_fps(fps: u32) -> Result<u32, String> {
     if fps == 0 || fps > MAX_FPS {
@@ -157,6 +204,7 @@ pub fn recording_start(
         return Err("Recording already active".to_string());
     }
 
+    validate_output_path(path)?;
     let fps = validate_fps(fps.unwrap_or(DEFAULT_FPS))?;
 
     state.active = true;
@@ -191,7 +239,9 @@ fn build_ffmpeg_command(output_path: &str, fps: u32) -> tokio::process::Command 
     let mut cmd = tokio::process::Command::new("ffmpeg");
     let high_fps = fps > HIGH_FPS_THRESHOLD;
 
-    cmd.args(["-y"])
+    // -hide_banner keeps the version and build banner out of stderr, so a
+    // failure message is the cause rather than the configure line.
+    cmd.args(["-y", "-hide_banner"])
         .args(["-avioflags", "direct"])
         .args([
             "-fpsprobesize",
@@ -213,7 +263,7 @@ fn build_ffmpeg_command(output_path: &str, fps: u32) -> tokio::process::Command 
         ])
         .args(["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"]);
 
-    if output_path.ends_with(".webm") {
+    if output_extension(output_path).as_deref() == Some("webm") {
         let bitrate = WEBM_BITRATE_KBPS_AT_BASE_FPS
             .max(WEBM_BITRATE_KBPS_AT_BASE_FPS.saturating_mul(fps) / HIGH_FPS_THRESHOLD.max(1));
         cmd.args(["-c:v", "libvpx", "-crf", "30"])
@@ -389,10 +439,7 @@ pub fn spawn_recording_task(
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!(
-                "ffmpeg failed: {}",
-                stderr.chars().take(300).collect::<String>()
-            ));
+            return Err(format!("ffmpeg failed: {}", ffmpeg_error_tail(&stderr)));
         }
 
         Ok(())
@@ -576,6 +623,121 @@ mod tests {
         let zero = recording_start(&mut state, "/tmp/test.webm", Some(0));
         assert!(zero.is_err());
         assert!(!state.active);
+    }
+
+    #[test]
+    fn test_recording_start_rejects_extensionless_path() {
+        let mut state = RecordingState::new();
+        for path in [
+            "/tmp/take",
+            "/tmp/dir.v2/take",
+            "/tmp/.hidden",
+            "/tmp/take.",
+        ] {
+            let err = recording_start(&mut state, path, None).unwrap_err();
+            assert!(err.contains(path), "error should name the path: {}", err);
+            assert!(err.contains("no extension"), "error was: {}", err);
+            assert!(err.contains(".webm"), "error should suggest .webm: {}", err);
+            assert!(err.contains(".mp4"), "error should suggest .mp4: {}", err);
+            assert!(!state.active);
+        }
+    }
+
+    #[test]
+    fn test_validate_output_path_accepts_any_extension() {
+        // Only the two documented formats are tuned, but ffmpeg muxes
+        // libx264 into .mkv/.mov/.avi fine and those worked before the
+        // check existed, so anything with an extension passes.
+        for path in [
+            "take.webm",
+            "take.mp4",
+            "./out/TAKE.WEBM",
+            "/abs/path/Take.Mp4",
+            "dotted.name.webm",
+            "take.mkv",
+            "take.mov",
+            "take.avi",
+            "take.webm.part",
+            "dir.v2/take.MP4",
+        ] {
+            assert!(validate_output_path(path).is_ok(), "{} should pass", path);
+        }
+    }
+
+    #[test]
+    fn test_validate_output_path_rejects_missing_extension() {
+        for path in ["take", "take.", ".hidden", ".webm", "dir.v2/take", "dir/"] {
+            assert!(validate_output_path(path).is_err(), "{} should fail", path);
+        }
+        assert_eq!(
+            validate_output_path("take").unwrap_err(),
+            "Invalid output path: 'take' has no extension (use .webm or .mp4)"
+        );
+    }
+
+    #[test]
+    fn test_build_ffmpeg_command_matches_extension_case_insensitively() {
+        let cmd = build_ffmpeg_command("/tmp/OUT.WEBM", DEFAULT_FPS);
+        let args: Vec<&std::ffi::OsStr> = cmd.as_std().get_args().collect();
+        let args_str: Vec<&str> = args.iter().filter_map(|a| a.to_str()).collect();
+        assert!(args_str.contains(&"libvpx"));
+        assert!(!args_str.contains(&"libx264"));
+    }
+
+    #[test]
+    fn test_build_ffmpeg_command_hides_banner() {
+        let cmd = build_ffmpeg_command("/tmp/out.webm", DEFAULT_FPS);
+        let args: Vec<&std::ffi::OsStr> = cmd.as_std().get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("-hide_banner")));
+    }
+
+    #[test]
+    fn test_ffmpeg_error_tail_keeps_short_output_whole() {
+        let stderr = "Unable to choose an output format for 'take'\nError opening output files: Invalid argument\n";
+        assert_eq!(
+            ffmpeg_error_tail(stderr),
+            "Unable to choose an output format for 'take'\nError opening output files: Invalid argument"
+        );
+    }
+
+    #[test]
+    fn test_ffmpeg_error_tail_keeps_the_cause_not_the_banner() {
+        // A realistic failure: banner and configure line first, the cause
+        // last. The old 300-character head never reached the cause.
+        let banner = format!(
+            "ffmpeg version 8.1 Copyright (c) 2000-2026 the FFmpeg developers\n  built with clang\n  configuration: {}\n",
+            "--enable-libx264 ".repeat(40)
+        );
+        let cause = "[out#0 @ 0x1] Unable to choose an output format for './take'; use a specific format\nError opening output file ./take.\nError opening output files: Invalid argument";
+        let stderr = format!("{}{}\n", banner, cause);
+
+        let tail = ffmpeg_error_tail(&stderr);
+        assert!(tail.ends_with(cause), "tail was: {}", tail);
+        assert!(!tail.contains("ffmpeg version"), "tail was: {}", tail);
+        assert!(tail.chars().count() <= FFMPEG_STDERR_TAIL_CHARS);
+        // The window opened mid-way through the configure line; that
+        // partial line is dropped so the message starts on a whole one.
+        assert!(tail.starts_with("[out#0"), "tail was: {}", tail);
+    }
+
+    #[test]
+    fn test_ffmpeg_error_tail_keeps_a_single_long_line() {
+        let line = "x".repeat(FFMPEG_STDERR_TAIL_CHARS + 50);
+        let tail = ffmpeg_error_tail(&line);
+        assert_eq!(tail.chars().count(), FFMPEG_STDERR_TAIL_CHARS);
+    }
+
+    #[test]
+    fn test_ffmpeg_error_tail_handles_multibyte_and_progress_lines() {
+        // ffmpeg's progress output uses carriage returns; the cut must not
+        // split a multi-byte character.
+        let stderr = format!(
+            "{}\rframe=   12 fps=0.0 q=0.0\rError: ✗ muxer",
+            "é".repeat(500)
+        );
+        let tail = ffmpeg_error_tail(&stderr);
+        assert!(tail.ends_with("Error: ✗ muxer"), "tail was: {}", tail);
+        assert!(tail.starts_with("frame="), "tail was: {}", tail);
     }
 
     #[test]

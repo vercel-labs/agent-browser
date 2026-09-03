@@ -1,6 +1,18 @@
 # Video Recording
 
-Use `record` to capture browser automation as a WebM video for debugging, CI evidence, product walkthroughs, or repro reports.
+Use `record` to capture browser automation as a WebM or MP4 video for debugging, CI evidence, product walkthroughs, or repro reports.
+
+## Requirements
+
+Recording pipes frames into `ffmpeg`, which must be on `PATH` with the `libvpx` and `libx264` encoders (the default builds from Homebrew and Debian/Ubuntu include both):
+
+```bash
+brew install ffmpeg        # macOS
+sudo apt install ffmpeg    # Debian/Ubuntu
+agent-browser doctor       # reports ffmpeg and its encoders under "Recording"
+```
+
+The supported formats are `.webm` (VP8 via libvpx) and `.mp4` (H.264 via libx264). Any other extension is handed to ffmpeg as-is with H.264 video, so `.mkv` or `.mov` work if ffmpeg knows the container. A path with no extension is rejected before recording starts, since ffmpeg would have nothing to pick a container from. Nothing else in agent-browser needs ffmpeg.
 
 ## Basic workflow
 
@@ -63,9 +75,9 @@ Valid rates are 1 to 60. Frames come from Chrome's screencast, so every repaint 
     <tr><th>Command</th><th>Description</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>record start &lt;path.webm&gt; [url] [--fps &lt;n&gt;]</code></td><td>Start recording the active page to a WebM file; a URL navigates the active tab first</td></tr>
+    <tr><td><code>record start &lt;path.webm|path.mp4&gt; [url] [--fps &lt;n&gt;]</code></td><td>Start recording the active page to a WebM or MP4 file; a URL navigates the active tab first</td></tr>
     <tr><td><code>record stop</code></td><td>Stop the active recording and save the file</td></tr>
-    <tr><td><code>record restart &lt;path.webm&gt; [url] [--fps &lt;n&gt;]</code></td><td>Stop the current recording and immediately start another on the active page</td></tr>
+    <tr><td><code>record restart &lt;path.webm|path.mp4&gt; [url] [--fps &lt;n&gt;]</code></td><td>Stop the current recording and immediately start another on the active page</td></tr>
   </tbody>
 </table>
 
@@ -115,8 +127,8 @@ Screenshots and videos work well together: screenshots capture precise still sta
     <tr><th>Property</th><th>Value</th></tr>
   </thead>
   <tbody>
-    <tr><td>Container</td><td>WebM</td></tr>
-    <tr><td>Common extension</td><td><code>.webm</code></td></tr>
+    <tr><td>Container</td><td>WebM (<code>.webm</code>, VP8 via libvpx) or MP4 (<code>.mp4</code>, H.264 via libx264), chosen by the extension; other extensions get H.264 in whatever container ffmpeg maps them to</td></tr>
+    <tr><td>Encoder</td><td>ffmpeg on <code>PATH</code></td></tr>
     <tr><td>Frame rate</td><td>30 fps by default, 1 to 60 with <code>--fps</code></td></tr>
     <tr><td>Viewport</td><td>Uses the active browser viewport settings</td></tr>
     <tr><td>State</td><td>Records the active page in place, including its session and in-page state</td></tr>
@@ -129,4 +141,4 @@ Screenshots and videos work well together: screenshots capture precise still sta
 - Long recordings can use significant disk space; 60 fps roughly doubles the bitrate of 30 fps.
 - Distinct frames per second are bounded by how often the page repaints, so a page that renders below 60 fps records below it too.
 - Use `record stop` before closing a session if you need the file flushed.
-- Some constrained headless environments may have codec or GPU limitations.
+- Some constrained headless environments may have codec or GPU limitations. An ffmpeg built without libvpx or libx264 cannot write the matching format; `agent-browser doctor` reports which encoders are present.
