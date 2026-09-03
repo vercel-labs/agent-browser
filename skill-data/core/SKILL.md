@@ -245,7 +245,7 @@ SESSION="$(agent-browser session id --scope worktree --prefix my-app)"
 agent-browser --session "$SESSION" --restore open https://app.example.com
 ```
 
-`--restore` with no value uses the current `--session` as the persistence key. Agent skills should prefer this over hand-built state file paths. Use `--restore-save auto` by default so a failed restore does not overwrite the previous known-good state. State is saved on close and also periodically while the browser is open (at most once per `AGENT_BROWSER_AUTOSAVE_INTERVAL_MS`, default 30000), so state survives even if the user closes the browser window by hand.
+`--restore` with no value uses the current `--session` as the persistence key. Agent skills should prefer this over hand-built state file paths. Use `--restore-save auto` by default so a failed restore does not overwrite the previous known-good state. State is saved on close and also periodically while the browser is open (at most once per `AGENT_BROWSER_AUTOSAVE_INTERVAL_MS`, default 30000), so state survives even if the user closes the browser window by hand. Set `AGENT_BROWSER_STATE_EXPIRE_DAYS` to the maximum age in days; it defaults to 30 and `0` disables automatic expiration.
 
 ```bash
 agent-browser --session "$SESSION" --restore --restore-check-text Dashboard open https://app.example.com

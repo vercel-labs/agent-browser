@@ -4,14 +4,16 @@
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 use super::helpers::parse_json_file;
 use super::{Check, Status};
-use crate::native::state::{get_sessions_dir, get_state_dir};
+use crate::native::state::{
+    get_sessions_dir, get_state_dir, is_state_file, state_expiration_cutoff, state_expiration_days,
+};
 
 pub(super) fn check(checks: &mut Vec<Check>) {
     let category = "Security";
@@ -73,26 +75,13 @@ pub(super) fn check(checks: &mut Vec<Check>) {
 
     let sessions_dir = get_sessions_dir();
     if sessions_dir.exists() {
-        let expire_days = env::var("AGENT_BROWSER_STATE_EXPIRE_DAYS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(30);
-        let cutoff = SystemTime::now()
-            .checked_sub(Duration::from_secs(expire_days * 86_400))
-            .unwrap_or(SystemTime::UNIX_EPOCH);
         let mut total = 0usize;
-        let mut old = 0usize;
         if let Ok(entries) = fs::read_dir(&sessions_dir) {
             for entry in entries.flatten() {
-                if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                if entry.file_type().map(|t| t.is_file()).unwrap_or(false)
+                    && is_state_file(&entry.path())
+                {
                     total += 1;
-                    if let Ok(meta) = entry.metadata() {
-                        if let Ok(modified) = meta.modified() {
-                            if modified < cutoff {
-                                old += 1;
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -103,29 +92,72 @@ pub(super) fn check(checks: &mut Vec<Check>) {
                 Status::Info,
                 "No saved state files",
             ));
-        } else if old > 0 {
-            checks.push(
-                Check::new(
+        } else {
+            match state_expiration_cutoff(SystemTime::now()) {
+                Ok(None) => checks.push(Check::new(
                     "security.state_count",
                     category,
-                    Status::Warn,
+                    Status::Pass,
                     format!(
-                        "{} state file(s) older than {} days ({} total)",
-                        old, expire_days, total
+                        "{} saved state file(s); expiration disabled (0 days)",
+                        total
                     ),
-                )
-                .with_fix(format!(
-                    "agent-browser state clean --older-than {}",
-                    expire_days
                 )),
-            );
-        } else {
-            checks.push(Check::new(
-                "security.state_count",
-                category,
-                Status::Pass,
-                format!("{} saved state file(s)", total),
-            ));
+                Err(error) => checks.push(
+                    Check::new(
+                        "security.state_count",
+                        category,
+                        Status::Warn,
+                        format!("Could not evaluate state expiration: {}", error),
+                    )
+                    .with_fix(
+                        "set AGENT_BROWSER_STATE_EXPIRE_DAYS to 0 or a smaller positive value",
+                    ),
+                ),
+                Ok(Some(cutoff)) => {
+                    let mut old = 0usize;
+                    if let Ok(entries) = fs::read_dir(&sessions_dir) {
+                        for entry in entries.flatten() {
+                            if entry.file_type().map(|t| t.is_file()).unwrap_or(false)
+                                && is_state_file(&entry.path())
+                                && entry
+                                    .metadata()
+                                    .and_then(|metadata| metadata.modified())
+                                    .map(|modified| modified < cutoff)
+                                    .unwrap_or(false)
+                            {
+                                old += 1;
+                            }
+                        }
+                    }
+                    if old > 0 {
+                        let expire_days =
+                            state_expiration_days().expect("enabled expiration has a day value");
+                        checks.push(
+                            Check::new(
+                                "security.state_count",
+                                category,
+                                Status::Warn,
+                                format!(
+                                    "{} state file(s) older than {} days ({} total)",
+                                    old, expire_days, total
+                                ),
+                            )
+                            .with_fix(format!(
+                                "agent-browser state clean --older-than {}",
+                                expire_days
+                            )),
+                        );
+                    } else {
+                        checks.push(Check::new(
+                            "security.state_count",
+                            category,
+                            Status::Pass,
+                            format!("{} saved state file(s)", total),
+                        ));
+                    }
+                }
+            }
         }
     }
 
@@ -163,5 +195,37 @@ pub(super) fn check(checks: &mut Vec<Check>) {
                 ),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn zero_expiration_does_not_report_saved_states_as_old() {
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "HOME",
+            "AGENT_BROWSER_STATE_EXPIRE_DAYS",
+            "AGENT_BROWSER_ENCRYPTION_KEY",
+        ]);
+        let tmp = TempDir::new().unwrap();
+        guard.set("HOME", tmp.path().to_str().unwrap());
+        guard.set("AGENT_BROWSER_STATE_EXPIRE_DAYS", "0");
+        guard.remove("AGENT_BROWSER_ENCRYPTION_KEY");
+
+        let sessions = get_sessions_dir();
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(sessions.join("keep.json"), "{}").unwrap();
+
+        let mut checks = Vec::new();
+        check(&mut checks);
+        let state_check = checks
+            .iter()
+            .find(|item| item.id == "security.state_count")
+            .expect("state count check should be present");
+        assert_eq!(state_check.status, Status::Pass);
+        assert!(state_check.message.contains("expiration disabled"));
     }
 }

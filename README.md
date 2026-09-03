@@ -799,7 +799,7 @@ agent-browser --session secure --restore open example.com
 | `AGENT_BROWSER_NAMESPACE`         | Namespace for daemon sockets and restore state     |
 | `AGENT_BROWSER_SESSION_NAME`      | Legacy auto-save/load state persistence name       |
 | `AGENT_BROWSER_ENCRYPTION_KEY`    | 64-char hex key for AES-256-GCM encryption         |
-| `AGENT_BROWSER_STATE_EXPIRE_DAYS` | Auto-delete states older than N days (default: 30) |
+| `AGENT_BROWSER_STATE_EXPIRE_DAYS` | Auto-delete states older than N days (default: 30; `0` disables) |
 
 ## Security
 

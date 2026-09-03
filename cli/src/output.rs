@@ -3891,7 +3891,7 @@ Environment:
   AGENT_BROWSER_RESTORE_CHECK_FN JS expression restored state must satisfy
   AGENT_BROWSER_SESSION_NAME     Legacy auto-save/restore state persistence name
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM state encryption
-  AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete states older than N days (default: 30)
+  AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete states older than N days (default: 30, 0 disables)
   AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
   AGENT_BROWSER_EXTENSIONS       Comma-separated browser extension paths
   AGENT_BROWSER_INIT_SCRIPTS     Comma-separated paths to page init scripts
@@ -3914,7 +3914,7 @@ Environment:
   AGENT_BROWSER_DOWNLOAD_PATH    Default download directory for browser downloads
   AGENT_BROWSER_DEFAULT_TIMEOUT  Default action timeout in ms (default: 25000)
   AGENT_BROWSER_SESSION_NAME     Legacy auto-save/load state persistence name
-  AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete saved states older than N days (default: 30)
+  AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete saved states older than N days (default: 30, 0 disables)
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM session encryption
   AGENT_BROWSER_STREAM_PORT      Override WebSocket streaming port (default: OS-assigned)
   AGENT_BROWSER_STREAM_QUALITY   JPEG quality 0-100 (default: 80)
