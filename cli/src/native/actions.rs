@@ -3099,11 +3099,6 @@ async fn open_fresh_tab_for_auto_connect(state: &mut DaemonState) -> Result<(), 
         return Ok(());
     };
     mgr.tab_new(None, None).await?;
-    let session_id = mgr.active_session_id()?.to_string();
-    let _ = mgr
-        .client
-        .send_command("Page.bringToFront", None, Some(&session_id))
-        .await;
     // Best effort: a failed write is retried after the next command.
     let _ = maybe_persist_tab_binding(state);
     Ok(())
@@ -7027,7 +7022,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
             .client
             .send_command_typed(
                 "Target.createTarget",
-                &json!({ "url": "about:blank", "browserContextId": context_id }),
+                &json!({ "url": "about:blank", "browserContextId": context_id, "background": true }),
                 None,
             )
             .await?;
@@ -10007,7 +10002,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
             .client
             .send_command_typed(
                 "Target.createTarget",
-                &json!({ "url": "about:blank", "browserContextId": context_id }),
+                &json!({ "url": "about:blank", "browserContextId": context_id, "background": true }),
                 None,
             )
             .await?;
