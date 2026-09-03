@@ -684,23 +684,32 @@ async fn select_native_option(
                 return { error: 'the native select is disabled' };
             }
             const options = Array.from(this.options || []);
-            const describe = option => `${option.value} ("${normalize(option.textContent)}")${option.matches(':disabled') ? ' [disabled]' : ''}`;
+            const describe = option => {
+                const label = normalize(option.label);
+                const text = normalize(option.textContent);
+                const textDetail = label === text ? '' : ` [text: "${text}"]`;
+                return `${option.value} ("${label}")${textDetail}${option.matches(':disabled') ? ' [disabled]' : ''}`;
+            };
             const available = options.map(describe);
+            const matches = (option, value) =>
+                option.value === value ||
+                normalize(option.label) === normalize(value) ||
+                normalize(option.textContent) === normalize(value);
             const enabledMatch = value => options.some(option =>
                 !option.matches(':disabled') &&
-                (option.value === value || normalize(option.textContent) === normalize(value))
+                matches(option, value)
             );
             const missing = vals.filter(value => !enabledMatch(value));
             if (missing.length) {
                 return { error: 'No enabled option matched ' + JSON.stringify(missing), available };
             }
             for (const option of options) {
-                option.selected = !option.matches(':disabled') && (vals.includes(option.value) || vals.some(value => normalize(option.textContent) === normalize(value)));
+                option.selected = !option.matches(':disabled') && vals.some(value => matches(option, value));
             }
             this.dispatchEvent(new Event('input', { bubbles: true }));
             this.dispatchEvent(new Event('change', { bubbles: true }));
             return {
-                selected: Array.from(this.selectedOptions || []).map(option => ({ value: option.value, label: normalize(option.textContent) })),
+                selected: Array.from(this.selectedOptions || []).map(option => ({ value: option.value, label: normalize(option.label), text: normalize(option.textContent) })),
                 multiple: this.multiple === true
             };
         }"#,
@@ -738,10 +747,10 @@ async fn select_native_option(
         r#"function(vals) {
             const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
             if ((this.tagName || '').toLowerCase() !== 'select') return { verified: false, selected: [] };
-            const selected = Array.from(this.selectedOptions || []).map(option => ({ value: option.value, label: normalize(option.textContent) }));
-            const matches = entry => vals.some(value => entry.value === value || entry.label === normalize(value));
+            const selected = Array.from(this.selectedOptions || []).map(option => ({ value: option.value, label: normalize(option.label), text: normalize(option.textContent) }));
+            const matches = entry => vals.some(value => entry.value === value || entry.label === normalize(value) || entry.text === normalize(value));
             const verified = this.multiple === true
-                ? vals.every(value => selected.some(entry => entry.value === value || entry.label === normalize(value)))
+                ? vals.every(value => selected.some(entry => entry.value === value || entry.label === normalize(value) || entry.text === normalize(value)))
                 : selected.some(matches);
             return { verified, selected };
         }"#,
@@ -911,6 +920,10 @@ async fn select_aria_option(
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
     let mut opened = false;
     let mut requested_options_seen = false;
+    // A combobox's input/display can contain the requested text while the
+    // popup is only filtering options. Keep the pre-activation committed state
+    // so that fallback verification requires an actual commit transition.
+    let mut committed_before_activation: Option<Vec<String>> = None;
 
     loop {
         let (object_id, effective_session_id) =
@@ -1052,6 +1065,7 @@ async fn select_aria_option(
             values,
             multiselectable,
             requested_options_seen,
+            committed_before_activation.as_deref(),
         ) {
             return Ok(SelectionResult::default());
         }
@@ -1151,6 +1165,9 @@ async fn select_aria_option(
                     target,
                     "the control could not receive keyboard input",
                 ));
+            }
+            if committed_before_activation.is_none() {
+                committed_before_activation = selection_committed_values(&state);
             }
             press_key(client, &effective_session_id, "Enter").await?;
             continue;
@@ -1264,6 +1281,9 @@ async fn select_aria_option(
             }
             continue;
         };
+        if committed_before_activation.is_none() {
+            committed_before_activation = selection_committed_values(&state);
+        }
         let click_result = dispatch_click(
             client,
             &effective_session_id,
@@ -1377,12 +1397,33 @@ fn option_matches_requested_value(option: &Value, value: &str) -> bool {
         )
 }
 
+fn selection_committed_values(state: &Value) -> Option<Vec<String>> {
+    state
+        .get("committed")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect()
+        })
+}
+
+fn committed_state_changed(state: &Value, before: Option<&[String]>) -> bool {
+    let Some(before) = before else {
+        return false;
+    };
+    selection_committed_values(state).is_some_and(|after| after != before)
+}
+
 fn aria_selection_confirmed(
     state: &Value,
     kind: SelectionControlKind,
     values: &[String],
     multiselectable: bool,
     requested_options_seen: bool,
+    committed_before_activation: Option<&[String]>,
 ) -> bool {
     let options = state
         .get("options")
@@ -1463,6 +1504,7 @@ fn aria_selection_confirmed(
     // is the only remaining standard postcondition, so it must not depend on
     // the option node still being mounted.
     requested_options_seen
+        && committed_state_changed(state, committed_before_activation)
         && state
             .get("committed")
             .and_then(Value::as_array)
@@ -2474,14 +2516,16 @@ mod tests {
             SelectionControlKind::AriaListbox,
             &["blue".to_string()],
             false,
-            true
+            true,
+            None
         ));
         assert!(!aria_selection_confirmed(
             &state,
             SelectionControlKind::AriaListbox,
             &["blu".to_string()],
             false,
-            true
+            true,
+            None
         ));
 
         let no_state = serde_json::json!({
@@ -2494,7 +2538,8 @@ mod tests {
             SelectionControlKind::AriaListbox,
             &["blue".to_string()],
             false,
-            false
+            false,
+            None
         ));
 
         let disabled_selected = serde_json::json!({
@@ -2512,7 +2557,8 @@ mod tests {
             SelectionControlKind::AriaCombobox,
             &["blue".to_string()],
             false,
-            true
+            true,
+            None
         ));
 
         let hidden_selected_after_observation = serde_json::json!({
@@ -2530,7 +2576,8 @@ mod tests {
             SelectionControlKind::AriaCombobox,
             &["blue".to_string()],
             false,
-            true
+            true,
+            None
         ));
 
         let committed_without_popup = serde_json::json!({
@@ -2538,12 +2585,35 @@ mod tests {
             "committed": ["Blue Label"],
             "hasCommittedState": true
         });
+        let previous_committed = vec!["Choose".to_string()];
         assert!(aria_selection_confirmed(
             &committed_without_popup,
             SelectionControlKind::AriaCombobox,
             &["Blue Label".to_string()],
             false,
-            true
+            true,
+            Some(&previous_committed)
+        ));
+
+        let transient_input = serde_json::json!({
+            "options": [{
+                "index": 0,
+                "matchValues": ["Blue"],
+                "selected": false,
+                "available": true,
+                "hasSelectedState": true
+            }],
+            "committed": ["Blue"],
+            "hasCommittedState": true
+        });
+        let same_committed = vec!["Blue".to_string()];
+        assert!(!aria_selection_confirmed(
+            &transient_input,
+            SelectionControlKind::AriaCombobox,
+            &["Blue".to_string()],
+            false,
+            true,
+            Some(&same_committed)
         ));
     }
 

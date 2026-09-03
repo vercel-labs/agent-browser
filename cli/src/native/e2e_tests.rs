@@ -1176,6 +1176,7 @@ async fn e2e_form_interaction() {
         "<input id='name' type='text' placeholder='Name'>",
         "<input id='email' type='email'>",
         "<select id='color'><option value='red'>Red</option><option value='blue'>Blue</option></select>",
+        "<select id='labelled'><option value='us' label='United States'>USA</option><option value='ca'>Canada</option></select>",
         "<select id='whitespace'><option value='us'>United\nStates</option></select>",
         "<select id='colors' multiple><option value='red'>Red</option><option value='blue'>Blue</option><option value='green'>Green</option></select>",
         "<input id='agree' type='checkbox'>",
@@ -1239,6 +1240,20 @@ async fn e2e_form_interaction() {
     .await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["result"], "blue");
+
+    let resp = execute_command(
+        &json!({ "id": "15-label", "action": "select", "selector": "#labelled", "values": ["United States"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "15-label-value", "action": "evaluate", "script": "document.getElementById('labelled').value" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "us");
 
     let resp = execute_command(
         &json!({ "id": "15a", "action": "select", "selector": "#whitespace", "values": ["United States"] }),
@@ -1602,6 +1617,59 @@ async fn e2e_aria_select_active_descendant_focuses_control() {
     assert_success(&resp);
     assert_eq!(get_data(&resp)["result"], "true");
 
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_aria_select_rejects_transient_combobox_input_value() {
+    let mut state = DaemonState::new();
+    state.default_timeout_ms = 250;
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let html = format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode(concat!(
+            "<html><body>",
+            "<input id='combo' role='combobox' value='Blue' aria-expanded='true' aria-controls='popup'>",
+            "<div id='popup' role='listbox'><div id='blue' role='option' aria-selected='false'>Blue</div></div>",
+            "</body></html>"
+        ))
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": html }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#combo", "values": ["Blue"] }),
+        &mut state,
+    )
+    .await;
+    assert!(!resp["success"].as_bool().unwrap_or(true));
+    assert!(resp["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("verification"));
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "JSON.stringify({value:combo.value,selected:blue.getAttribute('aria-selected')})" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        r#"{"value":"Blue","selected":"false"}"#
+    );
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
 }
 
