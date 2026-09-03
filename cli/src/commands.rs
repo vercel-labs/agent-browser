@@ -328,6 +328,24 @@ fn parse_cookie_header(header: &str) -> Result<Vec<Value>, String> {
     Ok(out)
 }
 
+
+fn parse_cdp_headers_flag(flags: &Flags) -> Result<Option<Value>, ParseError> {
+    let Some(ref headers_json) = flags.cdp_headers else {
+        return Ok(None);
+    };
+    let headers = serde_json::from_str::<Value>(headers_json).map_err(|_| ParseError::InvalidValue {
+        message: format!("Invalid JSON for --cdp-headers: {}", headers_json),
+        usage: r#"connect <url> --cdp-headers '{"Authorization":"Bearer …"}'"#,
+    })?;
+    if !headers.is_object() {
+        return Err(ParseError::InvalidValue {
+            message: format!("Invalid JSON object for --cdp-headers: {}", headers_json),
+            usage: r#"connect <url> --cdp-headers '{"Authorization":"Bearer …"}'"#,
+        });
+    }
+    Ok(Some(headers))
+}
+
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
     let mut result = parse_command_inner(args, flags)?;
 
@@ -1219,13 +1237,18 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 context: "connect".to_string(),
                 usage: "connect <port|url>",
             })?;
+            let cdp_headers = parse_cdp_headers_flag(flags)?;
             // Check if it's a URL (ws://, wss://, http://, https://)
             if endpoint.starts_with("ws://")
                 || endpoint.starts_with("wss://")
                 || endpoint.starts_with("http://")
                 || endpoint.starts_with("https://")
             {
-                Ok(json!({ "id": id, "action": "launch", "cdpUrl": endpoint }))
+                let mut cmd = json!({ "id": id, "action": "launch", "cdpUrl": endpoint });
+                if let Some(headers) = cdp_headers {
+                    cmd["cdpHeaders"] = headers;
+                }
+                Ok(cmd)
             } else {
                 // It's a port number - validate and use cdpPort field
                 let port: u16 = match endpoint.parse::<u32>() {
@@ -1255,7 +1278,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         });
                     }
                 };
-                Ok(json!({ "id": id, "action": "launch", "cdpPort": port }))
+                let mut cmd = json!({ "id": id, "action": "launch", "cdpPort": port });
+                if let Some(headers) = cdp_headers {
+                    cmd["cdpHeaders"] = headers;
+                }
+                Ok(cmd)
             }
         }
 
@@ -3436,6 +3463,7 @@ mod tests {
             init_scripts: Vec::new(),
             enable: Vec::new(),
             cdp: None,
+            cdp_headers: None,
             profile: None,
             state: None,
             proxy: None,
@@ -5492,6 +5520,20 @@ mod tests {
         assert_eq!(cmd["action"], "launch");
         assert_eq!(cmd["cdpPort"], 9222);
         assert!(cmd.get("cdpUrl").is_none());
+    }
+
+    #[test]
+    fn test_connect_with_cdp_headers() {
+        let mut flags = default_flags();
+        flags.cdp_headers = Some(r#"{"Authorization":"Bearer t"}"#.to_string());
+        let cmd = parse_command(
+            &args("connect wss://example.com/cdp"),
+            &flags,
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "launch");
+        assert_eq!(cmd["cdpUrl"], "wss://example.com/cdp");
+        assert_eq!(cmd["cdpHeaders"]["Authorization"], "Bearer t");
     }
 
     #[test]

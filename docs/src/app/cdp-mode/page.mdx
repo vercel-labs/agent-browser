@@ -25,6 +25,10 @@ agent-browser --cdp "wss://browser-service.com/cdp?token=..." snapshot
 
 # Works with any CDP-compatible service
 agent-browser --cdp "ws://localhost:9222/devtools/browser/abc123" open example.com
+
+# Authenticated CDP WebSocket (e.g. Cloudflare Browser Rendering)
+agent-browser --cdp "wss://api.cloudflare.com/.../devtools/browser" \
+  --cdp-headers '{"Authorization":"Bearer YOUR_API_TOKEN"}' snapshot
 ```
 
 The `--cdp` flag accepts either:
