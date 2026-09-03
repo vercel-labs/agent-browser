@@ -1756,6 +1756,80 @@ async fn e2e_aria_select_active_descendant_focuses_control() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_aria_select_active_descendant_dialog_is_reported_without_timeout() {
+    let mut state = DaemonState::new();
+    state.default_timeout_ms = 1_000;
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let html = format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode(concat!(
+            "<html><body>",
+            "<div id='combo' role='combobox' tabindex='0' aria-expanded='true' aria-controls='popup' aria-activedescendant='blue'>Current</div>",
+            "<div id='popup' role='listbox'><div id='blue' role='option' aria-selected='false'>Blue</div></div>",
+            "<script>",
+            "combo.addEventListener('keydown',event=>{if(event.key==='Enter'&&document.activeElement===combo&&confirm('Select Blue?')){blue.setAttribute('aria-selected','true');combo.textContent='Blue';combo.dataset.committed='blue';}});",
+            "</script></body></html>"
+        ))
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": html }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#combo", "values": ["Blue"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["selected"], json!(["Blue"]));
+    assert_eq!(get_data(&resp)["dialogOpened"], true);
+    assert!(resp["warning"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("confirm"));
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "dialog", "response": "status" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["hasDialog"], true);
+    assert_eq!(get_data(&resp)["type"], "confirm");
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "dialog", "response": "accept" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "JSON.stringify({selected:blue.getAttribute('aria-selected'),committed:combo.dataset.committed})" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        r#"{"selected":"true","committed":"blue"}"#
+    );
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_aria_select_rejects_transient_combobox_input_value() {
     let mut state = DaemonState::new();
     state.default_timeout_ms = 250;

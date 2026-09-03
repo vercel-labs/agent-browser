@@ -1257,7 +1257,23 @@ async fn select_aria_option(
                 committed_before_activation = selection_committed_values(&state);
             }
             activation_attempted = true;
-            press_key(client, &effective_session_id, "Enter").await?;
+            if dispatch_key_for_selection(
+                client,
+                &effective_session_id,
+                &[effective_session_id.as_str(), session_id],
+                "Enter",
+            )
+            .await?
+            {
+                // Enter can synchronously open a confirm or prompt from the
+                // widget's key handler. The renderer then cannot acknowledge
+                // the key event until the dialog is resolved, so surface the
+                // dialog immediately instead of waiting for the CDP timeout.
+                return Ok(SelectionResult {
+                    dialog_opened: true,
+                    pending_release: None,
+                });
+            }
             continue;
         }
 
@@ -2187,6 +2203,90 @@ async fn dispatch_mouse_or_dialog(
             }
         }
     }
+}
+
+/// Dispatch one key event and return whether a JavaScript dialog opened before
+/// the browser acknowledged it. Synchronous dialogs block the renderer's
+/// acknowledgement just as they do for mouse events, so keyboard activation
+/// must observe the dialog event concurrently with the CDP request.
+async fn dispatch_key_or_dialog(
+    client: &CdpClient,
+    session_id: &str,
+    accept_sessions: &[&str],
+    params: &DispatchKeyEventParams,
+) -> Result<bool, String> {
+    use tokio::sync::broadcast::error::RecvError;
+
+    let mut events = client.subscribe();
+    let send =
+        client.send_command_typed::<_, Value>("Input.dispatchKeyEvent", params, Some(session_id));
+    tokio::pin!(send);
+    loop {
+        tokio::select! {
+            res = &mut send => {
+                res?;
+                return Ok(false);
+            }
+            event = events.recv() => {
+                match event {
+                    Ok(e) if e.method == "Page.javascriptDialogOpening" => {
+                        let ours = match e.session_id.as_deref() {
+                            Some(sid) => accept_sessions.contains(&sid),
+                            None => true,
+                        };
+                        if ours {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Closed) => {
+                        (&mut send).await?;
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Send a trusted keyDown+keyUp sequence for selection, stopping as soon as a
+/// dialog opens. No keyUp is sent after a dialog interrupts keyDown because the
+/// blocked renderer cannot process it; unlike a mouse button, a keyboard key
+/// does not need a pending release tracked in daemon state.
+async fn dispatch_key_for_selection(
+    client: &CdpClient,
+    session_id: &str,
+    accept_sessions: &[&str],
+    key: &str,
+) -> Result<bool, String> {
+    let (key_name, code, key_code) = named_key_info(key);
+    let text = key_text(&key_name);
+    let key_down = DispatchKeyEventParams {
+        event_type: "keyDown".to_string(),
+        key: Some(key_name.clone()),
+        code: Some(code.clone()),
+        text: text.clone(),
+        unmodified_text: text,
+        windows_virtual_key_code: Some(key_code),
+        native_virtual_key_code: Some(key_code),
+        modifiers: None,
+    };
+    if dispatch_key_or_dialog(client, session_id, accept_sessions, &key_down).await? {
+        return Ok(true);
+    }
+
+    let key_up = DispatchKeyEventParams {
+        event_type: "keyUp".to_string(),
+        key: Some(key_name),
+        code: Some(code),
+        text: None,
+        unmodified_text: None,
+        windows_virtual_key_code: Some(key_code),
+        native_virtual_key_code: Some(key_code),
+        modifiers: None,
+    };
+    dispatch_key_or_dialog(client, session_id, accept_sessions, &key_up).await
 }
 
 async fn dispatch_click(
