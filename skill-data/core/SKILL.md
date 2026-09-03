@@ -159,6 +159,8 @@ agent-browser find first ".card" click
 agent-browser find nth 2 ".card" hover
 ```
 
+The `role`, `text`, `label`, `placeholder`, `alt`, `title`, and `testid` locators honor the current frame context. After selecting an iframe with `agent-browser frame`, use `agent-browser frame main` to search the top document again.
+
 Or a raw CSS selector:
 
 ```bash

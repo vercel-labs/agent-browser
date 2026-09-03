@@ -2275,6 +2275,8 @@ agent-browser find - Find and interact with elements by locator
 Usage: agent-browser find <locator> <value> [action] [text]
 
 Finds elements using semantic locators and optionally performs an action.
+The role, text, label, placeholder, alt, title, and testid locators honor the
+active frame selected by frame.
 
 Locators:
   role <role>              Find by ARIA role (--name <n>, --exact)
