@@ -3946,6 +3946,10 @@ Environment:
   AGENT_BROWSER_CA_CERT          Path to CA certificate to trust (HTTPS interception proxies)
   AGENT_BROWSER_CLEAR_CA_CERT    Clear CA trust retained by the running browser session
   AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless, agentcore, or plugin name)
+  BROWSER_USE_API_KEY            Browser Use Cloud API key
+  BROWSER_USE_PROFILE_ID         Browser Use profile UUID
+  BROWSER_USE_PROXY_COUNTRY      Managed proxy country; none/direct disables proxy
+  BROWSER_USE_ENABLE_RECORDING   Record the Browser Use Cloud session
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_PIN_TAB          Pin the session to its bound tab (strict tab binding)
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files

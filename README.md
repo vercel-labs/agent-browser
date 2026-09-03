@@ -1846,7 +1846,7 @@ Get your API key from the [Browserbase Dashboard](https://browserbase.com/overvi
 
 ### Browser Use
 
-[Browser Use](https://browser-use.com) provides cloud browser infrastructure for AI agents. Use it when running agent-browser in environments where a local browser isn't available (serverless, CI/CD, etc.).
+[Browser Use](https://browser-use.com) is an open-source browser automation project for AI agents with [over 100,000 GitHub stars](https://github.com/browser-use/browser-use), plus a managed Cloud browser service. Browser Use Cloud is useful when running agent-browser in environments where a local browser isn't available, such as serverless and CI environments.
 
 To enable Browser Use, use the `-p` flag:
 
@@ -1863,9 +1863,26 @@ export BROWSER_USE_API_KEY="your-api-key"
 agent-browser open https://example.com
 ```
 
-When enabled, agent-browser connects to a Browser Use cloud session instead of launching a local browser. All commands work identically.
+Optional Browser Use Cloud settings:
 
-Get your API key from the [Browser Use Cloud Dashboard](https://cloud.browser-use.com/settings?tab=api-keys). Free credits are available to get started, with pay-as-you-go pricing after.
+| Variable                       | Description                                                |
+| ------------------------------ | ---------------------------------------------------------- |
+| `BROWSER_USE_PROFILE_ID`       | Profile UUID for persistent cookies and logins             |
+| `BROWSER_USE_PROXY_COUNTRY`    | Managed proxy country, or `none`/`direct` to disable proxy |
+| `BROWSER_USE_ENABLE_RECORDING` | Record the Cloud browser session                           |
+
+```bash
+export BROWSER_USE_PROFILE_ID="your-profile-uuid"
+export BROWSER_USE_PROXY_COUNTRY="de"
+export BROWSER_USE_ENABLE_RECORDING="true"
+agent-browser -p browseruse open https://example.com
+```
+
+When enabled, agent-browser creates a Browser Use Cloud V4 session and connects to its CDP endpoint. Existing provider lifecycle handling stops the Cloud session when agent-browser closes it.
+
+The Cloud browser stays active between commands; run `agent-browser close` when the task finishes to stop the session and billing immediately, otherwise it stops when the daemon exits, including after the one-hour default idle timeout.
+
+Get your API key from the [Browser Use Cloud Dashboard](https://cloud.browser-use.com/settings?tab=api-keys).
 
 ### Kernel
 
