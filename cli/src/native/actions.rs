@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
@@ -6757,6 +6757,23 @@ async fn handle_set_media(cmd: &Value, state: &DaemonState) -> Result<Value, Str
     Ok(json!({ "set": true }))
 }
 
+/// Canonicalize an existing path for use as a Chrome CDP download directory.
+///
+/// `std::fs::canonicalize` is correct on Unix, but on Windows it returns a
+/// verbatim `\\?\`-prefixed path that `Browser.setDownloadBehavior` rejects,
+/// canceling the download. `dunce` uses the legacy form only when it can do
+/// so without changing the path's meaning.
+fn canonicalize_for_cdp(path: &Path) -> std::io::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        dunce::canonicalize(path)
+    }
+    #[cfg(not(windows))]
+    {
+        path.canonicalize()
+    }
+}
+
 async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let selector = cmd
         .get("selector")
@@ -6787,8 +6804,7 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .map_err(|e| format!("Failed to create download directory: {}", e))?;
 
     // Canonicalize after mkdir so the path actually exists for resolution
-    let download_dir = download_dir
-        .canonicalize()
+    let download_dir = canonicalize_for_cdp(&download_dir)
         .map_err(|e| format!("Failed to resolve download directory: {}", e))?;
     let dest = download_dir.join(
         raw_dest
@@ -15651,5 +15667,42 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             let auto_handled = auto_dialog && matches!(*dialog_type, "beforeunload" | "alert");
             assert!(!auto_handled, "{dialog_type} should NOT be auto-handled");
         }
+    }
+
+    #[test]
+    fn canonicalize_for_cdp_preserves_target() {
+        let dir = tempfile::tempdir().expect("tempdir must be created");
+        let standard = dir
+            .path()
+            .canonicalize()
+            .expect("the temporary directory must be canonicalizable");
+
+        let resolved = canonicalize_for_cdp(dir.path())
+            .expect("canonicalize_for_cdp must resolve an existing directory");
+        assert!(
+            resolved.is_absolute(),
+            "resolved path must be absolute, got {:?}",
+            resolved,
+        );
+
+        #[cfg(windows)]
+        {
+            let simplified = dunce::simplified(&standard);
+            assert_eq!(resolved.as_path(), simplified);
+            if simplified != standard.as_path() {
+                assert!(!resolved.to_string_lossy().starts_with(r"\\?\"));
+            }
+        }
+
+        #[cfg(not(windows))]
+        assert_eq!(resolved, standard);
+
+        assert_eq!(
+            resolved
+                .canonicalize()
+                .expect("the simplified path must remain canonicalizable"),
+            standard,
+            "simplifying the path must not change its target",
+        );
     }
 }
