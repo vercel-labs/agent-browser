@@ -708,6 +708,29 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 })?);
                 rest.drain(idx..=idx + 1);
             }
+            // `--state` is wait-scoped here (the element state to wait FOR),
+            // not the global auth-state file. Extract it before the variants so
+            // its value can never be misread as a selector.
+            let mut element_state: Option<String> = None;
+            if let Some(idx) = rest.iter().position(|&s| s == "--state") {
+                let raw = rest
+                    .get(idx + 1)
+                    .ok_or_else(|| ParseError::MissingArguments {
+                        context: "wait --state".to_string(),
+                        usage: "wait <selector> --state <visible|hidden|attached|detached>",
+                    })?;
+                if !matches!(*raw, "visible" | "hidden" | "attached" | "detached") {
+                    return Err(ParseError::InvalidValue {
+                        message: format!(
+                            "--state expects visible, hidden, attached, or detached, got '{}'",
+                            raw
+                        ),
+                        usage: "wait <selector> --state <visible|hidden|attached|detached>",
+                    });
+                }
+                element_state = Some((*raw).to_string());
+                rest.drain(idx..=idx + 1);
+            }
             let with_timeout = |mut cmd: Value| {
                 if let Some(ms) = timeout_ms {
                     cmd["timeout"] = json!(ms);
@@ -788,9 +811,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 if let Ok(timeout) = arg.parse::<u64>() {
                     Ok(json!({ "id": id, "action": "wait", "timeout": timeout }))
                 } else {
-                    Ok(with_timeout(
-                        json!({ "id": id, "action": "wait", "selector": arg }),
-                    ))
+                    let mut cmd = json!({ "id": id, "action": "wait", "selector": arg });
+                    if let Some(ref st) = element_state {
+                        cmd["state"] = json!(st);
+                    }
+                    Ok(with_timeout(cmd))
                 }
             } else {
                 Err(ParseError::MissingArguments {
@@ -4725,6 +4750,47 @@ mod tests {
         let cmd = parse_command(&args("wait #element"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "wait");
         assert_eq!(cmd["selector"], "#element");
+    }
+
+    #[test]
+    fn test_wait_state_hidden_reaches_the_daemon() {
+        // The daemon has always honored cmd["state"] (visible/hidden/attached/
+        // detached); only the CLI never sent it, while the help text documented
+        // this exact invocation.
+        let cmd = parse_command(&args("wait #spinner --state hidden"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "wait");
+        assert_eq!(cmd["selector"], "#spinner");
+        assert_eq!(cmd["state"], "hidden");
+    }
+
+    #[test]
+    fn test_wait_state_detached_with_ref() {
+        let cmd = parse_command(&args("wait @e5 --state detached"), &default_flags()).unwrap();
+        assert_eq!(cmd["selector"], "@e5");
+        assert_eq!(cmd["state"], "detached");
+    }
+
+    #[test]
+    fn test_wait_state_combines_with_timeout() {
+        let cmd = parse_command(
+            &args("wait #spinner --state hidden --timeout 9000"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["state"], "hidden");
+        assert_eq!(cmd["timeout"], 9000);
+    }
+
+    #[test]
+    fn test_wait_state_rejects_unknown_value() {
+        // Better a clear parse error than silently treating "gone" as a selector.
+        assert!(parse_command(&args("wait #spinner --state gone"), &default_flags()).is_err());
+    }
+
+    #[test]
+    fn test_wait_selector_without_state_is_unchanged() {
+        let cmd = parse_command(&args("wait #element"), &default_flags()).unwrap();
+        assert!(cmd.get("state").is_none());
     }
 
     #[test]

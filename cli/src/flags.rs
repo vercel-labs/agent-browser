@@ -679,10 +679,14 @@ pub fn parse_flags(args: &[String]) -> Flags {
 
     let mut i = 0;
     let mut seen_command = false;
+    let mut command_name: Option<String> = None;
     while i < args.len() {
         let arg = args[i].as_str();
         if !arg.starts_with('-') && looks_like_command(arg) {
             seen_command = true;
+            if command_name.is_none() {
+                command_name = Some(arg.to_string());
+            }
         }
         match arg {
             s if s.starts_with("--restore=") => {
@@ -854,7 +858,14 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 }
             }
             "--state" => {
-                if let Some(s) = args.get(i + 1) {
+                // `wait <selector> --state hidden` is a wait-scoped element
+                // state, not an auth-state file. Consuming it here made the CLI
+                // try to read a state file literally named "hidden", which fails
+                // and leaves the session on about:blank, even though the help
+                // text documents that exact invocation.
+                if command_name.as_deref() == Some("wait") {
+                    // Leave the flag and its value for the wait parser.
+                } else if let Some(s) = args.get(i + 1) {
                     flags.state = Some(s.clone());
                     flags.cli_state = true;
                     i += 1;
@@ -1186,6 +1197,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
 
     let mut i = 0;
     let mut seen_command = false;
+    let mut command_name: Option<String> = None;
     while i < args.len() {
         let arg = &args[i];
         if skip_next {
@@ -1194,6 +1206,13 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             continue;
         }
         if arg.starts_with("--restore=") {
+            i += 1;
+            continue;
+        }
+        // `wait --state <element state>` must survive into the command args;
+        // it is not the global auth-state file flag.
+        if arg == "--state" && command_name.as_deref() == Some("wait") {
+            result.push(arg.clone());
             i += 1;
             continue;
         }
@@ -1224,6 +1243,9 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         }
         if !arg.starts_with('-') && looks_like_command(arg) {
             seen_command = true;
+            if command_name.is_none() {
+                command_name = Some(arg.clone());
+            }
         }
         result.push(arg.clone());
         i += 1;
@@ -1238,6 +1260,43 @@ mod tests {
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn test_wait_state_is_not_swallowed_as_an_auth_state_file() {
+        // Regression: `--state` is a global auth-state file flag, but the help
+        // text also documents `wait <sel> --state hidden`. The global parser won,
+        // so the CLI tried to read a state file named "hidden", failed, and left
+        // the session on about:blank.
+        let flags = parse_flags(&args("wait #spinner --state hidden"));
+        assert_eq!(flags.state, None);
+        assert!(!flags.cli_state);
+    }
+
+    #[test]
+    fn test_global_state_flag_still_works_for_other_commands() {
+        let flags = parse_flags(&args("open example.com --state /tmp/auth.json"));
+        assert_eq!(flags.state, Some("/tmp/auth.json".to_string()));
+        assert!(flags.cli_state);
+    }
+
+    #[test]
+    fn test_global_state_flag_before_a_wait_command_still_loads_auth() {
+        // `--state` ahead of the command is unambiguously the auth-state file.
+        let flags = parse_flags(&args("--state /tmp/auth.json wait #spinner"));
+        assert_eq!(flags.state, Some("/tmp/auth.json".to_string()));
+    }
+
+    #[test]
+    fn test_clean_args_keeps_wait_state_for_the_command_parser() {
+        let cleaned = clean_args(&args("wait #spinner --state hidden"));
+        assert_eq!(cleaned, args("wait #spinner --state hidden"));
+    }
+
+    #[test]
+    fn test_clean_args_still_strips_global_state_for_other_commands() {
+        let cleaned = clean_args(&args("open example.com --state /tmp/auth.json"));
+        assert_eq!(cleaned, args("open example.com"));
     }
 
     #[test]
