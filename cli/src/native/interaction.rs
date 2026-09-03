@@ -1130,6 +1130,25 @@ async fn select_aria_option(
             .map(|index| index as usize)
             == Some(click_index)
         {
+            // aria-activedescendant is navigation state on the combobox, so
+            // Enter must be delivered to the focused control rather than to
+            // the option node. This also covers controls that were already
+            // open when select started and were not focused by the caller.
+            let focused = call_selection_function(
+                client,
+                &effective_session_id,
+                &object_id,
+                "function() { this.focus(); return document.activeElement === this; }",
+                None,
+                target,
+            )
+            .await?;
+            if !focused.as_bool().unwrap_or(false) {
+                return Err(selection_error(
+                    target,
+                    "the control could not receive keyboard input",
+                ));
+            }
             press_key(client, &effective_session_id, "Enter").await?;
             continue;
         }
