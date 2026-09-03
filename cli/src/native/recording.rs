@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{mpsc, oneshot};
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::{AttachToTargetParams, AttachToTargetResult};
@@ -65,48 +65,37 @@ fn frame_period(fps: u32) -> Duration {
     Duration::from_micros(1_000_000 / fps.clamp(1, MAX_FPS) as u64)
 }
 
-/// Number of frames owed to the stream at `elapsed` into the recording, given
-/// `written` frames already sent. Zero when the current frame slot is filled.
-///
-/// Screencast frames arrive whenever the compositor repaints, which is
-/// irregular: a burst during a scroll, nothing at all on a static page. ffmpeg
-/// reads the pipe as a constant-rate stream, so the recorder emits exactly one
-/// frame per wall-clock slot, repeating the frame on screen through any gap.
-/// That keeps playback aligned with wall clock at any rate.
+/// Frames owed to the constant-rate stream at `elapsed` into the recording,
+/// given `written` frames already sent. Zero when the current slot is filled.
 fn frames_due(elapsed: Duration, period: Duration, written: u64) -> u64 {
     let period_us = period.as_micros().max(1);
     let slot = (elapsed.as_micros() / period_us) as u64;
     slot.saturating_add(1).saturating_sub(written)
 }
 
-/// The dedicated CDP session a recording attaches to its page target.
+/// The CDP session a recording attaches to its page target for its screencast.
 ///
-/// Chrome keeps one screencast per session, and the live stream already runs
+/// Chrome keeps one screencast per session and the live stream already runs
 /// one on the page session, so the recorder attaches a second flattened
-/// session to the same target and screencasts there. The daemon must not
-/// manage that session as a tab, so it is published here for the event
-/// handlers to recognise.
+/// session to the same target. The daemon's event handlers use this to avoid
+/// treating that attachment as a tab.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CaptureSession {
     pub target_id: String,
-    /// `None` while `Target.attachToTarget` is in flight. Chrome emits
-    /// `Target.attachedToTarget` before it answers the command, so during that
-    /// window the attachment is recognised by target instead.
+    /// `None` while `Target.attachToTarget` is in flight: Chrome emits
+    /// `Target.attachedToTarget` before it answers, so in that window the
+    /// attachment is recognised by target instead.
     pub session_id: Option<String>,
 }
 
 impl CaptureSession {
-    /// Whether a `Target.attachedToTarget` event describes this recorder's
-    /// own attachment rather than a tab the daemon should track.
+    /// Whether a `Target.attachedToTarget` event is this recorder's own
+    /// attachment rather than a tab the daemon should track.
     pub fn owns_attachment(&self, target_id: &str, session_id: &str) -> bool {
         match self.session_id.as_deref() {
             Some(own) => own == session_id,
             None => self.target_id == target_id,
         }
-    }
-
-    pub fn owns_session(&self, session_id: &str) -> bool {
-        self.session_id.as_deref() == Some(session_id)
     }
 }
 
@@ -125,8 +114,7 @@ pub struct RecordingState {
     pub shared_frame_count: Option<Arc<AtomicU64>>,
     pub shared_captured_count: Option<Arc<AtomicU64>>,
     pub cancel_tx: Option<oneshot::Sender<()>>,
-    /// Shared with the daemon's background event handlers, which must ignore
-    /// the recorder's session.
+    /// Shared with the daemon's event handlers.
     pub capture_session: SharedCaptureSession,
 }
 
@@ -145,25 +133,9 @@ impl RecordingState {
             capture_session: Arc::new(Mutex::new(None)),
         }
     }
-
-    /// Whether `Target.attachedToTarget` for this session belongs to the
-    /// active recording's screencast session.
-    pub fn owns_attachment(&self, target_id: &str, session_id: &str) -> bool {
-        owns_attachment(&self.capture_session, target_id, session_id)
-    }
-
-    /// Whether events on this session belong to the recorder's screencast.
-    pub fn owns_session(&self, session_id: &str) -> bool {
-        self.capture_session
-            .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|c| c.owns_session(session_id)))
-            .unwrap_or(false)
-    }
 }
 
-/// [`CaptureSession::owns_attachment`] against a shared slot, for background
-/// tasks that hold a clone of it rather than the recording state.
+/// [`CaptureSession::owns_attachment`] against the shared slot.
 pub fn owns_attachment(shared: &SharedCaptureSession, target_id: &str, session_id: &str) -> bool {
     shared
         .lock()
@@ -215,34 +187,6 @@ pub fn recording_stop(state: &mut RecordingState) -> Result<Value, String> {
     }))
 }
 
-pub fn recording_restart(
-    state: &mut RecordingState,
-    path: &str,
-    fps: Option<u32>,
-) -> Result<Value, String> {
-    // Validate before tearing down the active recording so a bad rate cannot
-    // stop a good take.
-    let fps = validate_fps(fps.unwrap_or(DEFAULT_FPS))?;
-
-    let previous = if state.active {
-        let stop_result = recording_stop(state);
-        stop_result
-            .ok()
-            .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
-    } else {
-        None
-    };
-
-    recording_start(state, path, Some(fps))?;
-
-    Ok(json!({
-        "restarted": true,
-        "previousPath": previous,
-        "path": path,
-        "fps": fps,
-    }))
-}
-
 fn build_ffmpeg_command(output_path: &str, fps: u32) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("ffmpeg");
     let high_fps = fps > HIGH_FPS_THRESHOLD;
@@ -291,10 +235,9 @@ fn build_ffmpeg_command(output_path: &str, fps: u32) -> tokio::process::Command 
     cmd
 }
 
-/// Attach a dedicated flattened session to the target behind `page_session_id`
-/// for the recorder's screencast. Publishes the attachment in `shared` before
-/// the command is sent, so the daemon's event handlers can recognise the
-/// resulting `Target.attachedToTarget` as the recorder's own.
+/// Attach the recorder's own flattened session to the target behind
+/// `page_session_id`, publishing it in `shared` before the command is sent so
+/// the resulting `Target.attachedToTarget` is recognised as the recorder's.
 pub async fn attach_capture_session(
     client: &CdpClient,
     page_session_id: &str,
@@ -346,14 +289,10 @@ pub async fn attach_capture_session(
     }
 }
 
-/// Spawn a background task that screencasts the page on `capture_session` and
-/// pipes frames to ffmpeg at `fps` in real time.
-///
-/// Chrome pushes a frame whenever the page repaints, up to the display rate,
-/// so motion is captured at its true rate rather than at the pace
-/// `Page.captureScreenshot` can answer. A wall-clock ticker then writes the
-/// most recent frame once per slot, holding it through gaps, so the file's
-/// duration matches the automation it recorded.
+/// Spawn a background task that screencasts `capture_session` into ffmpeg at
+/// `fps`. Chrome pushes a frame on every repaint up to the display rate; a
+/// wall-clock ticker writes one frame per slot, holding the last one through
+/// gaps, so the file's duration matches the automation it recorded.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_recording_task(
     client: Arc<CdpClient>,
@@ -369,9 +308,10 @@ pub fn spawn_recording_task(
         let period = frame_period(fps);
         let max_frames_per_tick = MAX_BACKFILL_SECS * fps as u64 + 1;
 
-        // Subscribe before starting the screencast so the first frame, which
-        // Chrome sends immediately, is not missed.
-        let events = client.subscribe();
+        // Frames go to a private channel so the daemon's other subscribers
+        // neither copy them nor overflow on them. Subscribe before starting
+        // the screencast: Chrome sends the first frame immediately.
+        let events = client.subscribe_session(&capture_session);
 
         let mut command = build_ffmpeg_command(&output_path, fps);
         let mut ffmpeg = command.spawn().map_err(|e| {
@@ -392,6 +332,9 @@ pub fn spawn_recording_task(
                 Some(json!({
                     "format": "jpeg",
                     "quality": SCREENCAST_QUALITY,
+                    // Always 1: Chrome skips frames by count, and a static
+                    // page produces exactly one, which a higher value would
+                    // drop, leaving nothing to record.
                     "everyNthFrame": 1,
                 })),
                 Some(&capture_session),
@@ -418,6 +361,8 @@ pub fn spawn_recording_task(
                 Err(format!("Failed to start screencast: {}", e))
             }
         };
+
+        client.unsubscribe_session(&capture_session);
 
         // Best effort: the page may already be closed.
         let _ = tokio::time::timeout(
@@ -460,7 +405,7 @@ pub fn spawn_recording_task(
 async fn capture_frames(
     client: &CdpClient,
     capture_session: &str,
-    mut events: broadcast::Receiver<super::cdp::types::CdpEvent>,
+    mut events: mpsc::Receiver<super::cdp::types::CdpEvent>,
     mut stdin: tokio::process::ChildStdin,
     period: Duration,
     max_frames_per_tick: u64,
@@ -486,13 +431,8 @@ async fn capture_frames(
         tokio::select! {
             _ = &mut cancel_rx => break,
             event = events.recv() => {
-                let event = match event {
-                    Ok(event) => event,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                };
-                let on_capture_session = event.session_id.as_deref() == Some(capture_session);
-                if on_capture_session && event.method == "Page.screencastFrame" {
+                let Some(event) = event else { break };
+                if event.method == "Page.screencastFrame" {
                     if let Some(sid) = event.params.get("sessionId").and_then(Value::as_i64) {
                         let _ = client
                             .send_command_no_wait(
@@ -520,9 +460,7 @@ async fn capture_frames(
                         }
                         shared_captured.fetch_add(1, Ordering::Relaxed);
                     }
-                } else if event.method == "Target.detachedFromTarget"
-                    && event.params.get("sessionId").and_then(Value::as_str) == Some(capture_session)
-                {
+                } else if event.method == "Inspector.detached" {
                     // The recorded page was closed; finish the file.
                     break;
                 }
@@ -678,40 +616,30 @@ mod tests {
     }
 
     #[test]
-    fn test_recording_restart_while_inactive() {
-        let mut state = RecordingState::new();
-        let result = recording_restart(&mut state, "/tmp/new.webm", None);
-        assert!(result.is_ok());
-        assert!(state.active);
-        assert_eq!(state.output_path, "/tmp/new.webm");
-        assert_eq!(state.fps, DEFAULT_FPS);
+    fn test_capture_session_matches_by_target_while_attach_is_in_flight() {
+        let shared: SharedCaptureSession = Arc::new(Mutex::new(Some(CaptureSession {
+            target_id: "T-REC".into(),
+            session_id: None,
+        })));
+        assert!(owns_attachment(&shared, "T-REC", "S-ANY"));
+        assert!(!owns_attachment(&shared, "T-OTHER", "S-ANY"));
     }
 
     #[test]
-    fn test_recording_restart_while_active() {
-        let mut state = RecordingState::new();
-        recording_start(&mut state, "/tmp/old.webm", None).unwrap();
-        state.frame_count = 10;
-        let result = recording_restart(&mut state, "/tmp/new.webm", Some(60)).unwrap();
-        assert!(state.active);
-        assert_eq!(state.output_path, "/tmp/new.webm");
-        assert_eq!(state.frame_count, 0);
-        assert_eq!(state.fps, 60);
-        assert_eq!(result["previousPath"], "/tmp/old.webm");
-        assert_eq!(result["fps"], 60);
-    }
-
-    #[test]
-    fn test_recording_restart_rejects_bad_fps_without_stopping() {
-        let mut state = RecordingState::new();
-        recording_start(&mut state, "/tmp/old.webm", None).unwrap();
-        state.frame_count = 10;
-        let result = recording_restart(&mut state, "/tmp/new.webm", Some(120));
-        assert!(result.is_err());
-        // The in-flight take survives an invalid rate.
-        assert!(state.active);
-        assert_eq!(state.output_path, "/tmp/old.webm");
-        assert_eq!(state.frame_count, 10);
+    fn test_capture_session_matches_by_session_once_attached() {
+        let shared: SharedCaptureSession = Arc::new(Mutex::new(Some(CaptureSession {
+            target_id: "T-REC".into(),
+            session_id: Some("S-REC".into()),
+        })));
+        assert!(owns_attachment(&shared, "T-REC", "S-REC"));
+        // A later attachment to the same target (e.g. the daemon's own) is
+        // not the recorder's.
+        assert!(!owns_attachment(&shared, "T-REC", "S-OTHER"));
+        assert!(!owns_attachment(
+            &Arc::new(Mutex::new(None)),
+            "T-REC",
+            "S-REC"
+        ));
     }
 
     #[test]

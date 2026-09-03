@@ -70,7 +70,7 @@ agent-browser record stop
 agent-browser record start ./soak.webm --fps 5
 ```
 
-Frames come from Chrome's screencast, so every repaint up to the display rate is captured and a 60 fps take of a scroll or animation holds 60 distinct pictures per second. The file's duration matches the wall clock time it recorded: while the page is static the last frame is held, so playback never runs fast, and a gap longer than five seconds is held for five and the rest left out. `record stop --json` reports `frames` (written to the file) and `capturedFrames` (distinct frames the page produced). 60 fps roughly doubles the bitrate of 30 fps.
+Frames come from Chrome's screencast, so a 60 fps take of a scroll holds 60 distinct pictures per second. While the page is static the last frame is held, so duration matches wall clock; a gap longer than five seconds is held for five and the rest left out. `record stop --json` reports `frames` (written) and `capturedFrames` (distinct frames the page produced). 60 fps roughly doubles the bitrate of 30 fps.
 
 ## Use Cases
 

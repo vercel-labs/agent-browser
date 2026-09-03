@@ -768,8 +768,7 @@ impl DaemonState {
                         });
                         // The recorder's screencast session shares a target
                         // with a page session that already carries the
-                        // controls; installing them twice would pause every
-                        // request twice.
+                        // controls.
                         let is_recorder_session = target_info.as_ref().is_some_and(|target| {
                             recording::owns_attachment(&capture_session, &target.target_id, &sid)
                         });
@@ -1502,13 +1501,15 @@ impl DaemonState {
                                 match serde_json::from_value::<TargetInfo>(
                                     target_info_value.clone(),
                                 ) {
-                                    // The recorder's own screencast session
-                                    // is not a tab and must not have page
+                                    // The recorder's screencast session is
+                                    // not a tab and must not have page
                                     // domains enabled on it.
                                     Ok(target_info)
-                                        if self
-                                            .recording_state
-                                            .owns_attachment(&target_info.target_id, sid) => {}
+                                        if recording::owns_attachment(
+                                            &self.recording_state.capture_session,
+                                            &target_info.target_id,
+                                            sid,
+                                        ) => {}
                                     Ok(target_info) if target_info.target_type == "iframe" => {
                                         // For OOPIF targets, Chrome uses the frameId as
                                         // the targetId, so we can key iframe_sessions by it.
@@ -1902,14 +1903,6 @@ impl DaemonState {
                         // stream server's background CDP event loop. Here we just
                         // collect acks as a fallback for non-streaming mode.
                         "Page.screencastFrame" if self.stream_server.is_none() => {
-                            // The recorder acks its own frames.
-                            let from_recorder = event
-                                .session_id
-                                .as_deref()
-                                .is_some_and(|sid| self.recording_state.owns_session(sid));
-                            if from_recorder {
-                                continue;
-                            }
                             if let Some(sid) =
                                 event.params.get("sessionId").and_then(|v| v.as_i64())
                             {
@@ -7145,8 +7138,11 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
 }
 
 async fn handle_recording_stop(state: &mut DaemonState) -> Result<Value, String> {
-    state.stop_recording_task().await?;
+    // Clear the recording state even when the capture task failed, so a
+    // broken take does not block the next `record start`.
+    let task_result = state.stop_recording_task().await;
     let result = recording::recording_stop(&mut state.recording_state);
+    task_result?;
 
     if let Some(ref server) = state.stream_server {
         server.set_recording(false, &state.engine).await;

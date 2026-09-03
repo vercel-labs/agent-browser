@@ -45,9 +45,9 @@ agent-browser record start ./soak.webm --fps 10
   </tbody>
 </table>
 
-Valid rates are 1 to 60. Frames come from Chrome's screencast, which delivers a new frame every time the page repaints, up to the display rate, so a 60 fps recording of a scroll or animation holds 60 distinct pictures per second rather than repeats of the last screenshot. The file's duration matches the wall clock time it recorded: while the page is static the last frame is held, so playback never runs fast. A gap longer than five seconds (a hung page, a tab left in the background) is held for five seconds and the rest is left out.
+Valid rates are 1 to 60. Frames come from Chrome's screencast, so every repaint up to the display rate is captured and a 60 fps take of a scroll holds 60 distinct pictures per second. While the page is static the last frame is held, so the file's duration matches wall clock; a gap longer than five seconds is held for five and the rest left out.
 
-`record stop` reports both `frames`, the number written to the file, and `capturedFrames`, the number of distinct frames the page produced. A static page shows a small `capturedFrames` against a full `frames` count; that is the hold working, not a problem.
+`record stop` reports `frames` (written to the file) and `capturedFrames` (distinct frames the page produced). A static page shows a small `capturedFrames` against a full `frames` count; that is the hold working.
 
 ## Commands
 
