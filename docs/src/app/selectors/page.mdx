@@ -35,6 +35,8 @@ agent-browser click "div > button"
 agent-browser click "[data-testid='submit']"
 ```
 
+Use the same CSS selector or snapshot ref with `select` for native `<select>` elements and supported ARIA `combobox` or `listbox` controls. Matching is exact against option values, labels, or normalized accessible text. Re-snapshot after a custom widget opens or rerenders if you need refs for its options; the select command itself re-queries the associated option set and verifies the final state. The action uses CDP-managed browser sessions; WebDriver backends report it as unsupported.
+
 ## Text & XPath
 
 ```bash

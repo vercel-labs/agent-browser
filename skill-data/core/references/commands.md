@@ -66,12 +66,28 @@ agent-browser keyup Shift         # Release key
 agent-browser hover @e1           # Hover
 agent-browser check @e1           # Check checkbox
 agent-browser uncheck @e1         # Uncheck checkbox
-agent-browser select @e1 "value"  # Select dropdown option
-agent-browser select @e1 "a" "b"  # Select multiple options
+agent-browser select @e1 "value"  # Select a native or ARIA option
+agent-browser select @e1 "a" "b"  # Select final set in multiselectable ARIA listbox
 agent-browser scroll down 500     # Scroll page (default: down 300px)
 agent-browser scrollintoview @e1  # Scroll element into view (alias: scrollinto)
 agent-browser drag @e1 @e2        # Drag and drop
 agent-browser upload @e1 file.pdf # Upload files
+```
+
+### Select controls
+
+`select <selector> <value...>` supports native `<select>` elements and standard ARIA `combobox` or `listbox` controls. Matching is exact against an option value or label, with whitespace-normalized accessible text as a third match. Custom controls are opened and changed with browser input, then verified through selected options, the committed combobox value/display, or an associated form value. A single-select ARIA control accepts one value; multiple values require `aria-multiselectable="true"` on a listbox and mean its final selected set. Unknown, disabled, hidden, unsupported, or unverifiable controls fail with an actionable error, bounded by the configured action timeout. The action uses CDP-managed browser sessions; WebDriver backends report it as unsupported.
+
+```html
+<div id="country" role="combobox" aria-expanded="false" aria-controls="country-options">Choose a country</div>
+<div id="country-options" role="listbox" hidden>
+  <div role="option" value="us">United States</div>
+</div>
+```
+
+```bash
+agent-browser snapshot -i
+agent-browser select @e4 "United States"
 ```
 
 Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, run a fresh snapshot, then retry the original action.

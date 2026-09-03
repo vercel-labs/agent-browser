@@ -4292,6 +4292,17 @@ mod tests {
     }
 
     #[test]
+    fn test_select_preserves_value_contract_for_single_and_multiple_values() {
+        let single = parse_command(&args("select @e4 blue"), &default_flags()).unwrap();
+        assert_eq!(single["action"], "select");
+        assert_eq!(single["selector"], "@e4");
+        assert_eq!(single["values"], "blue");
+
+        let multiple = parse_command(&args("select #menu red blue"), &default_flags()).unwrap();
+        assert_eq!(multiple["values"], json!(["red", "blue"]));
+    }
+
+    #[test]
     fn test_frame_main() {
         let cmd = parse_command(&args("frame main"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "mainframe");

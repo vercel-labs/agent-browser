@@ -1746,7 +1746,12 @@ agent-browser select - Select a dropdown option
 
 Usage: agent-browser select <selector> <value...>
 
-Selects one or more options in a <select> dropdown by value.
+Selects options in a native <select> or supported role="combobox"/role="listbox"
+control by exact value, label, or normalized accessible text, then verifies the
+resulting selection state.
+Single-select ARIA controls accept one value. Multiple values are accepted only
+by an explicitly multiselectable ARIA listbox. Unmatched, disabled, unsupported,
+or unverified controls return an actionable error.
 
 Global Options:
   --json               Output as JSON
@@ -3613,7 +3618,7 @@ Core Commands:
   focus <sel>                Focus element
   check <sel>                Check checkbox
   uncheck <sel>              Uncheck checkbox
-  select <sel> <val...>      Select dropdown option
+  select <sel> <val...>      Select native or ARIA dropdown option(s)
   drag <src> <dst>           Drag and drop
   upload <sel> <files...>    Upload files
   download <sel> <path>      Download file by clicking element

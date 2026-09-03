@@ -1176,6 +1176,7 @@ async fn e2e_form_interaction() {
         "<input id='name' type='text' placeholder='Name'>",
         "<input id='email' type='email'>",
         "<select id='color'><option value='red'>Red</option><option value='blue'>Blue</option></select>",
+        "<select id='colors' multiple><option value='red'>Red</option><option value='blue'>Blue</option><option value='green'>Green</option></select>",
         "<input id='agree' type='checkbox'>",
         "<textarea id='bio'></textarea>",
         "<button id='submit'>Submit</button>",
@@ -1238,6 +1239,20 @@ async fn e2e_form_interaction() {
     assert_success(&resp);
     assert_eq!(get_data(&resp)["result"], "blue");
 
+    let resp = execute_command(
+        &json!({ "id": "15b", "action": "select", "selector": "#colors", "values": ["red", "green"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "15c", "action": "evaluate", "script": "Array.from(document.getElementById('colors').selectedOptions).map(option => option.value).join(',')" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "red,green");
+
     // Check checkbox
     let resp = execute_command(
         &json!({ "id": "16", "action": "check", "selector": "#agree" }),
@@ -1283,6 +1298,226 @@ async fn e2e_form_interaction() {
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// ARIA select controls: trusted interaction, delayed options, and verification
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_aria_select_controls() {
+    let mut state = DaemonState::new();
+    state.default_timeout_ms = 3_000;
+
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let html = format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode(concat!(
+        "<html><body>",
+        "<label for='country'>Country</label>",
+        "<div id='country' role='combobox' aria-expanded='false' aria-controls='country-options' tabindex='0'>Choose a country</div>",
+        "<div id='country-options' role='listbox' hidden></div>",
+        "<div id='fruits' role='listbox' aria-multiselectable='true'>",
+        "<div role='option' value='apple' aria-selected='false'>Apple</div>",
+        "<div role='option' value='pear' aria-selected='false'>Pear</div>",
+        "</div>",
+        "<div id='single' role='listbox'>",
+        "<div id='single-one' role='option' value='one' aria-selected='false'>One</div>",
+        "<div id='single-two' role='option' value='two' aria-selected='false'>Two</div>",
+        "</div>",
+        "<script>",
+        "const country=document.getElementById('country'), popup=document.getElementById('country-options');",
+        "country.onclick=()=>{country.setAttribute('aria-expanded','true');popup.hidden=false;setTimeout(()=>{popup.innerHTML=\"<div id='us' role='option' value='us' aria-selected='false'>United States</div><div role='option' value='ca' aria-selected='false'>Canada</div><div role='option' value='mx' aria-disabled='true' aria-selected='false'>Mexico</div>\";popup.querySelectorAll('[role=option]').forEach(o=>o.onclick=()=>{popup.querySelectorAll('[role=option]').forEach(x=>x.setAttribute('aria-selected',x===o?'true':'false'));country.textContent=o.textContent;country.setAttribute('aria-activedescendant',o.id||'');country.dataset.value=o.getAttribute('value');});},100)};",
+        "document.querySelectorAll('#fruits [role=option]').forEach(o=>o.onclick=()=>o.setAttribute('aria-selected',o.getAttribute('aria-selected')!=='true'));",
+        "document.querySelectorAll('#single [role=option]').forEach(o=>o.onclick=()=>{document.querySelectorAll('#single [role=option]').forEach(x=>x.setAttribute('aria-selected',x===o?'true':'false'));});",
+        "</script></body></html>"
+        ))
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": html }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let resp = execute_command(&json!({ "id": "2b", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let country_ref = get_data(&resp)["snapshot"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .find_map(|line| {
+            if !line.contains("combobox") {
+                return None;
+            }
+            let start = line.find("ref=")? + 4;
+            let end = line[start..]
+                .find(|character: char| character == ']' || character.is_whitespace())
+                .map(|offset| start + offset)
+                .unwrap_or(line.len());
+            Some(format!("@{}", &line[start..end]))
+        })
+        .expect("snapshot should expose the combobox ref");
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#country", "values": ["us"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["selected"], json!(["us"]));
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "country.dataset.value" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "us");
+
+    let resp = execute_command(
+        &json!({ "id": "4b", "action": "select", "selector": country_ref, "values": ["Canada"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["selected"], json!(["Canada"]));
+
+    let resp = execute_command(
+        &json!({ "id": "4c", "action": "select", "selector": "#single", "values": ["two"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4d", "action": "select", "selector": "#single", "values": ["one", "two"] }),
+        &mut state,
+    )
+    .await;
+    assert!(!resp["success"].as_bool().unwrap_or(true));
+    assert!(resp["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("single-select"));
+    let resp = execute_command(
+        &json!({ "id": "4e", "action": "evaluate", "script": "document.querySelector('#single [aria-selected=true]').getAttribute('value')" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "two");
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "select", "selector": "#country", "values": ["missing"] }),
+        &mut state,
+    )
+    .await;
+    assert!(!resp["success"].as_bool().unwrap_or(true));
+    assert!(resp["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("Canada"));
+    let resp = execute_command(
+        &json!({ "id": "5a", "action": "evaluate", "script": "country.dataset.value" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "ca");
+
+    let resp = execute_command(
+        &json!({ "id": "5b", "action": "select", "selector": "#country", "values": ["mx"] }),
+        &mut state,
+    )
+    .await;
+    assert!(!resp["success"].as_bool().unwrap_or(true));
+    assert!(resp["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("[disabled]"));
+    let resp = execute_command(
+        &json!({ "id": "5c", "action": "evaluate", "script": "country.dataset.value" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "ca");
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "select", "selector": "#fruits", "values": ["apple", "pear"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "select", "selector": "#fruits", "values": ["apple", "pear", "other"] }),
+        &mut state,
+    )
+    .await;
+    assert!(!resp["success"].as_bool().unwrap_or(true));
+
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "select", "selector": "#country", "values": ["United States", "Canada"] }),
+        &mut state,
+    )
+    .await;
+    assert!(!resp["success"].as_bool().unwrap_or(true));
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_aria_select_rejects_unsupported_and_unverified_controls() {
+    let mut state = DaemonState::new();
+    state.default_timeout_ms = 200;
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let html = "data:text/html,<div id='styled'>Choose</div><div id='opaque' role='combobox' aria-expanded='true' aria-controls='options' tabindex='0'>Choose</div><div id='options' role='listbox'><div role='option' aria-selected='false'>One</div></div>";
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": html }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "select", "selector": "#styled", "values": ["One"] }),
+        &mut state,
+    )
+    .await;
+    assert!(!resp["success"].as_bool().unwrap_or(true));
+    assert!(resp["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("native select"));
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "select", "selector": "#opaque", "values": ["One"] }),
+        &mut state,
+    )
+    .await;
+    assert!(!resp["success"].as_bool().unwrap_or(true));
+    assert!(resp["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("verification"));
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
 }
 
 // ---------------------------------------------------------------------------

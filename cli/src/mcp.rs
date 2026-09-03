@@ -892,7 +892,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_SELECT,
             "Select options",
-            "Select one or more options in a select element.",
+            "Select options in a native select or supported ARIA combobox/listbox using exact values, labels, or normalized accessible text, then verify the resulting widget state.",
             json!({
                 "selector": selector_schema(),
                 "values": {
@@ -2644,11 +2644,15 @@ fn call_download(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_select(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, select_command_args(arguments)?, None)
+}
+
+fn select_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let selector = required_string(arguments, "selector")?;
     let values = required_string_array(arguments, "values")?;
     let mut args = vec!["select".to_string(), selector];
     args.extend(values);
-    call_cli_tool(arguments, args, None)
+    Ok(args)
 }
 
 fn call_scroll(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4006,6 +4010,40 @@ mod tests {
         assert!(props.get("headed").is_some());
         assert!(props.get("webgpu").is_some());
         assert!(props.get("webmcp").is_some());
+    }
+
+    #[test]
+    fn select_tool_schema_describes_native_and_aria_controls() {
+        let select = tools()
+            .into_iter()
+            .find(|tool| tool["name"].as_str() == Some(TOOL_SELECT))
+            .expect("select tool should be registered");
+        assert_eq!(
+            select["inputSchema"]["required"],
+            json!(["selector", "values"])
+        );
+        assert_eq!(select["inputSchema"]["properties"]["values"]["minItems"], 1);
+        let description = select["description"].as_str().unwrap();
+        assert!(description.contains("native select"));
+        assert!(description.contains("ARIA combobox/listbox"));
+        assert!(description.contains("normalized accessible text"));
+    }
+
+    #[test]
+    fn select_forwards_selector_and_all_values_to_the_cli_command() {
+        let args = select_command_args(&json!({
+            "selector": "@e4",
+            "values": ["red", "Blue Label"]
+        }))
+        .unwrap();
+        assert_eq!(args, vec!["select", "@e4", "red", "Blue Label"]);
+    }
+
+    #[test]
+    fn select_requires_selector_and_values() {
+        assert!(select_command_args(&json!({ "values": ["red"] })).is_err());
+        assert!(select_command_args(&json!({ "selector": "#menu" })).is_err());
+        assert!(select_command_args(&json!({ "selector": "#menu", "values": [] })).is_err());
     }
 
     #[test]
