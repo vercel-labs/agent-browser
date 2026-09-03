@@ -7,6 +7,7 @@ use super::cdp::types::{
     AXNode, AXProperty, AXValue, EvaluateParams, EvaluateResult, GetFullAXTreeResult,
 };
 use super::element::{resolve_ax_session, RefMap};
+use crate::output::truncate_field;
 
 const INTERACTIVE_ROLES: &[&str] = &[
     "button",
@@ -73,6 +74,10 @@ const INVISIBLE_CHARS: &[char] = &[
     '\u{2060}', // Word Joiner
     '\u{00A0}', // Non-Breaking Space (&nbsp;)
 ];
+
+// Link hrefs longer than this are truncated in `--urls` output so long redirect
+// targets don't dominate the snapshot; the full URL stays reachable via `get attr`.
+const MAX_URL_CHARS: usize = 200;
 
 #[derive(Default)]
 pub struct SnapshotOptions {
@@ -1171,7 +1176,7 @@ fn render_tree(
     }
 
     if let Some(ref url) = node.url {
-        attrs.push(format!("url={}", url));
+        attrs.push(format!("url={}", truncate_field(url, MAX_URL_CHARS)));
     }
 
     if !attrs.is_empty() {
