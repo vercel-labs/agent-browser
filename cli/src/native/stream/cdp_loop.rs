@@ -335,6 +335,11 @@ pub(super) async fn cdp_event_loop(
                                         if let Some(data) = evt.params.get("data").and_then(|v| v.as_str()) {
                                             let meta = evt.params.get("metadata");
                                             let seq = super::next_frame_seq();
+                                            // Forward the real CDP frame metadata. Clients map input
+                                            // coordinates into this DIP space, so substituting the
+                                            // configured viewport here would misplace clicks whenever
+                                            // the actual content area differs from it (window chrome,
+                                            // scrollbars, device emulation, manual resizes).
                                             let msg = json!({
                                                 "type": "frame",
                                                 "seq": seq,
@@ -342,8 +347,8 @@ pub(super) async fn cdp_event_loop(
                                                 "metadata": {
                                                     "offsetTop": meta.and_then(|m| m.get("offsetTop")).and_then(|v| v.as_f64()).unwrap_or(0.0),
                                                     "pageScaleFactor": meta.and_then(|m| m.get("pageScaleFactor")).and_then(|v| v.as_f64()).unwrap_or(1.0),
-                                                    "deviceWidth": vw,
-                                                    "deviceHeight": vh,
+                                                    "deviceWidth": meta.and_then(|m| m.get("deviceWidth")).and_then(|v| v.as_f64()).unwrap_or(vw as f64),
+                                                    "deviceHeight": meta.and_then(|m| m.get("deviceHeight")).and_then(|v| v.as_f64()).unwrap_or(vh as f64),
                                                     "scrollOffsetX": meta.and_then(|m| m.get("scrollOffsetX")).and_then(|v| v.as_f64()).unwrap_or(0.0),
                                                     "scrollOffsetY": meta.and_then(|m| m.get("scrollOffsetY")).and_then(|v| v.as_f64()).unwrap_or(0.0),
                                                     "timestamp": frame_timestamp_ms(meta),

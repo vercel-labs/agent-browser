@@ -1577,6 +1577,8 @@ On Chrome, URL messages follow full-document, History API, and fragment navigati
 
 **Send mouse events:**
 
+Coordinates are CSS pixels in the page's device-independent pixel (DIP) space. Map positions from the displayed frame using the `metadata.deviceWidth` and `metadata.deviceHeight` of the latest frame, not the status message's `viewportWidth`/`viewportHeight` (the configured viewport can differ from the actual content area).
+
 ```json
 {
   "type": "input_mouse",
