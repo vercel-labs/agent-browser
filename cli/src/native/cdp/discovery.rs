@@ -203,7 +203,11 @@ async fn discover_cdp_ws(host: &str, port: u16, timeout: Duration) -> Result<Str
 }
 
 async fn reqwest_get_string(url: &str) -> Result<String, String> {
-    let resp = reqwest::get(url).await.map_err(|e| e.to_string())?;
+    let resp = crate::tls::http_client()
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     resp.text().await.map_err(|e| e.to_string())
 }
 

@@ -126,7 +126,11 @@
     },
     "caCert": {
       "type": "string",
-      "description": "Path to a CA certificate or PEM bundle trusted by locally launched Chromium on Linux. Trust remains active for later commands in the same running session."
+      "description": "Path to a CA certificate or PEM bundle added to CLI TLS trust and, for a local Chromium launch on Linux, browser trust. Browser trust remains active for later commands in the same running session."
+    },
+    "useSystemCa": {
+      "type": "boolean",
+      "description": "Verify the CLI's own TLS connections against the operating system trust store."
     },
     "clearCaCert": {
       "type": "boolean",

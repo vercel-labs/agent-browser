@@ -133,6 +133,7 @@ test("applies config-level safety flags to every command", async () => {
     clearCaCert: false,
     maxOutputChars: 5000,
     proxy: "http://proxy.example.com:8080",
+    useSystemCa: true,
   });
   const sandbox = fakeSandbox({ id: "flags" });
   await tools.close.execute({}, fakeCtx(sandbox));
@@ -141,6 +142,7 @@ test("applies config-level safety flags to every command", async () => {
   assert.ok(command.includes("--ca-cert /etc/ssl/certs/proxy-ca.pem"), command);
   assert.ok(command.includes("--max-output 5000"), command);
   assert.ok(command.includes("--proxy http://proxy.example.com:8080"), command);
+  assert.ok(command.includes("--use-system-ca"), command);
   resetConfig();
 });
 

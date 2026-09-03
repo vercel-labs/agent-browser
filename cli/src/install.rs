@@ -237,7 +237,7 @@ fn format_reqwest_error(e: &reqwest::Error) -> String {
 }
 
 fn http_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+    crate::tls::apply_to_reqwest(reqwest::Client::builder())
         .user_agent(format!("agent-browser/{}", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(120))
         .connect_timeout(std::time::Duration::from_secs(30))

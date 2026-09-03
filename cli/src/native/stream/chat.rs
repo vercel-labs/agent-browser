@@ -11,7 +11,7 @@ pub(crate) const DEFAULT_AI_GATEWAY_URL: &str = "https://ai-gateway.vercel.sh";
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 pub(crate) fn http_client() -> &'static reqwest::Client {
-    HTTP_CLIENT.get_or_init(reqwest::Client::new)
+    HTTP_CLIENT.get_or_init(crate::tls::http_client)
 }
 
 pub(crate) fn is_chat_enabled() -> bool {

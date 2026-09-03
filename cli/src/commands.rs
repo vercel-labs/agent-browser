@@ -3446,6 +3446,7 @@ mod tests {
             ignore_https_errors: false,
             ca_cert: None,
             clear_ca_cert: false,
+            use_system_ca: false,
             allow_file_access: false,
             hide_scrollbars: true,
             webgpu: false,

@@ -16,7 +16,9 @@ enum InstallMethod {
 }
 
 async fn fetch_latest_version() -> Result<String, String> {
-    let resp = reqwest::get(NPM_REGISTRY_URL)
+    let resp = crate::tls::http_client()
+        .get(NPM_REGISTRY_URL)
+        .send()
         .await
         .map_err(|e| format!("Failed to fetch version info: {}", e))?;
 

@@ -29,5 +29,6 @@ export default defineExtension({
     session: z.string().optional(),
     /** Prefix for the derived per-sandbox session name. */
     sessionPrefix: z.string().default("eve"),
+    useSystemCa: z.boolean().default(false),
   }),
 });

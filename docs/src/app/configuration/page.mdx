@@ -87,6 +87,7 @@ Global launch, output, provider, and chat options can be set in the config file 
     <tr><td><code>ignoreHttpsErrors</code></td><td><code>--ignore-https-errors</code></td><td>boolean</td></tr>
     <tr><td><code>caCert</code></td><td><code>--ca-cert</code></td><td>string</td></tr>
     <tr><td><code>clearCaCert</code></td><td><code>--no-ca-cert</code></td><td>boolean</td></tr>
+    <tr><td><code>useSystemCa</code></td><td><code>--use-system-ca</code></td><td>boolean</td></tr>
     <tr><td><code>allowFileAccess</code></td><td><code>--allow-file-access</code></td><td>boolean</td></tr>
     <tr><td><code>cdp</code></td><td><code>--cdp</code></td><td>string</td></tr>
     <tr><td><code>autoConnect</code></td><td><code>--auto-connect</code></td><td>boolean</td></tr>
@@ -133,7 +134,7 @@ Global launch, output, provider, and chat options can be set in the config file 
 }
 ```
 
-`caCert` imports the supplied CA certificate or PEM bundle into an isolated NSS database for locally launched Chromium on Linux. Hostname, validity period, and unrelated CA verification remain enabled. The CA remains active when later commands omit it. Setting different certificate content or `clearCaCert: true` relaunches Chromium without restarting the daemon. `agent-browser install --with-deps` installs the required `certutil`; otherwise install `libnss3-tools` on Debian/Ubuntu or `nss-tools` on RPM Linux. This initial implementation does not support Chrome profiles, CDP attach, providers, Lightpanda, macOS, or Windows.
+`caCert` adds the supplied CA certificate or PEM bundle to the CLI's own TLS trust. For locally launched Chromium on Linux, it also imports each certificate into an isolated NSS database used only by that browser process. Browser trust remains active when later commands omit it, and different certificate content or `clearCaCert: true` relaunches Chromium without restarting the daemon. `agent-browser install --with-deps` installs the required `certutil`; otherwise install `libnss3-tools` on Debian/Ubuntu or `nss-tools` on RPM Linux. Browser-side trust does not support Chrome profiles, Lightpanda, macOS, or Windows. With CDP attach, auto-connect, or providers, `caCert` affects only CLI TLS and cannot change the remote browser's trust store. Set `useSystemCa` when the CA already lives in the operating system trust store.
 
 Without the CA certificate on hand, fall back to ignoring every certificate error, which is less secure:
 
