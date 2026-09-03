@@ -1,7 +1,7 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 
-import { runBrowser, SELECTOR_HINT, type BrowserToolContext } from "../lib/browser";
+import { runBrowser, SELECTOR_HINT, type BrowserToolContext } from "../lib/browser.js";
 
 interface WaitOutcome {
   readonly condition: string;

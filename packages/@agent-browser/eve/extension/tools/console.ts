@@ -1,7 +1,7 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 
-import { runBrowser } from "../lib/browser";
+import { runBrowser } from "../lib/browser.js";
 
 interface ConsoleData {
   readonly messages: unknown[];

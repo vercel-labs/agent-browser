@@ -1,8 +1,8 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 
-import extension from "../extension";
-import { runBrowser, type BrowserToolContext } from "../lib/browser";
+import extension from "../extension.js";
+import { runBrowser, type BrowserToolContext } from "../lib/browser.js";
 
 interface ScreenshotData {
   readonly path?: string;

@@ -491,7 +491,7 @@ agent-browser react renders start                # begin re-render recording
 agent-browser react renders stop                 # print render profile
 agent-browser react suspense [--only-dynamic]    # Suspense boundaries + classifier
 agent-browser vitals [url]                       # LCP/CLS/TTFB/FCP/INP + hydration
-agent-browser pushstate <url>                    # SPA navigation (auto-detects Next router)
+agent-browser pushstate <url>                    # SPA navigation — auto-detects Next.js router, falls back to history.pushState + popstate
 ```
 
 Without `--enable react-devtools`, the `react …` commands error. `vitals` and `pushstate` work on any site regardless of framework. `vitals` prints a summary by default; use `--json` for the full structured payload.

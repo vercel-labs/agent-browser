@@ -1,7 +1,7 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 
-import { runBrowser, SELECTOR_HINT } from "../lib/browser";
+import { runBrowser, SELECTOR_HINT } from "../lib/browser.js";
 
 const PAGE_PROPERTIES = new Set(["title", "url"]);
 

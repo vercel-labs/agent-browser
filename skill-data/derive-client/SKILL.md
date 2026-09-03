@@ -61,12 +61,13 @@ jq '.log.entries[] | select(.request.url | test("api/search"))
 - **Auth**: compare request headers across endpoints. Look for `authorization`, `cookie`, `x-csrf-token`, `x-api-key`, and site-specific `x-*` headers. Replay only the ones that matter — test by omission in step 5.
 - **Cookies**: export the live session with `agent-browser cookies get --json > cookies.json` for the client to load at runtime. Never hardcode cookie values into generated source.
 
-## 4. Generate the client
+### Generate the client
 
 - One function per recorded flow (`search(query)`, `getItem(id)`), typed from the observed response bodies.
 - Auth material (cookies, bearer tokens) loads from a file or environment variable, with a clear error telling the user to re-run the browser login when it expires.
 - Reproduce the headers the API actually requires — some sites 403 without a matching `user-agent`, `referer`, or `x-requested-with`.
 - Keep pagination, sort, and filter parameters that appeared in the recorded query strings as function options.
+- If the API uses request signing (timestamps, nonces, HMAC signatures, digest headers, or any per-request authentication computation), the generated client must re-implement that signing step. Recorded headers alone are not sufficient — replaying signed headers from the HAR will fail once timestamps or nonces expire. Re-derive the signing logic from the page's network requests or fall back to the browser for that step.
 
 ## 5. Verify
 

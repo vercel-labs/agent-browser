@@ -4,9 +4,9 @@ import {
   defaultSessionName,
   quoteShellArg,
 } from "@agent-browser/sandbox";
-import { buildAgentBrowserCommand, installAgentBrowser, type EveSandboxSession } from "./sandbox";
+import { buildAgentBrowserCommand, installAgentBrowser, type EveSandboxSession } from "./sandbox.js";
 
-import extension from "../extension";
+import extension from "../extension.js";
 
 /** Structural subset of eve's tool context — every eve `ctx` satisfies it. */
 export interface BrowserToolContext {
