@@ -205,6 +205,12 @@ pub fn to_ai_friendly_error(error: &str) -> String {
             "{detail}. Verify the selector, role, or name is correct and the element exists in the DOM."
         );
     }
+    // Selection errors include the target, requested values, available options,
+    // and verification reason. Preserve that context instead of letting the
+    // generic timeout/interception guidance discard the actionable details.
+    if lower.starts_with("selection failed for ") {
+        return error.to_string();
+    }
     if lower.contains("strict mode violation") {
         return "Element matched multiple results. Use a more specific selector.".to_string();
     }
@@ -2685,6 +2691,15 @@ mod tests {
             to_ai_friendly_error("Timeout waiting for element"),
             "Operation timed out. The page may still be loading or the element may not exist."
         );
+    }
+
+    #[test]
+    fn test_to_ai_friendly_error_preserves_selection_details() {
+        let error = "Selection failed for '#country': no visible, enabled option matched [\"missing\"]. Available options: us (\"United States\")";
+        assert_eq!(to_ai_friendly_error(error), error);
+
+        let timeout = "Selection failed for '#country': selection verification timed out";
+        assert_eq!(to_ai_friendly_error(timeout), timeout);
     }
 
     #[test]

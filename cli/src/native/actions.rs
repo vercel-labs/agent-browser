@@ -2443,6 +2443,21 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         _ => {}
     }
 
+    // WebDriver does not expose the CDP Runtime and trusted-input primitives
+    // required by these actions. Reject before the generic launch/recovery path
+    // can try to create a missing CDP browser for an existing WebDriver session.
+    if matches!(state.backend_type, BackendType::WebDriver)
+        && WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&action)
+    {
+        return error_response(
+            &id,
+            &format!(
+                "Action '{}' is not supported on the WebDriver backend",
+                action
+            ),
+        );
+    }
+
     let skip_launch = skip_launch_action(action);
     let restore_key_change_needs_launch = !skip_launch
         && command_changes_restore_key(cmd, state)
@@ -2565,19 +2580,6 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 let _ = mgr.ensure_page().await;
             }
         }
-    }
-
-    // WebDriver backend: reject unsupported CDP-only actions
-    if matches!(state.backend_type, BackendType::WebDriver)
-        && WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&action)
-    {
-        return error_response(
-            &id,
-            &format!(
-                "Action '{}' is not supported on the WebDriver backend",
-                action
-            ),
-        );
     }
 
     // A pending confirm/prompt dialog blocks the renderer's main thread, so
@@ -5548,6 +5550,10 @@ async fn handle_scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     Ok(json!({ "scrolled": true }))
 }
 
+/// Select and verify native or standard ARIA dropdown controls. The interaction
+/// helper owns matching, trusted input, dynamic option polling, and postcondition
+/// verification; this handler only preserves the CLI/MCP response shape and
+/// pending-dialog lifecycle.
 async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -5569,15 +5575,20 @@ async fn handle_select(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .unwrap_or_default(),
     };
 
-    interaction::select_option(
+    let result = interaction::select_option(
         &mgr.client,
         &session_id,
         &state.ref_map,
         selector,
         &values,
         &state.iframe_sessions,
+        state.timeout_ms(cmd),
     )
     .await?;
+    if result.dialog_opened {
+        state.pending_pointer_release = result.pending_release;
+        return Ok(json!({ "selected": values, "dialogOpened": true }));
+    }
     Ok(json!({ "selected": values }))
 }
 

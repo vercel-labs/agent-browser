@@ -42,7 +42,10 @@ CSS selectors and semantic locators also supported:
 agent-browser click "#submit"
 agent-browser fill "#email" "test@example.com"
 agent-browser find role button click --name "Submit"
+agent-browser select "#country-combobox" "United States"
 ```
+
+The `select` command works with native `<select>` controls and standard ARIA `combobox` or `listbox` widgets. It matches exact values or labels, types into input-backed filters when needed, waits for associated custom options to render, and verifies the committed state. Use one value for single-select controls; native multiple selects retain multi-value behavior, while multiple ARIA values require an explicitly multiselectable listbox. The action uses CDP-managed browser sessions; WebDriver backends report it as unsupported.
 
 ## Headed mode
 

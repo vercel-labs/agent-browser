@@ -129,6 +129,9 @@ pub const WEBDRIVER_UNSUPPORTED_ACTIONS: &[&str] = &[
     "network",
     "har_start",
     "har_stop",
+    // Selection uses CDP Runtime and trusted input for ARIA widgets. Keep the
+    // WebDriver backend explicit rather than silently taking the CDP path.
+    "select",
 ];
 
 #[cfg(test)]
@@ -141,5 +144,6 @@ mod tests {
         assert!(WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&"screencast_start"));
         assert!(WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&"trace_start"));
         assert!(!WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&"navigate"));
+        assert!(WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&"select"));
     }
 }

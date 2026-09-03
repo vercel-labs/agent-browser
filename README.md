@@ -123,7 +123,7 @@ agent-browser keyboard inserttext <text>  # Insert text without key events (no s
 agent-browser keydown <key>           # Hold key down
 agent-browser keyup <key>             # Release key
 agent-browser hover <sel>             # Hover element
-agent-browser select <sel> <val>      # Select dropdown option
+agent-browser select <sel> <val...>   # Select native or ARIA dropdown option(s)
 agent-browser check <sel>             # Check checkbox
 agent-browser uncheck <sel>           # Uncheck checkbox
 agent-browser scroll <dir> [px]       # Scroll (up/down/left/right, --selector <sel>)
@@ -1189,6 +1189,13 @@ agent-browser hover @e4                   # Hover the link
 ```
 
 When a ref click is blocked by an overlay, the error includes the covering element, such as `covered by <div#consent-banner>`. Click the banner or dialog control first, then run `snapshot` again before reusing refs.
+
+`select` accepts native `<select>` elements and standard ARIA `combobox` or `listbox` controls. Values match an option's exact value, label, or whitespace-normalized accessible text. A single-select native or ARIA control accepts one value; native multiple selects retain multi-value behavior, while multiple values for ARIA controls require an explicitly multiselectable listbox and represent its final set. The command opens comboboxes with browser input, types the requested value into input-backed filters when needed, waits for associated options, and verifies the widget's selected or committed state. It fails when an option is unknown, disabled, hidden, unsupported, or exposes no standard state that can confirm the selection. Re-snapshot after a widget opens or rerenders before using newly exposed option refs. This action uses the CDP browser path; WebDriver backends report it as unsupported.
+
+```bash
+agent-browser select @e4 "United States"
+agent-browser select "#country-combobox" "us"
+```
 
 **Why use refs?**
 
