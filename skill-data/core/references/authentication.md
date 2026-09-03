@@ -144,6 +144,22 @@ agent-browser wait --load networkidle
 agent-browser get url  # Should be dashboard, not login
 ```
 
+For a form reached through an in-page click, challenge clearance, consent dismissal, or another stateful step, use the auth vault without discarding the prepared document:
+
+```bash
+agent-browser open https://app.example.com/
+agent-browser click "a[href='/login']"
+agent-browser auth login my-app --no-navigate
+```
+
+`--no-navigate` suppresses only the initial navigation that `auth login` normally performs. An existing active top-level HTTP(S) page is required. Before either credential is filled, agent-browser compares the page origin with the effective credential URL using scheme, host, and effective port. Paths, queries, and fragments may differ. Selector waits, credential filling, submit clicking, and submit-triggered navigation remain unchanged.
+
+The command-level `--url` override takes precedence over stored profile or credential-provider URL metadata. In no-navigation mode it is an expected-origin constraint, not a navigation destination. This supports hosted identity-provider flows:
+
+```bash
+agent-browser auth login work --no-navigate --url https://identity.example.com/login
+```
+
 ## Plugins
 
 Use credential provider plugins when credentials live in external vault software. Plugins are configured in `agent-browser.json` and run as external executables over the `agent-browser.plugin.v1` stdio JSON protocol.
@@ -194,6 +210,12 @@ Resolve credentials just-in-time for one login:
 
 ```bash
 agent-browser auth login my-app --credential-provider vault --item "My App"
+```
+
+After stateful setup, combine the provider with no-navigation mode. The provider secret remains in memory and does not enter generated process arguments or normal output:
+
+```bash
+agent-browser auth login my-app --credential-provider vault --item "My App" --no-navigate --url https://identity.example.com/login
 ```
 
 Use a plugin as a browser provider or a generic domain command:

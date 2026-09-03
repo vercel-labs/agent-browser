@@ -217,6 +217,16 @@ agent-browser auth save my-app --url https://app.example.com/login \
 agent-browser auth login my-app    # fills + clicks, waits for form
 ```
 
+By default, `auth login` navigates to the effective credential URL. If an in-page click, challenge clearance, consent dismissal, or similar setup revealed the login form, preserve that state with `--no-navigate`:
+
+```bash
+agent-browser open https://app.example.com/
+agent-browser click "a[href='/login']"
+agent-browser auth login my-app --no-navigate
+```
+
+This mode requires an active top-level HTTP(S) page and verifies that its scheme, host, and effective port match the effective credential URL. Different paths, queries, and fragments are allowed. It skips only the initial navigation; waiting, filling, submitting, and submit-triggered navigation are unchanged. A command-level `--url` overrides stored or provider URL metadata and acts as the origin constraint.
+
 If credentials live in an external vault, use a configured credential provider plugin instead of putting secrets in the command line:
 
 ```bash
@@ -224,6 +234,7 @@ agent-browser plugin add agent-browser-plugin-vault --name vault
 agent-browser plugin list
 agent-browser auth login my-app --credential-provider vault --item "My App"
 agent-browser auth login my-app --credential-provider vault --item "My App" --url https://app.example.com/login --username-selector "#email" --password-selector "#password"
+agent-browser auth login my-app --credential-provider vault --item "My App" --no-navigate --url https://identity.example.com/login
 ```
 
 Plugins can also provide browser providers, launch mutators such as stealth setup, and arbitrary namespaced commands:

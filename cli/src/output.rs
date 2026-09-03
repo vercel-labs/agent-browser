@@ -2597,16 +2597,19 @@ Save Options:
   --password-selector <s>  Custom CSS selector for password field
   --submit-selector <s>    Custom CSS selector for submit button
 
-Plugin Login Options:
+Login Options:
   --credential-provider <p> Resolve credentials from configured plugin <p>
   --item <ref>              Provider-specific vault item reference
   --url <url>               Login URL override
+  --no-navigate             Use the active top-level page without initial navigation
   --username-selector <s>   Username selector override for this login
   --password-selector <s>   Password selector override for this login
   --submit-selector <s>     Submit selector override for this login
 
 Login behavior:
-  auth login waits for form selectors to appear before filling/clicking.
+  auth login navigates, then waits for form selectors before filling/clicking.
+  --no-navigate preserves the active top-level page and checks its origin
+  against the effective credential URL. Submit-triggered navigation is allowed.
   Selector wait timeout follows the default action timeout.
   Plugin credentials are resolved just-in-time and are not saved locally.
 
@@ -2618,6 +2621,7 @@ Examples:
   echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin
   agent-browser auth save github --url https://github.com/login --username user --password pass
   agent-browser auth login github
+  agent-browser auth login github --no-navigate
   agent-browser auth login my-app --credential-provider vault --item "My App"
   agent-browser auth list
   agent-browser auth show github
@@ -3726,6 +3730,8 @@ Batch:
 Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
   auth login <name>          Login using saved credentials (waits for form fields)
+  auth login <name> --no-navigate
+                             Use active page after verifying credential URL origin
   auth login <name> --credential-provider <plugin> [--item <ref>] [--url <url>]
                              Resolve credentials from a configured plugin
   auth login <name> --username-selector <s> --password-selector <s>

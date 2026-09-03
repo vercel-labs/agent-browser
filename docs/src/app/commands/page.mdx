@@ -338,6 +338,8 @@ See [Debugging](/debugging) for console, error, dialog, trace, highlight, and De
 ```bash
 agent-browser auth save <name> [opts]    # Save auth profile
 agent-browser auth login <name>          # Login using saved credentials
+agent-browser auth login <name> --no-navigate
+                                          # Use active page after origin validation
 agent-browser auth login <name> --credential-provider <plugin> [--item <ref>] [--url <url>]
                                           # Resolve credentials from plugin
 agent-browser auth login <name> --username-selector <s> --password-selector <s> [--submit-selector <s>]
@@ -364,11 +366,22 @@ Save options:
 
 `auth login` navigates with `load` and then waits for the username/password/submit selectors to appear before interacting. This improves reliability on SPA login pages where fields render after initial page load.
 
+Use `--no-navigate` after an in-page click, challenge clearance, consent dismissal, or other stateful setup that must survive credential entry:
+
+```bash
+agent-browser open https://example.com/
+agent-browser click "a[href='/login']"
+agent-browser auth login work --no-navigate
+```
+
+The flag suppresses only the initial auth-login navigation. It requires an existing active top-level HTTP(S) page and compares that page with the effective credential URL by scheme, host, and effective port. Paths, queries, and fragments may differ. Waiting, filling, clicking submit, and any submit-triggered navigation are unchanged. A command-level `--url` overrides profile or provider URL metadata and acts as the expected-origin constraint rather than a navigation destination.
+
 Plugin login options:
 
 - `--credential-provider <plugin>`: resolve credentials from a configured plugin
 - `--item <ref>`: provider-specific vault item reference
 - `--url <url>`: login URL override
+- `--no-navigate`: use the active top-level page after validating it against the effective credential origin
 - `--username-selector <sel>`: selector override for this login
 - `--password-selector <sel>`: selector override for this login
 - `--submit-selector <sel>`: selector override for this login
@@ -388,6 +401,7 @@ echo "pass" | agent-browser auth save github --url https://github.com/login --us
 agent-browser auth login github
 agent-browser plugin add agent-browser-plugin-vault --name vault
 agent-browser auth login my-app --credential-provider vault --item "My App"
+agent-browser auth login my-app --credential-provider vault --item "My App" --no-navigate --url https://identity.example.com/login
 agent-browser --provider cloud-browser open https://example.com
 agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"...","url":"https://example.com"}'
 agent-browser auth list

@@ -10,6 +10,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -5204,6 +5205,400 @@ async fn start_delayed_login_server(
     (base_url, handle)
 }
 
+/// Starts a stateful login page whose form appears only after an in-page
+/// action. The counter covers top-level documents so tests can prove that
+/// no-navigation login did not reload or replace the page.
+async fn start_stateful_auth_login_server(
+) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{}", port);
+    let document_requests = Arc::new(AtomicUsize::new(0));
+    let counter = document_requests.clone();
+
+    let handle = tokio::spawn(async move {
+        for _ in 0..100 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let counter = counter.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                if !path.starts_with("/favicon") {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+
+                let body = r#"<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>Stateful Login</title><link rel="icon" href="data:," /></head>
+  <body>
+    <button id="reveal" type="button">Continue to login</button>
+    <form id="login-form" style="display:none">
+      <input type="email" name="email" />
+      <input type="password" name="password" />
+      <button type="submit">Sign in</button>
+    </form>
+    <script>
+      document.getElementById('reveal').addEventListener('click', () => {
+        document.getElementById('login-form').style.display = 'block';
+        window.__revealed = true;
+      });
+      document.getElementById('login-form').addEventListener('submit', (event) => {
+        event.preventDefault();
+        window.__submitted = true;
+      });
+    </script>
+  </body>
+</html>"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    (base_url, document_requests, handle)
+}
+
+fn unique_auth_profile_name(suffix: &str) -> String {
+    format!(
+        "e2e-auth-login-{}-{}",
+        suffix,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_else(|_| std::time::Duration::from_secs(0))
+            .as_nanos()
+    )
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_no_navigate_preserves_active_page_state() {
+    let (base_url, document_requests, _server) = start_stateful_auth_login_server().await;
+    let mut state = DaemonState::new();
+    let profile_name = unique_auth_profile_name("no-navigate");
+
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": format!("{}/flow/start?state=ready#login", base_url) }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "click", "selector": "#reveal" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "4", "action": "evaluate", "script": "window.__marker = 'preserved'" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({
+                "id": "5",
+                "action": "auth_save",
+                "name": profile_name.clone(),
+                "url": format!("{}/credentials/login?credential-query-sentinel#credential-fragment-sentinel", base_url),
+                "username": "stateful-user@example.com",
+                "password": "stateful-password-secret",
+            }),
+            &mut state,
+        )
+        .await,
+    );
+    let request_count_before = document_requests.load(Ordering::SeqCst);
+
+    let login = execute_command(
+        &json!({ "id": "6", "action": "auth_login", "name": profile_name.clone(), "noNavigate": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(get_data(&login)["loggedIn"], true);
+    assert_eq!(
+        document_requests.load(Ordering::SeqCst),
+        request_count_before
+    );
+
+    let verify = execute_command(
+        &json!({
+            "id": "7",
+            "action": "evaluate",
+            "script": "({ marker: window.__marker, revealed: !!window.__revealed, submitted: !!window.__submitted, user: document.querySelector('input[type=email]').value, pass: document.querySelector('input[type=password]').value })",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&verify);
+    let result = &get_data(&verify)["result"];
+    assert_eq!(result["marker"], "preserved");
+    assert_eq!(result["revealed"], true);
+    assert_eq!(result["submitted"], true);
+    assert_eq!(result["user"], "stateful-user@example.com");
+    assert_eq!(result["pass"], "stateful-password-secret");
+
+    let _ = execute_command(
+        &json!({ "id": "8", "action": "auth_delete", "name": profile_name }),
+        &mut state,
+    )
+    .await;
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_no_navigate_preserves_state_with_credential_provider() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (base_url, document_requests, _server) = start_stateful_auth_login_server().await;
+    let plugin_dir = tempfile::tempdir().unwrap();
+    let plugin_path = plugin_dir.path().join("stateful-credential-provider");
+    std::fs::write(
+        &plugin_path,
+        format!(
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s' '{{"protocol":"agent-browser.plugin.v1","success":true,"credential":{{"username":"provider-user@example.com","password":"provider-password-secret","url":"{}/provider/login"}}}}'
+"#,
+            base_url
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&plugin_path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&plugin_path, permissions).unwrap();
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": format!("{}/flow/provider", base_url) }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "click", "selector": "#reveal" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "4", "action": "evaluate", "script": "window.__marker = 'provider-preserved'" }),
+            &mut state,
+        )
+        .await,
+    );
+    let request_count_before = document_requests.load(Ordering::SeqCst);
+
+    let login = execute_command(
+        &json!({
+            "id": "5",
+            "action": "auth_login",
+            "name": "provider-stateful-login",
+            "noNavigate": true,
+            "credentialProvider": "mock",
+            "plugins": [{
+                "name": "mock",
+                "command": plugin_path.to_string_lossy(),
+                "capabilities": ["credential.read"]
+            }]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&login);
+    let serialized_login = serde_json::to_string(&login).unwrap();
+    assert!(!serialized_login.contains("provider-user@example.com"));
+    assert!(!serialized_login.contains("provider-password-secret"));
+    assert_eq!(
+        document_requests.load(Ordering::SeqCst),
+        request_count_before
+    );
+
+    let verify = execute_command(
+        &json!({
+            "id": "6",
+            "action": "evaluate",
+            "script": "({ marker: window.__marker, submitted: !!window.__submitted, user: document.querySelector('input[type=email]').value, pass: document.querySelector('input[type=password]').value })",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&verify);
+    let result = &get_data(&verify)["result"];
+    assert_eq!(result["marker"], "provider-preserved");
+    assert_eq!(result["submitted"], true);
+    assert_eq!(result["user"], "provider-user@example.com");
+    assert_eq!(result["pass"], "provider-password-secret");
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_rejects_cross_origin_no_navigate() {
+    let (active_origin, _, _active_server) = start_stateful_auth_login_server().await;
+    let (credential_origin, credential_requests, _credential_server) =
+        start_stateful_auth_login_server().await;
+    let mut state = DaemonState::new();
+    let profile_name = unique_auth_profile_name("origin-mismatch");
+
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": format!("{}/flow/current-path-sentinel", active_origin) }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "click", "selector": "#reveal" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({
+                "id": "4",
+                "action": "auth_save",
+                "name": profile_name.clone(),
+                "url": format!("{}/credential-path-sentinel?credential-query-sentinel#credential-fragment-sentinel", credential_origin),
+                "username": "username-secret-sentinel",
+                "password": "password-secret-sentinel",
+            }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let login = execute_command(
+        &json!({ "id": "5", "action": "auth_login", "name": profile_name.clone(), "noNavigate": true }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(login["success"], false);
+    let error = login["error"].as_str().unwrap_or_default();
+    assert!(error.contains("does not match credential origin"));
+    for sentinel in [
+        "current-path-sentinel",
+        "credential-path-sentinel",
+        "credential-query-sentinel",
+        "credential-fragment-sentinel",
+        "username-secret-sentinel",
+        "password-secret-sentinel",
+    ] {
+        assert!(!error.contains(sentinel));
+    }
+    assert_eq!(credential_requests.load(Ordering::SeqCst), 0);
+
+    let verify = execute_command(
+        &json!({
+            "id": "6",
+            "action": "evaluate",
+            "script": "({ user: document.querySelector('input[type=email]').value, pass: document.querySelector('input[type=password]').value, submitted: !!window.__submitted })",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&verify);
+    let result = &get_data(&verify)["result"];
+    assert_eq!(result["user"], "");
+    assert_eq!(result["pass"], "");
+    assert_eq!(result["submitted"], false);
+
+    let _ = execute_command(
+        &json!({ "id": "7", "action": "auth_delete", "name": profile_name }),
+        &mut state,
+    )
+    .await;
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_no_navigate_requires_usable_active_page() {
+    let mut state = DaemonState::new();
+    let profile_name = unique_auth_profile_name("missing-page");
+
+    assert_success(
+        &execute_command(
+            &json!({
+                "id": "1",
+                "action": "auth_save",
+                "name": profile_name.clone(),
+                "url": "https://example.com/login",
+                "username": "unused-user",
+                "password": "unused-password",
+            }),
+            &mut state,
+        )
+        .await,
+    );
+    let login = execute_command(
+        &json!({ "id": "2", "action": "auth_login", "name": profile_name.clone(), "noNavigate": true }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(login["success"], false);
+    assert!(login["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("requires an existing active HTTP(S) browser page"));
+    assert!(
+        state.browser.is_none(),
+        "no-navigation login must not launch a browser"
+    );
+
+    let _ = execute_command(
+        &json!({ "id": "3", "action": "auth_delete", "name": profile_name }),
+        &mut state,
+    )
+    .await;
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_auth_login_waits_for_delayed_spa_form_render() {
@@ -5246,6 +5641,13 @@ async fn e2e_auth_login_waits_for_delayed_spa_form_render() {
     .await;
     assert_success(&login);
     assert_eq!(get_data(&login)["loggedIn"], true);
+
+    let current_url = execute_command(&json!({ "id": "3b", "action": "url" }), &mut state).await;
+    assert_success(&current_url);
+    assert!(get_data(&current_url)["url"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with(&format!("{}/login", base_url)));
 
     let verify = execute_command(
         &json!({
