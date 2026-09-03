@@ -2748,9 +2748,207 @@ async fn e2e_drag_action_sends_buttons_during_move() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_drag_action_completes_html5_drop() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": native_test_fixture_url("html5_drag_probe")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "drag",
+            "source": "#source",
+            "target": "#dest"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "window.__html5DragProbe" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let probe = &get_data(&resp)["result"];
+    let events = probe["events"]
+        .as_array()
+        .expect("html5 drag probe should expose events");
+
+    // The full HTML5 DnD sequence must complete: dragstart on the source, a
+    // drop on the destination carrying the data set in dragstart, and dragend.
+    assert!(
+        events.iter().any(|event| event["type"] == "dragstart"),
+        "Expected dragstart to fire on the source element"
+    );
+    let drop = events
+        .iter()
+        .find(|event| event["type"] == "drop" && event["target"] == "dest")
+        .expect("Expected drop to fire on the #dest drop zone");
+    assert_eq!(
+        drop["dropped"].as_str(),
+        Some("probe"),
+        "Drop should deliver the data set in dragstart"
+    );
+    assert!(
+        events.iter().any(|event| event["type"] == "dragend"),
+        "Expected dragend after the drop"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
-// State save/load, state management
+// Click buttons and modifiers
 // ---------------------------------------------------------------------------
+
+const CLICK_BUTTONS_PROBE_HTML: &str = r#"<!doctype html>
+<html><body>
+<div id="target" style="width:100px;height:100px">target</div>
+<script>
+window.__clicks = [];
+const t = document.getElementById('target');
+for (const type of ['click', 'contextmenu', 'auxclick', 'mousedown', 'mouseup']) {
+  t.addEventListener(type, e => window.__clicks.push({
+    type: e.type, button: e.button,
+    ctrlKey: e.ctrlKey, shiftKey: e.shiftKey, altKey: e.altKey, metaKey: e.metaKey
+  }));
+}
+</script>
+</body></html>"#;
+
+async fn click_probe_events(state: &mut DaemonState) -> Vec<Value> {
+    let resp = execute_command(
+        &json!({ "id": "ev", "action": "evaluate", "script": "window.__clicks" }),
+        state,
+    )
+    .await;
+    assert_success(&resp);
+    get_data(&resp)["result"]
+        .as_array()
+        .expect("click probe should expose an events array")
+        .clone()
+}
+
+async fn launch_click_probe() -> DaemonState {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let url = format!(
+        "data:text/html;base64,{}",
+        STANDARD.encode(CLICK_BUTTONS_PROBE_HTML)
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    state
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_right_button_fires_contextmenu_not_click() {
+    let mut state = launch_click_probe().await;
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "click", "selector": "#target", "button": "right" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let events = click_probe_events(&mut state).await;
+    assert!(
+        events.iter().any(|e| e["type"] == "contextmenu"),
+        "Right-click should fire contextmenu, got: {:?}",
+        events
+    );
+    assert!(
+        !events.iter().any(|e| e["type"] == "click"),
+        "Right-click should not fire a normal click, got: {:?}",
+        events
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_middle_button_fires_auxclick() {
+    let mut state = launch_click_probe().await;
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "click", "selector": "#target", "button": "middle" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let events = click_probe_events(&mut state).await;
+    let aux = events
+        .iter()
+        .find(|e| e["type"] == "auxclick")
+        .expect("Middle-click should fire auxclick");
+    assert_eq!(aux["button"].as_i64(), Some(1));
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_with_modifiers_reports_modifier_state() {
+    let mut state = launch_click_probe().await;
+
+    // Ctrl(2) | Shift(8) = 10
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "click", "selector": "#target", "modifiers": 10 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let events = click_probe_events(&mut state).await;
+    let click = events
+        .iter()
+        .find(|e| e["type"] == "click")
+        .expect("Ctrl+Shift click should fire a normal click");
+    assert_eq!(click["ctrlKey"].as_bool(), Some(true));
+    assert_eq!(click["shiftKey"].as_bool(), Some(true));
+    assert_eq!(click["altKey"].as_bool(), Some(false));
+    assert_eq!(click["metaKey"].as_bool(), Some(false));
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
 
 #[tokio::test]
 #[ignore]
