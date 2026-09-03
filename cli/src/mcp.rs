@@ -1368,10 +1368,10 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_RECORD_START,
             "Record start",
-            "Start video recording. Captures 30 fps by default; pass fps up to 60 for motion-heavy takes.",
+            "Start video recording of the current active page. Captures 30 fps by default; pass fps up to 60 for motion-heavy takes. Pass url to navigate the active tab there first. Use agent_browser_tab_new beforehand to record in a separate tab.",
             json!({
                 "path": { "type": "string" },
-                "url": { "type": "string" },
+                "url": { "type": "string", "description": "Navigate the active tab to this URL before recording starts." },
                 "fps": {
                     "type": "integer",
                     "minimum": 1,

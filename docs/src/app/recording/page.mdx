@@ -20,7 +20,14 @@ agent-browser open
 agent-browser record start ./demo.webm https://example.com
 ```
 
-If no URL is provided, recording starts from the current page. The recording context copies cookies from the active session.
+`record start` records the current active page as-is. With no URL, nothing is navigated or replaced: the recorder attaches to the tab you already have open, so capture begins on a hydrated page rather than at `load` on a cold navigation. With a URL, the active tab navigates there first and recording starts once the page has loaded. No extra tab or browser context is created.
+
+To record in a separate tab, open one first:
+
+```bash
+agent-browser tab new https://example.com
+agent-browser record start ./demo.webm
+```
 
 ## Frame rate
 
@@ -56,9 +63,9 @@ Valid rates are 1 to 60. Frames come from Chrome's screencast, so every repaint 
     <tr><th>Command</th><th>Description</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>record start &lt;path.webm&gt; [url] [--fps &lt;n&gt;]</code></td><td>Start recording to a WebM file</td></tr>
+    <tr><td><code>record start &lt;path.webm&gt; [url] [--fps &lt;n&gt;]</code></td><td>Start recording the active page to a WebM file; a URL navigates the active tab first</td></tr>
     <tr><td><code>record stop</code></td><td>Stop the active recording and save the file</td></tr>
-    <tr><td><code>record restart &lt;path.webm&gt; [url] [--fps &lt;n&gt;]</code></td><td>Stop the current recording and immediately start another</td></tr>
+    <tr><td><code>record restart &lt;path.webm&gt; [url] [--fps &lt;n&gt;]</code></td><td>Stop the current recording and immediately start another on the active page</td></tr>
   </tbody>
 </table>
 
@@ -112,7 +119,7 @@ Screenshots and videos work well together: screenshots capture precise still sta
     <tr><td>Common extension</td><td><code>.webm</code></td></tr>
     <tr><td>Frame rate</td><td>30 fps by default, 1 to 60 with <code>--fps</code></td></tr>
     <tr><td>Viewport</td><td>Uses the active browser viewport settings</td></tr>
-    <tr><td>State</td><td>Copies cookies from the active session</td></tr>
+    <tr><td>State</td><td>Records the active page in place, including its session and in-page state</td></tr>
   </tbody>
 </table>
 

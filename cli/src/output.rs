@@ -2774,15 +2774,18 @@ Usage: agent-browser record start <path.webm> [url] [--fps <n>]
        agent-browser record restart <path.webm> [url] [--fps <n>]
 
 Record the browser to a WebM video file.
-Creates a fresh browser context but preserves cookies and localStorage.
-If no URL is provided, automatically navigates to your current page.
+Records the current active page as-is: no new context, no new tab, and no
+navigation unless you pass a URL. Capture starts on the page you already
+have open, so hydration and initial animations are not re-run cold.
+If a URL is provided, the active tab navigates there first.
+To record in a separate tab, run `tab new [url]` before `record start`.
 
 Recording captures 30 fps, which keeps scrolls and CSS transitions smooth.
 Raise it to 60 for short, motion-heavy takes (drag interactions, animation
 work); lower it for long sessions where file size matters more than motion.
 
 Operations:
-  start <path> [url]     Start recording (defaults to current URL if omitted)
+  start <path> [url]     Start recording the active page (navigates first if url given)
   stop                   Stop recording and save video
   restart <path> [url]   Stop current recording (if any) and start a new one
 
@@ -2794,15 +2797,19 @@ Global Options:
   --session <name>     Use specific session
 
 Examples:
-  # Record from current page (preserves login state)
+  # Record the page you are on (keeps login state and page state)
   agent-browser open https://app.example.com/dashboard
   agent-browser snapshot -i            # Explore and plan
   agent-browser record start ./demo.webm
   agent-browser click @e3              # Execute planned actions
   agent-browser record stop
 
-  # Or specify a different URL
+  # Navigate the active tab, then record
   agent-browser record start ./demo.webm https://example.com
+
+  # Record in a separate tab
+  agent-browser tab new https://example.com
+  agent-browser record start ./demo.webm
 
   # 60 fps for a scroll or animation capture
   agent-browser record start ./scroll.webm --fps 60
