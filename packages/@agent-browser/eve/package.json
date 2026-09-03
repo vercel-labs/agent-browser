@@ -1,6 +1,6 @@
 {
   "name": "@agent-browser/eve",
-  "version": "0.36.0",
+  "version": "0.37.0",
   "description": "eve extension that gives agents a full browser automation tool set backed by agent-browser",
   "type": "module",
   "sideEffects": false,

@@ -1,8 +1,31 @@
 # agent-browser
 
-## 0.36.0
+## 0.37.0
 
 <!-- release:start -->
+### New Features
+
+- **Recording frame rate** - `record start` and `record restart` accept `--fps` from 1 to 60 and default to 30 instead of 10, so scrolls, hover states, and CSS transitions record as motion rather than a slideshow. Frames now come from Chrome's screencast on a dedicated CDP session instead of polling `Page.captureScreenshot`, so a 60 fps take of a scroll holds 60 distinct pictures per second, and the file's duration matches wall clock even when the page is static. `record stop` reports `capturedFrames` alongside `frames`, and the MCP `record_start` / `record_restart` tools expose `fps` (#1763)
+- **ffmpeg check in doctor** - `doctor` reports whether `ffmpeg` is on PATH and whether its libvpx and libx264 encoders are available, with install hints. Recording requires ffmpeg and now says so in the docs and `record --help` (#1778)
+
+### Improvements
+
+- **Recording captures the current page** - `record start` attaches to the active page as-is instead of creating a fresh browser context and cold-loading the URL, so recordings no longer open with a second of hydration jank, no extra tab appears during a recording, and the page keeps its state. Passing a URL navigates the active tab. Use `tab new` first if you want a separate tab (#1776)
+- **Output extension validation** - `record start` rejects output paths that do not end in `.webm` or `.mp4` before touching the browser, matches the extension case-insensitively, and reports the tail of ffmpeg's output instead of its version banner when encoding fails (#1778)
+
+### Bug Fixes
+
+- Fixed **new tabs not inheriting session setup**: `tab new` now applies the session's user agent, extra and origin-scoped headers, init scripts, routes, color scheme, timezone, locale, geolocation, and offline mode to the new page before its first document loads (#1777)
+- Fixed **`record restart` output** printing `Saved to <new path>` instead of the restart line with the previous path (#1763)
+- Fixed a failed capture task leaving a **recording marked active**, which blocked the next `record start` (#1763)
+
+### Contributors
+
+- @jamesvclements
+<!-- release:end -->
+
+## 0.36.0
+
 ### New Features
 
 - Added experimental **WebMCP support** for discovering and invoking tools provided by the current page, including frame-aware tool selection, detached results, cancellation, bounded metadata and output handling, and an opt-in MCP tool profile. WebMCP is enabled by default for locally managed Chrome and can be disabled with `--no-webmcp` or `AGENT_BROWSER_NO_WEBMCP`.
@@ -24,7 +47,6 @@
 - @anupamme
 - @arrufat
 
-<!-- release:end -->
 
 ## 0.35.2
 
