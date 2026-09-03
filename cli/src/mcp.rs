@@ -1461,7 +1461,14 @@ fn parity_tools() -> Vec<Value> {
             TOOL_AUTH_LOGIN,
             "Auth login",
             "Log in with a saved auth profile.",
-            json!({ "name": { "type": "string" } }),
+            json!({
+                "name": { "type": "string" },
+                "noNavigate": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Use the active top-level page without performing the initial login navigation. The credential URL must match the page origin."
+                }
+            }),
             &["name"],
         ),
         tool(
@@ -2275,7 +2282,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_CLIPBOARD_COPY => call_literal(arguments, &["clipboard", "copy"]),
         TOOL_CLIPBOARD_PASTE => call_literal(arguments, &["clipboard", "paste"]),
         TOOL_AUTH_SAVE => call_auth_save(arguments),
-        TOOL_AUTH_LOGIN => call_one_string(arguments, "auth login", "name"),
+        TOOL_AUTH_LOGIN => call_auth_login(arguments),
         TOOL_AUTH_LIST => call_literal(arguments, &["auth", "list"]),
         TOOL_AUTH_SHOW => call_one_string(arguments, "auth show", "name"),
         TOOL_AUTH_DELETE => call_one_string(arguments, "auth delete", "name"),
@@ -3094,6 +3101,19 @@ fn call_auth_save(arguments: &Value) -> Result<Value, ProtocolError> {
     }
     args.push("--password-stdin".to_string());
     call_cli_tool(arguments, args, Some(password))
+}
+
+fn auth_login_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let name = required_string(arguments, "name")?;
+    let mut args = vec!["auth".to_string(), "login".to_string(), name];
+    if optional_bool(arguments, "noNavigate")?.unwrap_or(false) {
+        args.push("--no-navigate".to_string());
+    }
+    Ok(args)
+}
+
+fn call_auth_login(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, auth_login_args(arguments)?, None)
 }
 
 fn call_state_clear(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4079,6 +4099,32 @@ mod tests {
             }))
             .unwrap(),
             vec!["webmcp", "result", "invocation-1", "--timeout", "250"]
+        );
+    }
+
+    #[test]
+    fn auth_login_tool_exposes_and_forwards_no_navigate() {
+        let tools = tools();
+        let auth_login = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some(TOOL_AUTH_LOGIN))
+            .unwrap();
+        assert_eq!(
+            auth_login["inputSchema"]["properties"]["noNavigate"]["type"],
+            "boolean"
+        );
+
+        assert_eq!(
+            auth_login_args(&json!({ "name": "work" })).unwrap(),
+            vec!["auth", "login", "work"]
+        );
+        assert_eq!(
+            auth_login_args(&json!({ "name": "work", "noNavigate": false })).unwrap(),
+            vec!["auth", "login", "work"]
+        );
+        assert_eq!(
+            auth_login_args(&json!({ "name": "work", "noNavigate": true })).unwrap(),
+            vec!["auth", "login", "work", "--no-navigate"]
         );
     }
 

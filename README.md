@@ -625,6 +625,30 @@ agent-browser provides multiple ways to persist login sessions so you don't re-a
 | **State file** | Load a previously saved state JSON on launch | `--state <path>` / `AGENT_BROWSER_STATE` |
 | **Auth vault** | Store credentials locally (encrypted), login by name | `auth save` / `auth login` |
 
+### Stateful auth vault login
+
+By default, `auth login` navigates to the effective credential URL before it locates the form. Use `--no-navigate` after an in-page click, challenge clearance, consent dismissal, or other stateful setup that must survive credential entry:
+
+```bash
+agent-browser open https://example.com/
+agent-browser click "a[href='/login']"
+agent-browser auth login work --no-navigate
+```
+
+`--no-navigate` suppresses only that initial navigation. It requires an existing active top-level HTTP(S) page, waits for and fills the same selectors, clicks submit, and allows submission to navigate. The effective credential URL is checked as an origin constraint using scheme, host, and effective port. Paths, queries, and fragments may differ. A command-level `--url` takes precedence over stored or provider metadata, which is useful when a stateful flow reaches a hosted identity provider:
+
+```bash
+agent-browser open https://identity.example.com/start
+agent-browser click "button.continue"
+agent-browser auth login work --credential-provider vault --item "Work" --no-navigate --url https://identity.example.com/login
+```
+
+Provider credentials are still resolved directly by the daemon and remain out of process arguments and normal output.
+
+| Auth login option | Description |
+|-------------------|-------------|
+| `--no-navigate` | Use the active top-level page without the initial navigation and require its origin to match the effective credential URL. Form submission may still navigate. |
+
 ### Import auth from your browser
 
 If you are already logged in to a site in Chrome, you can grab that auth state and reuse it:
@@ -805,7 +829,7 @@ agent-browser --session secure --restore open example.com
 
 agent-browser includes security features for safe AI agent deployments. All features are opt-in, and existing workflows are unaffected until you explicitly enable a feature:
 
-- **Authentication Vault**: Store credentials locally (always encrypted), reference by name. The LLM never sees passwords. `auth login` navigates with `load` and then waits for login form selectors to appear (SPA-friendly, timeout follows the default action timeout). A key is auto-generated at `~/.agent-browser/.encryption-key` if `AGENT_BROWSER_ENCRYPTION_KEY` is not set: `echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin` then `agent-browser auth login github`
+- **Authentication Vault**: Store credentials locally (always encrypted), reference by name. The LLM never sees passwords. `auth login` navigates with `load` and then waits for login form selectors to appear (SPA-friendly, timeout follows the default action timeout). Use `auth login <name> --no-navigate` to preserve an already prepared active page after its origin is checked against the credential URL. A key is auto-generated at `~/.agent-browser/.encryption-key` if `AGENT_BROWSER_ENCRYPTION_KEY` is not set: `echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin` then `agent-browser auth login github`
 - **Plugin System**: Extend agent-browser with external executable plugins. Plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol and declare capabilities such as `credential.read`, `browser.provider`, `launch.mutate`, or `command.run`.
 - **Content Boundary Markers**: Wrap page output in delimiters so LLMs can distinguish tool output from untrusted content: `--content-boundaries`
 - **Domain Allowlist**: Restrict navigation to trusted domains (wildcards like `*.example.com` also match the bare domain): `--allowed-domains "example.com,*.example.com"`. Sub-resource requests (scripts, images, fetch), WebSocket/EventSource connections, and `sendBeacon` calls to non-allowed domains are blocked. WebRTC peer connections are disabled in supported Chromium sessions while the allowlist is active to prevent STUN, TURN, and DNS traffic from bypassing HTTP interception. Dedicated and shared workers are guarded with a bootstrap wrapper; if a page CSP forbids that wrapper, the worker fails closed rather than running without the allowlist guard. Pre-existing CDP sessions, auto-connect, Chrome profiles, direct-page provider plugins, agent-browser restore or state-file replay, raw Chrome args that select profiles, restore sessions, or open startup pages, iOS, and Safari reject this option because agent-browser cannot install equivalent containment before page scripts run. Include any CDN domains your target pages depend on (e.g., `*.cdn.example.com`).
@@ -880,6 +904,7 @@ Use a credential provider plugin for one login:
 ```bash
 agent-browser auth login my-app --credential-provider vault --item "My App"
 agent-browser auth login my-app --credential-provider vault --item "My App" --url https://app.example.com/login --username-selector "#email" --password-selector "#password" --submit-selector "button[type=submit]"
+agent-browser auth login my-app --credential-provider vault --item "My App" --no-navigate --url https://identity.example.com/login
 ```
 
 Use a browser provider plugin:

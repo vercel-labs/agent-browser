@@ -69,6 +69,7 @@ Then use it through the command path for its capability:
 
 ```bash
 agent-browser auth login my-app --credential-provider vault --item "My App"
+agent-browser auth login my-app --credential-provider vault --item "My App" --no-navigate --url https://identity.example.com/login
 agent-browser --provider cloud-browser open https://example.com
 agent-browser open https://example.com
 agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"abc","url":"https://example.com"}'
@@ -315,6 +316,12 @@ Use it for one login:
 
 ```bash
 agent-browser auth login my-app --credential-provider vault --item "My App"
+```
+
+For a login form reached through stateful in-page setup, add `--no-navigate`. The active top-level page must have the same scheme, host, and effective port as the effective credential URL. Command-level `--url` overrides provider URL metadata and supplies this expected origin without navigating. The provider secret remains outside generated process arguments and normal output:
+
+```bash
+agent-browser auth login my-app --credential-provider vault --item "My App" --no-navigate --url https://identity.example.com/login
 ```
 
 For external vaults, prefer calling the vendor CLI from the plugin and relying on its existing local session. Do not pass vault tokens in `agent-browser.json`.

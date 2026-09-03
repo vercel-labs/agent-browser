@@ -1061,7 +1061,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     Ok(cmd)
                 }
                 Some("login") => {
-                    const AUTH_LOGIN_USAGE: &str = "agent-browser auth login <name> [--credential-provider <plugin>] [--item <ref>] [--url <url>] [--username-selector <s>] [--password-selector <s>] [--submit-selector <s>]";
+                    const AUTH_LOGIN_USAGE: &str = "agent-browser auth login <name> [--no-navigate] [--credential-provider <plugin>] [--item <ref>] [--url <url>] [--username-selector <s>] [--password-selector <s>] [--submit-selector <s>]";
                     let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "auth login".to_string(),
                         usage: AUTH_LOGIN_USAGE,
@@ -1072,10 +1072,24 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     let mut username_selector: Option<String> = None;
                     let mut password_selector: Option<String> = None;
                     let mut submit_selector: Option<String> = None;
+                    let mut no_navigate = false;
 
                     let mut j = 2;
                     while j < rest.len() {
                         match rest[j] {
+                            "--no-navigate" => {
+                                if rest
+                                    .get(j + 1)
+                                    .is_some_and(|value| !value.starts_with("--"))
+                                {
+                                    return Err(ParseError::InvalidValue {
+                                        message: "--no-navigate does not accept a value"
+                                            .to_string(),
+                                        usage: AUTH_LOGIN_USAGE,
+                                    });
+                                }
+                                no_navigate = true;
+                            }
                             "--credential-provider" => {
                                 let Some(value) = rest.get(j + 1).filter(|v| !v.starts_with("--"))
                                 else {
@@ -1172,6 +1186,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     }
                     if let Some(ss) = submit_selector {
                         cmd["submitSelector"] = json!(ss);
+                    }
+                    if no_navigate {
+                        // Invocation-only behavior. This is intentionally not
+                        // stored in AuthProfile or credential provider data.
+                        cmd["noNavigate"] = json!(true);
                     }
                     Ok(cmd)
                 }
@@ -6149,6 +6168,61 @@ mod tests {
         assert_eq!(cmd["usernameSelector"], "#login_field");
         assert_eq!(cmd["passwordSelector"], "#password");
         assert_eq!(cmd["submitSelector"], "input[type=submit]");
+        assert!(cmd.get("noNavigate").is_none());
+    }
+
+    #[test]
+    fn test_auth_login_no_navigate() {
+        let cmd =
+            parse_command(&args("auth login github --no-navigate"), &default_flags()).unwrap();
+
+        assert_eq!(cmd["action"], "auth_login");
+        assert_eq!(cmd["name"], "github");
+        assert_eq!(cmd["noNavigate"], true);
+        assert!(cmd.get("url").is_none());
+    }
+
+    #[test]
+    fn test_auth_login_no_navigate_with_url() {
+        let cmd = parse_command(
+            &args("auth login github --no-navigate --url https://github.com/login"),
+            &default_flags(),
+        )
+        .unwrap();
+
+        assert_eq!(cmd["action"], "auth_login");
+        assert_eq!(cmd["name"], "github");
+        assert_eq!(cmd["noNavigate"], true);
+        assert_eq!(cmd["url"], "https://github.com/login");
+    }
+
+    #[test]
+    fn test_auth_login_no_navigate_combines_with_provider_and_selectors() {
+        let cmd = parse_command(
+            &args(
+                "auth login work --credential-provider vault --item Work --no-navigate --username-selector #email --password-selector #pass --submit-selector #submit",
+            ),
+            &default_flags(),
+        )
+        .unwrap();
+
+        assert_eq!(cmd["credentialProvider"], "vault");
+        assert_eq!(cmd["credentialItem"], "Work");
+        assert_eq!(cmd["noNavigate"], true);
+        assert_eq!(cmd["usernameSelector"], "#email");
+        assert_eq!(cmd["passwordSelector"], "#pass");
+        assert_eq!(cmd["submitSelector"], "#submit");
+    }
+
+    #[test]
+    fn test_auth_login_no_navigate_rejects_value() {
+        let err = parse_command(
+            &args("auth login github --no-navigate true"),
+            &default_flags(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ParseError::InvalidValue { .. }));
     }
 
     #[test]

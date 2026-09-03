@@ -63,6 +63,8 @@ const AUTH_LOGIN_SELECTOR_POLL_INTERVAL_MS: u64 = 100;
 /// fallback selectors are allowed.
 const AUTH_LOGIN_PREFERRED_SELECTOR_WINDOW_MS: u64 = 5_000;
 
+const AUTH_LOGIN_NO_NAVIGATE_PAGE_ERROR: &str = "auth login --no-navigate requires an existing active HTTP(S) browser page; open the login page first";
+
 pub struct PendingConfirmation {
     pub action: String,
     pub cmd: Value,
@@ -2330,6 +2332,13 @@ fn policy_actions_for_command(
 
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    // Unlike normal auth login, no-navigation mode must never launch a
+    // browser or manufacture an about:blank page to satisfy the command.
+    let auth_login_no_navigate = action == "auth_login"
+        && cmd
+            .get("noNavigate")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
     let id = cmd
         .get("id")
         .and_then(|v| v.as_str())
@@ -2447,7 +2456,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     let restore_key_change_needs_launch = !skip_launch
         && command_changes_restore_key(cmd, state)
         && has_active_browser_session(state);
-    let needs_launch = if !skip_launch {
+    let needs_launch = if !skip_launch && !auth_login_no_navigate {
         // Check if existing connection is stale and needs re-launch.
         // This must happen before policy evaluation so plugin capability
         // actions are gated when recovery relaunches would invoke plugins.
@@ -2533,11 +2542,20 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
-    let restore_transition_closed_browser =
-        match apply_restore_config_after_confirmation(cmd, state).await {
-            Ok(closed_browser) => closed_browser,
-            Err(err) => return error_response(&id, &err),
-        };
+    let restore_transition_closed_browser = match async {
+        if auth_login_no_navigate && command_changes_restore_key(cmd, state) {
+            return Err(
+                "auth login --no-navigate cannot switch restore sessions; select the session containing the active login page"
+                    .to_string(),
+            );
+        }
+        apply_restore_config_after_confirmation(cmd, state).await
+    }
+    .await
+    {
+        Ok(closed_browser) => closed_browser,
+        Err(err) => return error_response(&id, &err),
+    };
 
     if !skip_launch {
         if needs_launch {
@@ -2557,12 +2575,14 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             lifecycle_reused = true;
         }
 
-        if let Some(ref mut mgr) = state.browser {
-            if mgr.page_count() == 0 {
-                // ensure_page itself skips creation for a pinned tab_gone
-                // session, so a closed sole tab stays tab_gone instead of
-                // silently recovering onto a fresh blank page.
-                let _ = mgr.ensure_page().await;
+        if !auth_login_no_navigate {
+            if let Some(ref mut mgr) = state.browser {
+                if mgr.page_count() == 0 {
+                    // ensure_page itself skips creation for a pinned tab_gone
+                    // session, so a closed sole tab stays tab_gone instead of
+                    // silently recovering onto a fresh blank page.
+                    let _ = mgr.ensure_page().await;
+                }
             }
         }
     }
@@ -11192,15 +11212,151 @@ async fn handle_auth_save(cmd: &Value) -> Result<Value, String> {
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthLoginOrigin(String);
+
+#[derive(Debug, Clone)]
+struct AuthLoginBoundPage {
+    target_id: String,
+    session_id: String,
+}
+
+/// Parse a URL into the normalized HTTP(S) origin used to constrain
+/// `auth login --no-navigate`. Paths, queries, and fragments are intentionally
+/// excluded, and URL serialization normalizes explicit default ports.
+fn auth_login_origin(raw_url: &str, label: &str) -> Result<AuthLoginOrigin, String> {
+    let has_unambiguous_authority = raw_url
+        .split_once(':')
+        .map(|(_, rest)| rest)
+        .is_some_and(|rest| rest.starts_with("//") && !rest.starts_with("///"));
+    let parsed = url::Url::parse(raw_url).map_err(|_| {
+        format!(
+            "Invalid {} URL: expected an absolute HTTP(S) URL with a host",
+            label
+        )
+    })?;
+    if !has_unambiguous_authority
+        || !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+    {
+        return Err(format!(
+            "Invalid {} URL: expected an absolute HTTP(S) URL with a host",
+            label
+        ));
+    }
+
+    Ok(AuthLoginOrigin(parsed.origin().ascii_serialization()))
+}
+
+/// Bind no-navigation login to the current top-level page before any external
+/// credential provider is invoked. This rejects missing, blank, opaque, and
+/// otherwise unusable pages without reading a secret unnecessarily.
+async fn bind_auth_login_active_page(state: &DaemonState) -> Result<AuthLoginBoundPage, String> {
+    let mgr = state
+        .browser
+        .as_ref()
+        .ok_or(AUTH_LOGIN_NO_NAVIGATE_PAGE_ERROR)?;
+    if mgr.page_count() == 0 {
+        return Err(AUTH_LOGIN_NO_NAVIGATE_PAGE_ERROR.to_string());
+    }
+    let target_id = mgr
+        .active_target_id()
+        .map_err(|_| AUTH_LOGIN_NO_NAVIGATE_PAGE_ERROR.to_string())?
+        .to_string();
+    let session_id = mgr
+        .active_session_id()
+        .map_err(|_| AUTH_LOGIN_NO_NAVIGATE_PAGE_ERROR.to_string())?
+        .to_string();
+    let current_url = mgr
+        .get_url()
+        .await
+        .map_err(|_| AUTH_LOGIN_NO_NAVIGATE_PAGE_ERROR.to_string())?;
+    auth_login_origin(&current_url, "current page")
+        .map_err(|_| AUTH_LOGIN_NO_NAVIGATE_PAGE_ERROR.to_string())?;
+
+    Ok(AuthLoginBoundPage {
+        target_id,
+        session_id,
+    })
+}
+
+/// Ensure credential-bearing work still targets the page that was active
+/// when no-navigation login began, and that its live document remains on the
+/// expected origin. Diagnostics contain origins only, never URL paths or
+/// credential values.
+async fn validate_auth_login_active_page(
+    mgr: &BrowserManager,
+    bound_page: &AuthLoginBoundPage,
+    expected_origin: &AuthLoginOrigin,
+) -> Result<(), String> {
+    let active_target_id = mgr.active_target_id().map_err(|_| {
+        "Active browser page changed during auth login --no-navigate; retry on the intended login page"
+            .to_string()
+    })?;
+    let active_session_id = mgr.active_session_id().map_err(|_| {
+        "Active browser page changed during auth login --no-navigate; retry on the intended login page"
+            .to_string()
+    })?;
+    if active_target_id != bound_page.target_id || active_session_id != bound_page.session_id {
+        return Err(
+            "Active browser page changed during auth login --no-navigate; retry on the intended login page"
+                .to_string(),
+        );
+    }
+
+    let current_url = mgr.get_url().await.map_err(|_| {
+        "Active browser page changed during auth login --no-navigate; retry on the intended login page"
+            .to_string()
+    })?;
+    let current_origin = auth_login_origin(&current_url, "current page")?;
+    ensure_auth_login_origin_matches(&current_origin, expected_origin)
+}
+
+fn ensure_auth_login_origin_matches(
+    current_origin: &AuthLoginOrigin,
+    expected_origin: &AuthLoginOrigin,
+) -> Result<(), String> {
+    if current_origin == expected_origin {
+        return Ok(());
+    }
+    Err(format!(
+        "Current page origin {} does not match credential origin {}",
+        current_origin.0, expected_origin.0
+    ))
+}
+
 async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let name = cmd
         .get("name")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'name'")?;
-    if state.browser.is_none() {
+    let no_navigate = cmd
+        .get("noNavigate")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let bound_page = if no_navigate {
+        Some(bind_auth_login_active_page(state).await?)
+    } else {
+        None
+    };
+    if !no_navigate && state.browser.is_none() {
         return Err("Browser not launched".to_string());
     }
     let url_override = cmd.get("url").and_then(|v| v.as_str());
+    let override_origin = if no_navigate {
+        url_override
+            .map(|url| auth_login_origin(url, "credential"))
+            .transpose()?
+    } else {
+        None
+    };
+    if let (Some(bound_page), Some(override_origin)) = (&bound_page, &override_origin) {
+        let mgr = state
+            .browser
+            .as_ref()
+            .ok_or(AUTH_LOGIN_NO_NAVIGATE_PAGE_ERROR)?;
+        validate_auth_login_active_page(mgr, bound_page, override_origin).await?;
+    }
     let cred = if let Some(provider) = cmd.get("credentialProvider").and_then(|v| v.as_str()) {
         let command_plugins = cmd
             .get("plugins")
@@ -11254,7 +11410,25 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
 
     let auth_timeout_ms = state.timeout_ms(cmd);
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-    mgr.navigate(&url, AUTH_LOGIN_WAIT_UNTIL).await?;
+    let expected_origin = if no_navigate {
+        let origin = auth_login_origin(&url, "credential")?;
+        validate_auth_login_active_page(
+            mgr,
+            bound_page
+                .as_ref()
+                .expect("no-navigation login must bind an active page"),
+            &origin,
+        )
+        .await?;
+        // Auth login always locates its form in the top-level document. Ignore
+        // a prior `frame` selection for this command without mutating the
+        // caller's persistent frame selection.
+        super::element::set_active_frame(None);
+        Some(origin)
+    } else {
+        mgr.navigate(&url, AUTH_LOGIN_WAIT_UNTIL).await?;
+        None
+    };
 
     let session_id = mgr.active_session_id()?.to_string();
 
@@ -11346,6 +11520,9 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
             }
         }
     };
+    if let (Some(bound_page), Some(expected_origin)) = (&bound_page, &expected_origin) {
+        validate_auth_login_active_page(mgr, bound_page, expected_origin).await?;
+    }
     interaction::fill(
         &mgr.client,
         &session_id,
@@ -11367,6 +11544,9 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     )
     .await
     .map_err(|_| format!("Timed out waiting for password selector '{}'", pass_sel))?;
+    if let (Some(bound_page), Some(expected_origin)) = (&bound_page, &expected_origin) {
+        validate_auth_login_active_page(mgr, bound_page, expected_origin).await?;
+    }
     interaction::fill(
         &mgr.client,
         &session_id,
@@ -11398,6 +11578,9 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
             )
         })?
     };
+    if let (Some(bound_page), Some(expected_origin)) = (&bound_page, &expected_origin) {
+        validate_auth_login_active_page(mgr, bound_page, expected_origin).await?;
+    }
     interaction::click(
         &mgr.client,
         &session_id,
@@ -13369,6 +13552,50 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{
         let err = handle_auth_login(&cmd, &mut state).await.unwrap_err();
 
         assert_eq!(err, "Browser not launched");
+        assert!(!marker_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_auth_login_no_navigate_rejects_missing_page_before_plugin_resolution() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let marker_path = dir.path().join("credential-plugin-invoked");
+        let plugin_path = dir.path().join("mock-credential-plugin");
+        fs::write(
+            &plugin_path,
+            r#"#!/bin/sh
+printf invoked > "$1"
+cat >/dev/null
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{"username":"user","password":"pass","url":"https://example.com/login"}}'
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&plugin_path, perms).unwrap();
+
+        let mut state = DaemonState::new();
+        let cmd = json!({
+            "id": "auth-plugin-no-page",
+            "action": "auth_login",
+            "name": "example",
+            "noNavigate": true,
+            "credentialProvider": "mock",
+            "plugins": [
+                {
+                    "name": "mock",
+                    "command": plugin_path.to_string_lossy(),
+                    "args": [marker_path.to_string_lossy()],
+                    "capabilities": ["credential.read"]
+                }
+            ]
+        });
+
+        let err = handle_auth_login(&cmd, &mut state).await.unwrap_err();
+
+        assert_eq!(err, AUTH_LOGIN_NO_NAVIGATE_PAGE_ERROR);
         assert!(!marker_path.exists());
     }
 
@@ -15451,6 +15678,98 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "auth_login should navigate with Load and then wait for form \
              selectors explicitly"
         );
+    }
+
+    #[test]
+    fn test_auth_login_origin_ignores_path_query_and_fragment() {
+        let first = auth_login_origin(
+            "https://example.com/login?credential-path-sentinel#credential-fragment-sentinel",
+            "credential",
+        )
+        .unwrap();
+        let second = auth_login_origin(
+            "https://example.com/consent?current-path-sentinel#current-fragment-sentinel",
+            "current page",
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.0, "https://example.com");
+    }
+
+    #[test]
+    fn test_auth_login_origin_normalizes_default_ports() {
+        assert_eq!(
+            auth_login_origin("http://example.com:80/login", "credential").unwrap(),
+            auth_login_origin("http://example.com/flow", "current page").unwrap()
+        );
+        assert_eq!(
+            auth_login_origin("https://example.com:443/login", "credential").unwrap(),
+            auth_login_origin("https://example.com/flow", "current page").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_auth_login_origin_rejects_mismatched_origins() {
+        let expected = auth_login_origin("https://example.com/login", "credential").unwrap();
+        assert_ne!(
+            expected,
+            auth_login_origin("http://example.com/login", "current page").unwrap()
+        );
+        assert_ne!(
+            expected,
+            auth_login_origin("https://id.example.com/login", "current page").unwrap()
+        );
+        assert_ne!(
+            expected,
+            auth_login_origin("https://example.com:8443/login", "current page").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_auth_login_origin_rejects_malformed_opaque_and_non_http_urls() {
+        for value in [
+            "not a url",
+            "about:blank",
+            "data:text/html,login",
+            "file:///tmp/login.html",
+            "https://",
+            "https:///login",
+            "https:example.com/login",
+        ] {
+            let error = auth_login_origin(value, "credential").unwrap_err();
+            assert!(error.contains("absolute HTTP(S) URL with a host"));
+            assert!(!error.contains(value));
+        }
+    }
+
+    #[test]
+    fn test_auth_login_origin_mismatch_error_is_sanitized() {
+        let current = auth_login_origin(
+            "https://login.example.com/current-path-sentinel?current-query-sentinel#current-fragment-sentinel",
+            "current page",
+        )
+        .unwrap();
+        let expected = auth_login_origin(
+            "https://example.com/credential-path-sentinel?credential-query-sentinel#credential-fragment-sentinel",
+            "credential",
+        )
+        .unwrap();
+        let error = ensure_auth_login_origin_matches(&current, &expected).unwrap_err();
+
+        assert_eq!(
+            error,
+            "Current page origin https://login.example.com does not match credential origin https://example.com"
+        );
+        for sentinel in [
+            "current-path-sentinel",
+            "current-query-sentinel",
+            "current-fragment-sentinel",
+            "credential-path-sentinel",
+            "credential-query-sentinel",
+            "credential-fragment-sentinel",
+        ] {
+            assert!(!error.contains(sentinel));
+        }
     }
 
     #[test]
