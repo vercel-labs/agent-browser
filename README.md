@@ -80,6 +80,43 @@ Detects your installation method (npm, Homebrew, or Cargo) and runs the appropri
 - **Node.js 24+ and pnpm 11+** - Only needed when building from source.
 - **Rust** - Only needed when building from source (see From Source above).
 
+### AI Coding Assistants (recommended)
+
+Add the skill to your AI coding assistant for richer context:
+
+```bash
+npx skills add vercel-labs/agent-browser
+```
+
+This works with Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot, Goose, OpenCode, and Windsurf. The skill is fetched from the repository, so it stays up to date automatically. Do not copy `SKILL.md` from `node_modules` as it will become stale.
+
+### Claude Code
+
+Install as a Claude Code skill:
+
+```bash
+npx skills add vercel-labs/agent-browser
+```
+
+This adds a thin discovery stub at `.claude/skills/agent-browser/SKILL.md`. The stub is intentionally minimal — it points Claude Code at `agent-browser skills get core` to load the actual workflow content at runtime. This way the instructions always match the installed CLI version instead of going stale between releases.
+
+### AGENTS.md / CLAUDE.md
+
+For more consistent results, add to your project or global instructions file:
+
+```markdown
+## Browser Automation
+
+Use `agent-browser` for web automation. Run `agent-browser --help` for all commands.
+
+Core workflow:
+
+1. `agent-browser open <url>` - Navigate to page
+2. `agent-browser snapshot -i` - Get interactive elements with refs (@e1, @e2)
+3. `agent-browser click @e1` / `fill @e2 "text"` - Interact using refs
+4. Re-snapshot after page changes
+```
+
 ## Quick Start
 
 ```bash
@@ -1652,43 +1689,6 @@ Use agent-browser to test the login flow. Run agent-browser --help to see availa
 ```
 
 The `--help` output is comprehensive and most agents can figure it out from there.
-
-### AI Coding Assistants (recommended)
-
-Add the skill to your AI coding assistant for richer context:
-
-```bash
-npx skills add vercel-labs/agent-browser
-```
-
-This works with Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot, Goose, OpenCode, and Windsurf. The skill is fetched from the repository, so it stays up to date automatically. Do not copy `SKILL.md` from `node_modules` as it will become stale.
-
-### Claude Code
-
-Install as a Claude Code skill:
-
-```bash
-npx skills add vercel-labs/agent-browser
-```
-
-This adds a thin discovery stub at `.claude/skills/agent-browser/SKILL.md`. The stub is intentionally minimal — it points Claude Code at `agent-browser skills get core` to load the actual workflow content at runtime. This way the instructions always match the installed CLI version instead of going stale between releases.
-
-### AGENTS.md / CLAUDE.md
-
-For more consistent results, add to your project or global instructions file:
-
-```markdown
-## Browser Automation
-
-Use `agent-browser` for web automation. Run `agent-browser --help` for all commands.
-
-Core workflow:
-
-1. `agent-browser open <url>` - Navigate to page
-2. `agent-browser snapshot -i` - Get interactive elements with refs (@e1, @e2)
-3. `agent-browser click @e1` / `fill @e2 "text"` - Interact using refs
-4. Re-snapshot after page changes
-```
 
 ## Integrations
 
