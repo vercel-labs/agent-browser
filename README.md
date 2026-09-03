@@ -277,7 +277,15 @@ echo '[
   ["click", "@e1"],
   ["screenshot", "result.png"]
 ]' | agent-browser batch --json
+
+# Avoid echoing raw command arrays that contain confidential stdin values.
+# Rows use a zero-based index instead.
+echo '[["fill", "#password", "secret"]]' | \
+  agent-browser batch --json --omit-command
 ```
+
+`--omit-command` applies to successful and failed rows, including `--bail`
+output. Without it, JSON output keeps the existing `command` field.
 
 ### Clipboard
 

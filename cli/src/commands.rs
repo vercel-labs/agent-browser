@@ -1903,8 +1903,18 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         // === Batch ===
         "batch" => {
             let bail = rest.contains(&"--bail");
-            let commands: Vec<&str> = rest.iter().filter(|a| **a != "--bail").copied().collect();
-            let mut cmd = json!({ "id": id, "action": "batch", "bail": bail });
+            let omit_command = rest.contains(&"--omit-command");
+            let commands: Vec<&str> = rest
+                .iter()
+                .filter(|a| **a != "--bail" && **a != "--omit-command")
+                .copied()
+                .collect();
+            let mut cmd = json!({
+                "id": id,
+                "action": "batch",
+                "bail": bail,
+                "omitCommand": omit_command,
+            });
             if !commands.is_empty() {
                 cmd["commands"] = json!(commands);
             }
@@ -6260,6 +6270,18 @@ mod tests {
         let cmd = parse_command(&args("batch --bail"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "batch");
         assert_eq!(cmd["bail"], true);
+    }
+
+    #[test]
+    fn test_batch_with_omit_command() {
+        let cmd = parse_command(
+            &args("batch --omit-command --bail screenshot"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["omitCommand"], true);
+        assert_eq!(cmd["bail"], true);
+        assert_eq!(cmd["commands"], json!(["screenshot"]));
     }
 
     #[test]

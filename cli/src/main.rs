@@ -2059,13 +2059,17 @@ fn main() {
     // Handle batch command: from args or stdin
     if cmd.get("action").and_then(|v| v.as_str()) == Some("batch") {
         let bail = cmd.get("bail").and_then(|v| v.as_bool()).unwrap_or(false);
+        let omit_command = cmd
+            .get("omitCommand")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let arg_commands = cmd.get("commands").and_then(|v| v.as_array()).map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str())
                 .map(commands::shell_words_split)
                 .collect::<Vec<Vec<String>>>()
         });
-        run_batch(&flags, &daemon_opts, bail, arg_commands);
+        run_batch(&flags, &daemon_opts, bail, omit_command, arg_commands);
         return;
     }
 
@@ -2128,6 +2132,7 @@ fn run_batch(
     flags: &Flags,
     daemon_opts: &DaemonOptions,
     bail: bool,
+    omit_command: bool,
     arg_commands: Option<Vec<Vec<String>>>,
 ) {
     let commands: Vec<Vec<String>> = if let Some(cmds) = arg_commands {
@@ -2187,11 +2192,10 @@ fn run_batch(
             Err(e) => {
                 had_error = true;
                 if flags.json {
-                    results.push(json!({
-                        "command": cmd_args,
-                        "success": false,
-                        "error": e.format(),
-                    }));
+                    let mut result = batch_result_identity(i, cmd_args, omit_command);
+                    result["success"] = json!(false);
+                    result["error"] = json!(e.format());
+                    results.push(result);
                     if bail {
                         break;
                     }
@@ -2222,12 +2226,10 @@ fn run_batch(
         match send_command_with_respawn(parsed, &flags.session, daemon_opts) {
             Ok(resp) => {
                 if flags.json {
-                    let mut result = json!({
-                        "command": cmd_args,
-                        "success": resp.success,
-                        "result": resp.data,
-                        "error": resp.error,
-                    });
+                    let mut result = batch_result_identity(i, cmd_args, omit_command);
+                    result["success"] = json!(resp.success);
+                    result["result"] = json!(resp.data);
+                    result["error"] = json!(resp.error);
                     // Match the single-command `Response` serialization,
                     // which only emits `code` when set (e.g. `tab_gone`).
                     // Without this, machine-readable error codes are
@@ -2260,11 +2262,10 @@ fn run_batch(
             Err(e) => {
                 had_error = true;
                 if flags.json {
-                    results.push(json!({
-                        "command": cmd_args,
-                        "success": false,
-                        "error": e.to_string(),
-                    }));
+                    let mut result = batch_result_identity(i, cmd_args, omit_command);
+                    result["success"] = json!(false);
+                    result["error"] = json!(e.to_string());
+                    results.push(result);
                     if bail {
                         break;
                     }
@@ -2287,6 +2288,18 @@ fn run_batch(
 
     if had_error {
         exit(1);
+    }
+}
+
+fn batch_result_identity(
+    index: usize,
+    command: &[String],
+    omit_command: bool,
+) -> serde_json::Value {
+    if omit_command {
+        json!({ "index": index })
+    } else {
+        json!({ "command": command })
     }
 }
 
@@ -2963,5 +2976,24 @@ mod tests {
         assert_eq!(prompt.action, "plugin:stealth:launch.mutate");
         assert_eq!(prompt.description, "plugin:stealth:launch.mutate");
         assert_eq!(prompt.confirmation_id, "original-command");
+    }
+
+    #[test]
+    fn test_batch_result_identity_omits_sensitive_command() {
+        let command = vec![
+            "fill".to_string(),
+            "#password".to_string(),
+            "PUBLIC_SENTINEL".to_string(),
+        ];
+
+        let omitted = batch_result_identity(3, &command, true);
+        assert_eq!(omitted, json!({ "index": 3 }));
+        assert!(!serde_json::to_string(&omitted)
+            .unwrap()
+            .contains("PUBLIC_SENTINEL"));
+
+        let default = batch_result_identity(3, &command, false);
+        assert_eq!(default["command"], json!(command));
+        assert!(default.get("index").is_none());
     }
 }
