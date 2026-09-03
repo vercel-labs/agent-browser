@@ -10,7 +10,7 @@ import { minuteRateLimit, dailyRateLimit } from "@/lib/rate-limit";
 
 export const maxDuration = 60;
 
-const DEFAULT_MODEL = "anthropic/claude-haiku-4.5";
+const DEFAULT_MODEL = "anthropic/claude-sonnet-4.6";
 
 const SYSTEM_PROMPT = `You are a helpful documentation assistant for agent-browser, a browser automation CLI designed for AI agents.
 
@@ -105,6 +105,10 @@ export async function POST(req: Request) {
   } = await createBashTool({ files: docsFiles });
 
   const result = streamText({
+    headers: {
+      "http-referer": "https://agent-browser.dev",
+      "x-title": "agent-browser",
+    },
     model: DEFAULT_MODEL,
     system: SYSTEM_PROMPT,
     messages: await convertToModelMessages(messages),

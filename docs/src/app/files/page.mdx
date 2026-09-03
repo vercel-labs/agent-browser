@@ -1,0 +1,73 @@
+# Files & Clipboard
+
+agent-browser can upload files, capture downloads, read local files through `file://` URLs, write PDFs and screenshots, and interact with the browser clipboard.
+
+## Upload files
+
+```bash
+agent-browser snapshot -i
+agent-browser upload @e4 ./invoice.pdf
+agent-browser upload @e4 ./front.png ./back.png
+```
+
+The selector must resolve to a file input. Multiple file paths are accepted for multi-file inputs.
+
+## Downloads
+
+```bash
+agent-browser download @e5 ./report.csv
+agent-browser wait --download ./archive.zip --timeout 30000
+```
+
+Use `download` when a specific element triggers the download. Use `wait --download` when another action starts the download and you need to wait for completion.
+
+Set a default download directory for browser-initiated downloads:
+
+```bash
+agent-browser --download-path ./downloads open https://app.example.com
+```
+
+Without `--download-path`, downloads go to a temporary directory that is cleaned up when the browser closes.
+
+## Screenshots and PDFs
+
+```bash
+agent-browser screenshot ./page.png
+agent-browser screenshot --full ./page-full.png
+agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80 ./page.jpg
+agent-browser pdf ./page.pdf
+```
+
+Screenshot defaults can also be configured with:
+
+<table>
+  <thead>
+    <tr><th>Setting</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>--screenshot-dir</code> / <code>AGENT_BROWSER_SCREENSHOT_DIR</code></td><td>Default screenshot output directory</td></tr>
+    <tr><td><code>--screenshot-format</code> / <code>AGENT_BROWSER_SCREENSHOT_FORMAT</code></td><td><code>png</code> or <code>jpeg</code></td></tr>
+    <tr><td><code>--screenshot-quality</code> / <code>AGENT_BROWSER_SCREENSHOT_QUALITY</code></td><td>JPEG quality from 0 to 100</td></tr>
+  </tbody>
+</table>
+
+## Local files
+
+```bash
+agent-browser --allow-file-access open file:///Users/me/report.pdf
+agent-browser --allow-file-access open file:///path/to/page.html
+agent-browser screenshot ./local-file.png
+```
+
+`--allow-file-access` is Chromium-only. It allows `file://` pages to load and access other local files through browser APIs such as `fetch` and XHR.
+
+## Clipboard
+
+```bash
+agent-browser clipboard read
+agent-browser clipboard write "Hello, world"
+agent-browser clipboard copy
+agent-browser clipboard paste
+```
+
+`copy` and `paste` simulate the platform keyboard shortcuts for the current selection or focused element. Use `write` when you want to set clipboard text directly.

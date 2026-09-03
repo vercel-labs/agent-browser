@@ -5,26 +5,22 @@ import { useCallback, useEffect, useRef } from "react";
 import { useAtomCallback } from "jotai/utils";
 import type { SessionInfo } from "@/types";
 import { type ExecResult, execCommand, killSession, sessionArgs } from "@/lib/exec";
+import { getDashboardApiPath, getSessionTabsPath } from "@/lib/dashboard-routes";
 import { tabCacheAtom, engineCacheAtom } from "@/store/tabs";
 import { streamTabsAtom, streamEngineAtom } from "@/store/stream";
 
 function getPort(): number {
-  if (typeof window === "undefined") return 9223;
+  if (typeof window === "undefined") return 0;
   const params = new URLSearchParams(window.location.search);
-  const p = params.get("port");
-  return p ? parseInt(p, 10) || 9223 : 9223;
+  const portParam = params.get("port");
+  const port = portParam ? Number.parseInt(portParam, 10) : 0;
+  return Number.isInteger(port) && port > 0 ? port : 0;
 }
 
-const DASHBOARD_PORT = 4848;
+export const newSessionDialogAtom = atom(false);
 
 function getSessionsUrl(): string {
-  if (typeof window !== "undefined") {
-    const origin = window.location.origin;
-    if (origin.includes(`:${DASHBOARD_PORT}`)) {
-      return "/api/sessions";
-    }
-  }
-  return `http://localhost:${DASHBOARD_PORT}/api/sessions`;
+  return getDashboardApiPath("/api/sessions");
 }
 
 // ---------------------------------------------------------------------------
@@ -125,12 +121,21 @@ function parseExecError(result: ExecResult): string {
   return "";
 }
 
+const CHAT_STORAGE_PREFIX = "dashboard-chat-";
+
+function clearChatStorage(sessionName: string) {
+  try {
+    sessionStorage.removeItem(`${CHAT_STORAGE_PREFIX}${sessionName}`);
+  } catch { /* ignore */ }
+}
+
 export const closeSessionAtom = atom(null, (get, set, port: number) => {
   const sessions = get(sessionsAtom);
   const s = sessions.find((x) => x.port === port)?.session;
   if (s) {
     set(closingSessionsAtom, (prev) => new Set(prev).add(s));
     execCommand(sessionArgs(s, "close"));
+    clearChatStorage(s);
   }
 });
 
@@ -140,6 +145,7 @@ export const killSessionAtom = atom(null, (get, set, port: number) => {
   if (s) {
     set(closingSessionsAtom, (prev) => new Set(prev).add(s));
     killSession(s);
+    clearChatStorage(s);
   }
 });
 
@@ -149,16 +155,17 @@ export const closeAllSessionsAtom = atom(null, (get, set) => {
     if (!s.pending && !s.closing) {
       set(closingSessionsAtom, (prev) => new Set(prev).add(s.session));
       execCommand(sessionArgs(s.session, "close"));
+      clearChatStorage(s.session);
     }
   }
 });
 
 export const closeTabAtom = atom(
   null,
-  (get, _set, { port, tabIndex }: { port: number; tabIndex: number }) => {
+  (get, _set, { port, tabRef }: { port: number; tabRef: string }) => {
     const sessions = get(sessionsAtom);
     const s = sessions.find((x) => x.port === port)?.session;
-    if (s) execCommand(sessionArgs(s, "tab", "close", String(tabIndex)));
+    if (s) execCommand(sessionArgs(s, "tab", "close", tabRef));
   },
 );
 
@@ -170,10 +177,10 @@ export const addTabAtom = atom(null, (get, _set, port: number) => {
 
 export const switchTabAtom = atom(
   null,
-  (get, _set, { port, tabIndex }: { port: number; tabIndex: number }) => {
+  (get, _set, { port, tabRef }: { port: number; tabRef: string }) => {
     const sessions = get(sessionsAtom);
     const s = sessions.find((x) => x.port === port)?.session;
-    if (s) execCommand(sessionArgs(s, "tab", String(tabIndex)));
+    if (s) execCommand(sessionArgs(s, "tab", tabRef));
   },
 );
 
@@ -249,9 +256,9 @@ export function useSessionsSync(pollInterval = 5000) {
             // Poll tabs for all sessions
             for (const s of data) {
               try {
-                const tabsResp = await fetch(
-                  `http://localhost:${s.port}/api/tabs`,
-                ).catch(() => null);
+                const tabsResp = await fetch(getSessionTabsPath(s.port)).catch(
+                  () => null,
+                );
                 if (tabsResp?.ok) {
                   const tabs = await tabsResp.json();
                   if (tabs.length > 0) {

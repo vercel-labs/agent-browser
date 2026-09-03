@@ -45,6 +45,7 @@ impl Drop for TestKeyGuard {
 const DOCUMENTED_ACTIONS: &[&str] = &[
     "launch",
     "navigate",
+    "read",
     "url",
     "title",
     "content",
@@ -199,8 +200,11 @@ fn minimal_command(action: &str, id: &str) -> Value {
     let obj = cmd.as_object_mut().unwrap();
 
     match action {
-        "navigate" | "diff_url" | "waitforurl" => {
+        "navigate" | "diff_url" => {
             obj.insert("url".to_string(), json!("https://example.com"));
+        }
+        "waitforurl" => {
+            obj.insert("url".to_string(), json!("*"));
         }
         "evaluate" | "expose" => {
             obj.insert("script".to_string(), json!("1"));
@@ -244,9 +248,15 @@ fn minimal_command(action: &str, id: &str) -> Value {
         }
         "auth_save" => {
             obj.insert("name".to_string(), json!("parity-test-cred"));
-            obj.insert("url".to_string(), json!("https://example.com"));
+            obj.insert(
+                "url".to_string(),
+                json!("data:text/html,%3Cinput%20id%3Du%3E%3Cinput%20id%3Dp%20type%3Dpassword%3E%3Cbutton%20id%3Ds%20onclick%3D%22location.href%3D'data%3Atext%2Fhtml%2Cdone'%22%3Ego%3C%2Fbutton%3E"),
+            );
             obj.insert("username".to_string(), json!("u"));
             obj.insert("password".to_string(), json!("p"));
+            obj.insert("usernameSelector".to_string(), json!("#u"));
+            obj.insert("passwordSelector".to_string(), json!("#p"));
+            obj.insert("submitSelector".to_string(), json!("#s"));
         }
         "credentials_get" | "credentials_delete" | "auth_show" | "auth_delete" => {
             obj.insert("name".to_string(), json!("parity-test-cred"));
@@ -269,9 +279,11 @@ fn minimal_command(action: &str, id: &str) -> Value {
         }
         "waitforloadstate" => {
             obj.insert("state".to_string(), json!("load"));
+            obj.insert("timeout".to_string(), json!(100));
         }
         "waitforfunction" => {
-            obj.insert("script".to_string(), json!("() => true"));
+            obj.insert("expression".to_string(), json!("true"));
+            obj.insert("timeout".to_string(), json!(100));
         }
         "frame" => {
             obj.insert("selector".to_string(), json!("iframe"));
@@ -302,6 +314,7 @@ fn minimal_command(action: &str, id: &str) -> Value {
         }
         "auth_login" => {
             obj.insert("name".to_string(), json!("parity-test-cred"));
+            obj.insert("credentialProvider".to_string(), json!("missing-provider"));
         }
         "route" => {
             obj.insert("url".to_string(), json!("*"));
@@ -331,9 +344,11 @@ fn minimal_command(action: &str, id: &str) -> Value {
         }
         "responsebody" => {
             obj.insert("url".to_string(), json!("https://example.com"));
+            obj.insert("timeout".to_string(), json!(100));
         }
         "waitfordownload" => {
             obj.insert("path".to_string(), json!("/tmp/parity-download"));
+            obj.insert("timeout".to_string(), json!(100));
         }
         "styles" => {
             obj.insert("selector".to_string(), json!("body"));
@@ -377,11 +392,19 @@ fn minimal_command(action: &str, id: &str) -> Value {
 #[tokio::test]
 async fn test_all_documented_actions_are_handled() {
     let mut state = DaemonState::new();
+    state.default_timeout_ms = 100;
 
     for (i, action) in DOCUMENTED_ACTIONS.iter().enumerate() {
         let id = format!("parity-{}", i);
         let cmd = minimal_command(action, &id);
-        let result = execute_command(&cmd, &mut state).await;
+        // Generous: `launch` starts a real browser, and the slowest CI target
+        // (x86_64-apple-darwin) runs this suite about 3x slower than aarch64.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            execute_command(&cmd, &mut state),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("Action '{}' timed out", action));
 
         assert!(
             result.get("id").is_some(),
@@ -533,6 +556,8 @@ async fn test_daemon_state_new_defaults() {
     assert!(!state.request_tracking);
     assert!(state.tracked_requests.is_empty());
     assert!(state.active_frame_id.is_none());
+    assert!(state.iframe_sessions.is_empty());
+    assert!(state.active_iframe_sessions.is_empty());
     assert!(state.webdriver_backend.is_none());
     assert!(state.stream_client.is_none());
 }
@@ -697,4 +722,165 @@ async fn test_state_find_auto_returns_none_for_nonexistent() {
     use super::state;
     let result = state::find_auto_state_file("nonexistent-session-xyz");
     assert!(result.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// 5. Session-to-tab binding (--pin-tab) parity
+// ---------------------------------------------------------------------------
+
+/// Set up an isolated socket dir and session so `DaemonState::new` and the
+/// binding helpers cannot pick up a stray binding file from the real runtime
+/// directory. Returns the env guard and the tempdir; keep both alive for the
+/// duration of the test (the tempdir is deleted on drop).
+fn pin_tab_env(session: &str) -> (crate::test_utils::EnvGuard<'static>, tempfile::TempDir) {
+    let guard = crate::test_utils::EnvGuard::new(&[
+        "AGENT_BROWSER_SOCKET_DIR",
+        "XDG_RUNTIME_DIR",
+        "AGENT_BROWSER_NAMESPACE",
+        "AGENT_BROWSER_SESSION",
+        "AGENT_BROWSER_PIN_TAB",
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+    guard.remove("XDG_RUNTIME_DIR");
+    guard.remove("AGENT_BROWSER_NAMESPACE");
+    guard.set("AGENT_BROWSER_SESSION", session);
+    guard.remove("AGENT_BROWSER_PIN_TAB");
+    (guard, dir)
+}
+
+#[tokio::test]
+async fn test_pin_tab_command_field_enables_strict_binding() {
+    let (_guard, _dir) = pin_tab_env("parity-pin-cmd");
+    // A skip-launch action (no browser needed) still runs the early pinTab
+    // hook, so this exercises the flag plumbing without Chrome.
+    let mut state = DaemonState::new();
+    assert!(!state.pin_tab, "pin_tab should default to false");
+
+    let cmd = json!({ "action": "state_list", "id": "pin-1", "pinTab": true });
+    let result = execute_command(&cmd, &mut state).await;
+    assert_eq!(result["success"], true);
+    assert!(state.pin_tab, "pinTab command field should enable pin_tab");
+}
+
+#[tokio::test]
+async fn test_daemon_state_new_defaults_pin_tab_false() {
+    let (_guard, _dir) = pin_tab_env("parity-pin-default");
+    let state = DaemonState::new();
+    assert!(!state.pin_tab);
+}
+
+#[tokio::test]
+async fn test_daemon_state_new_reads_pin_tab_env() {
+    let (guard, _dir) = pin_tab_env("parity-pin-env");
+    guard.set("AGENT_BROWSER_PIN_TAB", "1");
+    let state = DaemonState::new();
+    assert!(
+        state.pin_tab,
+        "AGENT_BROWSER_PIN_TAB=1 should enable pin_tab"
+    );
+}
+
+#[tokio::test]
+async fn test_daemon_state_new_reads_sticky_pinned_binding() {
+    use super::tab_binding::{save, TabBinding};
+    let (_guard, _dir) = pin_tab_env("parity-pin-sticky");
+    // A persisted binding with pinned=true makes --pin-tab sticky across
+    // restarts even when the env var is absent.
+    save(
+        "parity-pin-sticky",
+        &TabBinding {
+            target_id: "ABCDEF0123456789".to_string(),
+            url: "https://example.com".to_string(),
+            pinned: true,
+        },
+    )
+    .unwrap();
+    let state = DaemonState::new();
+    assert!(
+        state.pin_tab,
+        "a persisted pinned binding should enable pin_tab"
+    );
+}
+
+#[tokio::test]
+async fn test_pin_tab_false_disables_pin_in_running_daemon() {
+    let (_guard, _dir) = pin_tab_env("parity-pin-disable-live");
+    let mut state = DaemonState::new();
+
+    let cmd = json!({ "action": "state_list", "id": "pin-on", "pinTab": true });
+    let result = execute_command(&cmd, &mut state).await;
+    assert_eq!(result["success"], true);
+    assert!(state.pin_tab);
+
+    let cmd = json!({ "action": "state_list", "id": "pin-off", "pinTab": false });
+    let result = execute_command(&cmd, &mut state).await;
+    assert_eq!(result["success"], true);
+    assert!(
+        !state.pin_tab,
+        "pinTab: false should disable pin_tab in a running daemon"
+    );
+}
+
+#[tokio::test]
+async fn test_pin_tab_false_disables_persisted_pin_across_restart() {
+    use super::tab_binding::{load, save, TabBinding};
+    let (_guard, _dir) = pin_tab_env("parity-pin-disable-sticky");
+    // Simulate a prior pinned session.
+    save(
+        "parity-pin-disable-sticky",
+        &TabBinding {
+            target_id: "ABCDEF0123456789".to_string(),
+            url: "https://example.com".to_string(),
+            pinned: true,
+        },
+    )
+    .unwrap();
+
+    // Fresh daemon restores the sticky pin; an explicit pinTab: false must
+    // disable it and rewrite the persisted record even with no browser
+    // attached, so the disable survives another restart.
+    let mut state = DaemonState::new();
+    assert!(state.pin_tab, "sticky pin should be restored");
+    let cmd = json!({ "action": "state_list", "id": "pin-off", "pinTab": false });
+    let result = execute_command(&cmd, &mut state).await;
+    assert_eq!(result["success"], true);
+    assert!(!state.pin_tab);
+
+    let binding = load("parity-pin-disable-sticky")
+        .unwrap()
+        .expect("binding file should still exist");
+    assert!(
+        !binding.pinned,
+        "the persisted binding must record pinned=false"
+    );
+    let state = DaemonState::new();
+    assert!(!state.pin_tab, "the disable must survive a daemon restart");
+}
+
+#[tokio::test]
+async fn test_pin_tab_absent_keeps_current_state() {
+    let (_guard, _dir) = pin_tab_env("parity-pin-absent");
+    let mut state = DaemonState::new();
+    let cmd = json!({ "action": "state_list", "id": "pin-on", "pinTab": true });
+    execute_command(&cmd, &mut state).await;
+    assert!(state.pin_tab);
+
+    // A command without the pinTab field must not reset the sticky pin.
+    let cmd = json!({ "action": "state_list", "id": "no-field" });
+    let result = execute_command(&cmd, &mut state).await;
+    assert_eq!(result["success"], true);
+    assert!(state.pin_tab, "absent pinTab must leave the pin enabled");
+}
+
+#[tokio::test]
+async fn test_daemon_state_new_with_corrupt_binding_does_not_pin() {
+    let (_guard, _dir) = pin_tab_env("parity-pin-corrupt");
+    let path = super::tab_binding::binding_path("parity-pin-corrupt");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "{\"targetId\":\"AAAA\",\"pin").unwrap();
+    // A corrupt file must not silently enable (or crash) pinning here; the
+    // attach path reports it as a recovery error instead.
+    let state = DaemonState::new();
+    assert!(!state.pin_tab);
 }

@@ -19,6 +19,12 @@ agent-browser session list
 
 # Show current session
 agent-browser session
+
+# Generate a stable worktree-scoped session id
+agent-browser session id --scope worktree --prefix next-dev-loop
+
+# Inspect daemon, launch, and restore status
+agent-browser session info --json
 ```
 
 ## Session isolation
@@ -30,9 +36,53 @@ Each session has its own:
 - Navigation history
 - Authentication state
 
+## Tab pinning in a shared browser
+
+Full isolation applies when each session launches its own browser. When sessions instead share one Chrome over `--cdp`, only the tab selection separates them. Each session remembers which tab it is bound to (by CDP target id, persisted across daemon restarts), so a restarted daemon reattaches to the session's own tab instead of adopting the most recently active one.
+
+Add `--pin-tab` (or set `AGENT_BROWSER_PIN_TAB=1`) to make the binding strict:
+
+```bash
+agent-browser --session agent1 --cdp 9222 --pin-tab open https://site-a.com
+agent-browser --session agent2 --cdp 9222 --pin-tab open https://site-b.com
+```
+
+With `--pin-tab`, a session whose bound tab was closed gets a `tab_gone` error instead of silently acting on another session's tab; run `tab new <url>` or pick a tab from `tab list` to recover. JSON output includes <code>"code": "tab_gone"</code>, <code>data.targetId</code>, and optional sanitized <code>data.lastUrl</code>. Batch output uses <code>result</code> for the same recovery object. The flag is sticky per session; pass `--no-pin-tab` to turn it off again. See [CDP Mode](/cdp-mode) for details.
+
+## Chrome profile reuse
+
+The simplest way to reuse your existing login state: pass a Chrome profile name to `--profile`. agent-browser copies the profile to a temp directory (read-only snapshot) and launches Chrome with your existing cookies and sessions.
+
+```bash
+# List available Chrome profiles
+agent-browser profiles
+
+# Reuse your default Chrome profile's login state
+agent-browser --profile Default open https://gmail.com
+
+# Use a named profile (by display name or directory name)
+agent-browser --profile "Work" open https://app.example.com
+
+# Or via environment variable
+AGENT_BROWSER_PROFILE=Default agent-browser open https://gmail.com
+```
+
+<table>
+  <thead>
+    <tr><th>Detail</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Supported browsers</td><td>Chrome, Chrome Canary, Chromium, Brave</td></tr>
+    <tr><td>What's copied</td><td>Cookies, local storage, extensions state (cache dirs excluded for speed)</td></tr>
+    <tr><td>Original profile</td><td>Never modified (read-only snapshot)</td></tr>
+    <tr><td>Cleanup</td><td>Temp copy deleted when browser closes</td></tr>
+    <tr><td>Windows note</td><td>Close Chrome before using <code>--profile &lt;name&gt;</code> if Chrome is running</td></tr>
+  </tbody>
+</table>
+
 ## Persistent profiles
 
-By default, browser state is lost when the browser closes. Use `--profile` to persist state across restarts:
+For a custom profile directory that persists state across browser restarts, pass a path to `--profile`:
 
 ```bash
 # Use a persistent profile directory
@@ -83,51 +133,54 @@ agent-browser --auto-connect state save ./my-auth.json
 # Load auth at launch
 agent-browser --state ./my-auth.json open https://app.example.com/dashboard
 
-# Or load into an existing session
+# Or load into an already-launched session
+agent-browser open about:blank
 agent-browser state load ./my-auth.json
 agent-browser open https://app.example.com/dashboard
 ```
 
-Combine with `--session-name` so the imported auth auto-persists across restarts:
+Combine with `--session <id> --restore` so the imported auth auto-persists across restarts:
 
 ```bash
-agent-browser --session-name myapp state load ./my-auth.json
-# From now on, state auto-saves/restores for "myapp"
+SESSION="$(agent-browser session id --scope worktree --prefix myapp)"
+agent-browser --session "$SESSION" --restore --state ./my-auth.json open https://app.example.com/dashboard
+# From now on, state auto-saves/restores for this session
 ```
 
 State files contain session tokens in plaintext. Add them to `.gitignore` and delete when no longer needed. For encryption at rest, see [State encryption](#state-encryption) below.
 
 ## Session persistence
 
-Use `--session-name` to automatically save and restore cookies and localStorage across browser restarts:
+Use `--restore` with a stable `--session` to automatically save and restore cookies and localStorage across browser restarts:
 
 ```bash
-# Auto-save/load state for "twitter" session
-agent-browser --session-name twitter open twitter.com
+# Auto-save/load state for this worktree
+SESSION="$(agent-browser session id --scope worktree --prefix twitter)"
+agent-browser --session "$SESSION" --restore open twitter.com
 
 # Login once, then state persists automatically
-agent-browser --session-name twitter click "#login"
+agent-browser --session "$SESSION" --restore click "#login"
 
-# Or via environment variable
-export AGENT_BROWSER_SESSION_NAME=twitter
-agent-browser open twitter.com
+# Optional validation prevents a bad restore from overwriting the previous good state
+agent-browser --session "$SESSION" --restore --restore-check-text Dashboard open twitter.com
 ```
 
-State files are stored in `~/.agent-browser/sessions/` and automatically loaded on daemon start.
+State files are stored in `~/.agent-browser/sessions/` and automatically loaded before navigation. With the default `--restore-save auto` policy, failed restore or failed validation skips auto-save.
 
-### Session name rules
+When `--restore` or another restore key is configured, state is saved when the browser closes (explicit `close`, idle timeout, or daemon shutdown) and also periodically while the browser is open, so a browser window you close by hand still leaves a recent save behind. A session ID by itself only isolates the daemon and does not enable persistence; without a restore key, shutdown discards transient browser state and open tabs. Periodic autosave waits for commands to settle, then saves at most once per `AGENT_BROWSER_AUTOSAVE_INTERVAL_MS` (default 30000; set to `0` to save only on close). Idle sessions with configured persistence keep saving on the same interval, so changes the page makes on its own (token refreshes, background requests) are captured too. The daemon exits after one hour without commands or dashboard input by default; `--idle-timeout <time>` or `AGENT_BROWSER_IDLE_TIMEOUT_MS` tunes this, and `0` disables it. Headed, Safari/iOS WebDriver, and user-attached browsers are exempt from the default timeout; provider-owned cloud browsers are not. State saving respects the `--restore-save` policy.
 
-Session names must contain only alphanumeric characters, hyphens, and underscores:
+### Restore key rules
+
+Session and restore names must contain only alphanumeric characters, hyphens, and underscores. Use `agent-browser session id` to generate a valid key:
 
 ```bash
-# Valid session names
-agent-browser --session-name my-project open example.com
-agent-browser --session-name test_session_v2 open example.com
+# Valid generated key
+agent-browser session id --scope worktree --prefix my-project
 
 # Invalid (will be rejected)
-agent-browser --session-name "../bad" open example.com    # path traversal
-agent-browser --session-name "my session" open example.com # spaces
-agent-browser --session-name "foo/bar" open example.com    # slashes
+agent-browser --session "../bad" --restore open example.com    # path traversal
+agent-browser --session "my session" --restore open example.com # spaces
+agent-browser --session "foo/bar" --restore open example.com    # slashes
 ```
 
 ## State encryption
@@ -142,7 +195,7 @@ openssl rand -hex 32
 export AGENT_BROWSER_ENCRYPTION_KEY=<your-64-char-hex-key>
 
 # State files are now encrypted automatically
-agent-browser --session-name secure-session open example.com
+agent-browser --session secure-session --restore open example.com
 
 # List states shows encryption status
 agent-browser state list
@@ -229,7 +282,15 @@ agent-browser set headers '{"X-Custom-Header": "value"}'
   </thead>
   <tbody>
     <tr><td><code>AGENT_BROWSER_SESSION</code></td><td>Browser session ID (default: "default")</td></tr>
-    <tr><td><code>AGENT_BROWSER_SESSION_NAME</code></td><td>Auto-save/load state persistence name</td></tr>
+    <tr><td><code>AGENT_BROWSER_NAMESPACE</code></td><td>Namespace for daemon sockets and restore-state directories</td></tr>
+    <tr><td><code>AGENT_BROWSER_PIN_TAB</code></td><td>Pin the session to its bound tab (strict tab binding)</td></tr>
+    <tr><td><code>AGENT_BROWSER_RESTORE</code></td><td>Auto-save/load state persistence key</td></tr>
+    <tr><td><code>AGENT_BROWSER_RESTORE_SAVE</code></td><td>Restore save policy: <code>auto</code>, <code>always</code>, or <code>never</code></td></tr>
+    <tr><td><code>AGENT_BROWSER_AUTOSAVE_INTERVAL_MS</code></td><td>Minimum ms between periodic session autosaves (default: 30000, <code>0</code> disables)</td></tr>
+    <tr><td><code>AGENT_BROWSER_RESTORE_CHECK_URL</code></td><td>URL pattern restored state must match</td></tr>
+    <tr><td><code>AGENT_BROWSER_RESTORE_CHECK_TEXT</code></td><td>Page text restored state must contain</td></tr>
+    <tr><td><code>AGENT_BROWSER_RESTORE_CHECK_FN</code></td><td>JavaScript expression restored state must satisfy</td></tr>
+    <tr><td><code>AGENT_BROWSER_SESSION_NAME</code></td><td>Legacy auto-save/load state persistence name</td></tr>
     <tr><td><code>AGENT_BROWSER_ENCRYPTION_KEY</code></td><td>64-char hex key for AES-256-GCM encryption</td></tr>
     <tr><td><code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code></td><td>Auto-delete states older than N days (default: 30)</td></tr>
   </tbody>

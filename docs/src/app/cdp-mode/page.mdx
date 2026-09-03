@@ -32,6 +32,8 @@ The `--cdp` flag accepts either:
 - A port number (e.g., `9222`) for local connections via `http://localhost:{port}`
 - A full WebSocket URL (e.g., `wss://...` or `ws://...`) for remote browser services
 
+Root WebSocket endpoints accept query strings with or without an explicit slash, so both `wss://browser-service.com?token=...` and `wss://browser-service.com/?token=...` work.
+
 ## Auto-Connect
 
 Use `--auto-connect` to automatically discover and connect to a running Chrome instance without specifying a port:
@@ -56,6 +58,31 @@ This is useful when:
 - Chrome 144+ has remote debugging enabled via `chrome://inspect/#remote-debugging` (which uses a dynamic port)
 - You want a zero-configuration connection to your existing browser
 - You don't want to track which port Chrome is using
+
+## Tab pinning
+
+When several sessions share one browser over CDP, each session remembers which tab it is bound to (by CDP target id, persisted across daemon restarts). A restarted daemon reattaches to the session's own tab instead of adopting whatever tab is currently active, which in a shared browser is usually another session's.
+
+Pass `--pin-tab` (or set `AGENT_BROWSER_PIN_TAB=1`) to make the binding strict:
+
+```bash
+# Two agents sharing one Chrome, each pinned to its own tab
+agent-browser --session agent1 --cdp 9222 --pin-tab open https://site-a.com
+agent-browser --session agent2 --cdp 9222 --pin-tab open https://site-b.com
+```
+
+With `--pin-tab`:
+
+- Attaching with no binding opens a fresh tab instead of adopting an existing one
+- If the bound tab is closed, commands fail with a `tab_gone` error instead of silently acting on another tab. JSON responses carry <code>"code": "tab_gone"</code>, <code>data.targetId</code>, and optional <code>data.lastUrl</code>
+- `tab list`, `tab new`, and `tab <ref>` still work in that state, so an agent can recover by binding a new tab
+- Tabs opened by other sessions or the user never steal the pinned session's active tab
+
+The flag is sticky per session: pass it once and later commands and daemon restarts keep the strict semantics. Pass `--no-pin-tab` to explicitly turn the pin off again. See [Sessions](/sessions) for the multi-session workflow and [Commands](/commands) for tab refs by CDP target id.
+
+The structured <code>lastUrl</code> is emitted only for sanitized HTTP(S) URLs and <code>about:blank</code>. Credentials, query strings, and fragments are removed from HTTP(S) URLs, while opaque URLs such as <code>data:</code> are omitted. Batch JSON exposes the recovery object under <code>result</code>.
+
+When re-running a shared-tab script such as the repro from #1530, add `--pin-tab` to the first command for every session. Without it, `open` intentionally preserves the legacy behavior and navigates the shared active tab, so the original script still collides. The same rule applies when sessions attach with `--auto-connect` instead of `--cdp`.
 
 ## Color scheme
 
@@ -91,7 +118,7 @@ This enables control of:
   <tbody>
     <tr><td><code>--session &lt;name&gt;</code></td><td>Use isolated session</td></tr>
     <tr><td><code>--profile &lt;path&gt;</code></td><td>Persistent browser profile directory</td></tr>
-    <tr><td><code>-p &lt;provider&gt;</code></td><td>Cloud browser provider (<code>browserbase</code>, <code>browseruse</code>, <code>kernel</code>, <code>browserless</code>)</td></tr>
+    <tr><td><code>-p &lt;provider&gt;</code></td><td>Browser provider (<code>browserbase</code>, <code>browseruse</code>, <code>kernel</code>, <code>browserless</code>, <code>agentcore</code>, or a configured <code>browser.provider</code> plugin)</td></tr>
     <tr><td><code>--headers &lt;json&gt;</code></td><td>HTTP headers scoped to origin</td></tr>
     <tr><td><code>--executable-path</code></td><td>Custom browser executable</td></tr>
     <tr><td><code>--args &lt;args&gt;</code></td><td>Browser launch args (comma-separated)</td></tr>
@@ -100,10 +127,12 @@ This enables control of:
     <tr><td><code>--proxy-bypass &lt;hosts&gt;</code></td><td>Hosts to bypass proxy</td></tr>
     <tr><td><code>--json</code></td><td>JSON output for scripts</td></tr>
     <tr><td><code>--name, -n</code></td><td>Locator name filter</td></tr>
-    <tr><td><code>--exact</code></td><td>Exact text match</td></tr>
+    <tr><td><code>--exact</code></td><td>Exact, case-sensitive match (accessible name for role)</td></tr>
     <tr><td><code>--headed</code></td><td>Show browser window</td></tr>
     <tr><td><code>{"--cdp <port|url>"}</code></td><td>CDP connection (port or WebSocket URL)</td></tr>
     <tr><td><code>--auto-connect</code></td><td>Auto-discover and connect to running Chrome</td></tr>
+    <tr><td><code>--pin-tab</code></td><td>Pin the session to its bound tab (strict tab binding)</td></tr>
+    <tr><td><code>--no-pin-tab</code></td><td>Disable a sticky pin previously enabled with <code>--pin-tab</code></td></tr>
     <tr><td><code>--color-scheme &lt;scheme&gt;</code></td><td>Persistent color scheme (<code>dark</code>, <code>light</code>, <code>no-preference</code>)</td></tr>
     <tr><td><code>--debug</code></td><td>Debug output</td></tr>
   </tbody>
@@ -111,10 +140,10 @@ This enables control of:
 
 ## Cloud providers
 
-Use the `-p` flag to connect to a cloud browser provider instead of launching a local browser:
+Use the `-p` flag to connect to a cloud browser provider or configured `browser.provider` plugin instead of launching a local browser:
 
 ```bash
 agent-browser -p browserbase open https://example.com
 ```
 
-See the [Providers](/providers/browser-use) section for setup and configuration of each supported provider: [Browser Use](/providers/browser-use), [Browserbase](/providers/browserbase), [Browserless](/providers/browserless), and [Kernel](/providers/kernel).
+See the [Providers](/providers/browser-use) section for setup and configuration of each built-in provider: [Browser Use](/providers/browser-use), [Browserbase](/providers/browserbase), [Browserless](/providers/browserless), [Kernel](/providers/kernel), and [AgentCore](/providers/agentcore).

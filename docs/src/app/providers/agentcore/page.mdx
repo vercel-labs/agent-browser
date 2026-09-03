@@ -1,0 +1,89 @@
+# AgentCore
+
+[AWS Bedrock AgentCore](https://aws.amazon.com/bedrock/agentcore/) provides cloud browser sessions with SigV4 authentication. Use it when running agent-browser in AWS environments or when you need managed cloud browsers backed by AWS infrastructure.
+
+## Setup
+
+Credentials are automatically resolved from:
+
+1. Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
+2. AWS CLI (`aws configure export-credentials`) which supports SSO, profiles, IAM roles, etc.
+
+```bash
+agent-browser -p agentcore open https://example.com
+```
+
+Or use environment variables for CI/scripts:
+
+```bash
+export AGENT_BROWSER_PROVIDER=agentcore
+agent-browser open https://example.com
+```
+
+The `-p` flag takes precedence over `AGENT_BROWSER_PROVIDER`.
+
+## Configuration
+
+<table>
+  <thead>
+    <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>AGENTCORE_REGION</code></td><td>AWS region for the AgentCore endpoint</td><td><code>us-east-1</code></td></tr>
+    <tr><td><code>AGENTCORE_BROWSER_ID</code></td><td>Browser identifier</td><td><code>aws.browser.v1</code></td></tr>
+    <tr><td><code>AGENTCORE_PROFILE_ID</code></td><td>Browser profile for persistent state (cookies, localStorage)</td><td>(none)</td></tr>
+    <tr><td><code>AGENTCORE_SESSION_TIMEOUT</code></td><td>Session timeout in seconds</td><td><code>3600</code></td></tr>
+    <tr><td><code>AWS_PROFILE</code></td><td>AWS CLI profile for credential resolution</td><td><code>default</code></td></tr>
+    <tr><td><code>AWS_ACCESS_KEY_ID</code></td><td>AWS access key (checked before AWS CLI fallback)</td><td>(none)</td></tr>
+    <tr><td><code>AWS_SECRET_ACCESS_KEY</code></td><td>AWS secret key</td><td>(none)</td></tr>
+    <tr><td><code>AWS_SESSION_TOKEN</code></td><td>Temporary session token (for STS/SSO credentials)</td><td>(none)</td></tr>
+  </tbody>
+</table>
+
+## Browser Profiles
+
+Use `AGENTCORE_PROFILE_ID` to persist browser state (cookies, localStorage) across sessions:
+
+```bash
+AGENTCORE_PROFILE_ID=my-profile agent-browser -p agentcore open https://example.com
+```
+
+When a profile is set, AgentCore stores and restores browser state automatically between sessions.
+
+## Live View
+
+When a session starts, AgentCore prints a Live View URL to stderr:
+
+```
+Session: abc123-def456
+Live View: https://us-east-1.console.aws.amazon.com/bedrock-agentcore/browser/aws.browser.v1/session/abc123-def456#
+```
+
+Open this URL in your browser to watch the agent session in real time from the AWS Console.
+
+## Credential Resolution
+
+AgentCore uses lightweight manual SigV4 signing (no AWS SDK dependency). Credentials are resolved in order:
+
+1. **Environment variables** (`AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, optionally `AWS_SESSION_TOKEN`)
+2. **AWS CLI** (`aws configure export-credentials --format env`), which supports SSO, IAM roles, credential files, and profiles
+
+If using SSO, run `aws sso login` before launching agent-browser. Set `AWS_PROFILE` to select a specific named profile.
+
+## Example
+
+```bash
+# Basic usage (credentials auto-resolved via AWS CLI)
+agent-browser -p agentcore open https://example.com
+
+# With a browser profile for persistent login state
+AGENTCORE_PROFILE_ID=my-profile agent-browser -p agentcore open https://x.com/home
+
+# With explicit region
+AGENTCORE_REGION=eu-west-1 agent-browser -p agentcore open https://example.com
+
+# With SSO profile
+AWS_PROFILE=my-sso-profile agent-browser -p agentcore open https://example.com
+```
+
+When enabled, agent-browser connects to an AgentCore cloud browser session instead of launching a local browser. All commands work identically.

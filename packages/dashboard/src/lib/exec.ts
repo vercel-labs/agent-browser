@@ -1,5 +1,3 @@
-const DASHBOARD_PORT = 4848;
-
 export interface ExecResult {
   success: boolean;
   exit_code: number | null;
@@ -9,7 +7,7 @@ export interface ExecResult {
 
 export async function execCommand(args: string[]): Promise<ExecResult> {
   try {
-    const resp = await fetch(`http://localhost:${DASHBOARD_PORT}/api/exec`, {
+    const resp = await fetch("/api/exec", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ args }),
@@ -31,7 +29,7 @@ export function sessionArgs(session: string, ...args: string[]): string[] {
 
 export async function killSession(session: string): Promise<{ success: boolean; killed_pid?: number }> {
   try {
-    const resp = await fetch(`http://localhost:${DASHBOARD_PORT}/api/kill`, {
+    const resp = await fetch("/api/kill", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session }),

@@ -1,7 +1,6 @@
 # Streaming
 
-Stream the browser viewport via WebSocket for live preview or "pair browsing"
-where a human can watch and interact alongside an AI agent.
+Stream the browser viewport via WebSocket for live preview or "pair browsing" where a human can watch and interact alongside an AI agent.
 
 ## Streaming
 
@@ -22,6 +21,8 @@ agent-browser stream disable           # Stop streaming for the session
 ```
 
 `stream status` returns the enabled state, active port, browser connection state, and whether screencasting is active. `stream disable` tears the server down and removes the session's `.stream` metadata file.
+
+Use [Video Recording](/recording) when you need a saved WebM artifact instead of a live WebSocket stream.
 
 ## Runtime status response
 
@@ -48,6 +49,10 @@ The lower-level `screencast_start` and `screencast_stop` commands still control 
 
 Connect to `ws://localhost:9223` to receive frames and send input.
 
+Frame encoding is set per daemon with `AGENT_BROWSER_STREAM_QUALITY` (0 to 100), `AGENT_BROWSER_STREAM_MAX_WIDTH` and `AGENT_BROWSER_STREAM_MAX_HEIGHT`. The live stream requests jpeg. An explicit `screencast_start` reconfigures the same underlying screencast, so a client can see the format change mid-stream. Width and height cap the frame and default to the session viewport. On a busy page at 1280x720, quality 80 costs about 54 KB per frame, quality 20 about 25 KB, and quality 20 at 640x360 about 9 KB.
+
+Browser clients must load from `localhost`, `127.0.0.1`, `::1` or `file://`. Any other origin gets a 403 on the upgrade and needs a proxy.
+
 ### Frame messages
 
 The server sends frame messages with base64-encoded images:
@@ -55,6 +60,7 @@ The server sends frame messages with base64-encoded images:
 ```json
 {
   "type": "frame",
+  "seq": 41,
   "data": "<base64-encoded-jpeg>",
   "metadata": {
     "deviceWidth": 1280,
@@ -62,10 +68,29 @@ The server sends frame messages with base64-encoded images:
     "pageScaleFactor": 1,
     "offsetTop": 0,
     "scrollOffsetX": 0,
-    "scrollOffsetY": 0
+    "scrollOffsetY": 0,
+    "timestamp": 1785038682238
   }
 }
 ```
+
+`seq` is a monotonic frame id. It is what an ack pacing client echoes back, and it keeps climbing across browser relaunches so a long-lived client never sees an id go backwards.
+
+`metadata.timestamp` is the capture time in epoch milliseconds. Comparing it against the clock when the frame is drawn gives the age of what is on screen, which is the number worth watching on a constrained link.
+
+### URL messages
+
+On Chrome, the server sends URL updates for full-document, History API, and fragment navigation in the active tab's main frame:
+
+```json
+{
+  "type": "url",
+  "url": "https://example.com/dashboard#activity",
+  "timestamp": 1785038682238
+}
+```
+
+Navigation inside child frames or background tabs does not emit a URL message or replace the active tab's cached URL.
 
 ### Status messages
 
@@ -81,9 +106,68 @@ Connection and screencast status:
 }
 ```
 
+### Frame delivery
+
+Frames are delivered latest-first: the server holds only the newest frame and reads it at send time, so every frame produced while an earlier one is still being written is skipped instead of queued. The application never builds a backlog.
+
+In the default push pacing the transport underneath still can: frames already accepted by the socket are delivered in order, so a client that stops reading entirely drains whatever the kernel buffered before the writer blocked. Ack pacing removes that window (see below). Status, console, and tab messages flow through a separate ordered channel, so they are never replaced by a newer message the way frames are. They are not unconditionally durable: a client that falls far enough behind can lag out of that channel and lose messages, so treat console output as a live feed rather than an audit log.
+
+Input handling is independent of frame delivery. Each connection reads input on its own task, so clicks and keystrokes dispatch to the browser immediately even while a large frame is mid-write to a slow client. Events go to the browser without waiting for its reply, so a click stays responsive behind a burst of mouse moves, and ordering is preserved.
+
+### Client configuration
+
+A client can cap its own frame rate by sending a `config` message at any time:
+
+```json
+{
+  "type": "config",
+  "maxFps": 10
+}
+```
+
+`maxFps` caps how many frames per second the server sends to this client (1 to 120). Set `0` to remove the cap (the default). Each client controls its own rate; other connected clients are unaffected.
+
+### Ack pacing
+
+Push pacing hands each frame to the socket as soon as the rate allows, so a client that stalls drains what the transport buffered. To get one frame at a time instead, opt into ack pacing:
+
+```json
+{
+  "type": "config",
+  "pacing": "ack"
+}
+```
+
+The server then keeps at most one frame in flight and waits for the client to acknowledge it:
+
+```json
+{
+  "type": "ack",
+  "seq": 41
+}
+```
+
+Every `frame` message carries a monotonic `seq`. Echo the id of the frame you finished rendering. While an ack is outstanding, newer frames replace each other in the server and never reach the socket, so a client that stalls for ten seconds and resumes receives the current page rather than ten seconds of history. This mirrors how Chrome paces its own screencast upstream with `Page.screencastFrameAck`.
+
+Under ack pacing one frame is in flight at a time, so the rate is one frame per transfer plus one acknowledgement round trip. Both the link's bandwidth and its latency bound it, and a link whose bandwidth-delay product exceeds a single frame goes underused. That headroom is the cost of the freshness guarantee.
+
+Ack pacing bounds one hop. With a proxy in the path, forward the renderer's acks; acks generated on receipt leave frames queued on the far side.
+
+Acks are cumulative: acknowledging a newer id covers every older one, so a client that skips ids still unblocks delivery. A client that opts in and then stops acknowledging simply stops receiving frames, while status, tabs, url, and console keep flowing. Send `{"type":"config","pacing":"push"}` to return to the default.
+
+`pacing` and `maxFps` are independent and compose: pacing bounds how much is in flight, `maxFps` bounds the rate. A preview on a constrained link usually wants both.
+
+A `config` message cannot cover the connection's opening frame, because the server sends the most recent frame as soon as the client connects. To have pacing apply from the very first frame, declare it on the URL instead:
+
+```
+ws://127.0.0.1:<port>/?pacing=ack&maxFps=10
+```
+
+A `config` message sent later still wins. An unrecognized or unparsable value on the URL is ignored rather than failing the connection.
+
 ## Input injection
 
-Send input events to control the browser remotely.
+Send input events to control the browser remotely. Mouse, keyboard, and touch input reset the daemon idle timer, so an actively controlled dashboard or streaming session is not shut down by the default timeout.
 
 ### Mouse events
 

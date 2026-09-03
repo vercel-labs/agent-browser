@@ -15,15 +15,21 @@ This project uses **pnpm**. Always use `pnpm` instead of `npm` or `yarn` for ins
 
 ## Documentation
 
+Do not hard-wrap prose in documentation files such as Markdown, MDX, and READMEs; let the editor or renderer wrap text naturally.
+
 When adding or changing user-facing features (new flags, commands, behaviors, environment variables, etc.), update **all** of the following:
 
 1. `cli/src/output.rs` — `--help` output (flags list, examples, environment variables)
 2. `README.md` — Options table, relevant feature sections, examples
-3. `skills/agent-browser/SKILL.md` — so AI agents know about the feature
+3. `skill-data/core/SKILL.md` (and its `references/`) — so AI agents know about the feature when they load the core skill. Edit `skill-data/core/SKILL.md` for overview/workflow changes; edit `skill-data/core/references/*.md` for detailed reference content. Do **not** put feature content in `skills/agent-browser/SKILL.md` — that file is an intentionally thin discovery stub for `npx skills add` and exists only to redirect agents to `agent-browser skills get core`.
 4. `docs/src/app/` — the Next.js docs site (MDX pages)
 5. Inline doc comments in the relevant source files
 
 This applies to changes that either human users or AI agents would need to know about. Do not skip any of these locations.
+
+## CLI/MCP Parity
+
+When adding or changing any CLI command, flag, behavior, output, environment variable, or parser semantics, update the MCP server in `cli/src/mcp.rs` in the same change. MCP tools should stay in sync with canonical CLI behavior by delegating through the normal CLI parser where possible. If a CLI command has no dedicated MCP tool, add one or document why it is intentionally omitted. Add or update tests that prove the CLI and MCP surfaces remain aligned.
 
 In the `docs/src/app/` MDX files, always use HTML `<table>` syntax for tables (not markdown pipe tables). This matches the existing convention across the docs site.
 
@@ -41,7 +47,7 @@ To prepare a release:
 1. Create a branch (e.g. `prepare-v0.24.0`)
 2. Bump `version` in `package.json`
 3. Run `pnpm version:sync` to update `cli/Cargo.toml`, `cli/Cargo.lock`, and `packages/dashboard/package.json`
-4. Write the changelog entry in `CHANGELOG.md` at the top, under a new `## <version>` heading, wrapped in `<!-- release:start -->` and `<!-- release:end -->` markers
+4. Write the changelog entry in `CHANGELOG.md` at the top, under a new `## <version>` heading, wrapped in `<!-- release:start -->` and `<!-- release:end -->` markers. Remove the `<!-- release:start -->` and `<!-- release:end -->` markers from the previous release entry so only the new release has markers.
 5. Add a matching entry to `docs/src/app/changelog/page.mdx` at the top (below the `# Changelog` heading)
 6. Open a PR and merge to `main`
 
@@ -51,16 +57,12 @@ When the PR merges, CI compares `package.json` version to what's on npm. If it d
 
 Review the git log since the last release and write the entry in `CHANGELOG.md`. Follow the existing format and voice. Group changes under `### New Features`, `### Bug Fixes`, `### Improvements`, etc. Bold the feature/fix name, then describe it concisely. Reference PR numbers in parentheses.
 
-Wrap the release notes (everything between the `## <version>` heading and the previous version) in markers so CI can extract them for the GitHub release:
+Wrap the release notes (everything between the `## <version>` heading and the previous version) in markers so CI can extract them for the GitHub release. Only the current release should have markers; remove the `<!-- release:start -->` and `<!-- release:end -->` markers from any previous release entry:
 
 ```markdown
-## 0.24.0
+## 0.24.1
 
 <!-- release:start -->
-### New Features
-
-- **Foo command** - Added `foo` command for bar (#1234)
-
 ### Bug Fixes
 
 - Fixed **baz** not working when qux is enabled (#1235)
@@ -68,10 +70,13 @@ Wrap the release notes (everything between the `## <version>` heading and the pr
 ### Contributors
 
 - @ctate
-- @somecontributor
 <!-- release:end -->
 
-## 0.23.3
+## 0.24.0
+
+### New Features
+
+- **Foo command** - Added `foo` command for bar (#1234)
 ```
 
 Include a `### Contributors` section listing the GitHub usernames (with `@` prefix) of everyone who contributed to the release. Check the git log between the previous tag and HEAD to find them.

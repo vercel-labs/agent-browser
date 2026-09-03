@@ -1,7 +1,6 @@
 # iOS Simulator
 
-Control real Mobile Safari in the iOS Simulator for authentic mobile
-web testing. Uses Appium with XCUITest for native automation.
+Control real Mobile Safari in the iOS Simulator for authentic mobile web testing. Uses Appium with XCUITest for native automation.
 
 ## Requirements
 
@@ -40,8 +39,7 @@ agent-browser device list
 
 ## Basic usage
 
-Use the `-p ios` flag to enable iOS mode. The workflow is
-identical to desktop:
+Use the `-p ios` flag to enable iOS mode. The workflow is identical to desktop:
 
 ```bash
 # Launch Safari on iPhone 16 Pro
@@ -114,8 +112,7 @@ All iOS Simulators available in Xcode are supported, including:
 
 ## Real device support
 
-Appium can control Safari on real iOS devices connected via USB. This
-requires additional one-time setup.
+Appium can control Safari on real iOS devices connected via USB. This requires additional one-time setup.
 
 ### 1. Get your device UDID
 
@@ -129,8 +126,7 @@ system_profiler SPUSBDataType | grep -A 5 "iPhone\|iPad"
 
 ### 2. Sign WebDriverAgent (one-time)
 
-WebDriverAgent needs to be signed with your Apple Developer
-certificate to run on real devices.
+WebDriverAgent needs to be signed with your Apple Developer certificate to run on real devices.
 
 ```bash
 # Open the WebDriverAgent Xcode project
@@ -203,5 +199,4 @@ Open Xcode and download iOS Simulator runtimes from **Settings → Platforms**.
 
 ### Simulator won't boot
 
-Try booting the simulator manually from Xcode or the Simulator app to
-ensure it works, then retry with agent-browser.
+Try booting the simulator manually from Xcode or the Simulator app to ensure it works, then retry with agent-browser.

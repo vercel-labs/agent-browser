@@ -6,6 +6,25 @@ use super::cdp::client::CdpClient;
 use super::cdp::types::*;
 use super::element::{resolve_element_center, resolve_element_object_id, RefMap};
 
+/// Outcome of a click. `dialog_opened` is true if a JavaScript dialog opened
+/// mid-sequence (the page is then blocked until `dialog accept`/`dismiss`).
+/// `pending_release` is set only when the dialog opened after mousePressed but
+/// before mouseReleased: the button is logically held until the caller
+/// dispatches the release (done once the dialog is resolved), otherwise the
+/// next click would register as a drag or double-click.
+#[derive(Default)]
+pub struct ClickResult {
+    pub dialog_opened: bool,
+    pub pending_release: Option<PendingRelease>,
+}
+
+pub struct PendingRelease {
+    pub session_id: String,
+    pub x: f64,
+    pub y: f64,
+    pub button: String,
+}
+
 pub async fn click(
     client: &CdpClient,
     session_id: &str,
@@ -14,7 +33,7 @@ pub async fn click(
     button: &str,
     click_count: i32,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<ClickResult, String> {
     let (x, y, effective_session_id) = resolve_element_center(
         client,
         session_id,
@@ -23,7 +42,19 @@ pub async fn click(
         iframe_sessions,
     )
     .await?;
-    dispatch_click(client, &effective_session_id, x, y, button, click_count).await
+    // A click-triggered dialog can fire on the frame's own session (OOPIF) or
+    // on the top-level page session; both count as "ours". A dialog on any
+    // other session belongs to a background tab and must not abort this click.
+    dispatch_click(
+        client,
+        &effective_session_id,
+        &[effective_session_id.as_str(), session_id],
+        x,
+        y,
+        button,
+        click_count,
+    )
+    .await
 }
 
 pub async fn dblclick(
@@ -32,7 +63,7 @@ pub async fn dblclick(
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<ClickResult, String> {
     click(
         client,
         session_id,
@@ -407,16 +438,26 @@ pub async fn select_option(
     )
     .await?;
 
+    // Matching nothing must be an error, not a silent success: an agent that
+    // selects a misspelled option otherwise sees "Done", and only discovers
+    // the page state is wrong after more commands. List what was available.
     let js = r#"function(vals) {
             const options = Array.from(this.options);
+            let matched = 0;
             for (const opt of options) {
                 opt.selected = vals.includes(opt.value) || vals.includes(opt.textContent.trim());
+                if (opt.selected) matched += 1;
+            }
+            if (matched === 0) {
+                const available = options.map(o => o.value + ' ("' + o.textContent.trim() + '")').join(', ');
+                return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
             }
             this.dispatchEvent(new Event('change', { bubbles: true }));
+            return { matched };
         }"#
     .to_string();
 
-    client
+    let result = client
         .send_command_typed::<_, Value>(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
@@ -432,6 +473,15 @@ pub async fn select_option(
             Some(&effective_session_id),
         )
         .await?;
+
+    if let Some(error) = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .and_then(|v| v.get("error"))
+        .and_then(|e| e.as_str())
+    {
+        return Err(error.to_string());
+    }
 
     Ok(())
 }
@@ -884,32 +934,93 @@ pub async fn tap_touch(
     Ok(())
 }
 
+/// Dispatches one mouse event and waits for the browser to ack it, but
+/// returns Ok(true) if a JavaScript dialog opens first. A synchronous dialog
+/// (confirm/prompt/alert in the event handler) blocks the renderer's main
+/// thread, so the input ack cannot arrive until the dialog is resolved;
+/// without this the command hangs until the client read timeout and the agent
+/// never sees the pending-dialog warning.
+async fn dispatch_mouse_or_dialog(
+    client: &CdpClient,
+    session_id: &str,
+    accept_sessions: &[&str],
+    params: &DispatchMouseEventParams,
+) -> Result<bool, String> {
+    use tokio::sync::broadcast::error::RecvError;
+
+    // Subscribe before sending so the dialog event cannot slip past us.
+    let mut events = client.subscribe();
+    let send =
+        client.send_command_typed::<_, Value>("Input.dispatchMouseEvent", params, Some(session_id));
+    tokio::pin!(send);
+    loop {
+        tokio::select! {
+            res = &mut send => {
+                res?;
+                return Ok(false);
+            }
+            event = events.recv() => {
+                match event {
+                    Ok(e) if e.method == "Page.javascriptDialogOpening" => {
+                        // Only a dialog on this click's frame/page session
+                        // aborts it; a background-tab dialog must not. A
+                        // session-less event has no flat session and is
+                        // treated as the top-level page (i.e. ours).
+                        let ours = match e.session_id.as_deref() {
+                            Some(sid) => accept_sessions.contains(&sid),
+                            None => true,
+                        };
+                        if ours {
+                            return Ok(true);
+                        }
+                        continue;
+                    }
+                    Ok(_) => continue,
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => {
+                        (&mut send).await?;
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn dispatch_click(
     client: &CdpClient,
     session_id: &str,
+    accept_sessions: &[&str],
     x: f64,
     y: f64,
     button: &str,
     click_count: i32,
-) -> Result<(), String> {
+) -> Result<ClickResult, String> {
     // Move
-    client
-        .send_command_typed::<_, Value>(
-            "Input.dispatchMouseEvent",
-            &DispatchMouseEventParams {
-                event_type: "mouseMoved".to_string(),
-                x,
-                y,
-                button: None,
-                buttons: None,
-                click_count: None,
-                delta_x: None,
-                delta_y: None,
-                modifiers: None,
-            },
-            Some(session_id),
-        )
-        .await?;
+    if dispatch_mouse_or_dialog(
+        client,
+        session_id,
+        accept_sessions,
+        &DispatchMouseEventParams {
+            event_type: "mouseMoved".to_string(),
+            x,
+            y,
+            button: None,
+            buttons: None,
+            click_count: None,
+            delta_x: None,
+            delta_y: None,
+            modifiers: None,
+        },
+    )
+    .await?
+    {
+        // No button was pressed yet, nothing to release.
+        return Ok(ClickResult {
+            dialog_opened: true,
+            pending_release: None,
+        });
+    }
 
     let button_value = match button {
         "right" => 2,
@@ -918,43 +1029,86 @@ async fn dispatch_click(
     };
 
     // Press
-    client
-        .send_command_typed::<_, Value>(
-            "Input.dispatchMouseEvent",
-            &DispatchMouseEventParams {
-                event_type: "mousePressed".to_string(),
+    if dispatch_mouse_or_dialog(
+        client,
+        session_id,
+        accept_sessions,
+        &DispatchMouseEventParams {
+            event_type: "mousePressed".to_string(),
+            x,
+            y,
+            button: Some(button.to_string()),
+            buttons: Some(button_value),
+            click_count: Some(click_count),
+            delta_x: None,
+            delta_y: None,
+            modifiers: None,
+        },
+    )
+    .await?
+    {
+        // Dialog opened from the mousedown handler: the button is held and the
+        // release will never arrive on its own. Hand the caller what it needs
+        // to release once the dialog is resolved.
+        return Ok(ClickResult {
+            dialog_opened: true,
+            pending_release: Some(PendingRelease {
+                session_id: session_id.to_string(),
                 x,
                 y,
-                button: Some(button.to_string()),
-                buttons: Some(button_value),
-                click_count: Some(click_count),
-                delta_x: None,
-                delta_y: None,
-                modifiers: None,
-            },
-            Some(session_id),
-        )
-        .await?;
+                button: button.to_string(),
+            }),
+        });
+    }
 
-    // Release
+    // Release. A dialog here fired from the click/mouseup handler, which runs
+    // after the button is already up, so there is nothing left to release.
+    let dialog_opened = dispatch_mouse_or_dialog(
+        client,
+        session_id,
+        accept_sessions,
+        &DispatchMouseEventParams {
+            event_type: "mouseReleased".to_string(),
+            x,
+            y,
+            button: Some(button.to_string()),
+            buttons: Some(0),
+            click_count: Some(click_count),
+            delta_x: None,
+            delta_y: None,
+            modifiers: None,
+        },
+    )
+    .await?;
+    Ok(ClickResult {
+        dialog_opened,
+        pending_release: None,
+    })
+}
+
+/// Best-effort mouseReleased to clear a button left logically down when a
+/// dialog opened mid-click. Called after the dialog is resolved.
+pub async fn dispatch_pending_release(
+    client: &CdpClient,
+    release: &PendingRelease,
+) -> Result<(), String> {
     client
         .send_command_typed::<_, Value>(
             "Input.dispatchMouseEvent",
             &DispatchMouseEventParams {
                 event_type: "mouseReleased".to_string(),
-                x,
-                y,
-                button: Some(button.to_string()),
+                x: release.x,
+                y: release.y,
+                button: Some(release.button.clone()),
                 buttons: Some(0),
-                click_count: Some(click_count),
+                click_count: Some(1),
                 delta_x: None,
                 delta_y: None,
                 modifiers: None,
             },
-            Some(session_id),
+            Some(&release.session_id),
         )
         .await?;
-
     Ok(())
 }
 

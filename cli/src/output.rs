@@ -58,20 +58,38 @@ fn truncate_if_needed(content: &str, max: Option<usize>) -> String {
     }
 }
 
-fn print_with_boundaries(content: &str, origin: Option<&str>, opts: &OutputOptions) {
+fn format_with_boundaries(content: &str, origin: Option<&str>, opts: &OutputOptions) -> String {
     let content = truncate_if_needed(content, opts.max_output);
     if opts.content_boundaries {
         let origin_str = origin.unwrap_or("unknown");
         let nonce = get_boundary_nonce();
-        println!(
+        format!(
             "--- AGENT_BROWSER_PAGE_CONTENT nonce={} origin={} ---",
             nonce, origin_str
-        );
-        println!("{}", content);
-        println!("--- END_AGENT_BROWSER_PAGE_CONTENT nonce={} ---", nonce);
+        ) + "\n"
+            + &content
+            + "\n"
+            + &format!("--- END_AGENT_BROWSER_PAGE_CONTENT nonce={} ---", nonce)
     } else {
-        println!("{}", content);
+        content
     }
+}
+
+fn print_with_boundaries(content: &str, origin: Option<&str>, opts: &OutputOptions) {
+    let content = format_with_boundaries(content, origin, opts);
+    print!("{}", content);
+    if !content.ends_with('\n') {
+        println!();
+    }
+}
+
+fn boundary_origin(data: &serde_json::Value) -> Option<&str> {
+    for key in ["origin", "finalUrl", "url"] {
+        if let Some(value) = data.get(key).and_then(|v| v.as_str()) {
+            return Some(value);
+        }
+    }
+    None
 }
 
 fn format_storage_value(value: &serde_json::Value) -> String {
@@ -130,6 +148,291 @@ fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> 
     }
 }
 
+fn format_webmcp_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
+    match action {
+        Some("webmcp_list") => {
+            let tools = data.get("tools")?.as_array()?;
+            if tools.is_empty() {
+                return Some("No WebMCP tools registered on the current page".to_string());
+            }
+            Some(
+                tools
+                    .iter()
+                    .map(format_webmcp_tool_text)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        }
+        Some("webmcp_invoke" | "webmcp_result" | "webmcp_cancel") => {
+            let invocation_id = data.get("invocationId")?.as_str()?;
+            let status = data.get("status")?.as_str()?;
+            let mut output = format!("{}: {}", invocation_id, status);
+            if let Some(result) = data.get("output") {
+                output.push('\n');
+                output.push_str(
+                    &serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string()),
+                );
+            }
+            if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
+                output.push('\n');
+                output.push_str(error);
+            }
+            Some(output)
+        }
+        _ => None,
+    }
+}
+
+fn format_webmcp_tool_text(tool: &serde_json::Value) -> String {
+    let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+    let description = tool
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let frame = tool.get("frameId").and_then(|v| v.as_str()).unwrap_or("?");
+    let origin = tool
+        .get("origin")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    format!("{} [{}]\n  {}\n  {}", name, frame, description, origin)
+}
+
+fn confirmation_data(data: &serde_json::Value) -> Option<&serde_json::Value> {
+    if data
+        .get("confirmation_required")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Some(data);
+    }
+
+    data.get("result")
+        .and_then(|v| v.get("data"))
+        .and_then(confirmation_data)
+}
+
+fn print_confirmation_required(data: &serde_json::Value) {
+    let action = data.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    let category = data.get("category").and_then(|v| v.as_str()).unwrap_or("");
+    let description = data
+        .get("description")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(action);
+    let cid = data
+        .get("confirmation_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(action);
+
+    println!("Confirmation required:");
+    if category.is_empty() {
+        println!("  {}", description);
+    } else {
+        println!("  {}: {}", category, description);
+    }
+    println!("  Run: agent-browser confirm {}", cid);
+    println!("  Or:  agent-browser deny {}", cid);
+}
+
+fn format_metric_ms(value: Option<f64>) -> String {
+    value
+        .map(|v| format!("{}ms", format_compact_number(v)))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_compact_number(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{}", value as i64)
+    } else {
+        let formatted = format!("{:.2}", value);
+        formatted
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    }
+}
+
+fn truncate_field(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    let mut truncated: String = value.chars().take(max_chars.saturating_sub(3)).collect();
+    truncated.push_str("...");
+    truncated
+}
+
+fn format_vitals_text(data: &serde_json::Value) -> String {
+    let url = data.get("url").and_then(|v| v.as_str()).unwrap_or("-");
+    let ttfb = format_metric_ms(data.get("ttfb").and_then(|v| v.as_f64()));
+    let fcp = format_metric_ms(data.get("fcp").and_then(|v| v.as_f64()));
+    let inp = format_metric_ms(data.get("inp").and_then(|v| v.as_f64()));
+    let lcp = data
+        .get("lcp")
+        .and_then(|v| v.get("startTime"))
+        .and_then(|v| v.as_f64());
+    let lcp = format_metric_ms(lcp);
+    let cls = data
+        .get("cls")
+        .and_then(|v| v.get("score"))
+        .and_then(|v| v.as_f64())
+        .map(format_compact_number)
+        .unwrap_or_else(|| "-".to_string());
+
+    let mut lines = vec![
+        format!("url: {}", url),
+        format!(
+            "ttfb: {}  fcp: {}  lcp: {}  cls: {}  inp: {}",
+            ttfb, fcp, lcp, cls, inp
+        ),
+    ];
+
+    if let Some(lcp_data) = data.get("lcp").and_then(|v| v.as_object()) {
+        let element = lcp_data.get("element").and_then(|v| v.as_str());
+        let lcp_url = lcp_data.get("url").and_then(|v| v.as_str());
+        if element.is_some() || lcp_url.is_some() {
+            let mut parts = Vec::new();
+            if let Some(element) = element {
+                parts.push(format!("element: {}", element));
+            }
+            if let Some(lcp_url) = lcp_url {
+                parts.push(format!("asset: {}", truncate_field(lcp_url, 96)));
+            }
+            lines.push(format!("lcp: {}", parts.join("  ")));
+        }
+    }
+
+    let phase_count = data
+        .get("phases")
+        .and_then(|v| v.as_array())
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let component_count = data
+        .get("hydratedComponents")
+        .and_then(|v| v.as_array())
+        .map(|v| v.len())
+        .unwrap_or(0);
+    let hydration = data
+        .get("hydration")
+        .and_then(|v| v.get("duration"))
+        .and_then(|v| v.as_f64());
+    lines.push(format!(
+        "hydration: {}  phases: {}  hydratedComponents: {}",
+        format_metric_ms(hydration),
+        phase_count,
+        component_count
+    ));
+
+    lines.join("\n")
+}
+
+pub(crate) fn format_a11y_text(data: &serde_json::Value) -> String {
+    let url = data.get("url").and_then(|v| v.as_str()).unwrap_or("-");
+    let version = data
+        .get("axeVersion")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let counts = data.get("counts").cloned().unwrap_or_default();
+    let count = |key: &str| counts.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+
+    let mut lines = vec![
+        format!("url: {}", url),
+        format!(
+            "axe-core: {}  violations: {}  incomplete: {}  passes: {}",
+            version,
+            count("violations"),
+            count("incomplete"),
+            count("passes")
+        ),
+    ];
+
+    let render_results = |lines: &mut Vec<String>, results: &[serde_json::Value]| {
+        for r in results {
+            let id = r.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+            let impact = r
+                .get("impact")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let help = r.get("help").and_then(|v| v.as_str()).unwrap_or("");
+            let node_count = r.get("nodeCount").and_then(|v| v.as_u64()).unwrap_or(0);
+            lines.push(format!(
+                "[{}] {}: {} ({} node{})",
+                impact,
+                id,
+                help,
+                node_count,
+                if node_count == 1 { "" } else { "s" }
+            ));
+            if let Some(help_url) = r.get("helpUrl").and_then(|v| v.as_str()) {
+                lines.push(format!("  {}", help_url));
+            }
+            if let Some(nodes) = r.get("nodes").and_then(|v| v.as_array()) {
+                for n in nodes {
+                    if let Some(target) = n.get("target").and_then(format_a11y_target) {
+                        lines.push(format!("  - {}", target));
+                    }
+                }
+                if node_count > nodes.len() as u64 {
+                    lines.push(format!(
+                        "  … and {} more node{}",
+                        node_count - nodes.len() as u64,
+                        if node_count - nodes.len() as u64 == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    ));
+                }
+            }
+        }
+    };
+
+    if let Some(violations) = data.get("violations").and_then(|v| v.as_array()) {
+        if !violations.is_empty() {
+            lines.push(String::new());
+            render_results(&mut lines, violations);
+        }
+    }
+
+    if let Some(incomplete) = data.get("incomplete").and_then(|v| v.as_array()) {
+        if !incomplete.is_empty() {
+            lines.push(String::new());
+            lines.push("incomplete (needs manual review):".to_string());
+            render_results(&mut lines, incomplete);
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn format_a11y_target(target: &serde_json::Value) -> Option<String> {
+    match target {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Array(parts) => {
+            let rendered = parts
+                .iter()
+                .filter_map(|part| match part {
+                    // axe represents a selector that crosses one or more
+                    // shadow roots as a nested array.
+                    serde_json::Value::Array(shadow_parts) => {
+                        let path = shadow_parts
+                            .iter()
+                            .filter_map(format_a11y_target)
+                            .collect::<Vec<_>>()
+                            .join(" >>> ");
+                        (!path.is_empty()).then_some(path)
+                    }
+                    _ => format_a11y_target(part),
+                })
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            (!rendered.is_empty()).then_some(rendered)
+        }
+        _ => None,
+    }
+}
+
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     if opts.json {
         if opts.content_boundaries {
@@ -138,8 +441,7 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 let nonce = get_boundary_nonce();
                 let origin = obj
                     .get("data")
-                    .and_then(|d| d.get("origin"))
-                    .and_then(|v| v.as_str())
+                    .and_then(boundary_origin)
                     .unwrap_or("unknown");
                 obj.insert(
                     "_boundary".to_string(),
@@ -172,6 +474,8 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
     }
 
     if let Some(data) = &resp.data {
+        print_lifecycle_note(data);
+
         // Dialog status response
         if action == Some("dialog") {
             if let Some(has_dialog) = data.get("hasDialog").and_then(|v| v.as_bool()) {
@@ -203,6 +507,31 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             println!("{}", output);
             return;
         }
+        if action == Some("webmcp_list") {
+            let Some(tools) = data.get("tools").and_then(|tools| tools.as_array()) else {
+                return;
+            };
+            if tools.is_empty() {
+                println!("No WebMCP tools registered on the current page");
+                return;
+            }
+            for tool in tools {
+                print_with_boundaries(&format_webmcp_tool_text(tool), boundary_origin(tool), opts);
+            }
+            return;
+        }
+        if let Some(output) = format_webmcp_text(action, data) {
+            print_with_boundaries(&output, boundary_origin(data), opts);
+            return;
+        }
+        if action == Some("vitals") {
+            println!("{}", format_vitals_text(data));
+            return;
+        }
+        if action == Some("a11y") {
+            println!("{}", format_a11y_text(data));
+            return;
+        }
         if action == Some("storage_get") {
             if let Some(output) = format_storage_text(data) {
                 println!("{}", output);
@@ -226,6 +555,16 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             }
             return;
         }
+        if action == Some("read") {
+            if let Some(content) = data.get("content").and_then(|v| v.as_str()) {
+                let origin = data
+                    .get("finalUrl")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| data.get("url").and_then(|v| v.as_str()));
+                print_with_boundaries(content, origin, opts);
+            }
+            return;
+        }
         // Navigation response
         if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
             if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
@@ -238,6 +577,11 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         }
         if let Some(cdp_url) = data.get("cdpUrl").and_then(|v| v.as_str()) {
             println!("{}", cdp_url);
+            return;
+        }
+        // Rich command reports (React renders/suspense and older daemon responses)
+        if let Some(report) = data.get("report").and_then(|v| v.as_str()) {
+            println!("{}", report);
             return;
         }
         // Diff responses -- route by action to avoid fragile shape probing
@@ -294,6 +638,31 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         // Count
         if let Some(count) = data.get("count").and_then(|v| v.as_i64()) {
             println!("{}", count);
+            return;
+        }
+        // Bounding box (get box)
+        if action == Some("boundingbox") {
+            if let Some(obj) = data.as_object() {
+                let x = obj.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let y = obj.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let w = obj.get("width").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let h = obj.get("height").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                println!("x:      {}", x);
+                println!("y:      {}", y);
+                println!("width:  {}", w);
+                println!("height: {}", h);
+            }
+            return;
+        }
+        // Computed styles (get styles)
+        if let Some(styles) = data.get("styles").and_then(|v| v.as_object()) {
+            for (key, val) in styles {
+                let display = match val.as_str() {
+                    Some(s) => s.to_string(),
+                    None => val.to_string(),
+                };
+                println!("{}: {}", key, display);
+            }
             return;
         }
         // Boolean results
@@ -381,7 +750,9 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         }
         // Tabs
         if let Some(tabs) = data.get("tabs").and_then(|v| v.as_array()) {
-            for (i, tab) in tabs.iter().enumerate() {
+            for tab in tabs {
+                let tab_id = tab.get("tabId").and_then(|v| v.as_str()).unwrap_or("?");
+                let tab_label = tab.get("label").and_then(|v| v.as_str());
                 let title = tab
                     .get("title")
                     .and_then(|v| v.as_str())
@@ -393,9 +764,71 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                 } else {
                     " ".to_string()
                 };
-                println!("{} [{}] {} - {}", marker, i, title, url);
+                if let Some(label) = tab_label {
+                    println!("{} [{}] {} {} - {}", marker, tab_id, label, title, url);
+                } else {
+                    println!("{} [{}] {} - {}", marker, tab_id, title, url);
+                }
             }
             return;
+        }
+        // Tab switch
+        if action == Some("tab_switch") {
+            if let Some(tab_id) = data.get("tabId").and_then(|v| v.as_str()) {
+                let note = if data.get("revived").and_then(|v| v.as_bool()) == Some(true) {
+                    " (revived, page may have reloaded)"
+                } else if data.get("dialogBlocked").and_then(|v| v.as_bool()) == Some(true) {
+                    " (dialog open, resolve it with `dialog accept`/`dialog dismiss`)"
+                } else {
+                    ""
+                };
+                if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
+                    println!(
+                        "{} Switched to tab [{}] ({}){}",
+                        color::success_indicator(),
+                        tab_id,
+                        url,
+                        note
+                    );
+                } else {
+                    println!(
+                        "{} Switched to tab [{}]{}",
+                        color::success_indicator(),
+                        tab_id,
+                        note
+                    );
+                }
+                return;
+            }
+        }
+        // New tab/window
+        if let Some(tab_id) = data.get("tabId").and_then(|v| v.as_str()) {
+            if let Some(total) = data.get("total").and_then(|v| v.as_i64()) {
+                let label_noun = match action {
+                    Some("window_new") => "Window opened",
+                    _ => "Tab opened",
+                };
+                let tab_label = data.get("label").and_then(|v| v.as_str());
+                if let Some(lbl) = tab_label {
+                    println!(
+                        "{} {} [{}] {} ({} total)",
+                        color::success_indicator(),
+                        label_noun,
+                        tab_id,
+                        lbl,
+                        total
+                    );
+                } else {
+                    println!(
+                        "{} {} [{}] ({} total)",
+                        color::success_indicator(),
+                        label_noun,
+                        tab_id,
+                        total
+                    );
+                }
+                return;
+            }
         }
         // Console logs
         if let Some(logs) = data.get("messages").and_then(|v| v.as_array()) {
@@ -537,7 +970,25 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         // Closed (browser or tab)
         if data.get("closed").is_some() {
             let label = match action {
-                Some("tab_close") => "Tab closed",
+                Some("tab_close") => {
+                    if let Some(closed_id) = data.get("tabId").and_then(|v| v.as_str()) {
+                        let note = if data.get("activeTabRevived").and_then(|v| v.as_bool())
+                            == Some(true)
+                        {
+                            " (active tab revived, page may have reloaded)"
+                        } else {
+                            ""
+                        };
+                        println!(
+                            "{} Tab [{}] closed{}",
+                            color::success_indicator(),
+                            closed_id,
+                            note
+                        );
+                        return;
+                    }
+                    "Tab closed"
+                }
                 _ => "Browser closed",
             };
             println!("{} {}", color::success_indicator(), label);
@@ -917,24 +1368,8 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         }
 
         // Confirmation required (for orchestrator use)
-        if data
-            .get("confirmation_required")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            let category = data.get("category").and_then(|v| v.as_str()).unwrap_or("");
-            let description = data
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let cid = data
-                .get("confirmation_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            println!("Confirmation required:");
-            println!("  {}: {}", category, description);
-            println!("  Run: agent-browser confirm {}", cid);
-            println!("  Or:  agent-browser deny {}", cid);
+        if let Some(pending) = confirmation_data(data) {
+            print_confirmation_required(pending);
             return;
         }
         if data
@@ -961,6 +1396,48 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
     print_warning(resp);
 }
 
+fn print_lifecycle_note(data: &serde_json::Value) {
+    let Some(lifecycle) = data.get("lifecycle") else {
+        return;
+    };
+
+    let mut parts: Vec<String> = Vec::new();
+    let relaunched = lifecycle
+        .get("relaunchedBrowser")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let launched = lifecycle
+        .get("launched")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let reused = lifecycle
+        .get("reused")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if relaunched {
+        parts.push("relaunched browser".to_string());
+    } else if launched && !reused {
+        parts.push("launched browser".to_string());
+    }
+
+    if let Some(status) = lifecycle.get("restoreStatus").and_then(|v| v.as_str()) {
+        if !matches!(status, "not_configured" | "pending") {
+            parts.push(format!("restore: {}", status));
+        }
+    }
+
+    if let Some(status) = lifecycle.get("saveStatus").and_then(|v| v.as_str()) {
+        if !matches!(status, "not_attempted" | "not_configured") {
+            parts.push(format!("save: {}", status));
+        }
+    }
+
+    if !parts.is_empty() {
+        eprintln!("{} {}", color::dim("[agent-browser]"), parts.join("; "));
+    }
+}
+
 fn print_warning(resp: &Response) {
     if let Some(ref warning) = resp.warning {
         eprintln!("{} {}", color::warning_indicator(), warning);
@@ -973,27 +1450,41 @@ pub fn print_command_help(command: &str) -> bool {
         // === Navigation ===
         "open" | "goto" | "navigate" => {
             r##"
-agent-browser open - Navigate to a URL
+agent-browser open - Launch the browser, optionally navigate
 
-Usage: agent-browser open <url>
+Usage: agent-browser open [url]
 
-Navigates the browser to the specified URL. If no protocol is provided,
-https:// is automatically prepended.
+Without a URL, launches the browser but stays on about:blank. This lets
+you stage state (network routes, cookies, init scripts) before the first
+real navigation — useful for SSR debug, auth setup, and capturing fresh
+`react suspense` / `vitals` state without noise from a prior page.
 
-Aliases: goto, navigate
+With a URL, launches and navigates. If no protocol is provided, https://
+is automatically prepended.
+
+The `goto` and `navigate` aliases still require a URL.
 
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
   --headers <json>     Set HTTP headers (scoped to this origin)
   --headed             Show browser window
+  --enable react-devtools   Inject the React DevTools hook before any page JS
+  --init-script <path>      Register a page init script (repeatable)
 
 Examples:
+  agent-browser open                     # Launch, no nav
   agent-browser open example.com
   agent-browser open https://github.com
   agent-browser open localhost:3000
   agent-browser open api.example.com --headers '{"Authorization": "Bearer token"}'
     # ^ Headers only sent to api.example.com, not other domains
+
+  # Pre-navigation setup in one turn:
+  agent-browser batch \
+    '["open"]' \
+    '["network","route","*","--abort","--resource-type","script"]' \
+    '["navigate","http://localhost:3000/target"]'
 "##
         }
         "back" => {
@@ -1048,6 +1539,49 @@ Examples:
 "##
         }
 
+        "read" => {
+            r##"
+agent-browser read - Fetch a URL as agent-readable text
+
+Usage: agent-browser read [url] [--raw] [--require-md] [--llms <index|full>] [--outline] [--filter <text>] [--timeout <ms>]
+
+Fetches a URL as agent-readable text. Omit the URL to read the rendered DOM of
+the active tab in the current browser session. Explicit URL reads prefer
+markdown with Accept: text/markdown, try the same URL with .md appended when
+the first response is not markdown, walk ancestor paths toward / to find the
+nearest llms.txt for a matching docs link, fall back to plain text or readable
+text extracted from HTML, and print only the document content by default.
+Use --outline for a compact heading outline of a single page. Use --llms index
+or --llms full for nearest-ancestor llms files; with no URL, --llms and
+--require-md use the active tab URL because they depend on HTTP resources.
+
+Options:
+  --raw                Print the response body without HTML extraction
+  --require-md         Fail unless the response is Content-Type: text/markdown
+  --llms <index|full>  Print nearest llms.txt links or llms-full.txt
+  --outline            Print a heading outline for the selected page
+  --filter <text>      Filter page sections, --llms links/sections, or --outline headings
+  --timeout <ms>       Request timeout in milliseconds (default: 10000)
+
+Global Options:
+  --json               Output metadata and content as JSON
+  --headers <json>     Additional HTTP headers, such as Authorization
+  --allowed-domains <list>  Restrict read fetches and redirects to allowed domains
+  --content-boundaries Wrap read output in boundary markers
+  --max-output <chars> Truncate read output to N chars
+
+Examples:
+  agent-browser read
+  agent-browser read https://docs.example.com/guide
+  agent-browser read https://docs.example.com/guide --filter auth
+  agent-browser read https://docs.example.com/guide --outline
+  agent-browser read https://docs.example.com --llms index --filter auth
+  agent-browser read https://docs.example.com --llms full --filter auth
+  agent-browser read docs.example.com/guide --require-md
+  agent-browser read https://api.example.com/docs --headers '{"Authorization":"Bearer token"}'
+"##
+        }
+
         // === Core Actions ===
         "click" => {
             r##"
@@ -1057,6 +1591,9 @@ Usage: agent-browser click <selector> [--new-tab]
 
 Clicks on the specified element. The selector can be a CSS selector,
 XPath, or an element reference from snapshot (e.g., @e1).
+
+If another element covers the click point, agent-browser reports the
+covering element instead of dispatching a click to the wrong target.
 
 Options:
   --new-tab            Open link in a new tab instead of navigating current tab
@@ -1483,6 +2020,8 @@ Usage: agent-browser screenshot [selector] [path]
 
 Captures a screenshot of the current page. If no path is provided,
 saves to a temporary directory with a generated filename.
+Headless Chromium screenshots hide native scrollbars for consistent image output.
+Pass --hide-scrollbars false when launching to keep native scrollbars visible.
 
 Options:
   --full, -f           Capture full page (not just viewport)
@@ -1544,6 +2083,7 @@ Designed for AI agents to understand page structure.
 
 Options:
   -i, --interactive    Only include interactive elements
+  -u, --urls           Include href URLs for link elements
   -c, --compact        Remove empty structural elements
   -d, --depth <n>      Limit tree depth
   -s, --selector <sel> Scope snapshot to CSS selector
@@ -1555,6 +2095,7 @@ Global Options:
 Examples:
   agent-browser snapshot
   agent-browser snapshot -i
+  agent-browser snapshot -i --urls
   agent-browser snapshot --compact --depth 5
   agent-browser snapshot -s "#main-content"
 "##
@@ -1721,11 +2262,13 @@ Locators:
   nth <index> <selector>   Nth matching element (0-based)
 
 Actions (default: click):
-  click, fill, type, hover, focus, check, uncheck
+  click, fill, check, hover, text
 
 Options:
   --name <name>        Filter role by accessible name
-  --exact              Require exact text match
+  --exact              Exact, case-sensitive match. For role it applies to
+                       the accessible name, whose default is a case-insensitive
+                       substring. The role value itself always ignores case.
 
 Global Options:
   --json               Output as JSON
@@ -1735,10 +2278,11 @@ Examples:
   agent-browser find role button click --name Submit
   agent-browser find text "Sign In" click
   agent-browser find label "Email" fill "user@example.com"
-  agent-browser find placeholder "Search..." type "query"
+  agent-browser find placeholder "Search..." fill "query"
   agent-browser find testid "login-form" click
   agent-browser find first "li.item" click
   agent-browser find nth 2 ".card" hover
+  agent-browser find role heading text --name Welcome
 "##
         }
 
@@ -1829,6 +2373,7 @@ Subcommands:
     --status <code>          Filter by status (200, 2xx, 400-499)
   request <requestId>        View full request/response detail (including body)
   har <start|stop> [path]    Record and export a HAR file
+    --content <mode>         Response bodies to embed on start: text (default), all, none
 
 Global Options:
   --json               Output as JSON
@@ -1845,6 +2390,7 @@ Examples:
   agent-browser network requests --clear
   agent-browser network request 1234.5
   agent-browser network har start
+  agent-browser network har start --content all
   agent-browser network har stop ./capture.har
 "##
         }
@@ -1941,16 +2487,30 @@ agent-browser tab - Manage browser tabs
 
 Usage: agent-browser tab [operation] [args]
 
-Manage browser tabs in the current window.
+Manage browser tabs in the current window. Stable tab ids look like `t1`,
+`t2`, `t3`. An id is never reused within a session, so scripts can keep
+referring to the same tab across commands. Optional user-assigned labels
+(e.g. `docs`, `app`) are interchangeable with ids everywhere a tab ref is
+accepted. CDP target ids (from `tab list --json`) are also accepted as tab
+refs; unlike `t<N>` ids they stay stable across daemon restarts.
+
+Each session remembers its active tab (bound by CDP target id) and returns
+to it after a daemon restart. With --pin-tab, commands fail with a
+`tab_gone` error instead of falling back to another tab when the bound tab
+is closed. JSON output includes code=tab_gone, data.targetId, and an
+optional sanitized data.lastUrl; batch output uses result for the recovery
+object. Recover with `tab new` or `tab list`. The pin is sticky per session;
+pass --no-pin-tab to turn it off again.
 
 Operations:
-  list                 List all tabs (default)
-  new [url]            Open new tab
-  close [index]        Close tab (current if no index)
-  <index>              Switch to tab by index
+  list                       List open tabs with their ids and labels (default)
+  new [url]                  Open a new tab
+  new --label <name> [url]   Open a new tab with a label like `docs` or `app`
+  close [t<N>|label|target]  Close a tab (current if no ref given)
+  <t<N>|label|target>        Switch to a tab by id, label, or CDP target id
 
 Global Options:
-  --json               Output as JSON
+  --json               Output as JSON (includes each tab's targetId)
   --session <name>     Use specific session
 
 Examples:
@@ -1958,9 +2518,14 @@ Examples:
   agent-browser tab list
   agent-browser tab new
   agent-browser tab new https://example.com
-  agent-browser tab 2
+  agent-browser tab new --label docs https://docs.example.com
+  agent-browser tab t2
+  agent-browser tab docs
   agent-browser tab close
-  agent-browser tab close 1
+  agent-browser tab close t1
+  agent-browser tab close docs
+  agent-browser tab list --json                        # Includes CDP target ids
+  agent-browser tab close 4A0B7C4E1F2D3A4B5C6D7E8F90A1B2C3  # Close by target id
 "##
         }
 
@@ -2032,9 +2597,18 @@ Save Options:
   --password-selector <s>  Custom CSS selector for password field
   --submit-selector <s>    Custom CSS selector for submit button
 
+Plugin Login Options:
+  --credential-provider <p> Resolve credentials from configured plugin <p>
+  --item <ref>              Provider-specific vault item reference
+  --url <url>               Login URL override
+  --username-selector <s>   Username selector override for this login
+  --password-selector <s>   Password selector override for this login
+  --submit-selector <s>     Submit selector override for this login
+
 Login behavior:
   auth login waits for form selectors to appear before filling/clicking.
   Selector wait timeout follows the default action timeout.
+  Plugin credentials are resolved just-in-time and are not saved locally.
 
 Global Options:
   --json                   Output as JSON
@@ -2044,6 +2618,7 @@ Examples:
   echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin
   agent-browser auth save github --url https://github.com/login --username user --password pass
   agent-browser auth login github
+  agent-browser auth login my-app --credential-provider vault --item "My App"
   agent-browser auth list
   agent-browser auth show github
   agent-browser auth delete github
@@ -2102,12 +2677,13 @@ Examples:
             r##"
 agent-browser trace - Record execution trace
 
-Usage: agent-browser trace <operation> [path]
+Usage: agent-browser trace start
+       agent-browser trace stop [path]
 
 Record a Chrome DevTools trace for debugging.
 
 Operations:
-  start [path]         Start recording trace
+  start                Start recording trace
   stop [path]          Stop recording and save trace
 
 Global Options:
@@ -2116,9 +2692,8 @@ Global Options:
 
 Examples:
   agent-browser trace start
-  agent-browser trace start ./my-trace
   agent-browser trace stop
-  agent-browser trace stop ./debug-trace.zip
+  agent-browser trace stop ./debug-trace.json
 "##
         }
 
@@ -2307,9 +2882,9 @@ Operations:
   clean --older-than <days>          Delete expired state files
 
 Automatic State Persistence:
-  Use --session-name to auto-save/restore state across restarts:
-  agent-browser --session-name myapp open https://example.com
-  Or set AGENT_BROWSER_SESSION_NAME environment variable.
+  Use --restore to auto-save/restore state across restarts:
+  agent-browser --session myapp --restore open https://example.com
+  Or set AGENT_BROWSER_RESTORE environment variable.
 
 State Encryption:
   Set AGENT_BROWSER_ENCRYPTION_KEY (64-char hex) for AES-256-GCM encryption.
@@ -2342,17 +2917,23 @@ instance with separate cookies, storage, and state.
 
 Operations:
   (none)               Show current session name
+  id                   Generate stable session id (--scope worktree|cwd|git-root, --prefix)
+  info                 Show daemon, launch, and restore diagnostics
   list                 List all active sessions
 
 Environment:
   AGENT_BROWSER_SESSION    Default session name
+  AGENT_BROWSER_NAMESPACE  Namespace for daemon sockets and restore state
 
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
+  --namespace <name>   Use specific namespace
 
 Examples:
   agent-browser session
+  agent-browser session id --scope worktree --prefix next-dev-loop
+  agent-browser session info --json
   agent-browser session list
   agent-browser --session test open example.com
 "##
@@ -2368,7 +2949,7 @@ Usage: agent-browser install [--with-deps]
 Downloads and installs browser binaries required for automation.
 
 Options:
-  -d, --with-deps      Also install system dependencies (Linux only)
+  -d, --with-deps      Also install system dependencies (Linux only; fails if deps fail)
 
 Examples:
   agent-browser install
@@ -2392,36 +2973,97 @@ Examples:
 "##
         }
 
+        // === Doctor ===
+        "doctor" => {
+            r##"
+agent-browser doctor - Diagnose and repair your install
+
+Usage: agent-browser doctor [options]
+
+Runs a battery of checks across environment, Chrome install, daemon state,
+config files, encryption key, providers, network reachability, and a live
+headless browser launch test.
+
+Auto-cleans stale daemon socket/pid/version sidecar files. Destructive
+repairs (reinstalling Chrome, purging old state files, generating a missing
+encryption key) are gated behind --fix.
+
+Options:
+  --offline            Skip network probes
+  --quick              Skip the live headless launch test
+  --webgpu             Also run a live WebGPU render probe (renders via a real
+                       WebGPU pass and pixel-checks both an in-page readback
+                       and a decoded screenshot; launches a second Chrome)
+  --headed             Run the WebGPU probe headed to validate the capture
+                       path (auto-Xvfb on displayless Linux)
+  --debug              Verbose diagnostics from the probes' scratch daemons
+  --fix                Also run destructive repairs
+  --json               JSON output
+
+Exit codes:
+  0  All checks pass (warnings OK)
+  1  At least one check failed
+
+Examples:
+  agent-browser doctor
+  agent-browser doctor --offline --quick
+  agent-browser doctor --webgpu
+  agent-browser doctor --webgpu --headed
+  agent-browser doctor --fix
+  agent-browser doctor --json
+"##
+        }
+
         // === Dashboard ===
         "dashboard" => {
             r##"
 agent-browser dashboard - Observability dashboard
 
-Usage: agent-browser dashboard [start|stop|install] [options]
+Usage: agent-browser dashboard [start|stop] [options]
 
 Manage the observability dashboard, a local web UI that shows live
 browser viewports and command activity feeds for all sessions.
+The dashboard is bundled into the binary and requires no separate install.
 
 Subcommands:
-  start [--port <n>]   Start the dashboard server (default port: 4848)
+  start [--port <n>] [--allowed-origins <origins>]
+                        Start the dashboard server (default port: 4848)
   stop                 Stop the dashboard server
-  install              Download and install the dashboard to ~/.agent-browser/dashboard/
 
 Running 'agent-browser dashboard' with no subcommand is equivalent to 'dashboard start'.
 
 The dashboard runs as a standalone background process, independent of
 browser sessions. All sessions automatically stream to the dashboard.
+Loopback origins work without configuration or a token. For a reverse-proxied or
+forwarded dashboard, pass --allowed-origins with the exact browser origin
+or set AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS. The browser stays on the
+dashboard origin; session tabs, status, and stream traffic are proxied
+internally, so session ports do not need to be exposed.
+For reverse-proxied origins, start prints private external access URLs
+containing an unguessable fragment token. Open the matching URL to establish
+the browser session and do not share it. Loopback URLs do not require or
+receive this token. Configure a reverse proxy to redact cookies from logs.
+Stop the dashboard before changing its port or allowed origins.
 
 Options:
   --port <n>           Port for the dashboard server (default: 4848)
+  --allowed-origins <origins>
+                       Comma-separated exact HTTPS origins allowed when the
+                       dashboard is exposed through a reverse proxy. Loopback
+                       origins are allowed by default. Can also be set with
+                       AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS.
+
+Ports must be integers from 1 to 65535. Every allowed origin must be valid.
+Unknown options, missing values, and malformed origins fail without starting
+the dashboard server.
 
 Global Options:
   --json               Output as JSON
 
 Examples:
-  agent-browser dashboard install
   agent-browser dashboard start
   agent-browser dashboard start --port 8080
+  agent-browser dashboard start --allowed-origins https://dashboard.example.com
   agent-browser dashboard stop
 "##
         }
@@ -2444,6 +3086,7 @@ Supported URL formats:
   - Port number: 9222 (connects to http://localhost:9222)
   - WebSocket URL: ws://localhost:9222/devtools/browser/...
   - Remote service: wss://remote-browser.example.com/cdp?token=...
+  - Root endpoint: wss://remote-browser.example.com?token=... (slash optional)
 
 Global Options:
   --json               Output as JSON
@@ -2483,6 +3126,22 @@ available localhost port automatically and reports it back.
 Notes:
   - 'stream enable' creates the WebSocket server.
   - WebSocket clients trigger frame streaming automatically.
+  - On Chrome, URL messages follow full-document, History API, and fragment
+    navigation in the active tab's main frame. Child-frame and background-tab
+    navigation does not emit URL messages.
+  - Frames are delivered latest-first: the newest frame is picked at send
+    time, so frames produced during an in-flight write are skipped, never
+    queued. Input events dispatch immediately, independent of frame
+    delivery, and are sent without waiting for the browser's reply, so a
+    click stays responsive behind a burst of mouse moves.
+  - Clients can cap their own frame rate by sending
+    {"type":"config","maxFps":N} (1-120, 0 = uncapped, per client).
+  - Clients that send {"type":"config","pacing":"ack"} receive one frame at
+    a time and acknowledge it with {"type":"ack","seq":N}, so a client that
+    stalls never drains a backlog of stale frames. Default is "push", where
+    frames already handed to the transport are delivered in order.
+  - Both settings can be declared on the URL instead, which is the only way
+    to cover the opening frame: ws://127.0.0.1:<port>/?pacing=ack&maxFps=10
   - 'screencast_start' and 'screencast_stop' still control explicit CDP screencasts.
   - Streaming is always enabled. Set AGENT_BROWSER_STREAM_PORT to bind to a
     specific port instead of the default OS-assigned port.
@@ -2622,20 +3281,24 @@ Examples:
 
         "batch" => {
             r##"
-agent-browser batch - Execute multiple commands from stdin
+agent-browser batch - Execute multiple commands sequentially
 
-Usage: echo '<json>' | agent-browser batch [options]
+Usage: agent-browser batch [options] "<cmd1>" "<cmd2>" ...
+       echo '<json>' | agent-browser batch [options]
 
-Reads a JSON array of commands from stdin and executes them sequentially.
-Each command is an array of strings matching normal CLI arguments.
-Results are printed in order, separated by blank lines (or as a JSON array
-with --json).
+Runs multiple commands in sequence. Commands can be passed as quoted
+arguments or piped as JSON via stdin. Results are printed in order,
+separated by blank lines (or as a JSON array with --json).
 
 Options:
   --bail               Stop on first error (default: continue all commands)
   --json               Output results as a JSON array
 
-Input Format:
+Argument Mode:
+  Each quoted argument is a full command string:
+  agent-browser batch "open https://example.com" "snapshot -i" "screenshot"
+
+Stdin Mode (JSON):
   A JSON array of string arrays. Each inner array is one command:
   [
     ["open", "https://example.com"],
@@ -2646,9 +3309,265 @@ Input Format:
   ]
 
 Examples:
+  agent-browser batch "open https://example.com" "screenshot"
+  agent-browser batch --bail "open https://example.com" "click @e1" "screenshot"
   echo '[["open", "https://example.com"], ["snapshot"]]' | agent-browser batch
-  echo '[["open", "https://example.com"], ["get", "title"]]' | agent-browser batch --json
   agent-browser batch --bail < commands.json
+"##
+        }
+
+        "a11y" => {
+            r##"
+agent-browser a11y - Run an axe-core accessibility audit
+
+Usage: agent-browser a11y [url] [options]
+
+Audits the current page, or navigates to the optional URL first. The vendored
+axe-core engine runs private partial audits without a network request across
+the page frame tree, does not trust or replace page-owned window.axe values,
+and merges serialized results without page messaging. Accessibility audits
+require a CDP browser and are not available with Safari or iOS WebDriver
+sessions.
+
+Options:
+  --tags <tag1,tag2>    Run only rules matching these axe tags
+  -s, --selector <css> Scope the audit to a matching subtree
+  --json                Return structured violations and incomplete results
+
+Structured node targets preserve axe selector paths. Nested arrays identify
+shadow DOM boundaries, while multiple path entries can identify frame boundaries.
+
+Examples:
+  agent-browser a11y
+  agent-browser a11y https://example.com
+  agent-browser a11y --tags wcag2a,wcag2aa
+  agent-browser a11y --selector "#main"
+  agent-browser a11y https://example.com --json
+"##
+        }
+
+        "profiles" => {
+            r##"
+agent-browser profiles - List available Chrome profiles
+
+Usage: agent-browser profiles
+
+Lists all Chrome profiles found in your Chrome user data directory, showing
+the directory name and display name for each profile. Use the directory name
+with --profile to launch Chrome with that profile's login state.
+
+Global Options:
+  --json               Output as JSON
+
+Examples:
+  agent-browser profiles
+  agent-browser profiles --json
+  agent-browser --profile Default open https://gmail.com
+"##
+        }
+
+        "chat" => {
+            r##"
+agent-browser chat - Natural language browser control via AI
+
+Usage:
+  agent-browser chat <message>         Single-shot: execute instruction and exit
+  agent-browser chat                   Interactive REPL (when stdin is a TTY)
+  echo "instruction" | agent-browser chat   Piped input
+
+Sends natural language instructions to an AI model that translates them
+into agent-browser commands and executes them against the active session.
+Requires AI_GATEWAY_API_KEY to be set.
+
+In interactive mode, type "quit", "exit", or "q" to leave the REPL.
+
+Chat Options:
+  --model <name>         AI model (or AI_GATEWAY_MODEL env, default: anthropic/claude-sonnet-4.6)
+  -v, --verbose          Show tool commands and their raw output
+  -q, --quiet            Show only the AI text response (hide tool calls)
+
+Global Options:
+  --json                 Structured JSON output per turn
+  --session <name>       Target session for commands
+
+Examples:
+  agent-browser chat "open google.com and search for cats"
+  agent-browser chat "take a screenshot of the current page"
+  agent-browser -q chat "summarize this page"
+  agent-browser -v chat "fill in the login form with test@example.com"
+  agent-browser --model openai/gpt-4o chat "navigate to hacker news"
+  agent-browser chat
+"##
+        }
+
+        "mcp" => {
+            r##"
+agent-browser mcp - Start an MCP stdio server
+
+Usage: agent-browser mcp [--tools <profiles>]
+
+Starts a Model Context Protocol server over stdio. MCP clients launch this
+command as a subprocess and communicate with newline-delimited JSON-RPC.
+stdout is reserved for MCP protocol messages; logs and diagnostics use stderr.
+The server defaults to MCP protocol 2025-11-25 and accepts older supported
+client protocol versions during initialization.
+
+The default tools profile is core, which keeps MCP context small for everyday
+browser automation. Use --tools all for the full typed CLI parity surface, or
+combine profiles with commas, such as --tools core,network,react.
+
+Tool profiles:
+  core       Default. Navigation, snapshots, interaction, waits, reads,
+             screenshots, JavaScript eval, close, tab basics, and profile discovery
+  network    Network routes, request inspection, HAR, headers, credentials, offline
+  state      Cookies, storage, auth, saved state, sessions, profiles, skills
+  debug      Console/errors, tracing, profiling, recording, accessibility audits,
+             clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff,
+             batch, confirm/deny
+  tabs       Back/forward/reload, tabs, windows, frames, dialogs
+  react      React tree/inspect/renders/suspense, vitals, pushstate
+  mobile     Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
+  all        Every MCP tool, including the full typed CLI parity surface
+
+Common tools include:
+  agent_browser_tools_profiles  List MCP startup tool profiles
+  agent_browser_open       Open a URL or launch about:blank
+  agent_browser_snapshot   Get an accessibility snapshot with refs
+  agent_browser_click      Click an element by @ref or selector
+  agent_browser_fill       Fill an input
+  agent_browser_screenshot Take a screenshot
+  agent_browser_get_url    Read the current URL
+  agent_browser_close      Close the browser session
+
+Each tool has typed fields such as url, selector, text, key, and session.
+Each tool also accepts extraArgs for advanced CLI flags and exact CLI parity.
+Tool discovery is paginated and includes read-only/open-world annotations so
+modern MCP clients can load the large typed surface incrementally.
+Use agent_browser_snapshot after navigation to get fresh refs before clicking.
+
+MCP client config example:
+  {
+    "mcpServers": {
+      "agent-browser": {
+        "command": "agent-browser",
+        "args": ["mcp"]
+      }
+    }
+  }
+
+Full parity config example:
+  {
+    "mcpServers": {
+      "agent-browser": {
+        "command": "agent-browser",
+        "args": ["mcp", "--tools", "all"]
+      }
+    }
+  }
+
+Environment:
+  AGENT_BROWSER_SESSION          Default browser session
+  AGENT_BROWSER_SOCKET_DIR       Daemon socket directory
+  AGENT_BROWSER_CONFIG           Config file loaded by tool invocations
+"##
+        }
+
+        "skills" => {
+            r##"
+agent-browser skills - List and retrieve bundled skill content
+
+Usage: agent-browser skills [subcommand] [options]
+
+Subcommands:
+  list                       List all available skills (default)
+  get <name> [name...]       Output a skill's full content
+  get <name> --full          Include references and templates
+  get --all                  Output every skill
+  path [name]                Print filesystem path to skill directory
+
+Options:
+  --json                     Output as JSON
+
+The skills command serves bundled skill content that always matches the
+installed CLI version. Agents should use this to get current instructions
+rather than relying on cached copies.
+
+Examples:
+  agent-browser skills
+  agent-browser skills list
+  agent-browser skills get core
+  agent-browser skills get core --full
+  agent-browser skills get protected-vercel-deployments
+  agent-browser skills get electron --full
+  agent-browser skills get --all
+  agent-browser skills path core
+  agent-browser skills list --json
+
+Environment:
+  AGENT_BROWSER_SKILLS_DIR   Override the skills directory path
+"##
+        }
+
+        "plugin" | "plugins" => {
+            r##"
+agent-browser plugin - Manage configured plugins
+
+Usage: agent-browser plugin [subcommand]
+
+Subcommands:
+  add <ref>                Add a plugin from npm or GitHub
+  list                     List configured plugins (default)
+  show <name>              Show one configured plugin
+  run <name> <type>        Run a command.run or custom plugin request
+
+Plugins are configured in agent-browser.json. A plugin entry declares a name,
+an executable command, optional args, and capabilities. Plugins run as
+external processes over the agent-browser.plugin.v1 stdio JSON protocol.
+
+Add sources:
+  <name>                   npm package, e.g. agent-browser-plugin-captcha
+  @<scope>/<name>          scoped npm package
+  <owner>/<repo>           GitHub repository
+
+Add options:
+  --name <name>            Override the configured plugin name
+  --capability <name>      Declare a capability if the plugin has no manifest
+  --global                 Write ~/.agent-browser/config.json instead of ./agent-browser.json
+  --no-manifest            Skip plugin.manifest discovery
+
+plugin add asks the package for plugin.manifest to discover name and
+capabilities. Use --capability when adding older plugins without a manifest.
+
+Capabilities:
+  credential.read          Resolve credentials for auth login
+  browser.provider         Launch/connect an external browser provider
+  launch.mutate            Append local launch args, extensions, or init scripts
+  command.run              Accept arbitrary namespaced plugin requests
+
+Core capabilities and protocol request types use dedicated command paths.
+Use auth login for credential.read, --provider for browser.provider, and
+a local launch for launch.mutate.
+
+Example config:
+  {{
+    "plugins": [
+      {{
+        "name": "vault",
+        "command": "agent-browser-plugin-vault",
+        "capabilities": ["credential.read"]
+      }}
+    ]
+  }}
+
+Examples:
+  agent-browser plugin add agent-browser-plugin-captcha
+  agent-browser plugin add org/agent-browser-plugin-cloud-browser
+  agent-browser plugin add @company/agent-browser-plugin-vault --name vault
+  agent-browser plugin list
+  agent-browser plugin show vault
+  agent-browser plugin run captcha captcha.solve --payload '{{"siteKey":"...","url":"https://example.com"}}'
+  agent-browser auth login my-app --credential-provider vault --item "My App"
+  agent-browser --provider cloud-browser open https://example.com
 "##
         }
 
@@ -2665,8 +3584,24 @@ agent-browser - fast browser automation CLI for AI agents
 
 Usage: agent-browser <command> [args] [options]
 
+Start here (for AI agents):
+  agent-browser skills get core --full
+
+  Skills ship with the CLI (always version-matched) and include workflow
+  patterns, ref/selector usage, and copy-paste examples. Prefer this over
+  guessing commands from flag docs alone. Specialized skills cover Electron
+  apps, Slack, exploratory testing, protected Vercel deployments, and cloud
+  browser providers.
+
+  skills [list]                List available skills
+  skills get core              Core usage guide (overview + common patterns)
+  skills get core --full       Include full command reference and templates
+  skills get <name>            Load a specialized skill (electron, slack, ...)
+  skills path [name]           Print skill directory path
+
 Core Commands:
   open <url>                 Navigate to URL
+  read [url]                 Fetch agent-readable text
   click <sel>                Click element (or @ref)
   dblclick <sel>             Double-click element
   type <sel> <text>          Type into element
@@ -2715,13 +3650,14 @@ Browser Settings:  agent-browser set <setting> [value]
   media [dark|light] [reduced-motion]
 
 Network:  agent-browser network <action>
-  route <url> [--abort|--body <json>]
+  route <url> [--abort|--body <json>] [--resource-type <csv>]
   unroute [url]
   requests [--clear] [--filter <pattern>]
   har <start|stop> [path]
 
 Storage:
   cookies [get|set|clear]    Manage cookies (set supports --url, --domain, --path, --httpOnly, --secure, --sameSite, --expires)
+                             Or:  cookies set --curl <file> [--domain <host>] (auto-detects JSON/cURL/Cookie-header files)
   storage <local|session>    Manage web storage
 
 Tabs:
@@ -2733,7 +3669,8 @@ Diff:
   diff url <u1> <u2>         Compare two pages
 
 Debug:
-  trace start|stop [path]    Record Chrome DevTools trace
+  trace start                Start Chrome DevTools trace
+  trace stop [path]          Stop and save Chrome DevTools trace
   profiler start|stop [path] Record Chrome DevTools profile
   record start <path> [url]  Start video recording (WebM)
   record stop                Stop and save video
@@ -2748,16 +3685,60 @@ Streaming:
   stream disable             Stop runtime WebSocket streaming
   stream status              Show streaming status and active port
 
+WebMCP (experimental):
+  webmcp list                List tools registered by the current page
+  webmcp invoke <tool>       Invoke a page tool; accepts --params <json|@file>,
+                             --frame <frame-id>, --detach, and --timeout <ms>
+  webmcp result <id>         Wait for a detached invocation result
+  webmcp cancel <id>         Cancel an active invocation
+
+React (requires `open --enable react-devtools`):
+  react tree                 Full React component tree (depth id parent name columns)
+  react inspect <id>         Inspect one fiber (props, hooks, state, source)
+  react renders start        Start recording re-renders via onCommitFiberRoot
+  react renders stop [--json] Stop and print render profile
+  react suspense [--only-dynamic] [--json]
+                             Walk Suspense boundaries + classifier report
+                             --only-dynamic hides the "static" list
+
+Performance:
+  vitals [url] [--json]      Core Web Vitals (LCP/CLS/TTFB/FCP/INP) +
+                             React hydration summary; --json returns full data
+
+Accessibility:
+  a11y [url] [--tags <t1,t2>] [--selector <css>] [--json]
+                             Run an axe-core accessibility audit on the current
+                             page (or url); reports WCAG violations with
+                             selectors and fix guidance
+
+SPA:
+  pushstate <url>            SPA client-side nav. Auto-detects window.next.router.push
+                             (triggers RSC fetch on Next.js); falls back to
+                             history.pushState + popstate/navigate events for other frameworks
+
+Init scripts:
+  removeinitscript <id>      Remove a script registered via --init-script or addinitscript
+
 Batch:
-  batch [--bail]             Execute commands from stdin (JSON array of string arrays)
-                             --bail stops on first error (default: continue all)
+  batch [--bail] ["cmd" ...]  Execute multiple commands sequentially (args or stdin)
+                              --bail stops on first error (default: continue all)
 
 Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
   auth login <name>          Login using saved credentials (waits for form fields)
+  auth login <name> --credential-provider <plugin> [--item <ref>] [--url <url>]
+                             Resolve credentials from a configured plugin
+  auth login <name> --username-selector <s> --password-selector <s>
+                             Override selectors for one login
   auth list                  List saved auth profiles
   auth show <name>           Show auth profile metadata
   auth delete <name>         Delete auth profile
+
+Plugins:
+  plugin add <ref>           Add a plugin from npm or GitHub
+  plugin [list]              List configured plugins
+  plugin show <name>         Show one configured plugin
+  plugin run <name> <type>   Run a command.run or custom plugin request
 
 Confirmation:
   confirm <id>               Approve a pending action
@@ -2767,16 +3748,28 @@ Sessions:
   session                    Show current session name
   session list               List active sessions
 
+MCP:
+  mcp                        Start an MCP stdio server exposing agent-browser tools
+
+Chat (AI):
+  chat <message>             Send a natural language instruction (single-shot)
+  chat                       Start interactive chat (REPL mode when stdin is a TTY)
+  Options: --model <name>, -v/--verbose, -q/--quiet
+
 Dashboard:
   dashboard [start]          Start the dashboard server (default port: 4848)
   dashboard start --port <n> Start on a specific port
+  dashboard start --allowed-origins <origins>
+                            Allow exact HTTPS reverse-proxied origins
   dashboard stop             Stop the dashboard server
 
 Setup:
   install                    Install browser binaries
   install --with-deps        Also install system dependencies (Linux)
   upgrade                    Upgrade to the latest version
-  dashboard install          Install the observability dashboard
+  doctor [--fix]             Diagnose install; auto-clean stale files
+  dashboard start            Start the observability dashboard
+  profiles                   List available Chrome profiles
 
 Snapshot Options:
   -i, --interactive          Only interactive elements
@@ -2785,9 +3778,17 @@ Snapshot Options:
   -s, --selector <sel>       Scope to CSS selector
 
 Authentication:
-  --profile <path>           Persist login sessions across restarts (cookies, IndexedDB, cache)
+  --profile <name|path>      Chrome profile name (e.g., Default) to reuse login state,
+                             or a directory path for a persistent custom profile
                              (or AGENT_BROWSER_PROFILE env)
-  --session-name <name>      Auto-save/restore cookies and localStorage by name
+  --restore [name]           Auto-save/restore cookies and localStorage.
+                             Without a name, uses --session as the restore key
+                             (or AGENT_BROWSER_RESTORE env)
+  --restore-save <policy>    Restore auto-save policy: auto, always, never (default: auto)
+  --restore-check-url <glob> Validate restored state against current URL pattern
+  --restore-check-text <txt> Validate restored state against visible page text
+  --restore-check-fn <js>    Validate restored state against a truthy JS expression
+  --session-name <name>      Legacy alias for restore persistence key
                              (or AGENT_BROWSER_SESSION_NAME env)
   --state <path>             Load saved auth state (cookies + storage) from JSON file
                              (or AGENT_BROWSER_STATE env)
@@ -2797,8 +3798,14 @@ Authentication:
 
 Options:
   --session <name>           Isolated session (or AGENT_BROWSER_SESSION env)
+  --namespace <name>         Isolate daemon sockets and restore-state directories
+                             (or AGENT_BROWSER_NAMESPACE env)
   --executable-path <path>   Custom browser executable (or AGENT_BROWSER_EXECUTABLE_PATH)
   --extension <path>         Load browser extensions (repeatable)
+  --init-script <path>       Register a page init script before the first navigation (repeatable)
+                             (or AGENT_BROWSER_INIT_SCRIPTS env, comma-separated)
+  --enable <feature>         Built-in init scripts: react-devtools (repeatable or comma-separated)
+                             (or AGENT_BROWSER_ENABLE env)
   --args <args>              Browser launch args, comma or newline separated (or AGENT_BROWSER_ARGS)
                              e.g., --args "--no-sandbox,--disable-blink-features=AutomationControlled"
   --user-agent <ua>          Custom User-Agent (or AGENT_BROWSER_USER_AGENT)
@@ -2807,8 +3814,13 @@ Options:
   --proxy-bypass <hosts>     Bypass proxy for these hosts (or AGENT_BROWSER_PROXY_BYPASS, NO_PROXY)
                              e.g., --proxy-bypass "localhost,*.internal.com"
   --ignore-https-errors      Ignore HTTPS certificate errors
+  --ca-cert <path>           Trust a specific CA certificate for HTTPS interception proxies
+                             (or AGENT_BROWSER_CA_CERT; local Chromium on Linux; install --with-deps provides certutil)
+  --no-ca-cert               Clear CA trust retained by the running browser session
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
-  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse, browserless
+  --hide-scrollbars <bool>   Hide native scrollbars in headless Chromium screenshots (default: true)
+                             Use --hide-scrollbars false to keep scrollbars visible
+  -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse, browserless, agentcore, or plugin name
   --device <name>            iOS device name (e.g., "iPhone 15 Pro")
   --json                     JSON output
   --annotate                 Annotated screenshot with numbered labels and legend
@@ -2816,17 +3828,30 @@ Options:
   --screenshot-quality <n>   JPEG quality 0-100; ignored for PNG (or AGENT_BROWSER_SCREENSHOT_QUALITY)
   --screenshot-format <fmt>  Screenshot format: png, jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)
   --headed                   Show browser window (not headless) (or AGENT_BROWSER_HEADED env)
-  --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
+  --webgpu                   Enable WebGPU; uses SwiftShader software Vulkan on Linux, no GPU required (or AGENT_BROWSER_WEBGPU env)
+  --no-webmcp                Disable default experimental WebMCP support for locally launched Chrome
+                             (or AGENT_BROWSER_NO_WEBMCP env)
+  --cdp <port|url>           Connect via CDP; root WebSocket query slash is optional
+  --pin-tab                  Pin the session to its bound tab (or AGENT_BROWSER_PIN_TAB env)
+                             Commands fail with a tab_gone error instead of falling back
+                             to another tab when the bound tab is closed. JSON includes
+                             data.targetId and optional sanitized data.lastUrl. Sticky per session.
+  --no-pin-tab               Disable a sticky pin previously enabled with --pin-tab
   --color-scheme <scheme>    Color scheme: dark, light, no-preference (or AGENT_BROWSER_COLOR_SCHEME)
   --download-path <path>     Default download directory (or AGENT_BROWSER_DOWNLOAD_PATH)
   --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
   --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
-  --allowed-domains <list>   Restrict navigation domains (or AGENT_BROWSER_ALLOWED_DOMAINS)
+  --allowed-domains <list>   Restrict network domains; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
   --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
   --engine <name>            Browser engine: chrome (default), lightpanda (or AGENT_BROWSER_ENGINE)
+  --idle-timeout <time>      Shut down daemon after inactivity: 10s, 3m, 1h, or raw ms
+                             (default: 1h; 0 disables; dashboard input resets the timer)
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
+  --model <name>             AI model for chat (or AI_GATEWAY_MODEL env)
+  -v, --verbose              Show tool commands and their raw output
+  -q, --quiet                Show only AI text responses (hide tool calls)
   --config <path>            Use a custom config file (or AGENT_BROWSER_CONFIG env)
   --debug                    Debug output
   --version, -V              Show version
@@ -2844,52 +3869,82 @@ Configuration:
   Boolean flags accept an optional true/false value to override config:
     --headed           (same as --headed true)
     --headed false     (disables "headed": true from config)
+    --hide-scrollbars false (keeps native scrollbars visible in headless Chromium screenshots)
 
   Extensions from user and project configs are merged (not replaced).
 
   Example agent-browser.json:
-    {{"headed": true, "proxy": "http://localhost:8080", "profile": "./browser-data"}}
+    {{"headed": true, "hideScrollbars": false, "proxy": "http://localhost:8080"}}
+
+  Plugin example:
+    {{"plugins":[{{"name":"vault","command":"agent-browser-plugin-vault","capabilities":["credential.read"]}},{{"name":"stealth","command":"agent-browser-plugin-stealth","capabilities":["launch.mutate"]}}]}}
 
 Environment:
   AGENT_BROWSER_CONFIG           Path to config file (or use --config)
   AGENT_BROWSER_SESSION          Session name (default: "default")
-  AGENT_BROWSER_SESSION_NAME     Auto-save/restore state persistence name
+  AGENT_BROWSER_NAMESPACE        Namespace for daemon sockets and restore state
+  AGENT_BROWSER_RESTORE          Auto-save/restore persistence key
+  AGENT_BROWSER_RESTORE_SAVE     Restore save policy: auto, always, never
+  AGENT_BROWSER_AUTOSAVE_INTERVAL_MS Min ms between periodic session autosaves (default: 30000, 0 disables)
+  AGENT_BROWSER_RESTORE_CHECK_URL URL pattern restored state must match
+  AGENT_BROWSER_RESTORE_CHECK_TEXT Page text restored state must contain
+  AGENT_BROWSER_RESTORE_CHECK_FN JS expression restored state must satisfy
+  AGENT_BROWSER_SESSION_NAME     Legacy auto-save/restore state persistence name
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM state encryption
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete states older than N days (default: 30)
   AGENT_BROWSER_EXECUTABLE_PATH  Custom browser executable path
   AGENT_BROWSER_EXTENSIONS       Comma-separated browser extension paths
+  AGENT_BROWSER_INIT_SCRIPTS     Comma-separated paths to page init scripts
+  AGENT_BROWSER_ENABLE           Comma-separated built-in init script features (e.g. react-devtools)
   AGENT_BROWSER_HEADED           Show browser window (not headless)
+  AGENT_BROWSER_NO_XVFB          Disable automatic Xvfb for headed mode on displayless Linux hosts
+  AGENT_BROWSER_WEBGPU           Enable WebGPU (SwiftShader software Vulkan on Linux)
   AGENT_BROWSER_JSON             JSON output
   AGENT_BROWSER_ANNOTATE         Annotated screenshot with numbered labels and legend
   AGENT_BROWSER_DEBUG            Debug output
   AGENT_BROWSER_IGNORE_HTTPS_ERRORS Ignore HTTPS certificate errors
-  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless)
+  AGENT_BROWSER_CA_CERT          Path to CA certificate to trust (HTTPS interception proxies)
+  AGENT_BROWSER_CLEAR_CA_CERT    Clear CA trust retained by the running browser session
+  AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless, agentcore, or plugin name)
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
+  AGENT_BROWSER_PIN_TAB          Pin the session to its bound tab (strict tab binding)
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
+  AGENT_BROWSER_HIDE_SCROLLBARS  Hide scrollbars in headless Chromium screenshots (default: true)
   AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)
   AGENT_BROWSER_DOWNLOAD_PATH    Default download directory for browser downloads
   AGENT_BROWSER_DEFAULT_TIMEOUT  Default action timeout in ms (default: 25000)
-  AGENT_BROWSER_SESSION_NAME     Auto-save/load state persistence name
+  AGENT_BROWSER_SESSION_NAME     Legacy auto-save/load state persistence name
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete saved states older than N days (default: 30)
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM session encryption
   AGENT_BROWSER_STREAM_PORT      Override WebSocket streaming port (default: OS-assigned)
-  AGENT_BROWSER_IDLE_TIMEOUT_MS  Auto-shutdown daemon after N ms of inactivity (disabled by default)
+  AGENT_BROWSER_STREAM_QUALITY   JPEG quality 0-100 (default: 80)
+  AGENT_BROWSER_STREAM_MAX_WIDTH  Cap frame width in pixels (default: the viewport)
+  AGENT_BROWSER_STREAM_MAX_HEIGHT Cap frame height in pixels (default: the viewport)
+  AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS
+                                 Comma-separated exact HTTPS origins allowed for a reverse-proxied dashboard
+  AGENT_BROWSER_IDLE_TIMEOUT_MS  Auto-shutdown daemon after N ms of inactivity (default: 3600000 = 1h; 0 disables)
+                                 Dashboard input resets the timer; headed, Safari/iOS WebDriver, and user-attached browsers are exempt from the default
+                                 Provider-owned cloud browsers remain eligible for default cleanup
   AGENT_BROWSER_IOS_DEVICE       Default iOS device name
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
   AGENT_BROWSER_CONTENT_BOUNDARIES Wrap page output in boundary markers
   AGENT_BROWSER_MAX_OUTPUT       Max characters for page output
-  AGENT_BROWSER_ALLOWED_DOMAINS  Comma-separated allowed domain patterns
+  AGENT_BROWSER_ALLOWED_DOMAINS  Comma-separated allowed domain patterns; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins
   AGENT_BROWSER_ACTION_POLICY    Path to action policy JSON file
   AGENT_BROWSER_CONFIRM_ACTIONS  Action categories requiring confirmation
   AGENT_BROWSER_CONFIRM_INTERACTIVE Enable interactive confirmation prompts
   AGENT_BROWSER_NO_AUTO_DIALOG   Disable automatic dismissal of alert/beforeunload dialogs
   AGENT_BROWSER_ENGINE           Browser engine: chrome (default), lightpanda
+  AGENT_BROWSER_PLUGINS          JSON plugin registry override
   HTTP_PROXY / HTTPS_PROXY       Standard proxy env vars (fallback if AGENT_BROWSER_PROXY not set)
   ALL_PROXY                      SOCKS proxy (fallback for proxy)
   NO_PROXY                       Bypass proxy for hosts (fallback for proxy-bypass)
   AGENT_BROWSER_SCREENSHOT_DIR   Default screenshot output directory
   AGENT_BROWSER_SCREENSHOT_QUALITY JPEG quality 0-100
   AGENT_BROWSER_SCREENSHOT_FORMAT Screenshot format: png, jpeg
+  AI_GATEWAY_URL                 Vercel AI Gateway base URL (default: https://ai-gateway.vercel.sh)
+  AI_GATEWAY_API_KEY             API key for the AI Gateway (enables chat command and dashboard AI chat)
+  AI_GATEWAY_MODEL               Default AI model (default: anthropic/claude-sonnet-4.6, or --model flag)
 
 Install:
   npm install -g agent-browser           # npm
@@ -2906,21 +3961,29 @@ Examples:
   agent-browser get text @e1
   agent-browser screenshot --full
   agent-browser screenshot --annotate    # Labeled screenshot for vision models
-  agent-browser wait --load networkidle  # Wait for slow pages to load
+  agent-browser wait 2000               # Wait for slow pages to settle
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
+  agent-browser --cdp 9222 --pin-tab open example.com  # Pin session to its own tab
   agent-browser --auto-connect snapshot  # Auto-discover running Chrome
   agent-browser stream enable            # Start runtime streaming on an auto-selected port
   agent-browser stream status            # Inspect runtime streaming state
   agent-browser --color-scheme dark open example.com  # Dark mode
-  agent-browser --profile ~/.myapp open example.com    # Persistent profile
-  agent-browser --session-name myapp open example.com  # Auto-save/restore state
+  agent-browser --profile Default open gmail.com        # Reuse Chrome login state
+  agent-browser --profile ~/.myapp open example.com    # Persistent custom profile
+  agent-browser profiles                               # List available Chrome profiles
+  SESSION="$(agent-browser session id --scope worktree --prefix myapp)"
+  agent-browser --session "$SESSION" --restore open example.com  # Auto-save/restore state
+  agent-browser session info --json                    # Inspect daemon and restore status
+  agent-browser chat "open google.com and search for cats"  # AI chat (single-shot)
+  agent-browser chat                                        # AI chat (interactive REPL)
+  agent-browser -q chat "summarize this page"               # Quiet mode (text only)
 
 Command Chaining:
   Chain commands with && in a single shell call (browser persists via daemon):
 
-  agent-browser open example.com && agent-browser wait --load networkidle && agent-browser snapshot -i
+  agent-browser open example.com && agent-browser snapshot -i
   agent-browser fill @e1 "user@example.com" && agent-browser fill @e2 "pass" && agent-browser click @e3
-  agent-browser open example.com && agent-browser wait --load networkidle && agent-browser screenshot page.png
+  agent-browser open example.com && agent-browser screenshot
 
 iOS Simulator (requires Xcode and Appium):
   agent-browser -p ios open example.com                    # Use default iPhone
@@ -3014,7 +4077,10 @@ pub fn print_version() {
 
 #[cfg(test)]
 mod tests {
-    use super::format_storage_text;
+    use super::{
+        boundary_origin, format_a11y_text, format_storage_text, format_vitals_text,
+        format_webmcp_text, format_webmcp_tool_text, format_with_boundaries, OutputOptions,
+    };
     use serde_json::json;
 
     #[test]
@@ -3079,5 +4145,244 @@ mod tests {
         let rendered = format_storage_text(&data).unwrap();
 
         assert_eq!(rendered, "No storage entries");
+    }
+
+    #[test]
+    fn test_format_a11y_text_summary() {
+        let data = json!({
+            "url": "https://example.com",
+            "axeVersion": "4.12.1",
+            "counts": { "violations": 1, "incomplete": 0, "passes": 24, "inapplicable": 40 },
+            "violations": [{
+                "id": "image-alt",
+                "impact": "critical",
+                "help": "Images must have alternative text",
+                "helpUrl": "https://dequeuniversity.com/rules/axe/4.12/image-alt",
+                "nodeCount": 2,
+                "nodes": [
+                    { "target": ["img.hero"], "html": "<img class=\"hero\">" },
+                    { "target": ["#logo > img"], "html": "<img>" }
+                ]
+            }],
+            "incomplete": []
+        });
+
+        let rendered = format_a11y_text(&data);
+
+        assert_eq!(
+            rendered,
+            "url: https://example.com\n\
+axe-core: 4.12.1  violations: 1  incomplete: 0  passes: 24\n\
+\n\
+[critical] image-alt: Images must have alternative text (2 nodes)\n\
+\x20 https://dequeuniversity.com/rules/axe/4.12/image-alt\n\
+\x20 - img.hero\n\
+\x20 - #logo > img"
+        );
+    }
+
+    #[test]
+    fn test_format_a11y_text_no_violations() {
+        let data = json!({
+            "url": "https://example.com",
+            "axeVersion": "4.12.1",
+            "counts": { "violations": 0, "incomplete": 0, "passes": 30, "inapplicable": 44 },
+            "violations": [],
+            "incomplete": []
+        });
+
+        let rendered = format_a11y_text(&data);
+
+        assert_eq!(
+            rendered,
+            "url: https://example.com\n\
+axe-core: 4.12.1  violations: 0  incomplete: 0  passes: 30"
+        );
+    }
+
+    #[test]
+    fn test_format_a11y_text_preserves_shadow_and_frame_boundaries() {
+        let data = json!({
+            "url": "https://example.com",
+            "axeVersion": "4.12.1",
+            "counts": { "violations": 1, "incomplete": 0, "passes": 1 },
+            "violations": [{
+                "id": "image-alt",
+                "impact": "critical",
+                "help": "Images must have alternative text",
+                "nodeCount": 2,
+                "nodes": [
+                    { "target": [["#shadow-host", "img"]] },
+                    { "target": ["iframe", "#nested-image"] }
+                ]
+            }],
+            "incomplete": []
+        });
+
+        let rendered = format_a11y_text(&data);
+
+        assert!(rendered.contains("  - #shadow-host >>> img"));
+        assert!(rendered.contains("  - iframe -> #nested-image"));
+    }
+
+    #[test]
+    fn test_format_vitals_text_summary() {
+        let data = json!({
+            "url": "https://example.com/dashboard",
+            "ttfb": 12.34,
+            "fcp": 56.0,
+            "lcp": {
+                "startTime": 123.45,
+                "size": 1200,
+                "element": "img",
+                "url": "https://example.com/assets/hero.png"
+            },
+            "cls": {
+                "score": 0.0123,
+                "entries": []
+            },
+            "inp": null,
+            "hydration": {
+                "startTime": 130.0,
+                "endTime": 180.25,
+                "duration": 50.25
+            },
+            "phases": [{ "label": "Hydrated" }],
+            "hydratedComponents": [{ "name": "App" }, { "name": "Nav" }]
+        });
+
+        let rendered = format_vitals_text(&data);
+
+        assert_eq!(
+            rendered,
+            "url: https://example.com/dashboard\n\
+ttfb: 12.34ms  fcp: 56ms  lcp: 123.45ms  cls: 0.01  inp: -\n\
+lcp: element: img  asset: https://example.com/assets/hero.png\n\
+hydration: 50.25ms  phases: 1  hydratedComponents: 2"
+        );
+    }
+
+    #[test]
+    fn test_format_vitals_text_handles_missing_values() {
+        let data = json!({
+            "url": "https://example.com",
+            "lcp": null,
+            "cls": { "score": 0.0, "entries": [] },
+            "phases": [],
+            "hydratedComponents": []
+        });
+
+        let rendered = format_vitals_text(&data);
+
+        assert_eq!(
+            rendered,
+            "url: https://example.com\n\
+ttfb: -  fcp: -  lcp: -  cls: 0  inp: -\n\
+hydration: -  phases: 0  hydratedComponents: 0"
+        );
+    }
+
+    #[test]
+    fn test_format_with_boundaries_applies_max_output() {
+        let opts = OutputOptions {
+            max_output: Some(5),
+            ..OutputOptions::default()
+        };
+
+        let rendered = format_with_boundaries("abcdef", Some("https://example.com"), &opts);
+
+        assert!(rendered.starts_with("abcde\n[truncated: showing 5 of 6 chars."));
+    }
+
+    #[test]
+    fn test_format_with_boundaries_wraps_content() {
+        let opts = OutputOptions {
+            content_boundaries: true,
+            ..OutputOptions::default()
+        };
+
+        let rendered = format_with_boundaries("content", Some("https://example.com"), &opts);
+
+        assert!(rendered.contains("AGENT_BROWSER_PAGE_CONTENT"));
+        assert!(rendered.contains("origin=https://example.com"));
+        assert!(rendered.contains("\ncontent\n"));
+        assert!(rendered.contains("END_AGENT_BROWSER_PAGE_CONTENT"));
+    }
+
+    #[test]
+    fn test_boundary_origin_supports_read_metadata() {
+        assert_eq!(
+            boundary_origin(&json!({
+                "finalUrl": "https://example.com/read",
+                "url": "https://example.com/source"
+            })),
+            Some("https://example.com/read")
+        );
+        assert_eq!(
+            boundary_origin(&json!({
+                "origin": "https://example.com/dom",
+                "finalUrl": "https://example.com/read"
+            })),
+            Some("https://example.com/dom")
+        );
+        assert_eq!(
+            boundary_origin(&json!({ "url": "https://example.com/source" })),
+            Some("https://example.com/source")
+        );
+    }
+
+    #[test]
+    fn test_webmcp_text_can_use_content_boundaries() {
+        let data = json!({
+            "invocationId": "i1",
+            "status": "completed",
+            "origin": "https://example.com",
+            "output": {"message": "untrusted"}
+        });
+        let text = format_webmcp_text(Some("webmcp_invoke"), &data).unwrap();
+        let rendered = format_with_boundaries(
+            &text,
+            boundary_origin(&data),
+            &OutputOptions {
+                content_boundaries: true,
+                ..OutputOptions::default()
+            },
+        );
+        assert!(rendered.contains("origin=https://example.com"));
+        assert!(rendered.contains("\"message\": \"untrusted\""));
+    }
+
+    #[test]
+    fn test_webmcp_list_tools_keep_their_own_origin() {
+        let first = json!({
+            "name": "search",
+            "frameId": "frame-a",
+            "origin": "https://a.example",
+            "description": "Search A"
+        });
+        let second = json!({
+            "name": "search",
+            "frameId": "frame-b",
+            "origin": "https://b.example",
+            "description": "Search B"
+        });
+        let opts = OutputOptions {
+            content_boundaries: true,
+            ..OutputOptions::default()
+        };
+        let first = format_with_boundaries(
+            &format_webmcp_tool_text(&first),
+            boundary_origin(&first),
+            &opts,
+        );
+        let second = format_with_boundaries(
+            &format_webmcp_tool_text(&second),
+            boundary_origin(&second),
+            &opts,
+        );
+        assert!(first.contains("origin=https://a.example"));
+        assert!(!first.contains("origin=https://b.example"));
+        assert!(second.contains("origin=https://b.example"));
+        assert!(!second.contains("origin=https://a.example"));
     }
 }

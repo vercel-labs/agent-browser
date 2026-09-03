@@ -1,0 +1,77 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>WebMCP probe</title>
+  </head>
+  <body>
+    <output id="result">idle</output>
+    <iframe id="tool-frame" src="http://127.0.0.1:__PORT__/frame.html" allow="tools"></iframe>
+    <script>
+      document.modelContext.registerTool({
+        name: "set_message",
+        description: "Sets the visible message",
+        inputSchema: {
+          type: "object",
+          properties: {
+            message: { type: "string" }
+          },
+          required: ["message"],
+          additionalProperties: false
+        },
+        annotations: {
+          readOnlyHint: false,
+          untrustedContentHint: false
+        },
+        execute: async ({ message }) => {
+          document.getElementById("result").textContent = message;
+          return { message };
+        }
+      });
+
+      document.modelContext.registerTool({
+        name: "wait_for_cancel",
+        description: "Waits until canceled",
+        inputSchema: {
+          type: "object",
+          properties: {}
+        },
+        annotations: {
+          readOnlyHint: true,
+          untrustedContentHint: false
+        },
+        execute: async () => new Promise(() => {})
+      });
+
+      document.modelContext.registerTool({
+        name: "fail_tool",
+        description: "Returns a controlled failure",
+        inputSchema: {
+          type: "object",
+          properties: {}
+        },
+        annotations: {
+          readOnlyHint: true,
+          untrustedContentHint: true
+        },
+        execute: async () => {
+          throw new Error("fixture failure");
+        }
+      });
+
+      document.modelContext.registerTool({
+        name: "duplicate_tool",
+        description: "Duplicate tool in the main frame",
+        inputSchema: {
+          type: "object",
+          properties: {}
+        },
+        annotations: {
+          readOnlyHint: true,
+          untrustedContentHint: false
+        },
+        execute: async () => ({ scope: "main" })
+      });
+    </script>
+  </body>
+</html>

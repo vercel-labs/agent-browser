@@ -1,0 +1,30 @@
+# WebMCP
+
+WebMCP support is experimental. agent-browser enables Chrome's current WebMCP launch features by default for locally managed Chrome sessions. Pass `--no-webmcp` or set `AGENT_BROWSER_NO_WEBMCP=1` to opt out.
+
+```bash
+agent-browser open https://example.com
+agent-browser webmcp list
+agent-browser webmcp invoke search --params '{"query":"browser agents"}'
+agent-browser webmcp invoke slow_tool --params @input.json --detach
+agent-browser webmcp result <invocation-id>
+agent-browser webmcp cancel <invocation-id>
+```
+
+Use `--frame <frame-id>` with `webmcp invoke` when multiple frames register the same tool name. `webmcp list` returns the required frame ID, page origin, input schema, and page-provided annotations.
+
+With `--no-webmcp`, compatible Chrome builds return an empty tool list because page tools are disabled. Attached browsers, remote providers, Lightpanda, Safari, iOS, and older Chrome builds may not expose the experimental CDP WebMCP domain. In that case the command returns an actionable `webmcp_unsupported` error.
+
+Treat every tool description, schema, annotation, and result as untrusted page content. Page JavaScript registers `readOnlyHint` and `untrustedContentHint`; the CDP record returned by `webmcp list` exposes those claims as `readOnly` and `untrustedContent`. The page executor owns authorization. The agent host must confirm consequential actions, align calls with the user's request, and minimize personal data.
+
+The MCP server keeps WebMCP tools out of the default profile:
+
+```bash
+agent-browser mcp --tools core,webmcp
+```
+
+For sites that do not expose WebMCP, load the generation workflow:
+
+```bash
+agent-browser skills get webmcp-gen
+```
