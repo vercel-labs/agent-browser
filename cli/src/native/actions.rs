@@ -6231,13 +6231,29 @@ async fn handle_errors(state: &DaemonState) -> Result<Value, String> {
     Ok(state.event_tracker.get_errors_json())
 }
 
+/// Report daemon and browser state without launching or reconnecting a browser.
 async fn handle_session_info(state: &DaemonState) -> Result<Value, String> {
+    let (browser_connected, connection_kind, external_connection) = match state.browser.as_ref() {
+        Some(mgr) => {
+            let external = mgr.is_cdp_connection();
+            (
+                mgr.is_connection_alive().await,
+                Some(if external { "external-cdp" } else { "local" }),
+                Some(external),
+            )
+        }
+        None => (false, None, None),
+    };
+
     Ok(json!({
         "session": state.session_id,
         "namespace": env::var("AGENT_BROWSER_NAMESPACE").ok(),
         "socketDir": get_socket_dir().to_string_lossy(),
         "backgroundPid": std::process::id(),
         "browserLaunched": state.browser.is_some(),
+        "browserConnected": browser_connected,
+        "connectionKind": connection_kind,
+        "externalConnection": external_connection,
         "pageCount": state.browser.as_ref().map(|mgr| mgr.page_count()).unwrap_or(0),
         "engine": state.engine,
         "launchHash": state.launch_hash,
@@ -12075,6 +12091,63 @@ mod tests {
     use std::fs;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn session_info_without_browser_reports_disconnected() {
+        let state = DaemonState::new();
+
+        let info = handle_session_info(&state).await.unwrap();
+
+        assert_eq!(info["browserConnected"], false);
+        assert_eq!(info["connectionKind"], Value::Null);
+        assert_eq!(info["externalConnection"], Value::Null);
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_session_info_reports_live_local_connection() {
+        let mut state = DaemonState::new();
+        let launch = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(launch["success"], true);
+
+        let info = handle_session_info(&state).await.unwrap();
+        assert_eq!(info["browserConnected"], true);
+        assert_eq!(info["connectionKind"], "local");
+        assert_eq!(info["externalConnection"], false);
+
+        close_current_browser(&mut state).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_session_info_reports_live_external_cdp_connection() {
+        let mut local = DaemonState::new();
+        let launch = execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut local,
+        )
+        .await;
+        assert_eq!(launch["success"], true);
+        let cdp_url = local.browser.as_ref().unwrap().get_cdp_url().to_string();
+
+        let mut external = DaemonState::new();
+        external.browser = Some(BrowserManager::connect_cdp(&cdp_url).await.unwrap());
+        let info = handle_session_info(&external).await.unwrap();
+        assert_eq!(info["browserConnected"], true);
+        assert_eq!(info["connectionKind"], "external-cdp");
+        assert_eq!(info["externalConnection"], true);
+
+        close_current_browser(&mut local).await.unwrap();
+        let disconnected = handle_session_info(&external).await.unwrap();
+        assert_eq!(disconnected["browserConnected"], false);
+        assert_eq!(disconnected["connectionKind"], "external-cdp");
+
+        close_current_browser(&mut external).await.unwrap();
+    }
 
     /// A binding-recovery failure must tear the connection down: the attach
     /// paths set `state.browser` before calling this, so returning the error
