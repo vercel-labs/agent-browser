@@ -216,6 +216,19 @@ pub fn to_ai_friendly_error(error: &str) -> String {
         return "Another element is covering the target element. Try scrolling or closing overlays."
             .to_string();
     }
+    // Navigation-lifecycle timeouts mean the load/DOMContentLoaded event (or
+    // the network-quiet state) never arrived within the timeout. That is a
+    // page condition (auth prompts, hanging subresources, endless redirects),
+    // not a locator problem: element-oriented advice sends agents into
+    // open/wait retry loops that each burn the full timeout. Steer them
+    // toward inspecting the page that is already there instead.
+    if lower.contains("loadeventfired")
+        || lower.contains("domcontenteventfired")
+        || lower.contains("networkidle")
+    {
+        return "The page did not reach the requested navigation state before the timeout: the load event never fired. Common causes are HTTP auth prompts, hanging subresources, or endless redirects. The page may still be usable: check where it landed with get url or snapshot. To keep waiting, run wait --load (or another navigation wait) with a larger timeout instead of re-running the navigation."
+            .to_string();
+    }
     if lower.contains("timeout") {
         return "Operation timed out. The page may still be loading or the element may not exist."
             .to_string();
@@ -2685,6 +2698,31 @@ mod tests {
             to_ai_friendly_error("Timeout waiting for element"),
             "Operation timed out. The page may still be loading or the element may not exist."
         );
+    }
+
+    #[test]
+    fn test_to_ai_friendly_error_navigation_lifecycle_timeout() {
+        // Navigation-lifecycle timeouts must get navigation guidance, not the
+        // element-flavored text that trains agents into open/wait retry loops.
+        for raw in [
+            "Timeout waiting for Page.loadEventFired",
+            "Timeout waiting for Page.domContentEventFired",
+            "Timeout waiting for networkidle",
+        ] {
+            let out = to_ai_friendly_error(raw);
+            assert!(
+                out.contains("load event never fired"),
+                "{raw} must classify as a navigation-lifecycle timeout, got: {out}"
+            );
+            assert!(
+                out.contains("get url") && out.contains("wait --load"),
+                "{raw} guidance must point at inspection and wait, got: {out}"
+            );
+            assert!(
+                !out.contains("element may not exist"),
+                "{raw} must not use element-oriented advice, got: {out}"
+            );
+        }
     }
 
     #[test]
