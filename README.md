@@ -1501,6 +1501,8 @@ This is useful when:
 
 The result is deliberately conservative: `ready` means a Chrome-advertised local port is listening; `candidate` means a common auto-connect port is listening but cannot be verified as Chrome/CDP without a protocol request; `not-running` means no active-port file or common listener was found, which cannot distinguish a closed browser from a disabled setting; `stale` means a file exists but its port is closed; and `unknown` covers malformed or unreadable state. Use `--json` for these stable status names. When setup is needed, open `chrome://inspect/#remote-debugging` in Chrome and enable Remote debugging. Normal agent-browser launches do not require this security-sensitive setting; it is only for reusing an existing browser with `--auto-connect`.
 
+This readiness check is only for desktop Chrome-family auto-connect. iOS/Safari, remote providers, and locally launched Chrome (including `--extension`) use their existing connection paths and do not need it. Electron apps on ports other than 9222 or 9229 should use `--cdp <port>` directly.
+
 ## Streaming (Browser Preview)
 
 Stream the browser viewport via WebSocket for live preview or "pair browsing" where a human can watch and interact alongside an AI agent.

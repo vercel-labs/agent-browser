@@ -77,6 +77,8 @@ This is useful when:
 
 Use `agent-browser chrome status --json` for machine-readable output. When setup is needed, open `chrome://inspect/#remote-debugging` in Chrome and enable Remote debugging. Normal agent-browser launches do not require this security-sensitive setting; it is only for reusing an existing browser with `--auto-connect`.
 
+This readiness check is only for desktop Chrome-family auto-connect. iOS/Safari, remote providers, and locally launched Chrome (including `--extension`) use their existing connection paths and do not need it. Electron apps on ports other than 9222 or 9229 should use `--cdp <port>` directly.
+
 ## Tab pinning
 
 When several sessions share one browser over CDP, each session remembers which tab it is bound to (by CDP target id, persisted across daemon restarts). A restarted daemon reattaches to the session's own tab instead of adopting whatever tab is currently active, which in a shared browser is usually another session's.
