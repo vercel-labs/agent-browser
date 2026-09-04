@@ -16,6 +16,8 @@ Capture browser automation as video for debugging, documentation, or verificatio
 
 ## Basic Recording
 
+`record start` records the current active page as-is. Without a URL it attaches to the tab you already have open (no navigation, no new tab, page state and hydration intact). With a URL it navigates the active tab there first.
+
 ```bash
 # Launch the browser, then start recording
 agent-browser open https://example.com
@@ -47,6 +49,13 @@ agent-browser record stop
 
 # Restart with new file (stops current + starts new)
 agent-browser record restart ./take2.webm --fps 60
+
+# Navigate the active tab, then record
+agent-browser record start ./output.webm https://example.com/checkout
+
+# Record in a separate tab: open it first, then start recording
+agent-browser tab new https://example.com
+agent-browser record start ./output.webm
 ```
 
 ## Frame Rate

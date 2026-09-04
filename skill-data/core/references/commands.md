@@ -114,13 +114,14 @@ Headless Chromium screenshots hide native scrollbars for consistent image output
 
 ```bash
 agent-browser open https://example.com     # Launch a browser session first
-agent-browser record start ./demo.webm    # Start recording at 30 fps
+agent-browser record start ./demo.webm    # Start recording the current page at 30 fps
 agent-browser click @e1                   # Perform actions
 agent-browser record stop                 # Stop and save video
 agent-browser record restart ./take2.webm # Stop current + start new
 
 agent-browser record start ./scroll.webm --fps 60  # 60 fps for motion-heavy takes
 agent-browser record start ./soak.webm --fps 10    # Lower rate for long sessions
+agent-browser tab new https://example.com          # Open a separate tab first if you want the recording there
 ```
 
 `--fps` accepts 1 to 60 and defaults to 30. Playback duration always matches the wall clock time recorded, so a slow page holds frames instead of speeding the video up.

@@ -7157,15 +7157,15 @@ async fn e2e_upload_with_css_selector() {
 }
 
 // ---------------------------------------------------------------------------
-// Recording: viewport inheritance
+// Recording: default records the current active page
 // ---------------------------------------------------------------------------
 
-/// Verify that `recording_start` inherits the current viewport dimensions
-/// into the newly created recording context. Without this, the recording
-/// context falls back to the default 1280×720 regardless of what the user set.
+/// `recording_start` attaches the recorder to the active page
+/// as-is: no new browser context, no new tab, no navigation. Page state set
+/// before `record start` must survive, and the viewport must be untouched.
 #[tokio::test]
 #[ignore]
-async fn e2e_recording_inherits_viewport() {
+async fn e2e_recording_default_records_active_page() {
     let mut state = DaemonState::new();
 
     let resp = execute_command(
@@ -7175,8 +7175,9 @@ async fn e2e_recording_inherits_viewport() {
     .await;
     assert_success(&resp);
 
+    let page_url = "data:text/html,<h1>Current</h1>";
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>Viewport</h1>" }),
+        &json!({ "id": "2", "action": "navigate", "url": page_url }),
         &mut state,
     )
     .await;
@@ -7189,44 +7190,155 @@ async fn e2e_recording_inherits_viewport() {
     .await;
     assert_success(&resp);
 
-    let tmp_dir = std::env::temp_dir();
-    let rec_path = tmp_dir.join(format!("ab-e2e-rec-viewport-{}.webm", std::process::id()));
+    // In-memory page state: a cold navigation or a new page would lose this.
     let resp = execute_command(
-        &json!({ "id": "4", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &json!({ "id": "4", "action": "evaluate", "script": "window.__abMarker = 42; window.__abMarker" }),
         &mut state,
     )
     .await;
     assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], 42);
+
+    let tmp_dir = std::env::temp_dir();
+    let rec_path = tmp_dir.join(format!("ab-e2e-rec-current-{}.webm", std::process::id()));
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(700)).await;
+
+    // Still exactly one tab: no recording tab was added.
+    let resp = execute_command(&json!({ "id": "6", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    let tabs = get_data(&resp)["tabs"].as_array().unwrap();
+    assert_eq!(
+        tabs.len(),
+        1,
+        "default record start must not open a new tab, got {tabs:?}"
+    );
+
+    // Same page, same JS heap: the marker survived and the URL is unchanged.
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "evaluate", "script": "window.__abMarker" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        42,
+        "default record start must not navigate or replace the page"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "evaluate", "script": "location.href" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], page_url);
+
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "evaluate", "script": "[window.innerWidth, window.innerHeight]" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], json!([800, 600]));
+
+    let resp = execute_command(
+        &json!({ "id": "10", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        get_data(&resp)["frames"].as_u64().unwrap_or(0) > 0,
+        "recorder attached to the active page should have captured frames"
+    );
+
+    let _ = std::fs::remove_file(&rec_path);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// `recording_start` with a URL navigates the active
+/// tab to that URL before recording. No new tab is created.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_default_with_url_navigates_active_tab() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": "data:text/html,<button id='before'>Before</button>"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Refs from the page being replaced must not survive the navigation.
+    let resp = execute_command(
+        &json!({ "id": "2b", "action": "snapshot", "selector": "#before" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(state.ref_map.get("e1").is_some());
+
+    let target_url = "data:text/html,<h1>Recorded</h1>";
+    let tmp_dir = std::env::temp_dir();
+    let rec_path = tmp_dir.join(format!("ab-e2e-rec-url-{}.webm", std::process::id()));
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "recording_start",
+            "path": rec_path.to_string_lossy(),
+            "url": target_url
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        state.ref_map.entries_sorted().is_empty(),
+        "record start <url> must clear refs like navigate does"
+    );
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
+    let resp = execute_command(&json!({ "id": "4", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    let tabs = get_data(&resp)["tabs"].as_array().unwrap();
+    assert_eq!(
+        tabs.len(),
+        1,
+        "record start <url> must reuse the active tab"
+    );
+
     let resp = execute_command(
-        &json!({ "id": "5", "action": "evaluate", "script": "window.innerWidth" }),
+        &json!({ "id": "5", "action": "evaluate", "script": "location.href" }),
         &mut state,
     )
     .await;
     assert_success(&resp);
-    let rec_width = get_data(&resp)["result"].as_i64().unwrap();
+    assert_eq!(get_data(&resp)["result"], target_url);
 
     let resp = execute_command(
-        &json!({ "id": "6", "action": "evaluate", "script": "window.innerHeight" }),
-        &mut state,
-    )
-    .await;
-    assert_success(&resp);
-    let rec_height = get_data(&resp)["result"].as_i64().unwrap();
-
-    assert_eq!(
-        rec_width, 800,
-        "Recording context width should be 800 (inherited from viewport), got {rec_width}"
-    );
-    assert_eq!(
-        rec_height, 600,
-        "Recording context height should be 600 (inherited from viewport), got {rec_height}"
-    );
-
-    let resp = execute_command(
-        &json!({ "id": "7", "action": "recording_stop" }),
+        &json!({ "id": "6", "action": "recording_stop" }),
         &mut state,
     )
     .await;
@@ -7283,14 +7395,11 @@ async fn e2e_recording_honors_requested_fps() {
     assert_eq!(get_data(&resp)["fps"].as_u64(), Some(FPS));
 
     // The recorder screencasts on its own CDP session attached to the
-    // recording page. That attachment must not surface as a tab.
+    // active page. That attachment must not surface as a tab.
     let resp = execute_command(&json!({ "id": "3b", "action": "tab_list" }), &mut state).await;
     assert_success(&resp);
     let tabs = get_data(&resp)["tabs"].as_array().unwrap().len();
-    assert_eq!(
-        tabs, 2,
-        "original page plus the recording page, nothing else"
-    );
+    assert_eq!(tabs, 1, "the recorded page only, nothing else");
 
     tokio::time::sleep(tokio::time::Duration::from_millis(RECORD_MS)).await;
 
@@ -7326,7 +7435,7 @@ async fn e2e_recording_honors_requested_fps() {
 }
 
 /// Verify that an out-of-range frame rate is rejected before the recorder
-/// builds its context, leaving no file and no active recording behind.
+/// attaches to the page, leaving no file and no active recording behind.
 #[tokio::test]
 #[ignore]
 async fn e2e_recording_rejects_invalid_fps() {

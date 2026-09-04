@@ -4929,10 +4929,12 @@ mod tests {
     #[test]
     fn test_record_start_rejects_unknown_flag() {
         let result = parse_command(&args("record start demo.webm --smooth"), &default_flags());
-        assert!(matches!(
-            result.unwrap_err(),
-            ParseError::InvalidValue { .. }
-        ));
+        match result.unwrap_err() {
+            ParseError::InvalidValue { message, .. } => {
+                assert!(message.contains("--smooth"), "got: {message}");
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
     }
 
     #[test]

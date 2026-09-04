@@ -338,13 +338,13 @@ agent-browser network har stop /tmp/trace.har
 
 ```bash
 agent-browser open https://example.com
-agent-browser record start demo.webm          # 30 fps by default
+agent-browser record start demo.webm          # records the current page in place, 30 fps
 agent-browser snapshot -i
 agent-browser click @e3
 agent-browser record stop
 ```
 
-Pass `--fps 60` for motion-heavy takes (drag, animation, scroll work) or a lower rate for long sessions; `--fps` accepts 1 to 60.
+`record start` attaches to the active tab as-is (no new context, no navigation unless you pass a URL). To record in a separate tab, run `tab new <url>` first. Pass `--fps 60` for motion-heavy takes (drag, animation, scroll work) or a lower rate for long sessions; `--fps` accepts 1 to 60.
 
 See [references/video-recording.md](references/video-recording.md) for frame rate guidance, codec options, and more.
 

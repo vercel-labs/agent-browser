@@ -18,10 +18,9 @@ use super::browser::{should_track_target, BrowserManager, WaitUntil};
 use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
-    AttachToTargetParams, AttachToTargetResult, CdpEvent, CreateTargetResult,
-    DispatchMouseEventParams, ExceptionThrownEvent, GetFullAXTreeResult,
-    JavascriptDialogOpeningEvent, TargetCreatedEvent, TargetDestroyedEvent, TargetInfo,
-    TargetInfoChangedEvent,
+    AttachToTargetParams, AttachToTargetResult, CdpEvent, DispatchMouseEventParams,
+    ExceptionThrownEvent, GetFullAXTreeResult, JavascriptDialogOpeningEvent, TargetCreatedEvent,
+    TargetDestroyedEvent, TargetInfo, TargetInfoChangedEvent,
 };
 use super::cookies;
 use super::diff;
@@ -4844,38 +4843,16 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         }
     }
 
-    if let Some(session_id) = state
-        .browser
-        .as_ref()
-        .and_then(|browser| browser.active_session_id().ok())
-        .map(ToString::to_string)
-    {
-        state.webmcp.clear_page_scope(&session_id);
-    } else {
-        state.webmcp.clear_invocations();
-    }
-    let _ = enable_webmcp_events(state).await;
-
     // WebDriver backend path
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
+            state.webmcp.clear_invocations();
             state.ref_map.clear();
             wb.navigate(url).await?;
             let new_url = wb.get_url().await.unwrap_or_else(|_| url.to_string());
             let title = wb.get_title().await.unwrap_or_default();
             return Ok(json!({ "url": new_url, "title": title }));
         }
-    }
-
-    // With one tab, every tracked iframe belongs to the page being replaced.
-    // With multiple tabs, retain the other tabs' sessions so switching back to
-    // an already-attached OOPIF does not lose its execution context.
-    let has_background_tabs = state
-        .browser
-        .as_ref()
-        .is_some_and(|browser| browser.page_count() > 1);
-    if !has_background_tabs {
-        state.iframe_sessions.clear();
     }
 
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
@@ -4928,9 +4905,45 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         }
     }
 
+    navigate_active_page(state, url, wait_until).await
+}
+
+/// Navigate the active page and drop the state that belonged to the document
+/// being replaced: element refs, frame scope, and WebMCP page state. Every
+/// command that replaces the active document must go through here, or a
+/// stale `@e3` from the previous page keeps resolving.
+async fn navigate_active_page(
+    state: &mut DaemonState,
+    url: &str,
+    wait_until: WaitUntil,
+) -> Result<Value, String> {
+    if let Some(session_id) = state
+        .browser
+        .as_ref()
+        .and_then(|browser| browser.active_session_id().ok())
+        .map(ToString::to_string)
+    {
+        state.webmcp.clear_page_scope(&session_id);
+    } else {
+        state.webmcp.clear_invocations();
+    }
+    let _ = enable_webmcp_events(state).await;
+
+    // With one tab, every tracked iframe belongs to the page being replaced.
+    // With multiple tabs, retain the other tabs' sessions so switching back to
+    // an already-attached OOPIF does not lose its execution context.
+    let has_background_tabs = state
+        .browser
+        .as_ref()
+        .is_some_and(|browser| browser.page_count() > 1);
+    if !has_background_tabs {
+        state.iframe_sessions.clear();
+    }
+
     state.ref_map.clear();
     state.active_iframe_sessions.clear();
     state.active_frame_id = None;
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let result = mgr.navigate(url, wait_until).await?;
     state.refresh_active_iframe_sessions().await;
     Ok(result)
@@ -6969,6 +6982,12 @@ fn recording_fps_from_command(cmd: &Value) -> Result<Option<u32>, String> {
     }
 }
 
+/// Start recording the current active page. The recorder attaches to the
+/// active session as-is: no new browser context, no new tab, and no
+/// navigation unless a URL is given (in which case the active tab navigates
+/// there first). Capture therefore starts on an already-hydrated page instead
+/// of at `load` on a cold navigation. Use `tab new` first to record in a
+/// separate tab.
 async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let path = cmd
         .get("path")
@@ -6980,155 +6999,30 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
 
-    // Validate the rate before spinning up a recording context so a bad value
-    // costs nothing.
+    // Validate the rate before any browser work so a bad value costs nothing.
     let fps = recording_fps_from_command(cmd)?;
 
-    let viewport = state.viewport;
-    let domain_filter = state.domain_filter.read().await.clone();
-    if let Some(url) = recording_url {
-        check_url_allowed_by_filter(domain_filter.as_ref(), url)?;
+    {
+        let domain_filter = state.domain_filter.read().await;
+        if let Some(url) = recording_url {
+            check_url_allowed_by_filter(domain_filter.as_ref(), url)?;
+        }
     }
 
-    let (client, new_session_id, nav_url) = {
-        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-        let old_session_id = mgr.active_session_id()?.to_string();
+    if state.recording_state.active {
+        return Err("Recording already active".to_string());
+    }
 
-        // Capture current URL if no URL specified
-        let nav_url = if let Some(u) = recording_url {
-            u.to_string()
-        } else {
-            mgr.get_url()
-                .await
-                .unwrap_or_else(|_| "about:blank".to_string())
-        };
-        check_url_allowed_by_filter(domain_filter.as_ref(), &nav_url)?;
-
-        // Capture current cookies
-        let cookies_result = mgr
-            .client
-            .send_command_no_params("Network.getAllCookies", Some(&old_session_id))
-            .await
-            .ok();
-
-        // Create new browser context
-        let ctx_result = mgr
-            .client
-            .send_command_no_params("Target.createBrowserContext", None)
-            .await?;
-        let context_id = ctx_result
-            .get("browserContextId")
-            .and_then(|v| v.as_str())
-            .ok_or("Failed to get browserContextId")?
-            .to_string();
-
-        // Create page in new context
-        let create_result: CreateTargetResult = mgr
-            .client
-            .send_command_typed(
-                "Target.createTarget",
-                &json!({ "url": "about:blank", "browserContextId": context_id }),
-                None,
-            )
-            .await?;
-
-        let attach_result: AttachToTargetResult = mgr
-            .client
-            .send_command_typed(
-                "Target.attachToTarget",
-                &AttachToTargetParams {
-                    target_id: create_result.target_id.clone(),
-                    flatten: true,
-                },
-                None,
-            )
-            .await?;
-
-        let new_session_id = attach_result.session_id.clone();
-        mgr.prepare_domains_pub(&new_session_id).await?;
-
-        // Re-apply download behavior to the recording context.
-        // Without this, downloads in the recording context are silently dropped
-        // because Browser.setDownloadBehavior at launch only applies to the default context.
-        if let Some(ref dl_path) = mgr.download_path {
-            let _ = mgr
-                .client
-                .send_command(
-                    "Browser.setDownloadBehavior",
-                    Some(json!({
-                        "behavior": "allow",
-                        "downloadPath": dl_path,
-                        "browserContextId": context_id,
-                        "eventsEnabled": true
-                    })),
-                    None,
-                )
-                .await;
-        }
-
-        // Re-apply HTTPS error ignore to the recording context.
-        // Security.setIgnoreCertificateErrors at launch only applies to the session it was sent on.
-        if mgr.ignore_https_errors {
-            let _ = mgr
-                .client
-                .send_command(
-                    "Security.setIgnoreCertificateErrors",
-                    Some(json!({ "ignore": true })),
-                    Some(&new_session_id),
-                )
-                .await;
-        }
-
-        // Transfer cookies to new context
-        if let Some(ref cr) = cookies_result {
-            if let Some(cookie_arr) = cr.get("cookies").and_then(|v| v.as_array()) {
-                if !cookie_arr.is_empty() {
-                    let _ = mgr
-                        .client
-                        .send_command(
-                            "Network.setCookies",
-                            Some(json!({ "cookies": cookie_arr })),
-                            Some(&new_session_id),
-                        )
-                        .await;
-                }
-            }
-        }
-
-        // Add page and switch to it
-        let tab_id = mgr.assign_tab_id();
-        mgr.add_page(super::browser::PageInfo {
-            tab_id,
-            label: None,
-            target_id: create_result.target_id,
-            session_id: new_session_id.clone(),
-            url: "about:blank".to_string(),
-            title: String::new(),
-            target_type: "page".to_string(),
-        });
-
-        (mgr.client.clone(), new_session_id, nav_url)
+    if let Some(url) = recording_url {
+        navigate_active_page(state, url, WaitUntil::Load).await?;
+    }
+    let (client, session_id) = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        (mgr.client.clone(), mgr.active_session_id()?.to_string())
     };
 
-    let has_proxy_creds = state.proxy_credentials.read().await.is_some();
-    install_network_controls_or_resume_prepared_session(state, has_proxy_creds, &new_session_id)
-        .await?;
-    state.drain_cdp_events_background().await?;
-
-    {
-        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-        if let Some((w, h, scale, mobile)) = viewport {
-            let _ = mgr.set_viewport(w, h, scale, mobile).await;
-        }
-
-        // Navigate only after domain filtering and WebRTC containment are active.
-        if nav_url != "about:blank" {
-            mgr.navigate(&nav_url, WaitUntil::Load).await?;
-        }
-    }
-
     let result = recording::recording_start(&mut state.recording_state, path, fps)?;
-    state.start_recording_task(client, new_session_id).await?;
+    state.start_recording_task(client, session_id).await?;
 
     if let Some(ref server) = state.stream_server {
         server.set_recording(true, &state.engine).await;
@@ -7181,12 +7075,15 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         None
     };
 
-    let recording_target = if let Some(ref mut browser) = state.browser {
-        if let Some(url) = recording_url {
-            browser.navigate(&url, WaitUntil::Load).await?;
+    let recording_target = if state.browser.is_some() {
+        if let Some(ref url) = recording_url {
+            navigate_active_page(state, url, WaitUntil::Load).await?;
         }
-        let session_id = browser.active_session_id()?.to_string();
-        Some((browser.client.clone(), session_id))
+        let browser = state.browser.as_ref().ok_or("Browser not launched")?;
+        Some((
+            browser.client.clone(),
+            browser.active_session_id()?.to_string(),
+        ))
     } else {
         None
     };
