@@ -23,9 +23,11 @@ agent-browser session
 # Generate a stable worktree-scoped session id
 agent-browser session id --scope worktree --prefix next-dev-loop
 
-# Inspect daemon, launch, and restore status
+# Inspect daemon and browser connection status without launching or reconnecting
 agent-browser session info --json
 ```
+
+The runtime data reports <code>browserConnected</code>, <code>connectionKind</code> (<code>local</code> or <code>external-cdp</code>), and <code>externalConnection</code>. A daemon IPC failure is returned in <code>runtimeError</code> instead of being mistaken for a missing runtime.
 
 ## Session isolation
 

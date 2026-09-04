@@ -94,6 +94,8 @@ Use `agent-browser session info --json` for diagnostics:
 agent-browser --session "$SESSION" session info --json
 ```
 
+This is a read-only connection probe: it checks the existing browser socket without launching or reconnecting. The runtime object includes `browserConnected`, `connectionKind` (`local` or `external-cdp`), and `externalConnection`. Check `runtimeError` for daemon IPC failures.
+
 ### Manual State Files
 
 Use `state save`, `state load`, and `--state <path>` when you need an explicit portable JSON file. Do not make agents construct paths under `~/.agent-browser/sessions/`; prefer `--restore` for reusable agent sessions.

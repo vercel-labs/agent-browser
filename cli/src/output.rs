@@ -2958,7 +2958,7 @@ instance with separate cookies, storage, and state.
 Operations:
   (none)               Show current session name
   id                   Generate stable session id (--scope worktree|cwd|git-root, --prefix)
-  info                 Show daemon, launch, and restore diagnostics
+  info                 Show daemon, browser connection, launch, and restore diagnostics
   list                 List all active sessions
 
 Environment:
@@ -4013,7 +4013,7 @@ Examples:
   agent-browser profiles                               # List available Chrome profiles
   SESSION="$(agent-browser session id --scope worktree --prefix myapp)"
   agent-browser --session "$SESSION" --restore open example.com  # Auto-save/restore state
-  agent-browser session info --json                    # Inspect daemon and restore status
+  agent-browser session info --json                    # Inspect daemon and browser connection status
   agent-browser chat "open google.com and search for cats"  # AI chat (single-shot)
   agent-browser chat                                        # AI chat (interactive REPL)
   agent-browser -q chat "summarize this page"               # Quiet mode (text only)

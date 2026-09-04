@@ -1741,7 +1741,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SESSION_INFO,
             "Session info",
-            "Show session, daemon, launch, and restore diagnostics.",
+            "Show session, daemon, browser connection, launch, and restore diagnostics without launching or reconnecting a browser.",
             json!({}),
             &[],
         ),

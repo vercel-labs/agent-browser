@@ -252,6 +252,8 @@ agent-browser --session "$SESSION" --restore --restore-check-text Dashboard open
 agent-browser --session "$SESSION" session info --json
 ```
 
+`session info` checks the existing browser connection without launching or reconnecting. Read `runtime.browserConnected`, `runtime.connectionKind`, and `runtime.externalConnection`; if daemon IPC fails, `runtimeError` contains the failure.
+
 ### Extract data
 
 ```bash
