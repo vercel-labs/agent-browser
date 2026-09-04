@@ -358,34 +358,64 @@ pub async fn take_snapshot(
 
     let mut nodes_with_refs: Vec<(usize, usize)> = Vec::new();
 
-    // Pre-collect cursor-interactive elements so we can mark them with refs during tree building
-    let cursor_elements: HashMap<i64, CursorElementInfo> =
-        find_cursor_interactive_elements(client, session_id)
+    // Pre-collect cursor-interactive elements so we can mark them with refs during tree building.
+    // Use effective_session_id (not session_id) so that when processing a cross-origin iframe
+    // the JS runs inside the iframe's own CDP session and can see the iframe's DOM elements.
+    // For the main frame effective_session_id == session_id, so there is no change in behaviour.
+    let (cursor_elements, cursor_parent_bid_map) =
+        find_cursor_interactive_elements(client, effective_session_id)
             .await
-            .unwrap_or_default();
+            .unwrap_or_else(|_| (HashMap::new(), HashMap::new()));
+
+    // DEBUG: dump AX tree vs cursor element matching info to a file
+    if let Ok(debug_path) = std::env::var("AB_DEBUG_CURSOR") {
+        let debug_path = if debug_path.is_empty() { "/tmp/ab_debug.log".to_string() } else { debug_path };
+        let mut lines = Vec::new();
+        lines.push(format!("[DEBUG] frame_id={:?} tree_nodes={} cursor_elements={}", frame_id, tree_nodes.len(), cursor_elements.len()));
+        let nodes_with_bid: Vec<_> = tree_nodes.iter()
+            .filter(|n| n.backend_node_id.is_some())
+            .map(|n| (n.role.clone(), n.name.clone(), n.backend_node_id.unwrap()))
+            .take(20)
+            .collect();
+        lines.push(format!("[DEBUG] first 20 AX nodes with backendNodeId: {nodes_with_bid:?}"));
+        let all_ax_bids: Vec<_> = tree_nodes.iter()
+            .filter(|n| n.backend_node_id.is_some())
+            .map(|n| n.backend_node_id.unwrap())
+            .collect();
+        lines.push(format!("[DEBUG] all {} AX backendNodeIds: {all_ax_bids:?}", all_ax_bids.len()));
+        let cursor_bids: Vec<_> = cursor_elements.keys().cloned().collect();
+        lines.push(format!("[DEBUG] all {} cursor backendNodeIds: {cursor_bids:?}", cursor_bids.len()));
+        let matches: Vec<_> = tree_nodes.iter()
+            .filter(|n| n.backend_node_id.map(|bid| cursor_elements.contains_key(&bid)).unwrap_or(false))
+            .map(|n| (n.role.clone(), n.name.clone(), n.backend_node_id.unwrap()))
+            .collect();
+        lines.push(format!("[DEBUG] {} cursor-matched AX nodes: {matches:?}", matches.len()));
+        let nodes_empty_role_count = tree_nodes.iter().filter(|n| n.role.is_empty() && n.backend_node_id.is_some()).count();
+        let nodes_empty_role: Vec<_> = tree_nodes.iter()
+            .filter(|n| n.role.is_empty() && n.backend_node_id.is_some())
+            .map(|n| n.backend_node_id.unwrap())
+            .take(10)
+            .collect();
+        lines.push(format!("[DEBUG] {nodes_empty_role_count} empty-role AX nodes with backendNodeId (first 10): {nodes_empty_role:?}"));
+        let content = lines.join("\n") + "\n";
+        let _ = std::fs::OpenOptions::new()
+            .create(true).append(true)
+            .open(&debug_path)
+            .and_then(|mut f| { use std::io::Write; f.write_all(content.as_bytes()) });
+    }
 
     promote_hidden_inputs(&mut tree_nodes, &cursor_elements);
+    promote_cursor_matched_ignored(&mut tree_nodes, &cursor_elements);
+    // Inject synthetic TreeNodes for cursor elements that Chrome completely omitted from the
+    // accessibility tree (not even as ignored nodes).  Examples: CSS grid cells with
+    // cursor:pointer that carry no ARIA role and no text — Chrome prunes them from the AX tree
+    // entirely in some configurations.  We use the parent backendNodeId (resolved alongside the
+    // cursor elements) to attach synthetic nodes to the correct AX parent.
+    inject_cursor_orphans(&mut tree_nodes, &cursor_elements, &cursor_parent_bid_map);
 
     for (idx, node) in tree_nodes.iter().enumerate() {
-        let role = node.role.as_str();
-        let mut should_ref = if INTERACTIVE_ROLES.contains(&role) {
-            true
-        } else if CONTENT_ROLES.contains(&role) {
-            !node.name.is_empty()
-        } else {
-            false
-        };
-
-        if node
-            .backend_node_id
-            .is_some_and(|bid| cursor_elements.contains_key(&bid))
-        {
-            // ref elements that are cursor-interactive
-            should_ref = true;
-        }
-
-        if should_ref {
-            let nth = tracker.track(role, &node.name, idx);
+        if should_assign_ref(&node.role, &node.name, node.backend_node_id, &cursor_elements) {
+            let nth = tracker.track(&node.role, &node.name, idx);
             nodes_with_refs.push((idx, nth));
         }
     }
@@ -621,10 +651,42 @@ async fn resolve_iframe_frame_id(
         .ok_or_else(|| "Could not resolve iframe frame ID".to_string())
 }
 
+/// Returns `true` when an AX tree node should be assigned a snapshot ref.
+///
+/// A ref is assigned when:
+/// - The role is a known interactive role (`button`, `link`, `textbox`, …).
+/// - The role is a content role (`heading`, `cell`, …) **and** the node has a
+///   non-empty accessible name.
+/// - The node's `backendNodeId` appears in `cursor_elements`, meaning it was
+///   detected as cursor-interactive by [`find_cursor_interactive_elements`]
+///   (e.g. a `<div onclick>` or an element with `cursor:pointer`).
+///
+/// This function exists as a standalone helper so that it can be unit-tested
+/// independently of the async CDP calls in [`take_snapshot`].
+fn should_assign_ref(
+    role: &str,
+    name: &str,
+    backend_node_id: Option<i64>,
+    cursor_elements: &HashMap<i64, CursorElementInfo>,
+) -> bool {
+    if INTERACTIVE_ROLES.contains(&role) {
+        return true;
+    }
+    if CONTENT_ROLES.contains(&role) && !name.is_empty() {
+        return true;
+    }
+    backend_node_id.is_some_and(|bid| cursor_elements.contains_key(&bid))
+}
+
+/// Returns two maps:
+/// 1. `cursor_elements`: backendNodeId → CursorElementInfo for every cursor-interactive element
+/// 2. `cursor_parent_bid_map`: backendNodeId → `Option<parent backendNodeId>`.  The parent
+///    backend ID is used by `inject_cursor_orphans` to find the correct AX tree parent when a
+///    cursor element is completely absent from Chrome's accessibility tree.
 async fn find_cursor_interactive_elements(
     client: &CdpClient,
     session_id: &str,
-) -> Result<HashMap<i64, CursorElementInfo>, String> {
+) -> Result<(HashMap<i64, CursorElementInfo>, HashMap<i64, Option<i64>>), String> {
     // Single JS evaluation that matches the v0.19.0 Node.js findCursorInteractiveElements():
     // - Uses querySelectorAll('*') to walk all elements
     // - Checks getComputedStyle(el).cursor === 'pointer'
@@ -638,6 +700,7 @@ async fn find_cursor_interactive_elements(
 (function() {
     var results = [];
     if (!document.body) return results;
+    var parentIdxCounter = 0;
 
     var interactiveRoles = {
         'button':1, 'link':1, 'textbox':1, 'checkbox':1, 'radio':1, 'combobox':1, 'listbox':1,
@@ -699,6 +762,16 @@ async fn find_cursor_interactive_elements(
         }
 
         el.setAttribute('data-__ab-ci', String(results.length));
+        // Tag the parent element so we can resolve its backendNodeId via a second
+        // DOM.querySelectorAll call.  We cannot rely on DOM.describeNode returning parentId
+        // because Chrome only emits it for nodes already resolved in the CDP session.
+        var parentCiP = null;
+        if (el.parentElement) {
+            if (!el.parentElement.hasAttribute('data-__ab-ci-p')) {
+                el.parentElement.setAttribute('data-__ab-ci-p', String(parentIdxCounter++));
+            }
+            parentCiP = el.parentElement.getAttribute('data-__ab-ci-p');
+        }
         results.push({
             text: text,
             tagName: tagName,
@@ -707,7 +780,8 @@ async fn find_cursor_interactive_elements(
             hasTabIndex: hasTabIndex,
             isEditable: isEditable,
             hiddenInputType: hiddenInputType,
-            hiddenInputChecked: hiddenInputChecked
+            hiddenInputChecked: hiddenInputChecked,
+            parentCiP: parentCiP
         });
     }
     return results;
@@ -733,7 +807,7 @@ async fn find_cursor_interactive_elements(
         .unwrap_or_default();
 
     if elements.is_empty() {
-        return Ok(HashMap::new());
+        return Ok((HashMap::new(), HashMap::new()));
     }
 
     // Batch-resolve backendNodeIds: use DOM.getDocument to get the root nodeId,
@@ -769,29 +843,67 @@ async fn find_cursor_interactive_elements(
         .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect())
         .unwrap_or_default();
 
-    // Resolve backendNodeIds for each DOM node using concurrent CDP calls.
-    let describe_futures: Vec<_> = node_ids
-        .iter()
-        .map(|&node_id| {
-            client.send_command(
-                "DOM.describeNode",
-                Some(serde_json::json!({ "nodeId": node_id })),
-                Some(session_id),
-            )
-        })
-        .collect();
+    // Also query for the parent elements we tagged with data-__ab-ci-p in the JS above.
+    // This lets us resolve parent backendNodeIds without relying on DOM.describeNode returning
+    // parentId — which Chrome only emits when the parent has already been resolved in the CDP
+    // session (it hasn't, because DOM.getDocument was called with depth=0).
+    let parent_query_result = client
+        .send_command(
+            "DOM.querySelectorAll",
+            Some(serde_json::json!({
+                "nodeId": root_node_id,
+                "selector": "[data-__ab-ci-p]"
+            })),
+            Some(session_id),
+        )
+        .await
+        .unwrap_or_default();
+    let parent_node_ids: Vec<i64> = parent_query_result
+        .get("nodeIds")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect())
+        .unwrap_or_default();
 
-    let describe_results = futures_util::future::join_all(describe_futures).await;
+    // DEBUG: log node_ids count
+    if let Ok(debug_path) = std::env::var("AB_DEBUG_CURSOR") {
+        let debug_path = if debug_path.is_empty() { "/tmp/ab_debug.log".to_string() } else { debug_path };
+        let msg = format!("[DEBUG-CI] session={session_id} js_found={} dom_querySelectorAll={} parent_count={}\n",
+            elements.len(), node_ids.len(), parent_node_ids.len());
+        let _ = std::fs::OpenOptions::new()
+            .create(true).append(true)
+            .open(&debug_path)
+            .and_then(|mut f| { use std::io::Write; f.write_all(msg.as_bytes()) });
+    }
 
-    // Build a map from data-__ab-ci index to backendNodeId.
-    let mut idx_to_backend: HashMap<usize, i64> = HashMap::new();
+    // Resolve backendNodeIds for cursor elements and their parents in one concurrent batch.
+    let cursor_describe_futures = node_ids.iter().map(|&node_id| {
+        client.send_command(
+            "DOM.describeNode",
+            Some(serde_json::json!({ "nodeId": node_id })),
+            Some(session_id),
+        )
+    });
+    let parent_describe_futures = parent_node_ids.iter().map(|&node_id| {
+        client.send_command(
+            "DOM.describeNode",
+            Some(serde_json::json!({ "nodeId": node_id })),
+            Some(session_id),
+        )
+    });
+    let (describe_results, parent_describe_results) = futures_util::future::join(
+        futures_util::future::join_all(cursor_describe_futures),
+        futures_util::future::join_all(parent_describe_futures),
+    )
+    .await;
+
+    // Build data-__ab-ci index → backendNodeId for cursor elements.
+    let mut idx_to_backend_id: HashMap<usize, i64> = HashMap::new();
     for desc in describe_results.into_iter().flatten() {
-        let backend_id = desc
-            .get("node")
+        let node = desc.get("node");
+        let backend_id = node
             .and_then(|n| n.get("backendNodeId"))
             .and_then(|v| v.as_i64());
-        let ci_attr = desc
-            .get("node")
+        let ci_attr = node
             .and_then(|n| n.get("attributes"))
             .and_then(|a| a.as_array())
             .and_then(|attrs| {
@@ -805,13 +917,46 @@ async fn find_cursor_interactive_elements(
                     .and_then(|s| s.parse::<usize>().ok())
             });
         if let (Some(bid), Some(idx)) = (backend_id, ci_attr) {
-            idx_to_backend.insert(idx, bid);
+            idx_to_backend_id.insert(idx, bid);
         }
     }
 
-    // Clean up the data attributes we injected for backendNodeId resolution.
-    let cleanup_js =
-        r#"(function(){ var els = document.querySelectorAll('[data-__ab-ci]'); for (var i = 0; i < els.length; i++) els[i].removeAttribute('data-__ab-ci'); return els.length; })()"#.to_string();
+    // Build data-__ab-ci-p value → parent backendNodeId.
+    // The data-__ab-ci-p value is the string index set by JS (e.g. "0", "1", …) — we use it
+    // as a stable key to join cursor elements to their parents without relying on DOM nodeIds.
+    let mut parent_ci_p_to_bid: HashMap<String, i64> = HashMap::new();
+    for desc in parent_describe_results.into_iter().flatten() {
+        let node = desc.get("node");
+        let backend_id = node
+            .and_then(|n| n.get("backendNodeId"))
+            .and_then(|v| v.as_i64());
+        let ci_p_attr = node
+            .and_then(|n| n.get("attributes"))
+            .and_then(|a| a.as_array())
+            .and_then(|attrs| {
+                attrs
+                    .iter()
+                    .enumerate()
+                    .find(|(_, v)| v.as_str() == Some("data-__ab-ci-p"))
+                    .and_then(|(i, _)| attrs.get(i + 1))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            });
+        if let (Some(bid), Some(key)) = (backend_id, ci_p_attr) {
+            parent_ci_p_to_bid.insert(key, bid);
+        }
+    }
+
+    // Clean up both sets of data attributes we injected.
+    let cleanup_js = r#"(function(){
+        var els = document.querySelectorAll('[data-__ab-ci],[data-__ab-ci-p]');
+        for (var i = 0; i < els.length; i++) {
+            els[i].removeAttribute('data-__ab-ci');
+            els[i].removeAttribute('data-__ab-ci-p');
+        }
+        return els.length;
+    })()"#
+        .to_string();
     if let Err(e) = client
         .send_command_typed::<EvaluateParams, EvaluateResult>(
             "Runtime.evaluate",
@@ -827,10 +972,23 @@ async fn find_cursor_interactive_elements(
         eprintln!("[agent-browser] Warning: failed to clean up data-__ab-ci attributes: {e}");
     }
 
-    // Build the map
+    // Build the cursor-elements map and the cursor→parent-backend map.
     let mut map: HashMap<i64, CursorElementInfo> = HashMap::new();
+    // Maps cursor element backendNodeId → its parent's backendNodeId.
+    // Needed by inject_cursor_orphans to find the right AX parent when the cursor
+    // element itself is absent from the accessibility tree.
+    let mut cursor_parent_bid_map: HashMap<i64, Option<i64>> = HashMap::new();
+
     for (i, elem) in elements.iter().enumerate() {
-        let backend_node_id = idx_to_backend.get(&i).copied();
+        let Some(&bid) = idx_to_backend_id.get(&i) else {
+            continue;
+        };
+        // Resolve parent backendNodeId via the parentCiP value we tagged in JS.
+        let parent_bid = elem
+            .get("parentCiP")
+            .and_then(|v| v.as_str())
+            .and_then(|key| parent_ci_p_to_bid.get(key).copied());
+        cursor_parent_bid_map.insert(bid, parent_bid);
 
         // Role differentiation: v0.19.0 uses 'clickable' for cursor:pointer or onclick,
         // 'focusable' for tabindex-only elements.
@@ -889,21 +1047,19 @@ async fn find_cursor_interactive_elements(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        if let Some(bid) = backend_node_id {
-            map.insert(
-                bid,
-                CursorElementInfo {
-                    kind: kind.to_string(),
-                    hints,
-                    text,
-                    hidden_input_kind,
-                    hidden_input_checked,
-                },
-            );
-        }
+        map.insert(
+            bid,
+            CursorElementInfo {
+                kind: kind.to_string(),
+                hints,
+                text,
+                hidden_input_kind,
+                hidden_input_checked,
+            },
+        );
     }
 
-    Ok(map)
+    Ok((map, cursor_parent_bid_map))
 }
 
 /// Promote LabelText/generic nodes that wrap a hidden radio/checkbox input.
@@ -938,6 +1094,189 @@ fn promote_hidden_inputs(
     }
 }
 
+/// Promote AX nodes that Chrome's engine marked as "ignored" but that cursor
+/// detection found to be independently interactive (cursor:pointer, onclick, …).
+///
+/// Chrome omits semantic information for unstyled container divs — most visibly
+/// CSS grid cells that carry no `role` attribute.  Their AX nodes appear as
+/// empty `TreeNode`s in our tree (with `role = ""`), so they never match the
+/// INTERACTIVE_ROLES / CONTENT_ROLES checks and are silently skipped.
+///
+/// When `find_cursor_interactive_elements` did find one of those nodes (its
+/// `backendDOMNodeId` appears in `cursor_elements`), we restore a `"generic"`
+/// role and, if the element had visible text, its `textContent` as name.
+/// Any single StaticText child whose text already matches the promoted name is
+/// cleared to avoid redundant output.
+fn promote_cursor_matched_ignored(
+    tree_nodes: &mut [TreeNode],
+    cursor_elements: &HashMap<i64, CursorElementInfo>,
+) {
+    // First pass: collect promotions (borrow-checker: can't hold a mut ref and
+    // index into the same slice simultaneously).
+    let promotions: Vec<(usize, String)> = tree_nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, node)| {
+            if !node.role.is_empty() {
+                return None; // already a proper AX node
+            }
+            let bid = node.backend_node_id?;
+            let cursor_info = cursor_elements.get(&bid)?;
+            Some((i, cursor_info.text.clone()))
+        })
+        .collect();
+
+    // Second pass: apply and deduplicate.
+    for (i, text) in promotions {
+        tree_nodes[i].role = "generic".to_string();
+        if tree_nodes[i].name.is_empty() && !text.is_empty() {
+            tree_nodes[i].name = text.clone();
+        }
+        // Clear a redundant single-child StaticText (same text as the promoted name).
+        if tree_nodes[i].children.len() == 1 {
+            let child_idx = tree_nodes[i].children[0];
+            if tree_nodes[child_idx].role == "StaticText"
+                && tree_nodes[child_idx].name == tree_nodes[i].name
+            {
+                tree_nodes[child_idx].clear();
+            }
+        }
+    }
+}
+
+/// Inject synthetic `"generic"` TreeNodes for cursor-interactive elements that Chrome omitted
+/// from the accessibility tree entirely (not even as ignored/pruned nodes).
+///
+/// This is the final fallback after both the normal backendDOMNodeId match and
+/// `promote_cursor_matched_ignored` have run.  Common trigger: CSS-grid cells with
+/// `cursor:pointer` but no ARIA role and no direct event listeners — Chrome decides they
+/// carry no accessibility value and skips them entirely.
+///
+/// For each cursor element whose `backendNodeId` is absent from every existing tree node, we:
+/// 1. Look up the element's **parent** backend node ID (from `cursor_parent_bid_map`).
+/// 2. Find the first existing tree node that has that parent backend node ID.
+/// 3. Append a synthetic `"generic"` child with the cursor element's text content.
+///
+/// If no parent AX node can be found we skip the element rather than injecting at an arbitrary
+/// position (which could confuse agents reading the snapshot).
+fn inject_cursor_orphans(
+    tree_nodes: &mut Vec<TreeNode>,
+    cursor_elements: &HashMap<i64, CursorElementInfo>,
+    cursor_parent_bid_map: &HashMap<i64, Option<i64>>,
+) {
+    // Collect all backend node IDs that already exist in the tree (matched or promoted).
+    let tree_bids: std::collections::HashSet<i64> = tree_nodes
+        .iter()
+        .filter_map(|n| n.backend_node_id)
+        .collect();
+
+    // Build parent_bid → first tree node index lookup for quick parent resolution.
+    let mut parent_bid_to_tree_idx: HashMap<i64, usize> = HashMap::new();
+    for (idx, node) in tree_nodes.iter().enumerate() {
+        if let Some(bid) = node.backend_node_id {
+            parent_bid_to_tree_idx.entry(bid).or_insert(idx);
+        }
+    }
+
+    // Collect synthetic nodes to inject (avoid borrow issues with tree_nodes).
+    struct Orphan {
+        parent_tree_idx: usize,
+        backend_node_id: i64,
+        text: String,
+        kind: String,
+        hints: Vec<String>,
+    }
+    let mut orphans: Vec<Orphan> = Vec::new();
+
+    // DEBUG
+    if let Ok(debug_path) = std::env::var("AB_DEBUG_CURSOR") {
+        let debug_path = if debug_path.is_empty() { "/tmp/ab_debug.log".to_string() } else { debug_path };
+        let unmatched: Vec<_> = cursor_elements.keys().filter(|bid| !tree_bids.contains(bid)).collect();
+        let parent_map_sample: Vec<_> = cursor_parent_bid_map.iter().take(5).collect();
+        let tree_bid_count = tree_bids.len();
+        let msg = format!("[DEBUG-ORPHAN] unmatched_cursor={} tree_bids={} parent_bid_map_len={} sample_parents={:?} tree_bid_sample={:?}\n",
+            unmatched.len(), tree_bid_count, cursor_parent_bid_map.len(), parent_map_sample,
+            tree_bids.iter().take(10).collect::<Vec<_>>());
+        let _ = std::fs::OpenOptions::new()
+            .create(true).append(true)
+            .open(&debug_path)
+            .and_then(|mut f| { use std::io::Write; f.write_all(msg.as_bytes()) });
+    }
+
+    for (&cursor_bid, cursor_info) in cursor_elements {
+        if tree_bids.contains(&cursor_bid) {
+            continue; // already represented in the tree
+        }
+
+        // Find the parent's backendNodeId and from there the parent tree node.
+        let parent_bid = match cursor_parent_bid_map.get(&cursor_bid) {
+            Some(Some(pbid)) => *pbid,
+            _ => continue, // no parent info — skip
+        };
+        let parent_tree_idx = match parent_bid_to_tree_idx.get(&parent_bid) {
+            Some(&idx) => idx,
+            None => continue, // parent not in AX tree — skip
+        };
+
+        orphans.push(Orphan {
+            parent_tree_idx,
+            backend_node_id: cursor_bid,
+            text: cursor_info.text.clone(),
+            kind: cursor_info.kind.clone(),
+            hints: cursor_info.hints.clone(),
+        });
+    }
+
+    // Sort by backend_node_id so injection order is deterministic across runs.
+    // HashMap iteration order is non-deterministic; without sorting, ref numbers
+    // assigned to otherwise-identical snapshots would differ between calls.
+    // backend_node_id values are assigned incrementally by Chrome, so this also
+    // approximates DOM document order.
+    orphans.sort_by_key(|o| o.backend_node_id);
+
+    // Append synthetic nodes and wire parent–child links.
+    for orphan in orphans {
+        let new_idx = tree_nodes.len();
+        // Keep a copy of the text for the reparenting step below (orphan.text is moved).
+        let orphan_text = orphan.text.clone();
+        tree_nodes.push(TreeNode {
+            role: "generic".to_string(),
+            name: orphan.text,
+            backend_node_id: Some(orphan.backend_node_id),
+            parent_idx: Some(orphan.parent_tree_idx),
+            // cursor_info is set later by the ref-assignment loop in take_snapshot
+            ..TreeNode::empty()
+        });
+        tree_nodes[orphan.parent_tree_idx].children.push(new_idx);
+
+        // Clear duplicate StaticText siblings that Chrome hoisted from this pruned element.
+        //
+        // When an element carries role="none/presentation", Chrome omits the element from
+        // the AX tree but promotes its text content to the nearest non-pruned ancestor as
+        // a StaticText node.  Now that we have injected the element as a named generic,
+        // those StaticText siblings are redundant — clear them so the snapshot shows the
+        // cell exactly once (as the clickable generic) rather than twice.
+        if !orphan_text.is_empty() {
+            // Clone the parent children list to avoid simultaneous mutable+immutable borrows.
+            let sibling_indices: Vec<usize> =
+                tree_nodes[orphan.parent_tree_idx].children.clone();
+            let to_clear: Vec<usize> = sibling_indices
+                .into_iter()
+                .filter(|&ci| {
+                    ci != new_idx
+                        && tree_nodes
+                            .get(ci)
+                            .map(|c| c.role == "StaticText" && c.name == orphan_text)
+                            .unwrap_or(false)
+                })
+                .collect();
+            for ci in to_clear {
+                tree_nodes[ci].clear();
+            }
+        }
+    }
+}
+
 fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
     let mut tree_nodes: Vec<TreeNode> = Vec::with_capacity(nodes.len());
     let mut id_to_idx: HashMap<String, usize> = HashMap::new();
@@ -951,7 +1290,17 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
             extract_properties(&node.properties);
 
         if (node.ignored.unwrap_or(false) && role != "RootWebArea") || role == "InlineTextBox" {
-            tree_nodes.push(TreeNode::empty());
+            let mut empty = TreeNode::empty();
+            // For genuinely-ignored nodes (not InlineTextBox) preserve the
+            // backendDOMNodeId so that promote_cursor_matched_ignored can restore
+            // them when cursor detection finds them clickable.  Chrome marks
+            // structurally-meaningless divs — e.g. CSS grid cells that carry no
+            // ARIA role — as "ignored" in the AX tree even though they have
+            // cursor:pointer and are independently interactive.
+            if role != "InlineTextBox" {
+                empty.backend_node_id = node.backend_d_o_m_node_id;
+            }
+            tree_nodes.push(empty);
             id_to_idx.insert(node.node_id.clone(), i);
             continue;
         }
@@ -1597,5 +1946,468 @@ mod tests {
         promote_hidden_inputs(&mut nodes, &cursor_elements);
 
         assert_eq!(nodes[0].role, "LabelText"); // unchanged
+    }
+
+    // -----------------------------------------------------------------------
+    // should_assign_ref
+    // Guards the logic that turns AX tree nodes into snapshot refs, including
+    // the cursor-interactive path that covers onclick/<div> game buttons inside
+    // cross-origin iframes.
+    // -----------------------------------------------------------------------
+
+    fn clickable_cursor_info(text: &str) -> CursorElementInfo {
+        CursorElementInfo {
+            kind: "clickable".to_string(),
+            hints: vec!["cursor:pointer".to_string()],
+            text: text.to_string(),
+            hidden_input_kind: None,
+            hidden_input_checked: None,
+        }
+    }
+
+    #[test]
+    fn test_should_assign_ref_interactive_roles_always_get_ref() {
+        let cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        for role in INTERACTIVE_ROLES {
+            assert!(
+                should_assign_ref(role, "", None, &cursor_elements),
+                "interactive role '{role}' should always get a ref"
+            );
+        }
+    }
+
+    #[test]
+    fn test_should_assign_ref_content_roles_require_non_empty_name() {
+        let cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        assert!(should_assign_ref("heading", "Title", None, &cursor_elements));
+        assert!(!should_assign_ref("heading", "", None, &cursor_elements));
+        assert!(should_assign_ref("cell", "Value", None, &cursor_elements));
+        assert!(!should_assign_ref("cell", "", None, &cursor_elements));
+    }
+
+    #[test]
+    fn test_should_assign_ref_generic_without_cursor_info_skipped() {
+        // A plain <div> with no cursor-interactive match must NOT get a ref —
+        // otherwise every structural wrapper would pollute the snapshot.
+        let cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        assert!(!should_assign_ref("generic", "", None, &cursor_elements));
+        assert!(!should_assign_ref("generic", "Some text", None, &cursor_elements));
+        assert!(!should_assign_ref("generic", "", Some(42), &cursor_elements));
+    }
+
+    #[test]
+    fn test_should_assign_ref_generic_with_cursor_info_gets_ref() {
+        // A <div> detected as cursor-interactive (onclick / cursor:pointer)
+        // MUST get a ref so agents can interact with it.
+        // This is the exact case for game number-buttons (e.g. Sudoku 1–9) and
+        // action buttons (SLET / HJÆLP) that live inside cross-origin iframes
+        // and carry no ARIA role.
+        let bid: i64 = 42;
+        let mut cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        cursor_elements.insert(bid, clickable_cursor_info("SLET"));
+
+        // Node with a different backendNodeId → no ref
+        assert!(!should_assign_ref("generic", "", Some(999), &cursor_elements));
+        // No backendNodeId at all → no ref
+        assert!(!should_assign_ref("generic", "", None, &cursor_elements));
+
+        // Node whose backendNodeId appears in cursor_elements → ref assigned
+        assert!(should_assign_ref("generic", "", Some(bid), &cursor_elements));
+        assert!(should_assign_ref("generic", "SLET", Some(bid), &cursor_elements));
+    }
+
+    #[test]
+    fn test_should_assign_ref_structural_roles_without_cursor_info_skipped() {
+        let cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        for role in STRUCTURAL_ROLES {
+            assert!(
+                !should_assign_ref(role, "anything", None, &cursor_elements),
+                "structural role '{role}' without cursor info must not get a ref"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-origin iframe session regression guard
+    //
+    // When take_snapshot recurses into a cross-origin iframe it computes
+    // effective_session_id via resolve_ax_session.  find_cursor_interactive_elements
+    // MUST be called with effective_session_id (not session_id) so that the JS
+    // evaluation runs inside the iframe document.
+    //
+    // If the parent session were used instead, document.body.querySelectorAll('*')
+    // would scan the main frame and find none of the iframe's elements, leaving
+    // every clickable <div> inside the iframe as plain StaticText with no ref.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cross_origin_iframe_effective_session_differs_from_parent() {
+        let parent_session = "parent-session-id";
+        let cross_origin_frame_id = "cross-origin-frame-id";
+        let iframe_session = "iframe-dedicated-session-id";
+
+        let mut iframe_sessions = HashMap::new();
+        iframe_sessions.insert(cross_origin_frame_id.to_string(), iframe_session.to_string());
+
+        let (_params, effective_session) =
+            resolve_ax_session(Some(cross_origin_frame_id), parent_session, &iframe_sessions);
+
+        assert_ne!(
+            effective_session, parent_session,
+            "cross-origin iframe: effective_session_id must differ from parent session; \
+             passing parent session to find_cursor_interactive_elements scans the wrong document"
+        );
+        assert_eq!(
+            effective_session, iframe_session,
+            "cross-origin iframe: effective_session_id must be the dedicated iframe CDP session"
+        );
+    }
+
+    #[test]
+    fn test_main_frame_effective_session_equals_parent() {
+        // For main-frame snapshots effective_session_id == session_id, so switching
+        // find_cursor_interactive_elements from session_id to effective_session_id
+        // is a no-op and cannot break existing behaviour.
+        let parent_session = "parent-session-id";
+        let iframe_sessions: HashMap<String, String> = HashMap::new();
+
+        let (_params, effective_session) =
+            resolve_ax_session(None, parent_session, &iframe_sessions);
+
+        assert_eq!(
+            effective_session, parent_session,
+            "main frame: effective_session_id must equal parent session"
+        );
+    }
+
+    #[test]
+    fn test_same_origin_iframe_effective_session_equals_parent() {
+        // Same-origin iframes share the parent CDP session (no separate entry in
+        // iframe_sessions), so effective_session_id == session_id.  The cursor
+        // element fix provides no improvement here (same-origin requires
+        // execution-context scoping), but it must not break anything either.
+        let parent_session = "parent-session-id";
+        let same_origin_frame_id = "same-origin-frame-id";
+        let iframe_sessions: HashMap<String, String> = HashMap::new(); // no entry
+
+        let (_params, effective_session) =
+            resolve_ax_session(Some(same_origin_frame_id), parent_session, &iframe_sessions);
+
+        assert_eq!(
+            effective_session, parent_session,
+            "same-origin iframe: effective_session_id falls back to parent session"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // promote_cursor_matched_ignored
+    //
+    // Chrome marks semantically-empty divs (e.g. CSS grid cells with no ARIA
+    // role) as "ignored" in the AX tree.  build_tree therefore creates empty
+    // TreeNodes (role="") for them — but now preserves their backendDOMNodeId.
+    // promote_cursor_matched_ignored restores "generic" role + textContent name
+    // for any such node whose backendNodeId appears in cursor_elements.
+    // -----------------------------------------------------------------------
+
+    fn make_ignored_node(backend_node_id: Option<i64>) -> TreeNode {
+        // Simulates what build_tree produces for an AX-ignored div:
+        // role="" (empty), backendNodeId optionally set.
+        let mut node = TreeNode::empty();
+        node.backend_node_id = backend_node_id;
+        node
+    }
+
+    #[test]
+    fn test_promote_ignored_node_with_cursor_match() {
+        // An ignored div (<div class="cell">) that was found by cursor detection
+        // must be promoted to role="generic" so it can receive a ref.
+        let bid: i64 = 101;
+        let mut nodes = vec![make_ignored_node(Some(bid))];
+        let mut cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        cursor_elements.insert(bid, clickable_cursor_info("8"));
+
+        promote_cursor_matched_ignored(&mut nodes, &cursor_elements);
+
+        assert_eq!(nodes[0].role, "generic", "ignored node must be promoted to generic");
+        assert_eq!(nodes[0].name, "8", "name must come from cursor_info.text");
+    }
+
+    #[test]
+    fn test_promote_ignored_empty_cell_no_text() {
+        // An empty cell div (no text content) is still promoted to generic even
+        // though cursor_info.text is empty — so it can receive a ref and appear
+        // in the snapshot as an interactable empty cell.
+        let bid: i64 = 202;
+        let mut nodes = vec![make_ignored_node(Some(bid))];
+        let mut cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        cursor_elements.insert(bid, clickable_cursor_info("")); // empty textContent
+
+        promote_cursor_matched_ignored(&mut nodes, &cursor_elements);
+
+        assert_eq!(nodes[0].role, "generic");
+        assert_eq!(nodes[0].name, "", "empty cell: name stays empty (no textContent)");
+    }
+
+    #[test]
+    fn test_promote_ignored_node_without_cursor_match_unchanged() {
+        // A node that is ignored AND not in cursor_elements must not be touched.
+        let bid: i64 = 303;
+        let mut nodes = vec![make_ignored_node(Some(bid))];
+        let cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new(); // empty
+
+        promote_cursor_matched_ignored(&mut nodes, &cursor_elements);
+
+        assert_eq!(nodes[0].role, "", "no cursor match: role stays empty");
+    }
+
+    #[test]
+    fn test_promote_ignored_node_without_backend_node_id_unchanged() {
+        // Nodes without a backendNodeId cannot be matched regardless.
+        let mut nodes = vec![make_ignored_node(None)];
+        let mut cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        cursor_elements.insert(999, clickable_cursor_info("x"));
+
+        promote_cursor_matched_ignored(&mut nodes, &cursor_elements);
+
+        assert_eq!(nodes[0].role, "");
+    }
+
+    #[test]
+    fn test_promote_deduplicates_matching_static_text_child() {
+        // After promotion the node's name = "8".  If it has a single StaticText
+        // child also named "8", that child must be cleared to avoid duplicates.
+        let parent_bid: i64 = 404;
+        let mut parent = make_ignored_node(Some(parent_bid));
+        parent.children = vec![1]; // child at index 1
+
+        let mut child = TreeNode::empty();
+        child.role = "StaticText".to_string();
+        child.name = "8".to_string();
+
+        let mut nodes = vec![parent, child];
+        let mut cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        cursor_elements.insert(parent_bid, clickable_cursor_info("8"));
+
+        promote_cursor_matched_ignored(&mut nodes, &cursor_elements);
+
+        assert_eq!(nodes[0].role, "generic");
+        assert_eq!(nodes[0].name, "8");
+        assert_eq!(nodes[1].role, "", "matching StaticText child must be cleared");
+    }
+
+    #[test]
+    fn test_promote_does_not_clear_non_matching_static_text_child() {
+        // If the StaticText child has different text, it must be preserved.
+        let parent_bid: i64 = 505;
+        let mut parent = make_ignored_node(Some(parent_bid));
+        parent.children = vec![1];
+
+        let mut child = TreeNode::empty();
+        child.role = "StaticText".to_string();
+        child.name = "9".to_string(); // different from promoted name "8"
+
+        let mut nodes = vec![parent, child];
+        let mut cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        cursor_elements.insert(parent_bid, clickable_cursor_info("8"));
+
+        promote_cursor_matched_ignored(&mut nodes, &cursor_elements);
+
+        assert_eq!(nodes[0].name, "8");
+        assert_eq!(nodes[1].role, "StaticText", "non-matching child must be preserved");
+        assert_eq!(nodes[1].name, "9");
+    }
+
+    #[test]
+    fn test_promote_does_not_touch_proper_ax_nodes() {
+        // Nodes with a non-empty role (already proper AX nodes) must be left alone.
+        let bid: i64 = 606;
+        let mut node = make_node("generic", "some name", Some(bid));
+        let mut nodes = vec![node];
+        let mut cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        cursor_elements.insert(bid, clickable_cursor_info("other"));
+
+        promote_cursor_matched_ignored(&mut nodes, &cursor_elements);
+
+        assert_eq!(nodes[0].role, "generic");
+        assert_eq!(nodes[0].name, "some name", "proper AX node must not be overwritten");
+    }
+
+    // -----------------------------------------------------------------------
+    // inject_cursor_orphans
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal parent + optional StaticText child tree, then call
+    /// `inject_cursor_orphans` with an orphan cursor element.
+    fn run_inject_orphan(
+        parent_bid: i64,
+        static_text_name: Option<&str>,
+        orphan_cursor_bid: i64,
+        orphan_text: &str,
+    ) -> Vec<TreeNode> {
+        // Index 0 = parent node (e.g. a .sudoku-grid div in the AX tree as ignored)
+        let mut parent = TreeNode::empty();
+        parent.backend_node_id = Some(parent_bid);
+
+        let mut nodes: Vec<TreeNode> = vec![parent];
+
+        if let Some(st_name) = static_text_name {
+            let mut st = TreeNode::empty();
+            st.role = "StaticText".to_string();
+            st.name = st_name.to_string();
+            nodes[0].children.push(1); // child at index 1
+            nodes.push(st);
+        }
+
+        let mut cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        cursor_elements.insert(orphan_cursor_bid, clickable_cursor_info(orphan_text));
+
+        let mut cursor_parent_bid_map: HashMap<i64, Option<i64>> = HashMap::new();
+        cursor_parent_bid_map.insert(orphan_cursor_bid, Some(parent_bid));
+
+        inject_cursor_orphans(&mut nodes, &cursor_elements, &cursor_parent_bid_map);
+        nodes
+    }
+
+    #[test]
+    fn test_inject_orphan_adds_generic_child_to_parent() {
+        // A cursor element absent from the AX tree must be injected as a "generic"
+        // child of its parent AX node so the snapshot shows it with a ref.
+        let nodes = run_inject_orphan(10, None, 99, "8");
+
+        // A new node must have been appended.
+        assert_eq!(nodes.len(), 2, "one synthetic node should be appended");
+        let injected = &nodes[1];
+        assert_eq!(injected.role, "generic");
+        assert_eq!(injected.name, "8");
+        assert_eq!(injected.backend_node_id, Some(99));
+        assert_eq!(injected.parent_idx, Some(0));
+        // Parent must list the new node as a child.
+        assert!(nodes[0].children.contains(&1), "parent must have injected node as child");
+    }
+
+    #[test]
+    fn test_inject_orphan_empty_text_cell() {
+        // An empty cell (no text) is still injected as a named-empty generic.
+        let nodes = run_inject_orphan(10, None, 99, "");
+
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[1].role, "generic");
+        assert_eq!(nodes[1].name, "");
+    }
+
+    #[test]
+    fn test_inject_orphan_clears_hoisted_static_text() {
+        // Chrome hoists text from role=none elements to the nearest non-pruned ancestor.
+        // inject_cursor_orphans must clear that StaticText sibling to avoid duplicates.
+        //
+        // Tree before:
+        //   [0] parent (bid=10)
+        //     [1] StaticText "8"        ← Chrome hoisted this from the cell div
+        //
+        // After inject for orphan cursor bid=99 (text="8"), parent=10:
+        //   [0] parent (bid=10)
+        //     [2] generic "8" (bid=99)  ← injected
+        //   [1] StaticText "8"          ← cleared (role="" name="" so snapshot skips it)
+        let nodes = run_inject_orphan(10, Some("8"), 99, "8");
+
+        // Three nodes total: parent + original StaticText + injected generic.
+        assert_eq!(nodes.len(), 3);
+
+        let injected = &nodes[2];
+        assert_eq!(injected.role, "generic");
+        assert_eq!(injected.name, "8");
+        assert_eq!(injected.backend_node_id, Some(99));
+
+        // The hoisted StaticText must have been cleared.
+        let static_text = &nodes[1];
+        assert_eq!(static_text.role, "", "hoisted StaticText must be cleared");
+        assert_eq!(static_text.name, "", "hoisted StaticText name must be cleared");
+    }
+
+    #[test]
+    fn test_inject_orphan_preserves_non_matching_static_text() {
+        // A StaticText with DIFFERENT text (e.g. a different cell's text hoisted to
+        // the same container) must NOT be cleared.
+        let nodes = run_inject_orphan(10, Some("9"), 99, "8");
+
+        // Three nodes total.
+        assert_eq!(nodes.len(), 3);
+        // StaticText "9" must be untouched.
+        let static_text = &nodes[1];
+        assert_eq!(static_text.role, "StaticText");
+        assert_eq!(static_text.name, "9");
+    }
+
+    #[test]
+    fn test_inject_orphan_skips_already_in_tree() {
+        // If a cursor element's backendNodeId already appears in the tree (e.g. it was
+        // matched or promoted by earlier passes), inject_cursor_orphans must skip it.
+        let parent_bid: i64 = 10;
+        let cursor_bid: i64 = 20;
+
+        // Existing tree: parent → existing-generic (bid=cursor_bid already in tree)
+        let mut parent = TreeNode::empty();
+        parent.backend_node_id = Some(parent_bid);
+        parent.children = vec![1];
+
+        let mut existing = TreeNode::empty();
+        existing.role = "generic".to_string();
+        existing.name = "already there".to_string();
+        existing.backend_node_id = Some(cursor_bid);
+
+        let mut nodes = vec![parent, existing];
+
+        let mut cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        cursor_elements.insert(cursor_bid, clickable_cursor_info("already there"));
+
+        let mut cursor_parent_bid_map: HashMap<i64, Option<i64>> = HashMap::new();
+        cursor_parent_bid_map.insert(cursor_bid, Some(parent_bid));
+
+        inject_cursor_orphans(&mut nodes, &cursor_elements, &cursor_parent_bid_map);
+
+        // No new node should be appended since cursor_bid is already in the tree.
+        assert_eq!(nodes.len(), 2, "already-present node must not be duplicated");
+    }
+
+    #[test]
+    fn test_inject_orphan_skips_when_no_parent_bid() {
+        // If cursor_parent_bid_map has None for the cursor element, skip injection.
+        let cursor_bid: i64 = 99;
+
+        let mut nodes: Vec<TreeNode> = vec![TreeNode::empty()]; // single root
+
+        let mut cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        cursor_elements.insert(cursor_bid, clickable_cursor_info("x"));
+
+        let mut cursor_parent_bid_map: HashMap<i64, Option<i64>> = HashMap::new();
+        cursor_parent_bid_map.insert(cursor_bid, None); // no parent resolved
+
+        inject_cursor_orphans(&mut nodes, &cursor_elements, &cursor_parent_bid_map);
+
+        // Nothing should be injected.
+        assert_eq!(nodes.len(), 1, "no injection when parent bid is None");
+    }
+
+    #[test]
+    fn test_inject_orphan_skips_when_parent_not_in_tree() {
+        // If the parent backendNodeId doesn't appear in any tree node, skip.
+        let cursor_bid: i64 = 99;
+        let orphan_parent_bid: i64 = 999; // not in tree
+
+        let mut nodes = vec![{
+            let mut n = TreeNode::empty();
+            n.backend_node_id = Some(10); // different bid
+            n
+        }];
+
+        let mut cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+        cursor_elements.insert(cursor_bid, clickable_cursor_info("x"));
+
+        let mut cursor_parent_bid_map: HashMap<i64, Option<i64>> = HashMap::new();
+        cursor_parent_bid_map.insert(cursor_bid, Some(orphan_parent_bid));
+
+        inject_cursor_orphans(&mut nodes, &cursor_elements, &cursor_parent_bid_map);
+
+        assert_eq!(nodes.len(), 1, "no injection when parent is not in tree");
     }
 }
