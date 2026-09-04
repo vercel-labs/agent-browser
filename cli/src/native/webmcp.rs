@@ -10,6 +10,7 @@ pub const MAX_TOOL_LIST_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_TOOL_COUNT: usize = 512;
 pub const MAX_INVOCATION_HISTORY: usize = 128;
 pub const MAX_EARLY_RESPONSES: usize = 128;
+pub const DISCOVERY_WINDOW_MS: u64 = 250;
 const MAX_ERROR_BYTES: usize = 64 * 1024;
 
 pub const ERR_UNSUPPORTED: &str = "webmcp_unsupported";

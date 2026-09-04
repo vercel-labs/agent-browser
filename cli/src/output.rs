@@ -197,6 +197,18 @@ fn format_webmcp_tool_text(tool: &serde_json::Value) -> String {
     format!("{} [{}]\n  {}\n  {}", name, frame, description, origin)
 }
 
+fn format_webmcp_availability_text(data: &serde_json::Value) -> Option<&'static str> {
+    let webmcp = data.get("webmcp")?;
+    (webmcp.get("available").and_then(|value| value.as_bool()) == Some(true)
+        && webmcp
+            .get("toolCount")
+            .and_then(|value| value.as_u64())
+            .is_some_and(|count| count > 0))
+    .then_some(
+        "WebMCP tools are available on this page (experimental)\nRun `agent-browser webmcp list` to view them",
+    )
+}
+
 fn confirmation_data(data: &serde_json::Value) -> Option<&serde_json::Value> {
     if data
         .get("confirmation_required")
@@ -579,9 +591,15 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
                 println!("{} {}", color::success_indicator(), color::bold(title));
                 println!("  {}", color::dim(url));
+                if let Some(webmcp) = format_webmcp_availability_text(data) {
+                    println!("{}", webmcp);
+                }
                 return;
             }
             println!("{}", url);
+            if let Some(webmcp) = format_webmcp_availability_text(data) {
+                println!("{}", webmcp);
+            }
             return;
         }
         if let Some(cdp_url) = data.get("cdpUrl").and_then(|v| v.as_str()) {
@@ -1487,7 +1505,8 @@ real navigation — useful for SSR debug, auth setup, and capturing fresh
 `react suspense` / `vitals` state without noise from a prior page.
 
 With a URL, launches and navigates. If no protocol is provided, https://
-is automatically prepended.
+is automatically prepended. When the page registers WebMCP tools, successful
+navigation output tells you to run `agent-browser webmcp list`.
 
 The `goto` and `navigate` aliases still require a URL.
 
@@ -3731,6 +3750,7 @@ WebMCP (experimental):
                              --frame <frame-id>, --detach, and --timeout <ms>
   webmcp result <id>         Wait for a detached invocation result
   webmcp cancel <id>         Cancel an active invocation
+  Successful navigation advertises when the page has WebMCP tools
 
 React (requires `open --enable react-devtools`):
   react tree                 Full React component tree (depth id parent name columns)
@@ -4119,7 +4139,8 @@ pub fn print_version() {
 mod tests {
     use super::{
         boundary_origin, format_a11y_text, format_storage_text, format_vitals_text,
-        format_webmcp_text, format_webmcp_tool_text, format_with_boundaries, OutputOptions,
+        format_webmcp_availability_text, format_webmcp_text, format_webmcp_tool_text,
+        format_with_boundaries, OutputOptions,
     };
     use serde_json::json;
 
@@ -4424,5 +4445,49 @@ hydration: -  phases: 0  hydratedComponents: 0"
         assert!(!first.contains("origin=https://b.example"));
         assert!(second.contains("origin=https://b.example"));
         assert!(!second.contains("origin=https://a.example"));
+    }
+
+    #[test]
+    fn test_navigation_formats_webmcp_availability_hint() {
+        let data = json!({
+            "url": "https://example.com",
+            "webmcp": {
+                "experimental": true,
+                "available": true,
+                "toolCount": 4
+            }
+        });
+
+        assert_eq!(
+            format_webmcp_availability_text(&data),
+            Some(
+                "WebMCP tools are available on this page (experimental)\nRun `agent-browser webmcp list` to view them"
+            )
+        );
+    }
+
+    #[test]
+    fn test_navigation_omits_webmcp_hint_without_available_tools() {
+        for data in [
+            json!({"url": "https://example.com"}),
+            json!({
+                "url": "https://example.com",
+                "webmcp": {
+                    "experimental": true,
+                    "available": false,
+                    "toolCount": 4
+                }
+            }),
+            json!({
+                "url": "https://example.com",
+                "webmcp": {
+                    "experimental": true,
+                    "available": true,
+                    "toolCount": 0
+                }
+            }),
+        ] {
+            assert_eq!(format_webmcp_availability_text(&data), None);
+        }
     }
 }

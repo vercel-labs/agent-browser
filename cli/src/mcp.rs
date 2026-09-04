@@ -768,7 +768,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_OPEN,
             "Open page",
-            "Launch the browser and optionally navigate to a URL.",
+            "Launch the browser and optionally navigate to a URL. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools.",
             json!({
                 "url": { "type": "string", "description": "URL to open. Omit to launch about:blank." },
                 "headed": { "type": "boolean", "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults." },
@@ -4029,6 +4029,9 @@ mod tests {
             .iter()
             .find(|t| t["name"].as_str() == Some(TOOL_OPEN))
             .unwrap();
+        assert!(open["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("WebMCP availability metadata")));
         let props = &open["inputSchema"]["properties"];
         assert!(props.get("headed").is_some());
         assert!(props.get("webgpu").is_some());
