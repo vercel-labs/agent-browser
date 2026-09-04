@@ -167,6 +167,7 @@ const TOOL_PLUGIN_ADD: &str = "agent_browser_plugin_add";
 const TOOL_PLUGIN_LIST: &str = "agent_browser_plugin_list";
 const TOOL_PLUGIN_SHOW: &str = "agent_browser_plugin_show";
 const TOOL_PLUGIN_RUN: &str = "agent_browser_plugin_run";
+const TOOL_CHROME_STATUS: &str = "agent_browser_chrome_status";
 const TOOL_DOCTOR: &str = "agent_browser_doctor";
 const TOOL_DASHBOARD_START: &str = "agent_browser_dashboard_start";
 const TOOL_DASHBOARD_STOP: &str = "agent_browser_dashboard_stop";
@@ -263,7 +264,7 @@ impl ToolProfile {
             Self::Core => "Everyday browser automation with navigation, snapshots, common interaction, waits, screenshots, basic reads, tab basics, JavaScript eval, close, and profile discovery.",
             Self::Network => "Network interception, request inspection, HAR capture, headers, credentials, and offline mode.",
             Self::State => "Cookies, storage, auth profiles, saved browser state, sessions, Chrome profiles, and bundled skills.",
-            Self::Debug => "Console/errors, highlighting, DevTools, tracing, profiling, accessibility audits, PDF, downloads/uploads, recording, clipboard, plugin registry and plugin command.run, doctor, dashboard, install, upgrade, and chat.",
+            Self::Debug => "Console/errors, highlighting, DevTools, tracing, profiling, accessibility audits, PDF, downloads/uploads, recording, clipboard, plugin registry and plugin command.run, Chrome status, doctor, dashboard, install, upgrade, and chat.",
             Self::Tabs => "Tab, window, frame, and JavaScript dialog management.",
             Self::React => "React tree inspection, render recording, Suspense inspection, Web Vitals, SPA pushstate, and init-script removal.",
             Self::Mobile => "Viewport/device/geolocation/media emulation plus touch, swipe, and lower-level mouse tools.",
@@ -450,6 +451,7 @@ const DEBUG_PROFILE_TOOLS: &[&str] = &[
     TOOL_PLUGIN_LIST,
     TOOL_PLUGIN_SHOW,
     TOOL_PLUGIN_RUN,
+    TOOL_CHROME_STATUS,
     TOOL_DOCTOR,
     TOOL_DASHBOARD_START,
     TOOL_DASHBOARD_STOP,
@@ -1812,6 +1814,13 @@ fn parity_tools() -> Vec<Value> {
             &["name", "requestType"],
         ),
         tool(
+            TOOL_CHROME_STATUS,
+            "Chrome status",
+            "Check whether Chrome is ready for auto-connect without attaching a debugger or triggering Chrome approval.",
+            json!({}),
+            &[],
+        ),
+        tool(
             TOOL_DOCTOR,
             "Doctor",
             "Diagnose the installation.",
@@ -2099,6 +2108,7 @@ fn is_read_only_tool(name: &str) -> bool {
             | TOOL_SKILLS_PATH
             | TOOL_PLUGIN_LIST
             | TOOL_PLUGIN_SHOW
+            | TOOL_CHROME_STATUS
     )
 }
 
@@ -2115,6 +2125,7 @@ fn is_open_world_tool(name: &str) -> bool {
             | TOOL_SKILLS_PATH
             | TOOL_PLUGIN_LIST
             | TOOL_PLUGIN_SHOW
+            | TOOL_CHROME_STATUS
             | TOOL_DOCTOR
             | TOOL_DASHBOARD_START
             | TOOL_DASHBOARD_STOP
@@ -2342,6 +2353,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_PLUGIN_LIST => call_literal(arguments, &["plugin", "list"]),
         TOOL_PLUGIN_SHOW => call_one_string(arguments, "plugin show", "name"),
         TOOL_PLUGIN_RUN => call_plugin_run(arguments),
+        TOOL_CHROME_STATUS => call_literal(arguments, &["chrome", "status"]),
         TOOL_DOCTOR => call_doctor(arguments),
         TOOL_DASHBOARD_START => call_dashboard_start(arguments),
         TOOL_DASHBOARD_STOP => call_literal(arguments, &["dashboard", "stop"]),
@@ -4123,6 +4135,14 @@ mod tests {
         assert!(props.get("webgpu").is_some());
         assert!(props.get("headed").is_some());
         assert!(props.get("debug").is_some());
+    }
+
+    #[test]
+    fn chrome_status_tool_is_read_only_and_in_debug_profile() {
+        let profile = McpConfig::from_profiles(vec![ToolProfile::Debug]);
+        assert!(profile.allows(TOOL_CHROME_STATUS));
+        assert!(is_read_only_tool(TOOL_CHROME_STATUS));
+        assert!(!is_open_world_tool(TOOL_CHROME_STATUS));
     }
 
     #[test]

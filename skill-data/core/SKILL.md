@@ -394,6 +394,8 @@ agent-browser doctor --json              # structured output for programmatic co
 
 `doctor` auto-cleans stale socket/pid/version sidecar files on every run. Destructive actions require `--fix`. Exit code is `0` if all checks pass (warnings OK), `1` if any fail.
 
+Before using `--auto-connect`, run `agent-browser chrome status --json`. This reads Chrome's local `DevToolsActivePort` state and checks only TCP reachability, including fallback ports 9222 and 9229; it does not send HTTP, open a WebSocket, attach a debugger, or trigger Chrome's approval prompt. Continue only after `ready` or `candidate`; candidate means a common port is reachable but is not verified as Chrome/CDP. `not-running` means Chrome may be closed or remote debugging may be disabled; ask the user to enable it at `chrome://inspect/#remote-debugging`, then pause for confirmation. `stale` and `unknown` require restarting Chrome or fixing the reported local state before retrying. Normal agent-browser launches do not need remote debugging.
+
 ## Troubleshooting
 
 **"Ref not found" / "Element not found: @eN"** Page changed since the snapshot. Run `agent-browser snapshot -i` again, then use the new refs.

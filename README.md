@@ -524,6 +524,7 @@ agent-browser removeinitscript <identifier>       # Remove a previously register
 agent-browser install                 # Download Chrome from Chrome for Testing (Google's official automation channel)
 agent-browser install --with-deps     # Also install system deps (Linux)
 agent-browser upgrade                 # Upgrade agent-browser to the latest version
+agent-browser chrome status           # Check auto-connect readiness without attaching
 agent-browser doctor                  # Diagnose the install and auto-clean stale daemon files
 agent-browser doctor --fix            # Also run destructive repairs (reinstall Chrome, purge old state, ...)
 agent-browser doctor --offline --quick  # Skip network probes and the live launch test
@@ -563,7 +564,7 @@ Profiles:
 - `core` — Default. Navigation, snapshots, interaction, waits, reads, screenshots, JavaScript eval, close, tab basics, and profile discovery
 - `network` — Network routes, request inspection, HAR, headers, credentials, offline
 - `state` — Cookies, storage, auth, saved state, sessions, profiles, skills
-- `debug` — Console/errors, tracing, profiling, recording, a11y audit, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
+- `debug` — Console/errors, tracing, profiling, recording, a11y audit, clipboard, plugins, Chrome status, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
 - `tabs` — Back/forward/reload, tabs, windows, frames, dialogs
 - `react` — React tree/inspect/renders/suspense, vitals, pushstate
 - `mobile` — Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
@@ -1473,6 +1474,9 @@ This enables control of:
 Use `--auto-connect` to automatically discover and connect to a running Chrome instance without specifying a port:
 
 ```bash
+# Check first without attaching or triggering Chrome's approval prompt
+agent-browser chrome status
+
 # Auto-discover running Chrome with remote debugging
 agent-browser --auto-connect open example.com
 agent-browser --auto-connect snapshot
@@ -1492,6 +1496,10 @@ This is useful when:
 - Chrome 144+ has remote debugging enabled via `chrome://inspect/#remote-debugging` (which uses a dynamic port)
 - You want a zero-configuration connection to your existing browser
 - You don't want to track which port Chrome is using
+
+`chrome status` reads `DevToolsActivePort` from the platform's standard Chrome, Chrome Canary, Chromium, and Brave user-data directories, then checks loopback TCP reachability. If no active-port file is present, it also checks the same common ports as auto-connect, 9222 and 9229. It never sends HTTP, opens a WebSocket, or attaches a debugger. The command works on the published macOS x64/ARM64, Linux glibc/musl x64/ARM64, and Windows x64 binaries (including the x64 fallback on Windows ARM64).
+
+The result is deliberately conservative: `ready` means a Chrome-advertised local port is listening; `candidate` means a common auto-connect port is listening but cannot be verified as Chrome/CDP without a protocol request; `not-running` means no active-port file or common listener was found, which cannot distinguish a closed browser from a disabled setting; `stale` means a file exists but its port is closed; and `unknown` covers malformed or unreadable state. Use `--json` for these stable status names. When setup is needed, open `chrome://inspect/#remote-debugging` in Chrome and enable Remote debugging. Normal agent-browser launches do not require this security-sensitive setting; it is only for reusing an existing browser with `--auto-connect`.
 
 ## Streaming (Browser Preview)
 

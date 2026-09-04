@@ -39,6 +39,9 @@ Root WebSocket endpoints accept query strings with or without an explicit slash,
 Use `--auto-connect` to automatically discover and connect to a running Chrome instance without specifying a port:
 
 ```bash
+# Check first without attaching or triggering Chrome's approval prompt
+agent-browser chrome status
+
 # Auto-discover running Chrome with remote debugging
 agent-browser --auto-connect open example.com
 agent-browser --auto-connect snapshot
@@ -58,6 +61,21 @@ This is useful when:
 - Chrome 144+ has remote debugging enabled via `chrome://inspect/#remote-debugging` (which uses a dynamic port)
 - You want a zero-configuration connection to your existing browser
 - You don't want to track which port Chrome is using
+
+`chrome status` reads `DevToolsActivePort` from the platform's standard Chrome, Chrome Canary, Chromium, and Brave user-data directories, then checks loopback TCP reachability. If no active-port file is present, it also checks the same common ports as auto-connect, 9222 and 9229. It never sends HTTP, opens a WebSocket, or attaches a debugger. The command works on the published macOS x64/ARM64, Linux glibc/musl x64/ARM64, and Windows x64 binaries, including the x64 fallback on Windows ARM64.
+
+<table>
+  <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>ready</code></td><td>The advertised local port is listening.</td></tr>
+    <tr><td><code>candidate</code></td><td>A common auto-connect port is listening, but the read-only check cannot verify it as Chrome/CDP.</td></tr>
+    <tr><td><code>not-running</code></td><td>No active-port file or common listener was found. This cannot distinguish a closed browser from a disabled setting.</td></tr>
+    <tr><td><code>stale</code></td><td>An active-port file exists, but its port is closed.</td></tr>
+    <tr><td><code>unknown</code></td><td>The state file is malformed or unreadable.</td></tr>
+  </tbody>
+</table>
+
+Use `agent-browser chrome status --json` for machine-readable output. When setup is needed, open `chrome://inspect/#remote-debugging` in Chrome and enable Remote debugging. Normal agent-browser launches do not require this security-sensitive setting; it is only for reusing an existing browser with `--auto-connect`.
 
 ## Tab pinning
 

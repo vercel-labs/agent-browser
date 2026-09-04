@@ -2979,6 +2979,27 @@ Examples:
 "##
         }
 
+        // === Chrome ===
+        "chrome" => {
+            r##"
+agent-browser chrome - Inspect Chrome integration
+
+Usage: agent-browser chrome status [--json]
+
+Checks whether Chrome remote debugging is ready for --auto-connect without
+sending HTTP, opening a WebSocket, or attaching a debugger.
+
+Exit codes:
+  0  Ready or a common-port candidate is reachable for auto-connect
+  1  Not active (Chrome may be closed or remote debugging may be disabled)
+  2  Stale or unknown state
+
+Examples:
+  agent-browser chrome status
+  agent-browser chrome status --json
+"##
+        }
+
         // === Install ===
         "install" => {
             r##"
@@ -3804,6 +3825,7 @@ Dashboard:
   dashboard stop             Stop the dashboard server
 
 Setup:
+  chrome status              Check --auto-connect readiness without attaching
   install                    Install browser binaries
   install --with-deps        Also install system dependencies (Linux)
   upgrade                    Upgrade to the latest version

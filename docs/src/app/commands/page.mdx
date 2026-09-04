@@ -450,6 +450,15 @@ agent-browser dashboard stop          # Stop the dashboard server
 
 Loopback dashboard origins are accepted by default without an access token. For a reverse-proxied or forwarded URL, pass its exact browser origin with `--allowed-origins` or set `AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS`. Every configured origin must be a valid exact HTTPS origin. Ports must be integers from 1 to 65535. Unknown options, missing values, invalid ports, and malformed origins fail without starting the server. The command prints private tokenized access URLs only for external origins; open the matching URL once to establish the browser session and do not share it. Open the normal `http://localhost:<port>` URL for local access. The browser stays on the dashboard origin; per-session tabs, status, and stream traffic are proxied internally, so session ports do not need to be exposed. Stop the running dashboard before changing the port or allowed origins.
 
+## Chrome status
+
+```bash
+agent-browser chrome status          # Check auto-connect readiness without attaching
+agent-browser chrome status --json   # Machine-readable readiness status
+```
+
+This command only reads Chrome's local `DevToolsActivePort` file and checks loopback TCP reachability. It does not send HTTP, open a WebSocket, attach a debugger, or trigger Chrome's approval prompt. See [CDP mode](/cdp-mode#auto-connect) for setup and platform limitations.
+
 ## Doctor
 
 Diagnose your install, auto-clean stale daemon files, and optionally repair common problems.
@@ -653,7 +662,7 @@ Profiles:
 - `core` - Default. Navigation, snapshots, interaction, waits, reads, screenshots, JavaScript eval, close, tab basics, and profile discovery
 - `network` - Network routes, request inspection, HAR, headers, credentials, offline
 - `state` - Cookies, storage, auth, saved state, sessions, profiles, skills
-- `debug` - Console/errors, tracing, profiling, recording, accessibility audits, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
+- `debug` - Console/errors, tracing, profiling, recording, accessibility audits, clipboard, plugins, Chrome status, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
 - `tabs` - Back/forward/reload, tabs, windows, frames, dialogs
 - `react` - React tree/inspect/renders/suspense, vitals, pushstate
 - `mobile` - Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
