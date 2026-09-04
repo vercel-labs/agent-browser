@@ -537,6 +537,8 @@ mod tests {
     }
 
     #[tokio::test]
+    // The Err type is fixed by tungstenite's Callback trait and cannot be shrunk.
+    #[allow(clippy::result_large_err)]
     async fn root_websocket_url_with_query_sends_slash_request_target() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
