@@ -338,13 +338,13 @@ agent-browser network har stop /tmp/trace.har
 
 ```bash
 agent-browser open https://example.com
-agent-browser record start demo.webm          # 30 fps by default
+agent-browser record start demo.webm          # 30 fps by default; .webm or .mp4
 agent-browser snapshot -i
 agent-browser click @e3
 agent-browser record stop
 ```
 
-Pass `--fps 60` for motion-heavy takes (drag, animation, scroll work) or a lower rate for long sessions; `--fps` accepts 1 to 60.
+Recording needs `ffmpeg` on PATH (`brew install ffmpeg` / `apt install ffmpeg`); `agent-browser doctor` checks for it. Pass `--fps 60` for motion-heavy takes (drag, animation, scroll work) or a lower rate for long sessions; `--fps` accepts 1 to 60.
 
 See [references/video-recording.md](references/video-recording.md) for frame rate guidance, codec options, and more.
 
