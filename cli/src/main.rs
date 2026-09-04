@@ -1764,6 +1764,10 @@ fn main() {
             launch_cmd["downloadPath"] = json!(dp);
         }
 
+        if let Some(ref ctx) = flags.context {
+            launch_cmd["contextName"] = json!(ctx);
+        }
+
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
             Ok(resp) => Some(
@@ -1865,6 +1869,10 @@ fn main() {
             launch_cmd["downloadPath"] = json!(dp);
         }
 
+        if let Some(ref ctx) = flags.context {
+            launch_cmd["contextName"] = json!(ctx);
+        }
+
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
             Ok(resp) => Some(
@@ -1887,6 +1895,10 @@ fn main() {
     // Launch with cloud provider if -p flag is set.
     if let Some(ref provider) = flags.provider {
         let launch_cmd = build_provider_launch_command(provider, &flags);
+
+        if let Some(ref ctx) = flags.context {
+            launch_cmd["contextName"] = json!(ctx);
+        }
 
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
@@ -2023,6 +2035,10 @@ fn main() {
 
         if let Some(ref engine) = flags.engine {
             launch_cmd["engine"] = json!(engine);
+        }
+
+        if let Some(ref ctx) = flags.context {
+            launch_cmd["contextName"] = json!(ctx);
         }
 
         match send_command(launch_cmd, &flags.session) {
