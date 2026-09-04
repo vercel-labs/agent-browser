@@ -11,8 +11,10 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, Write};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -3764,11 +3766,76 @@ fn append_common_global_args(
     Ok(())
 }
 
-fn run_cli(args: &[String], stdin_body: Option<String>, timeout_ms: u64) -> Result<CliRun, String> {
-    let exe = env::current_exe().map_err(|e| e.to_string())?;
-    let mut command = Command::new(exe);
+/// How long to keep reading child output after the child process has exited.
+///
+/// A detached grandchild (e.g. a daemon spawned on cold start) may still hold
+/// the write ends of our stdout/stderr pipes, in which case `read_to_end`
+/// never sees EOF. Return the partial output after this grace period instead
+/// of blocking the MCP server forever; every later request would otherwise
+/// queue behind the wedge until the server process is killed.
+const POST_EXIT_DRAIN_MS: u64 = 2_000;
+
+struct PipedOutput {
+    buffer: Arc<Mutex<Vec<u8>>>,
+    done: Arc<AtomicBool>,
+}
+
+impl PipedOutput {
+    fn spawn<R: io::Read + Send + 'static>(mut stream: R) -> Self {
+        let output = Self {
+            buffer: Arc::new(Mutex::new(Vec::new())),
+            done: Arc::new(AtomicBool::new(false)),
+        };
+        let buffer = Arc::clone(&output.buffer);
+        let done = Arc::clone(&output.done);
+        // Append each chunk as it arrives instead of buffering locally: if a
+        // grandchild holds the pipe open, read never returns EOF and a local
+        // buffer would never be published for the bounded drain to snapshot.
+        thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Ok(mut guard) = buffer.lock() {
+                            guard.extend_from_slice(&chunk[..n]);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            done.store(true, Ordering::Release);
+        });
+        output
+    }
+
+    fn is_done(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+
+    fn snapshot(&self) -> String {
+        let bytes = self
+            .buffer
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+fn drain_piped_outputs(outputs: [&PipedOutput; 2]) {
+    let deadline = Instant::now() + Duration::from_millis(POST_EXIT_DRAIN_MS);
+    while Instant::now() < deadline && outputs.iter().any(|out| !out.is_done()) {
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn run_command(
+    mut command: Command,
+    stdin_body: Option<String>,
+    timeout_ms: u64,
+) -> Result<CliRun, String> {
     command
-        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(if stdin_body.is_some() {
@@ -3789,40 +3856,29 @@ fn run_cli(args: &[String], stdin_body: Option<String>, timeout_ms: u64) -> Resu
             .map_err(|e| format!("failed to write child stdin: {}", e))?;
     }
 
-    let mut child_stdout = child
+    let child_stdout = child
         .stdout
         .take()
         .ok_or_else(|| "failed to open child stdout".to_string())?;
-    let mut child_stderr = child
+    let child_stderr = child
         .stderr
         .take()
         .ok_or_else(|| "failed to open child stderr".to_string())?;
-
-    let stdout_thread = thread::spawn(move || {
-        let mut buf = Vec::new();
-        child_stdout.read_to_end(&mut buf).map(|_| buf)
-    });
-    let stderr_thread = thread::spawn(move || {
-        let mut buf = Vec::new();
-        child_stderr.read_to_end(&mut buf).map(|_| buf)
-    });
+    let stdout_output = PipedOutput::spawn(child_stdout);
+    let stderr_output = PipedOutput::spawn(child_stderr);
 
     let started = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
+    let mut timed_out = false;
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
+            Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 if started.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    let stdout = join_output(stdout_thread)?;
-                    let stderr = join_output(stderr_thread)?;
-                    return Ok(CliRun {
-                        exit_code: None,
-                        stdout,
-                        stderr: append_timeout_message(stderr, timeout_ms),
-                    });
+                    timed_out = true;
+                    break None;
                 }
                 thread::sleep(Duration::from_millis(20));
             }
@@ -3830,22 +3886,25 @@ fn run_cli(args: &[String], stdin_body: Option<String>, timeout_ms: u64) -> Resu
         }
     };
 
-    let stdout = join_output(stdout_thread)?;
-    let stderr = join_output(stderr_thread)?;
+    drain_piped_outputs([&stdout_output, &stderr_output]);
+    let stdout = stdout_output.snapshot();
+    let mut stderr = stderr_output.snapshot();
+    if timed_out {
+        stderr = append_timeout_message(stderr, timeout_ms);
+    }
 
     Ok(CliRun {
-        exit_code: status.code(),
+        exit_code: status.as_ref().and_then(|s| s.code()),
         stdout,
         stderr,
     })
 }
 
-fn join_output(handle: thread::JoinHandle<io::Result<Vec<u8>>>) -> Result<String, String> {
-    let bytes = handle
-        .join()
-        .map_err(|_| "failed to join output reader".to_string())?
-        .map_err(|e| e.to_string())?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+fn run_cli(args: &[String], stdin_body: Option<String>, timeout_ms: u64) -> Result<CliRun, String> {
+    let exe = env::current_exe().map_err(|e| e.to_string())?;
+    let mut command = Command::new(exe);
+    command.args(args);
+    run_command(command, stdin_body, timeout_ms)
 }
 
 fn append_timeout_message(stderr: String, timeout_ms: u64) -> String {
@@ -3997,6 +4056,23 @@ fn write_json_line(stdout: &mut io::Stdout, value: &Value) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_returns_partial_output_when_a_grandchild_holds_the_pipe() {
+        // The backgrounded sleep inherits our stdout pipe write end and
+        // outlives the shell. run_command must return the partial output once
+        // the child exits instead of blocking until the sleep finishes.
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("sleep 30 & echo ready");
+        let started = std::time::Instant::now();
+        let run = run_command(command, None, 25_000).expect("run_command should succeed");
+        assert!(run.stdout.contains("ready"), "stdout: {:?}", run.stdout);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "run_command blocked on a grandchild holding the pipe"
+        );
+    }
 
     #[test]
     fn tools_list_contains_typed_tools() {
