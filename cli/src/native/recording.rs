@@ -339,15 +339,32 @@ pub async fn attach_capture_session(
     }
 }
 
-/// Spawn a background task that screencasts `capture_session` into ffmpeg at
-/// `fps`. Chrome pushes a frame on every repaint up to the display rate; a
+/// Start ffmpeg for `output_path`, so `record start` fails right away when it
+/// is missing instead of at `record stop`.
+pub fn spawn_ffmpeg(output_path: &str, fps: u32) -> Result<tokio::process::Child, String> {
+    spawn_ffmpeg_command(&mut build_ffmpeg_command(output_path, fps))
+}
+
+fn spawn_ffmpeg_command(
+    command: &mut tokio::process::Command,
+) -> Result<tokio::process::Child, String> {
+    command.spawn().map_err(|e| {
+        format!(
+            "ffmpeg not found or failed to execute: {}. Install ffmpeg to enable recording.",
+            e
+        )
+    })
+}
+
+/// Spawn a background task that screencasts `capture_session` into the
+/// already running `ffmpeg` at `fps`. Chrome pushes a frame on every repaint up to the display rate; a
 /// wall-clock ticker writes one frame per slot, holding the last one through
 /// gaps, so the file's duration matches the automation it recorded.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_recording_task(
     client: Arc<CdpClient>,
     capture_session: String,
-    output_path: String,
+    mut ffmpeg: tokio::process::Child,
     fps: u32,
     shared_count: Arc<AtomicU64>,
     shared_captured: Arc<AtomicU64>,
@@ -362,14 +379,6 @@ pub fn spawn_recording_task(
         // neither copy them nor overflow on them. Subscribe before starting
         // the screencast: Chrome sends the first frame immediately.
         let events = client.subscribe_session(&capture_session);
-
-        let mut command = build_ffmpeg_command(&output_path, fps);
-        let mut ffmpeg = command.spawn().map_err(|e| {
-            format!(
-                "ffmpeg not found or failed to execute: {}. Install ffmpeg to enable recording.",
-                e
-            )
-        })?;
 
         let stdin = ffmpeg
             .stdin
@@ -873,6 +882,14 @@ mod tests {
         }
 
         assert_eq!(emitted, max_frames + 20);
+    }
+
+    #[tokio::test]
+    async fn test_spawn_ffmpeg_reports_missing_binary() {
+        let mut command = tokio::process::Command::new("agent-browser-no-such-ffmpeg");
+        let err = spawn_ffmpeg_command(&mut command).unwrap_err();
+        assert!(err.contains("ffmpeg not found"), "{err}");
+        assert!(err.contains("Install ffmpeg"), "{err}");
     }
 
     #[test]
