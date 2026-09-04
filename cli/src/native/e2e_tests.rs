@@ -7157,6 +7157,48 @@ async fn e2e_upload_with_css_selector() {
 }
 
 // ---------------------------------------------------------------------------
+// Recording: immediate stop
+// ---------------------------------------------------------------------------
+
+/// Verify that stopping before the first frame reports the existing
+/// no-frames error instead of leaking ffmpeg's empty-input failure.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_immediate_stop_reports_no_frames() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let rec_path = std::env::temp_dir().join(format!(
+        "ab-e2e-rec-immediate-stop-{}.webm",
+        std::process::id()
+    ));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false);
+    assert_eq!(resp["error"], "No frames captured");
+    assert!(!rec_path.exists());
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
 // Recording: viewport inheritance
 // ---------------------------------------------------------------------------
 
