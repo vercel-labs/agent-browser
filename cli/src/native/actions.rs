@@ -1075,13 +1075,28 @@ impl DaemonState {
         }
     }
 
-    /// Attach the recorder's own CDP session to the page behind `session_id`
-    /// and spawn the task that screencasts it into ffmpeg.
+    /// Start ffmpeg, attach the recorder's own CDP session to the page behind
+    /// `session_id`, and spawn the task that screencasts it into ffmpeg. Any
+    /// failure rolls the recording state back so `record start` reports it
+    /// and the next `record start` is not blocked.
     async fn start_recording_task(
         &mut self,
         client: Arc<CdpClient>,
         session_id: String,
     ) -> Result<(), String> {
+        // ffmpeg first: a missing binary is the common failure, and it costs
+        // nothing to undo.
+        let ffmpeg = match recording::spawn_ffmpeg(
+            &self.recording_state.output_path,
+            self.recording_state.fps,
+        ) {
+            Ok(ffmpeg) => ffmpeg,
+            Err(e) => {
+                // `recording_start` already marked the state active.
+                self.recording_state.active = false;
+                return Err(e);
+            }
+        };
         let capture_session = match recording::attach_capture_session(
             &client,
             &session_id,
@@ -1091,7 +1106,10 @@ impl DaemonState {
         {
             Ok(capture_session) => capture_session,
             Err(e) => {
-                // `recording_start` already marked the state active.
+                // Dropping the child kills ffmpeg (kill_on_drop) and leaves an
+                // empty file behind; remove it.
+                drop(ffmpeg);
+                let _ = std::fs::remove_file(&self.recording_state.output_path);
                 self.recording_state.active = false;
                 return Err(e);
             }
@@ -1102,7 +1120,7 @@ impl DaemonState {
         let handle = recording::spawn_recording_task(
             client,
             capture_session,
-            self.recording_state.output_path.clone(),
+            ffmpeg,
             self.recording_state.fps,
             shared_count.clone(),
             shared_captured.clone(),
@@ -7293,8 +7311,10 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
 
-    // Validate the rate before any browser work so a bad value costs nothing.
+    // Validate the rate and output path before any browser work so a bad value
+    // costs nothing.
     let fps = recording_fps_from_command(cmd)?;
+    recording::validate_output_path(path)?;
 
     {
         let domain_filter = state.domain_filter.read().await;
@@ -10399,6 +10419,7 @@ async fn handle_video_start(cmd: &Value, state: &mut DaemonState) -> Result<Valu
     }
 
     let fps = recording_fps_from_command(cmd)?;
+    recording::validate_output_path(path)?;
 
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
