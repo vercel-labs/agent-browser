@@ -4843,38 +4843,16 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         }
     }
 
-    if let Some(session_id) = state
-        .browser
-        .as_ref()
-        .and_then(|browser| browser.active_session_id().ok())
-        .map(ToString::to_string)
-    {
-        state.webmcp.clear_page_scope(&session_id);
-    } else {
-        state.webmcp.clear_invocations();
-    }
-    let _ = enable_webmcp_events(state).await;
-
     // WebDriver backend path
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
+            state.webmcp.clear_invocations();
             state.ref_map.clear();
             wb.navigate(url).await?;
             let new_url = wb.get_url().await.unwrap_or_else(|_| url.to_string());
             let title = wb.get_title().await.unwrap_or_default();
             return Ok(json!({ "url": new_url, "title": title }));
         }
-    }
-
-    // With one tab, every tracked iframe belongs to the page being replaced.
-    // With multiple tabs, retain the other tabs' sessions so switching back to
-    // an already-attached OOPIF does not lose its execution context.
-    let has_background_tabs = state
-        .browser
-        .as_ref()
-        .is_some_and(|browser| browser.page_count() > 1);
-    if !has_background_tabs {
-        state.iframe_sessions.clear();
     }
 
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
@@ -4927,9 +4905,45 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         }
     }
 
+    navigate_active_page(state, url, wait_until).await
+}
+
+/// Navigate the active page and drop the state that belonged to the document
+/// being replaced: element refs, frame scope, and WebMCP page state. Every
+/// command that replaces the active document must go through here, or a
+/// stale `@e3` from the previous page keeps resolving.
+async fn navigate_active_page(
+    state: &mut DaemonState,
+    url: &str,
+    wait_until: WaitUntil,
+) -> Result<Value, String> {
+    if let Some(session_id) = state
+        .browser
+        .as_ref()
+        .and_then(|browser| browser.active_session_id().ok())
+        .map(ToString::to_string)
+    {
+        state.webmcp.clear_page_scope(&session_id);
+    } else {
+        state.webmcp.clear_invocations();
+    }
+    let _ = enable_webmcp_events(state).await;
+
+    // With one tab, every tracked iframe belongs to the page being replaced.
+    // With multiple tabs, retain the other tabs' sessions so switching back to
+    // an already-attached OOPIF does not lose its execution context.
+    let has_background_tabs = state
+        .browser
+        .as_ref()
+        .is_some_and(|browser| browser.page_count() > 1);
+    if !has_background_tabs {
+        state.iframe_sessions.clear();
+    }
+
     state.ref_map.clear();
     state.active_iframe_sessions.clear();
     state.active_frame_id = None;
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let result = mgr.navigate(url, wait_until).await?;
     state.refresh_active_iframe_sessions().await;
     Ok(result)
@@ -6999,13 +7013,12 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         return Err("Recording already active".to_string());
     }
 
+    if let Some(url) = recording_url {
+        navigate_active_page(state, url, WaitUntil::Load).await?;
+    }
     let (client, session_id) = {
-        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-        if let Some(url) = recording_url {
-            mgr.navigate(url, WaitUntil::Load).await?;
-        }
-        let session_id = mgr.active_session_id()?.to_string();
-        (mgr.client.clone(), session_id)
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        (mgr.client.clone(), mgr.active_session_id()?.to_string())
     };
 
     let result = recording::recording_start(&mut state.recording_state, path, fps)?;
@@ -7062,12 +7075,15 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         None
     };
 
-    let recording_target = if let Some(ref mut browser) = state.browser {
-        if let Some(url) = recording_url {
-            browser.navigate(&url, WaitUntil::Load).await?;
+    let recording_target = if state.browser.is_some() {
+        if let Some(ref url) = recording_url {
+            navigate_active_page(state, url, WaitUntil::Load).await?;
         }
-        let session_id = browser.active_session_id()?.to_string();
-        Some((browser.client.clone(), session_id))
+        let browser = state.browser.as_ref().ok_or("Browser not launched")?;
+        Some((
+            browser.client.clone(),
+            browser.active_session_id()?.to_string(),
+        ))
     } else {
         None
     };

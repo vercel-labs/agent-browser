@@ -7280,11 +7280,24 @@ async fn e2e_recording_default_with_url_navigates_active_tab() {
     assert_success(&resp);
 
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>Before</h1>" }),
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": "data:text/html,<button id='before'>Before</button>"
+        }),
         &mut state,
     )
     .await;
     assert_success(&resp);
+
+    // Refs from the page being replaced must not survive the navigation.
+    let resp = execute_command(
+        &json!({ "id": "2b", "action": "snapshot", "selector": "#before" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(state.ref_map.get("e1").is_some());
 
     let target_url = "data:text/html,<h1>Recorded</h1>";
     let tmp_dir = std::env::temp_dir();
@@ -7300,6 +7313,10 @@ async fn e2e_recording_default_with_url_navigates_active_tab() {
     )
     .await;
     assert_success(&resp);
+    assert!(
+        state.ref_map.entries_sorted().is_empty(),
+        "record start <url> must clear refs like navigate does"
+    );
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
