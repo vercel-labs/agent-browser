@@ -154,6 +154,8 @@ Without the CA certificate on hand, fall back to ignoring every certificate erro
 }
 ```
 
+agent-browser already auto-adds `--no-sandbox` when the sandbox looks unavailable, and auto-adds `--disable-dev-shm-usage` when `/dev/shm` is too small. Keeping these args in config can still be useful when you want an explicit, pinned setup for CI images.
+
 ### iOS Testing
 
 ```json
