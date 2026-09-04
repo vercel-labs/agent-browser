@@ -3224,7 +3224,7 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 
 /// Parse network interception, request inspection, and HAR recording commands.
 fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["route", "unroute", "requests", "request", "har"];
+    const VALID: &[&str] = &["route", "unroute", "requests", "request", "har", "wait"];
 
     match rest.first().copied() {
         Some("route") => {
@@ -3326,13 +3326,46 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 }),
             }
         }
+        Some("wait") => {
+            let url_pattern = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "network wait".to_string(),
+                usage: "network wait <url-pattern> [--status <code>] [--method <method>] [--timeout <ms>]",
+            })?;
+            let mut cmd = json!({ "id": id, "action": "network_wait", "urlPattern": url_pattern });
+            if let Some(i) = rest.iter().position(|&s| s == "--status") {
+                if let Some(code) = rest.get(i + 1) {
+                    cmd["status"] = json!(code.parse::<u16>().map_err(|_| {
+                        ParseError::InvalidValue {
+                            message: format!("Invalid status code: {}", code),
+                            usage: "network wait <url-pattern> [--status <code>] [--method <method>] [--timeout <ms>]",
+                        }
+                    })?);
+                }
+            }
+            if let Some(i) = rest.iter().position(|&s| s == "--method") {
+                if let Some(m) = rest.get(i + 1) {
+                    cmd["method"] = json!(m.to_uppercase());
+                }
+            }
+            if let Some(i) = rest.iter().position(|&s| s == "--timeout") {
+                if let Some(t) = rest.get(i + 1) {
+                    cmd["timeout"] = json!(t.parse::<u64>().map_err(|_| {
+                        ParseError::InvalidValue {
+                            message: format!("Invalid timeout value: {}", t),
+                            usage: "network wait <url-pattern> [--status <code>] [--method <method>] [--timeout <ms>]",
+                        }
+                    })?);
+                }
+            }
+            Ok(cmd)
+        }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
             valid_options: VALID,
         }),
         None => Err(ParseError::MissingArguments {
             context: "network".to_string(),
-            usage: "network <route|unroute|requests|request|har> [args...]",
+            usage: "network <route|unroute|requests|request|har|wait> [args...]",
         }),
     }
 }
