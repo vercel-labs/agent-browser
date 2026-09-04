@@ -8383,7 +8383,8 @@ async fn collect_webmcp_tools(state: &mut DaemonState) -> Result<Vec<webmcp::Too
         .await
         .map_err(|error| webmcp::unsupported_error(&error))?;
 
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(250);
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(webmcp::DISCOVERY_WINDOW_MS);
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
@@ -11929,7 +11930,7 @@ fn success_response(id: &str, data: Value) -> Value {
     })
 }
 
-async fn attach_webmcp_availability(resp: &mut Value, action: &str, state: &DaemonState) {
+async fn attach_webmcp_availability(resp: &mut Value, action: &str, state: &mut DaemonState) {
     if action != "navigate"
         || resp.get("success").and_then(Value::as_bool) != Some(true)
         || matches!(state.backend_type, BackendType::WebDriver)
@@ -11938,18 +11939,46 @@ async fn attach_webmcp_availability(resp: &mut Value, action: &str, state: &Daem
     {
         return;
     }
-    let Some(session_id) = state
-        .browser
-        .as_ref()
-        .and_then(|browser| browser.active_session_id().ok())
-    else {
-        return;
-    };
-    let Ok(tools) = state.webmcp.tools(session_id) else {
+    let Ok(tools) = wait_for_navigation_webmcp_tools(state).await else {
         return;
     };
     let domain_filter = state.domain_filter.read().await;
     attach_webmcp_availability_from_tools(resp, action, &tools, domain_filter.as_ref());
+}
+
+async fn wait_for_navigation_webmcp_tools(
+    state: &mut DaemonState,
+) -> Result<Vec<webmcp::ToolRecord>, String> {
+    let session_id = state
+        .browser
+        .as_ref()
+        .ok_or("Browser not launched")?
+        .active_session_id()?
+        .to_string();
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(webmcp::DISCOVERY_WINDOW_MS);
+    loop {
+        state.drain_cdp_events_background().await?;
+        let tools = state.webmcp.tools(&session_id)?;
+        let domain_filter = state.domain_filter.read().await;
+        let has_allowed_tool = webmcp_tool_count(&tools, domain_filter.as_ref()) > 0;
+        drop(domain_filter);
+        if has_allowed_tool {
+            return Ok(tools);
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(tools);
+        }
+        tokio::time::sleep(remaining.min(std::time::Duration::from_millis(10))).await;
+    }
+}
+
+fn webmcp_tool_count(tools: &[webmcp::ToolRecord], domain_filter: Option<&DomainFilter>) -> usize {
+    tools
+        .iter()
+        .filter(|tool| domain_filter.is_none_or(|filter| filter.check_url(&tool.origin).is_ok()))
+        .count()
 }
 
 fn attach_webmcp_availability_from_tools(
@@ -11961,10 +11990,7 @@ fn attach_webmcp_availability_from_tools(
     if action != "navigate" || resp.get("success").and_then(Value::as_bool) != Some(true) {
         return;
     }
-    let tool_count = tools
-        .iter()
-        .filter(|tool| domain_filter.is_none_or(|filter| filter.check_url(&tool.origin).is_ok()))
-        .count();
+    let tool_count = webmcp_tool_count(tools, domain_filter);
     if tool_count == 0 {
         return;
     }
@@ -13782,7 +13808,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         let mut resp = success_response("cmd-webmcp", json!({"url": "https://example.com"}));
         let expected = resp.clone();
 
-        attach_webmcp_availability(&mut resp, "navigate", &state).await;
+        attach_webmcp_availability(&mut resp, "navigate", &mut state).await;
 
         assert_eq!(resp, expected);
     }

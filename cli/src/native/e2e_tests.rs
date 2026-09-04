@@ -49,6 +49,7 @@ fn native_test_fixture_html(name: &str) -> &'static str {
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
         "snapshot_diff_probe" => include_str!("test_fixtures/snapshot_diff_probe.html"),
         "upload_probe" => include_str!("test_fixtures/upload_probe.html"),
+        "webmcp_delayed_probe" => include_str!("test_fixtures/webmcp_delayed_probe.html"),
         "webmcp_frame_probe" => include_str!("test_fixtures/webmcp_frame_probe.html"),
         "webmcp_probe" => include_str!("test_fixtures/webmcp_probe.html"),
         _ => panic!("Unknown native test fixture: {}", name),
@@ -426,6 +427,37 @@ async fn e2e_webmcp_discovery_invocation_and_cancellation() {
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
     assert!(state.webmcp.invocations.is_empty());
+    fixture_server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_webmcp_navigation_waits_for_delayed_initial_registration() {
+    let (fixture_url, fixture_server) = start_webmcp_server().await;
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": format!("{fixture_url}/delayed.html")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["webmcp"]["experimental"], true);
+    assert_eq!(get_data(&resp)["webmcp"]["available"], true);
+    assert_eq!(get_data(&resp)["webmcp"]["toolCount"], 1);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
     fixture_server.abort();
 }
 
@@ -5077,6 +5109,8 @@ async fn start_webmcp_server() -> (String, tokio::task::JoinHandle<()>) {
                 let body = if request.starts_with("GET /frame.html ") {
                     native_test_fixture_html("webmcp_frame_probe")
                         .replace("__PORT__", &port.to_string())
+                } else if request.starts_with("GET /delayed.html ") {
+                    native_test_fixture_html("webmcp_delayed_probe").to_string()
                 } else {
                     native_test_fixture_html("webmcp_probe").replace("__PORT__", &port.to_string())
                 };
