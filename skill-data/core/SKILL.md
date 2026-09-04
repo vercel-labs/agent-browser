@@ -317,6 +317,17 @@ agent-browser --session b fill @e1 "bob@test.com"
 
 `AGENT_BROWSER_SESSION=myapp` sets the default session for the current shell.
 
+For a linear workflow in an existing Chrome, reuse one attached session instead of creating a session for each step. Start with the no-launch checks `agent-browser session list` and `agent-browser --session "$SESSION" session info --json`. If the runtime and browser status confirm an active attachment, run the intended browser command without `--auto-connect`.
+
+If runtime or browser status is missing or uncertain, warn the user before the first browser-touching command. Any browser command can attempt stale-session recovery, and a daemon configured with `AGENT_BROWSER_AUTO_CONNECT` may reconnect and make Chrome ask the user to allow debugging. Use an explicit `--auto-connect` only when no reusable attached session exists, and treat the first attachment as a human-intervention boundary:
+
+1. Tell the user before running it that Chrome may request approval.
+2. Run one `--auto-connect` command by itself.
+3. If Chrome shows an Allow debugging prompt, pause and report `Action required: Allow debugging in Chrome`.
+4. After approval, reuse the same named session without `--auto-connect`.
+
+Never silently retry `--auto-connect`. A `tab_gone` error means the connection still exists but its bound tab was closed; recover with `tab list`, `tab new <url>`, or tab selection. Create multiple sessions only for genuine parallel work or separate browser identities. See `references/session-management.md` for the complete workflow.
+
 When several sessions share one Chrome over `--cdp <port>`, add `--pin-tab` so each session sticks to its own tab. Every session remembers its bound tab across daemon restarts; with `--pin-tab` a command whose bound tab was closed fails with a `tab_gone` error instead of acting on another session's tab. JSON output includes `"code": "tab_gone"`, `data.targetId`, and an optional sanitized `data.lastUrl` for recovery. Recover with `tab new <url>` or pick a tab from `tab list`. The flag is sticky per session, so pass it once (`--no-pin-tab` turns it off again). See `references/session-management.md` for details.
 
 ### Mock network requests
