@@ -70,6 +70,34 @@ const KEY_INFO: Record<string, { text?: string; keyCode: number }> = {
   PageDown: { keyCode: 34 },
 };
 
+// Windows virtual-key codes for US-layout punctuation. ASCII char codes
+// collide with VK control codes (e.g. '.' = 46 = VK_DELETE), so any
+// printable special character must be mapped to its OEM VK code explicitly.
+// Mirrors `punctuation_key_info()` in cli/src/native/interaction.rs.
+const PUNCTUATION_KEY_INFO: Record<string, number> = {
+  ";": 186, ":": 186, // VK_OEM_1
+  "=": 187, "+": 187, // VK_OEM_PLUS
+  ",": 188, "<": 188, // VK_OEM_COMMA
+  "-": 189, "_": 189, // VK_OEM_MINUS
+  ".": 190, ">": 190, // VK_OEM_PERIOD
+  "/": 191, "?": 191, // VK_OEM_2
+  "`": 192, "~": 192, // VK_OEM_3
+  "[": 219, "{": 219, // VK_OEM_4
+  "\\": 220, "|": 220, // VK_OEM_5
+  "]": 221, "}": 221, // VK_OEM_6
+  "'": 222, '"': 222, // VK_OEM_7
+};
+
+// Returns 0 for unmapped chars (e.g. '!', '@', '你'); CDP still inserts
+// the character via the `text` field on dispatchKeyEvent. Mirrors
+// `char_to_key_info()` in cli/src/native/interaction.rs.
+function charToVirtualKeyCode(ch: string): number {
+  if (ch.length !== 1) return 0;
+  if (/[a-zA-Z]/.test(ch)) return ch.toUpperCase().charCodeAt(0);
+  if (/[0-9]/.test(ch)) return ch.charCodeAt(0);
+  return PUNCTUATION_KEY_INFO[ch] ?? 0;
+}
+
 function cdpButton(btn: number): string {
   switch (btn) {
     case 0: return "left";
@@ -363,7 +391,7 @@ export function Viewport() {
       const text = eventType === "keyDown"
         ? (info?.text ?? (e.key.length === 1 ? e.key : undefined))
         : undefined;
-      const keyCode = info?.keyCode ?? (e.key.length === 1 ? e.key.charCodeAt(0) : 0);
+      const keyCode = info?.keyCode ?? charToVirtualKeyCode(e.key);
       let m = 0;
       if (e.altKey) m |= 1;
       if (e.ctrlKey) m |= 2;
