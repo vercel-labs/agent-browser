@@ -176,6 +176,7 @@ pub fn recording_stop(state: &mut RecordingState) -> Result<Value, String> {
     state.active = false;
 
     if state.frame_count == 0 {
+        let _ = std::fs::remove_file(&state.output_path);
         return Err("No frames captured".to_string());
     }
 
@@ -233,6 +234,18 @@ fn build_ffmpeg_command(output_path: &str, fps: u32) -> tokio::process::Command 
         .kill_on_drop(true);
 
     cmd
+}
+
+fn check_ffmpeg_exit(frame_count: u64, succeeded: bool, stderr: &[u8]) -> Result<(), String> {
+    if succeeded || frame_count == 0 {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(stderr);
+    Err(format!(
+        "ffmpeg failed: {}",
+        stderr.chars().take(300).collect::<String>()
+    ))
 }
 
 /// Attach the recorder's own flattened session to the target behind
@@ -387,13 +400,11 @@ pub fn spawn_recording_task(
 
         capture?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!(
-                "ffmpeg failed: {}",
-                stderr.chars().take(300).collect::<String>()
-            ));
-        }
+        check_ffmpeg_exit(
+            shared_count.load(Ordering::Relaxed),
+            output.status.success(),
+            &output.stderr,
+        )?;
 
         Ok(())
     })
@@ -597,12 +608,25 @@ mod tests {
 
     #[test]
     fn test_recording_stop_no_frames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.mp4");
+        std::fs::write(&path, []).unwrap();
         let mut state = RecordingState::new();
-        recording_start(&mut state, "/tmp/test.mp4", None).unwrap();
+        recording_start(&mut state, path.to_str().unwrap(), None).unwrap();
         let result = recording_stop(&mut state);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("No frames"));
         assert!(!state.active);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_ffmpeg_failure_is_deferred_when_no_frames_were_written() {
+        assert!(check_ffmpeg_exit(0, false, b"empty input").is_ok());
+        assert_eq!(
+            check_ffmpeg_exit(1, false, b"encoder failed").unwrap_err(),
+            "ffmpeg failed: encoder failed"
+        );
     }
 
     #[test]
