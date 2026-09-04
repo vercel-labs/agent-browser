@@ -200,6 +200,9 @@ function showInstallReminder() {
     console.log('');
     console.log(`  ✓ System Chrome found: ${systemChrome}`);
     console.log('    agent-browser will use it automatically.');
+    console.log('    Optional: to reuse your signed-in Chrome with --auto-connect, run:');
+    console.log('      agent-browser chrome status');
+    console.log('    If Chrome is open and status is not-running, enable it at chrome://inspect/#remote-debugging.');
     console.log('');
     return;
   }

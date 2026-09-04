@@ -1137,6 +1137,116 @@ pub fn read_devtools_active_port(user_data_dir: &Path) -> Option<(u16, String)> 
     Some((port, ws_path))
 }
 
+/// Side-effect-free readiness state for attaching to an existing Chrome.
+///
+/// This only reads Chrome's `DevToolsActivePort` files and checks whether the
+/// advertised loopback port accepts TCP connections. It never sends HTTP,
+/// opens a WebSocket, or attaches a debugger, so it cannot trigger Chrome's
+/// remote-debugging approval prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChromeDebuggingStatus {
+    Ready {
+        user_data_dir: PathBuf,
+        port: u16,
+    },
+    Candidate {
+        port: u16,
+    },
+    NotRunning,
+    Stale {
+        user_data_dir: PathBuf,
+        port: u16,
+    },
+    Unknown {
+        user_data_dir: PathBuf,
+        reason: String,
+    },
+}
+
+/// Inspect the default Chrome-family user-data directories without attaching.
+pub async fn chrome_debugging_status() -> ChromeDebuggingStatus {
+    chrome_debugging_status_in(
+        &get_chrome_user_data_dirs(),
+        &[9222, 9229],
+        |port| async move {
+            let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            matches!(
+                tokio::time::timeout(
+                    Duration::from_millis(200),
+                    tokio::net::TcpStream::connect(address)
+                )
+                .await,
+                Ok(Ok(_))
+            )
+        },
+    )
+    .await
+}
+
+async fn chrome_debugging_status_in<F, Fut>(
+    user_data_dirs: &[PathBuf],
+    common_ports: &[u16],
+    mut port_is_reachable: F,
+) -> ChromeDebuggingStatus
+where
+    F: FnMut(u16) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let mut fallback = ChromeDebuggingStatus::NotRunning;
+
+    for dir in user_data_dirs {
+        let path = dir.join("DevToolsActivePort");
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                if matches!(fallback, ChromeDebuggingStatus::NotRunning) {
+                    fallback = ChromeDebuggingStatus::Unknown {
+                        user_data_dir: dir.clone(),
+                        reason: error.to_string(),
+                    };
+                }
+                continue;
+            }
+        };
+
+        let Some(port) = content
+            .lines()
+            .next()
+            .and_then(|line| line.trim().parse::<u16>().ok())
+        else {
+            if matches!(fallback, ChromeDebuggingStatus::NotRunning) {
+                fallback = ChromeDebuggingStatus::Unknown {
+                    user_data_dir: dir.clone(),
+                    reason: "DevToolsActivePort does not contain a valid port".to_string(),
+                };
+            }
+            continue;
+        };
+
+        if port_is_reachable(port).await {
+            return ChromeDebuggingStatus::Ready {
+                user_data_dir: dir.clone(),
+                port,
+            };
+        }
+        if matches!(fallback, ChromeDebuggingStatus::NotRunning) {
+            fallback = ChromeDebuggingStatus::Stale {
+                user_data_dir: dir.clone(),
+                port,
+            };
+        }
+    }
+
+    for &port in common_ports {
+        if port_is_reachable(port).await {
+            return ChromeDebuggingStatus::Candidate { port };
+        }
+    }
+
+    fallback
+}
+
 pub async fn auto_connect_cdp() -> Result<String, String> {
     let user_data_dirs = get_chrome_user_data_dirs();
 
@@ -1158,7 +1268,7 @@ pub async fn auto_connect_cdp() -> Result<String, String> {
         }
     }
 
-    Err("No running Chrome instance found. Launch Chrome with --remote-debugging-port or use --cdp.".to_string())
+    Err("No running Chrome instance with remote debugging found. Run `agent-browser chrome status`; for Chrome 144+, enable Remote debugging at chrome://inspect/#remote-debugging, or use --cdp.".to_string())
 }
 
 /// Resolve a CDP WebSocket URL from a DevToolsActivePort entry.
@@ -2672,6 +2782,67 @@ mod tests {
             result.args.iter().any(|a| a == "--password-store=basic"),
             "profile path should keep keychain flags"
         );
+    }
+
+    #[tokio::test]
+    async fn chrome_debugging_status_is_ready_without_protocol_attach() {
+        let dir = TempDir::new("chrome-debugging-ready");
+        std::fs::create_dir_all(&*dir).unwrap();
+        std::fs::write(
+            dir.join("DevToolsActivePort"),
+            "43123\n/devtools/browser/test\n",
+        )
+        .unwrap();
+
+        let status =
+            chrome_debugging_status_in(&[dir.0.clone()], &[], |port| async move { port == 43123 })
+                .await;
+
+        assert_eq!(
+            status,
+            ChromeDebuggingStatus::Ready {
+                user_data_dir: dir.0.clone(),
+                port: 43123,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn chrome_debugging_status_distinguishes_missing_stale_and_invalid_files() {
+        let missing = TempDir::new("chrome-debugging-missing");
+        assert_eq!(
+            chrome_debugging_status_in(&[missing.0.clone()], &[], |_| async { false }).await,
+            ChromeDebuggingStatus::NotRunning
+        );
+
+        std::fs::create_dir_all(&*missing).unwrap();
+        std::fs::write(missing.join("DevToolsActivePort"), "43123\n").unwrap();
+        assert_eq!(
+            chrome_debugging_status_in(&[missing.0.clone()], &[], |_| async { false }).await,
+            ChromeDebuggingStatus::Stale {
+                user_data_dir: missing.0.clone(),
+                port: 43123,
+            }
+        );
+
+        std::fs::write(missing.join("DevToolsActivePort"), "not-a-port\n").unwrap();
+        assert!(matches!(
+            chrome_debugging_status_in(&[missing.0.clone()], &[], |_| async { false }).await,
+            ChromeDebuggingStatus::Unknown { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn chrome_debugging_status_reports_reachable_common_port_as_candidate() {
+        let dir = TempDir::new("chrome-debugging-common-port");
+
+        let status =
+            chrome_debugging_status_in(&[dir.0.clone()], &[9222, 9229], |port| async move {
+                port == 9222
+            })
+            .await;
+
+        assert_eq!(status, ChromeDebuggingStatus::Candidate { port: 9222 });
     }
 
     // -------------------------------------------------------------------

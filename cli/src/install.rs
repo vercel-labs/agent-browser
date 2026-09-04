@@ -456,6 +456,7 @@ pub fn run_install(with_deps: bool) {
                 color::success_indicator(),
                 version
             );
+            print_auto_connect_setup_hint();
             return;
         }
     }
@@ -488,6 +489,7 @@ pub fn run_install(with_deps: bool) {
                 );
                 println!("  agent-browser install --with-deps");
             }
+            print_auto_connect_setup_hint();
         }
         Err(e) => {
             let _ = fs::remove_dir_all(&dest);
@@ -495,6 +497,13 @@ pub fn run_install(with_deps: bool) {
             exit(1);
         }
     }
+}
+
+fn print_auto_connect_setup_hint() {
+    println!();
+    println!("Optional: to reuse your signed-in Chrome with --auto-connect, run:");
+    println!("  agent-browser chrome status");
+    println!("If Chrome is open and status is not-running, enable it at chrome://inspect/#remote-debugging.");
 }
 
 fn install_status_result(status: io::Result<ExitStatus>) -> Result<(), String> {
