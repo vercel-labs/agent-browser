@@ -1937,3 +1937,5 @@ When enabled, agent-browser connects to an AgentCore cloud browser session inste
 ## License
 
 Apache-2.0
+
+[![Contributions](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](https://github.com/BAKOME-Hub)
