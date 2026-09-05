@@ -3502,6 +3502,22 @@ async fn install_active_network_controls(
     Ok(())
 }
 
+/// Store proxy credentials so Fetch interception can answer `Fetch.authRequired`.
+/// Returns whether proxy authentication is configured. Must run before any path
+/// that installs network controls — including a reconnect, which rebuilds the
+/// Fetch handler from scratch.
+async fn store_proxy_credentials(state: &DaemonState, launch_options: &LaunchOptions) -> bool {
+    let has_proxy_auth = launch_options.proxy_username.is_some();
+    if has_proxy_auth {
+        let mut creds = state.proxy_credentials.write().await;
+        *creds = Some((
+            launch_options.proxy_username.clone().unwrap_or_default(),
+            launch_options.proxy_password.clone().unwrap_or_default(),
+        ));
+    }
+    has_proxy_auth
+}
+
 async fn install_network_controls_or_close(
     state: &mut DaemonState,
     handle_auth_requests: bool,
@@ -4496,6 +4512,10 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     // Hash comparison and fast process-exit check are evaluated before the
     // async is_connection_alive to skip the expensive CDP liveness probe
     // when a relaunch is already certain.
+    // Set when a dead CDP socket was recovered by reconnecting to the still-running
+    // browser. The reconnect replaces the CDP client, so everything bound to the old
+    // one has to be rebuilt before this call can return "reused".
+    let mut reconnected = false;
     let needs_relaunch = if let Some(ref mut mgr) = state.browser {
         let is_external =
             launch_connection_is_external(cdp_url, cdp_port, auto_connect, provider_name);
@@ -4522,6 +4542,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             match mgr.reconnect().await {
                 Ok(()) => {
                     eprintln!("[cdp] connection lost; reconnected to the running browser");
+                    reconnected = true;
                     false
                 }
                 Err(e) => {
@@ -4548,6 +4569,24 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             close_current_browser(state).await?;
         }
     } else {
+        if reconnected {
+            // The reconnect swapped in a new CDP client, so every subscriber and
+            // background task captured from the old one is now bound to a dead
+            // socket: the event subscription, the Fetch handler, the dialog
+            // handler, and the Arc<CdpClient> held by the stream server. Left
+            // as-is they fail silently — and the Fetch handler is what enforces
+            // allow-domains and answers proxy auth, so skipping this would drop
+            // a security control while still reporting a healthy reused browser.
+            // Rebuild the same wiring the attach branches below install.
+            let has_proxy_auth = store_proxy_credentials(state, &launch_options).await;
+            state.reset_input_state();
+            state.subscribe_to_browser_events();
+            state.start_fetch_handler();
+            state.start_dialog_handler();
+            state.update_stream_client().await;
+            install_network_controls_or_close(state, has_proxy_auth).await?;
+            apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
+        }
         load_storage_state(state, &storage_state_owned).await?;
         state.effective_ca_cert = effective_ca_cert;
         return Ok(json!({ "launched": true, "reused": true, "relaunchedBrowser": false }));
@@ -4567,14 +4606,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     // Store proxy credentials before any local or remote CDP branch enables
     // Fetch interception with authentication handling.
-    let has_proxy_auth = launch_options.proxy_username.is_some();
-    if has_proxy_auth {
-        let mut creds = state.proxy_credentials.write().await;
-        *creds = Some((
-            launch_options.proxy_username.clone().unwrap_or_default(),
-            launch_options.proxy_password.clone().unwrap_or_default(),
-        ));
-    }
+    let has_proxy_auth = store_proxy_credentials(state, &launch_options).await;
 
     if let Some(url) = cdp_url {
         state.reset_input_state();
