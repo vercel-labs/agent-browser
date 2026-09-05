@@ -3917,6 +3917,54 @@ async fn apply_launch_mutator_plugins(
     Ok(())
 }
 
+/// Parse Chromium launch arguments from `--args` / `AGENT_BROWSER_ARGS`.
+///
+/// Newlines always separate arguments. Commas still separate adjacent launch
+/// switches for backwards compatibility, but a comma inside a single argument
+/// value is preserved, so `--window-size=1600,1200` survives intact instead of
+/// being split into two meaningless fragments.
+///
+/// A comma is treated as a separator only when the text after it starts a new
+/// switch (`-`); otherwise it belongs to the current value.
+pub(crate) fn parse_launch_args(raw: &str) -> Vec<String> {
+    let mut args = Vec::new();
+
+    for line in raw.lines() {
+        let mut current = String::new();
+        let mut remainder = line.trim();
+        if remainder.is_empty() {
+            continue;
+        }
+
+        while let Some(idx) = remainder.find(',') {
+            let before = &remainder[..idx];
+            let after = &remainder[idx + 1..];
+
+            if after.trim_start().starts_with('-') {
+                current.push_str(before);
+                let arg = current.trim();
+                if !arg.is_empty() {
+                    args.push(arg.to_string());
+                }
+                current.clear();
+                remainder = after.trim_start();
+            } else {
+                current.push_str(before);
+                current.push(',');
+                remainder = after;
+            }
+        }
+
+        current.push_str(remainder);
+        let arg = current.trim();
+        if !arg.is_empty() {
+            args.push(arg.to_string());
+        }
+    }
+
+    args
+}
+
 fn launch_options_from_env() -> LaunchOptions {
     let headed = headed_from_env();
 
@@ -3939,12 +3987,7 @@ fn launch_options_from_env() -> LaunchOptions {
             .map(|v| v == "1" || v == "true")
             .unwrap_or(false),
         args: env::var("AGENT_BROWSER_ARGS")
-            .map(|v| {
-                v.split([',', '\n'])
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
+            .map(|v| parse_launch_args(&v))
             .unwrap_or_default(),
         extensions,
         storage_state: env::var("AGENT_BROWSER_STATE").ok(),
@@ -13887,6 +13930,46 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[test]
+    #[test]
+    fn test_parse_launch_args_preserves_comma_in_switch_value() {
+        // The regression: --window-size=1600,1200 must survive as one argument.
+        assert_eq!(
+            parse_launch_args("--window-size=1600,1200"),
+            vec!["--window-size=1600,1200"]
+        );
+    }
+
+    #[test]
+    fn test_parse_launch_args_splits_adjacent_switches_at_comma() {
+        // A comma is a separator only when a new switch follows it.
+        assert_eq!(
+            parse_launch_args(
+                "--window-size=1600,1200,--disable-blink-features=AutomationControlled"
+            ),
+            vec![
+                "--window-size=1600,1200",
+                "--disable-blink-features=AutomationControlled"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_launch_args_splits_on_newline() {
+        assert_eq!(
+            parse_launch_args("--window-size=1600,1200\n--disable-gpu"),
+            vec!["--window-size=1600,1200", "--disable-gpu"]
+        );
+    }
+
+    #[test]
+    fn test_parse_launch_args_trims_and_skips_empties() {
+        assert_eq!(
+            parse_launch_args("  --no-sandbox ,  --disable-gpu  \n\n"),
+            vec!["--no-sandbox", "--disable-gpu"]
+        );
+        assert!(parse_launch_args("   \n  ").is_empty());
+    }
+
     fn test_launch_options_from_env_webgpu() {
         let guard = EnvGuard::new(&["AGENT_BROWSER_WEBGPU"]);
         guard.remove("AGENT_BROWSER_WEBGPU");
