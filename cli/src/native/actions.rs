@@ -2203,6 +2203,25 @@ async fn close_active_provider_session(state: &mut DaemonState) {
     state.active_provider_connection = false;
 }
 
+/// Reset the daemon state that belongs to a specific CDP *connection* rather
+/// than to the browser itself.
+///
+/// Everything here is invalidated when the socket goes away, whether because the
+/// browser was closed or because the connection dropped and was re-established:
+/// `Target.setAutoAttach` is a per-connection command (and the flag gates
+/// re-sending it), and the session ids in the iframe maps, the WebMCP registry
+/// and the screencast flag all belong to the sessions the old socket owned.
+///
+/// Deliberately excludes `launch_hash`: that describes the browser's
+/// configuration, which a reconnect does not change.
+fn reset_cdp_connection_state(state: &mut DaemonState) {
+    state.network_auto_attach_installed = false;
+    state.iframe_sessions.clear();
+    state.active_iframe_sessions.clear();
+    state.webmcp.clear_all();
+    state.screencasting = false;
+}
+
 pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(), String> {
     let close_error = if let Some(mut mgr) = state.browser.take() {
         mgr.close().await.err()
@@ -2212,11 +2231,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
 
     close_active_provider_session(state).await;
     state.launch_hash = None;
-    state.network_auto_attach_installed = false;
-    state.iframe_sessions.clear();
-    state.active_iframe_sessions.clear();
-    state.webmcp.clear_all();
-    state.screencasting = false;
+    reset_cdp_connection_state(state);
     state.reset_input_state();
     state.update_stream_client().await;
 
@@ -3502,6 +3517,22 @@ async fn install_active_network_controls(
     Ok(())
 }
 
+/// Store proxy credentials so Fetch interception can answer `Fetch.authRequired`.
+/// Returns whether proxy authentication is configured. Must run before any path
+/// that installs network controls — including a reconnect, which rebuilds the
+/// Fetch handler from scratch.
+async fn store_proxy_credentials(state: &DaemonState, launch_options: &LaunchOptions) -> bool {
+    let has_proxy_auth = launch_options.proxy_username.is_some();
+    if has_proxy_auth {
+        let mut creds = state.proxy_credentials.write().await;
+        *creds = Some((
+            launch_options.proxy_username.clone().unwrap_or_default(),
+            launch_options.proxy_password.clone().unwrap_or_default(),
+        ));
+    }
+    has_proxy_auth
+}
+
 async fn install_network_controls_or_close(
     state: &mut DaemonState,
     handle_auth_requests: bool,
@@ -4496,17 +4527,45 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     // Hash comparison and fast process-exit check are evaluated before the
     // async is_connection_alive to skip the expensive CDP liveness probe
     // when a relaunch is already certain.
+    // Set when a dead CDP socket was recovered by reconnecting to the still-running
+    // browser. The reconnect replaces the CDP client, so everything bound to the old
+    // one has to be rebuilt before this call can return "reused".
+    let mut reconnected = false;
     let needs_relaunch = if let Some(ref mut mgr) = state.browser {
         let is_external =
             launch_connection_is_external(cdp_url, cdp_port, auto_connect, provider_name);
         let was_external = mgr.is_cdp_connection();
         let hash_changed = state.launch_hash != Some(new_hash);
         let storage_state_requires_clean_launch = storage_state_owned.is_some() && !is_external;
-        is_external != was_external
-            || hash_changed
-            || storage_state_requires_clean_launch
-            || mgr.has_process_exited()
-            || !mgr.is_connection_alive().await
+        let config_changed =
+            is_external != was_external || hash_changed || storage_state_requires_clean_launch;
+
+        if config_changed || mgr.has_process_exited() {
+            // Genuinely unusable: wrong configuration, or the process is gone.
+            true
+        } else if mgr.is_connection_alive().await {
+            false
+        } else {
+            // The process is alive and correctly configured — only our CDP
+            // socket died. Chrome resets the DevTools WebSocket on its own
+            // ("Connection reset without closing handshake") on long-lived idle
+            // sessions, leaving the browser running and still listening on the
+            // same debug port. Relaunching here closes a working browser and
+            // discards its profile — cookies, storage, logged-in state — to
+            // rebuild what we already have. Reconnect first; relaunch only if
+            // that fails.
+            match mgr.reconnect().await {
+                Ok(()) => {
+                    eprintln!("[cdp] connection lost; reconnected to the running browser");
+                    reconnected = true;
+                    false
+                }
+                Err(e) => {
+                    eprintln!("[cdp] connection lost and reconnect failed ({e}); relaunching");
+                    true
+                }
+            }
+        }
     } else {
         true
     };
@@ -4525,6 +4584,34 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             close_current_browser(state).await?;
         }
     } else {
+        if reconnected {
+            // The reconnect swapped in a new CDP client, so every subscriber and
+            // background task captured from the old one is now bound to a dead
+            // socket: the event subscription, the Fetch handler, the dialog
+            // handler, and the Arc<CdpClient> held by the stream server. Left
+            // as-is they fail silently — and the Fetch handler is what enforces
+            // allow-domains and answers proxy auth, so skipping this would drop
+            // a security control while still reporting a healthy reused browser.
+            // Rebuild the same wiring the attach branches below install.
+            //
+            // Clearing the connection-scoped state first is what makes
+            // install_network_controls_or_close effective: it re-sends
+            // Target.setAutoAttach only when network_auto_attach_installed is
+            // false, and auto-attach is a per-connection command that did not
+            // survive the drop. Leaving the flag set would silently skip it, so
+            // popups and new windows opened after a reconnect would never be
+            // attached — and therefore never filtered by allow-domains or
+            // covered by proxy auth.
+            reset_cdp_connection_state(state);
+            let has_proxy_auth = store_proxy_credentials(state, &launch_options).await;
+            state.reset_input_state();
+            state.subscribe_to_browser_events();
+            state.start_fetch_handler();
+            state.start_dialog_handler();
+            state.update_stream_client().await;
+            install_network_controls_or_close(state, has_proxy_auth).await?;
+            apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
+        }
         load_storage_state(state, &storage_state_owned).await?;
         state.effective_ca_cert = effective_ca_cert;
         return Ok(json!({ "launched": true, "reused": true, "relaunchedBrowser": false }));
@@ -4544,14 +4631,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 
     // Store proxy credentials before any local or remote CDP branch enables
     // Fetch interception with authentication handling.
-    let has_proxy_auth = launch_options.proxy_username.is_some();
-    if has_proxy_auth {
-        let mut creds = state.proxy_credentials.write().await;
-        *creds = Some((
-            launch_options.proxy_username.clone().unwrap_or_default(),
-            launch_options.proxy_password.clone().unwrap_or_default(),
-        ));
-    }
+    let has_proxy_auth = store_proxy_credentials(state, &launch_options).await;
 
     if let Some(url) = cdp_url {
         state.reset_input_state();

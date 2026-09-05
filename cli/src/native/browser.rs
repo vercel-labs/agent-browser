@@ -425,6 +425,15 @@ pub struct BrowserManager {
     /// launch rules such as extension-forced headed mode. Meaningless for
     /// attached browsers (browser_process is None).
     headless: bool,
+    /// Emulation applied over CDP after launch rather than baked into the
+    /// process, kept so [`BrowserManager::reconnect`] can replay it. A fresh
+    /// WebSocket starts without these, so a reconnected session would otherwise
+    /// silently differ from the one it replaced.
+    user_agent: Option<String>,
+    color_scheme: Option<String>,
+    /// Headers used to open an external CDP connection, so a reconnect can
+    /// present the same ones (they may carry the auth that allowed it at all).
+    cdp_headers: Option<Vec<(String, String)>>,
 }
 
 /// Stable machine-readable prefix for "the bound tab no longer exists"
@@ -537,6 +546,9 @@ impl BrowserManager {
                 bound_target_id: None,
                 bound_target_gone: None,
                 headless,
+                user_agent: user_agent.clone(),
+                color_scheme: color_scheme.clone(),
+                cdp_headers: None,
             };
             manager.discover_and_attach_targets().await?;
             manager
@@ -614,7 +626,7 @@ impl BrowserManager {
         headers: Option<Vec<(String, String)>>,
     ) -> Result<Self, String> {
         let ws_url = resolve_cdp_url(url).await?;
-        let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
+        let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers.clone()).await?);
         let mut manager = Self {
             client,
             browser_process: None,
@@ -626,6 +638,9 @@ impl BrowserManager {
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
+            user_agent: None,
+            color_scheme: None,
+            cdp_headers: headers,
             direct_page,
             pin_tab: false,
             bound_target_id: None,
@@ -1327,6 +1342,116 @@ impl BrowserManager {
         match result {
             Ok(Ok(_)) => true,
             Ok(Err(_)) | Err(_) => false,
+        }
+    }
+
+    /// Re-establish the CDP WebSocket to a browser that is STILL RUNNING.
+    ///
+    /// A dead socket is not a dead browser. Chrome can reset the DevTools
+    /// WebSocket ("Connection reset without closing handshake") while the
+    /// process keeps running normally, and the browser-level `ws_url` stays
+    /// valid for as long as it does — its DevTools endpoint is still listening
+    /// on the same port and will hand out the same browser target. Reconnecting
+    /// recovers the session; the alternative (close and relaunch) discards the
+    /// profile with it — cookies, storage, and any logged-in state — to rebuild
+    /// a browser that was never broken.
+    ///
+    /// Session ids belong to the old socket, so all targets are re-attached. The
+    /// bound/active tab is restored by target id where it still exists, and the
+    /// CDP-applied emulation is replayed, so callers see the browser they had.
+    ///
+    /// Not supported for `direct_page` connections (provider CDP proxies), whose
+    /// WebSocket *is* the page session and whose re-attach semantics differ;
+    /// callers fall back to a relaunch for those.
+    pub async fn reconnect(&mut self) -> Result<(), String> {
+        if self.direct_page {
+            return Err("reconnect is not supported for direct-page CDP connections".to_string());
+        }
+
+        let client = Arc::new(
+            CdpClient::connect_with_headers(&self.ws_url, self.cdp_headers.clone())
+                .await
+                .map_err(|e| format!("reconnect to {}: {}", self.ws_url, e))?,
+        );
+        self.client = client;
+
+        // Prefer the explicit binding; fall back to whatever was active.
+        let previous_target = self.bound_target_id.clone().or_else(|| {
+            self.pages
+                .get(self.active_page_index)
+                .map(|p| p.target_id.clone())
+        });
+        let previous_url = self
+            .pages
+            .get(self.active_page_index)
+            .map(|p| p.url.clone())
+            .unwrap_or_default();
+
+        // discover_and_attach_targets APPENDS, so clear first — otherwise every
+        // reconnect would duplicate the entire tab list.
+        self.pages.clear();
+        self.active_page_index = 0;
+        self.discover_and_attach_targets().await?;
+
+        if let Some(target_id) = previous_target {
+            if self.restore_target_binding(&target_id, &previous_url) {
+                // discover_and_attach_targets only enables domains on pages[0].
+                let session_id = self.pages[self.active_page_index].session_id.clone();
+                self.enable_domains(&session_id).await?;
+            }
+        }
+
+        self.reapply_cdp_state().await;
+        Ok(())
+    }
+
+    /// Replay the CDP-applied settings a fresh connection does not inherit.
+    /// Best-effort by design: these mirror the post-launch calls in `launch`,
+    /// which also ignore their errors, and a failure here must not downgrade a
+    /// recovered session into a relaunch.
+    async fn reapply_cdp_state(&self) {
+        let Ok(session_id) = self.active_session_id().map(|s| s.to_string()) else {
+            return;
+        };
+        if self.ignore_https_errors {
+            let _ = self
+                .client
+                .send_command(
+                    "Security.setIgnoreCertificateErrors",
+                    Some(json!({ "ignore": true })),
+                    Some(&session_id),
+                )
+                .await;
+        }
+        if let Some(ref ua) = self.user_agent {
+            let _ = self
+                .client
+                .send_command(
+                    "Emulation.setUserAgentOverride",
+                    Some(json!({ "userAgent": ua })),
+                    Some(&session_id),
+                )
+                .await;
+        }
+        if let Some(ref scheme) = self.color_scheme {
+            let _ = self
+                .client
+                .send_command(
+                    "Emulation.setEmulatedMedia",
+                    Some(json!({ "features": [{ "name": "prefers-color-scheme", "value": scheme }] })),
+                    Some(&session_id),
+                )
+                .await;
+        }
+        if let Some(ref path) = self.download_path {
+            let _ = self
+                .client
+                .send_command(
+                    "Browser.setDownloadBehavior",
+                    Some(json!({ "behavior": "allow", "downloadPath": path })),
+                    None,
+                )
+                .await;
         }
     }
 
@@ -2321,6 +2446,9 @@ async fn initialize_lightpanda_manager(
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 1,
+            user_agent: None,
+            color_scheme: None,
+            cdp_headers: None,
             direct_page: false,
             pin_tab: false,
             bound_target_id: None,
@@ -3025,6 +3153,9 @@ mod tests {
             ignore_https_errors: false,
             visited_origins: HashSet::new(),
             next_tab_id: 100,
+            user_agent: None,
+            color_scheme: None,
+            cdp_headers: None,
             direct_page: false,
             pin_tab: false,
             bound_target_id: None,
@@ -3048,6 +3179,21 @@ mod tests {
         assert_eq!(mgr.active_target_id().unwrap(), TARGET_A);
         assert_eq!(mgr.bound_target_id(), Some(TARGET_A));
         assert!(!mgr.bound_target_is_gone());
+    }
+
+    #[tokio::test]
+    async fn test_reconnect_rejected_for_direct_page_connections() {
+        // A direct-page connection's WebSocket IS the page session, so the
+        // browser-level re-attach reconnect performs does not apply. It must
+        // refuse rather than half-reattach, so callers fall back to a relaunch.
+        let mut mgr = test_manager(vec![page(1, TARGET_A, "https://mine.example")]).await;
+        mgr.direct_page = true;
+
+        let err = mgr.reconnect().await.unwrap_err();
+        assert!(
+            err.contains("direct-page"),
+            "expected a direct-page refusal, got: {err}"
+        );
     }
 
     #[tokio::test]
