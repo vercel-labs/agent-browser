@@ -218,7 +218,7 @@ async fn run_chat_turn(
         }
     };
 
-    let tools: Value = serde_json::from_str(chat::CHAT_TOOLS).unwrap();
+    let tools: Value = serde_json::from_str(&chat::chat_tools_json()).unwrap();
     let url = format!("{}/v1/chat/completions", gateway_url);
     let client = chat::http_client();
 
@@ -341,21 +341,36 @@ async fn run_chat_turn(
             }
         }
 
-        for (tc_id, _tc_name, tc_args) in &tool_calls {
+        for (tc_id, tc_name, tc_args) in &tool_calls {
             let input: Value = serde_json::from_str(tc_args).unwrap_or(json!({}));
-            let command = input.get("command").and_then(|c| c.as_str()).unwrap_or("");
 
-            if !json_mode && verbosity != Verbosity::Quiet {
-                eprintln!("{}", color::dim(&format!("> {}", command)));
-            }
+            let result = if tc_name == "exa_web_search" {
+                let query = input.get("query").and_then(|q| q.as_str()).unwrap_or("");
+                let num = input.get("numResults").and_then(|n| n.as_u64());
 
-            let result =
+                if !json_mode && verbosity != Verbosity::Quiet {
+                    eprintln!("{}", color::dim(&format!("> exa search: {}", query)));
+                }
+
+                match tokio::time::timeout(tool_timeout, chat::execute_exa_search(query, num)).await
+                {
+                    Ok(r) => r,
+                    Err(_) => "Exa search timed out after 60 seconds.".to_string(),
+                }
+            } else {
+                let command = input.get("command").and_then(|c| c.as_str()).unwrap_or("");
+
+                if !json_mode && verbosity != Verbosity::Quiet {
+                    eprintln!("{}", color::dim(&format!("> {}", command)));
+                }
+
                 match tokio::time::timeout(tool_timeout, chat::execute_chat_tool(session, command))
                     .await
                 {
                     Ok(r) => r,
                     Err(_) => "Tool execution timed out after 60 seconds.".to_string(),
-                };
+                }
+            };
 
             if !json_mode && verbosity == Verbosity::Verbose {
                 for line in result.lines() {
@@ -364,7 +379,8 @@ async fn run_chat_turn(
             }
 
             all_tool_calls.push(json!({
-                "command": command,
+                "tool": tc_name,
+                "input": input,
                 "output": result
             }));
 
