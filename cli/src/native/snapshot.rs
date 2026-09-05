@@ -1426,6 +1426,35 @@ mod tests {
         assert!(!dups.contains_key("button:Cancel"));
     }
 
+    /// Regression guard for Didomi-style consent buttons, whose accessible name
+    /// is itself a quoted "key: description" string (e.g. "Agree and close:
+    /// Agree to our data processing and close") while the AX value carries the
+    /// short label. Interactive snapshots must keep BOTH: the quoted name and
+    /// the trailing value text. An earlier parser dropped the value suffix,
+    /// leaving agents unable to tell such buttons apart.
+    #[test]
+    fn test_render_tree_keeps_button_value_text_in_interactive_mode() {
+        let mut node = TreeNode::empty();
+        node.role = "button".to_string();
+        node.name = "Agree and close: Agree to our data processing and close".to_string();
+        node.value_text = Some("Agree and close".to_string());
+        node.has_ref = true;
+        node.ref_id = Some("e1".to_string());
+
+        let options = SnapshotOptions {
+            interactive: true,
+            ..SnapshotOptions::default()
+        };
+        let mut output = String::new();
+
+        render_tree(&[node], 0, 0, &mut output, &options);
+
+        assert_eq!(
+            output.trim(),
+            "- button \"Agree and close: Agree to our data processing and close\" [ref=e1]: Agree and close"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Cursor-interactive text dedup (Issue #841 regression guard)
     // -----------------------------------------------------------------------
