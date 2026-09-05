@@ -4502,11 +4502,34 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         let was_external = mgr.is_cdp_connection();
         let hash_changed = state.launch_hash != Some(new_hash);
         let storage_state_requires_clean_launch = storage_state_owned.is_some() && !is_external;
-        is_external != was_external
-            || hash_changed
-            || storage_state_requires_clean_launch
-            || mgr.has_process_exited()
-            || !mgr.is_connection_alive().await
+        let config_changed =
+            is_external != was_external || hash_changed || storage_state_requires_clean_launch;
+
+        if config_changed || mgr.has_process_exited() {
+            // Genuinely unusable: wrong configuration, or the process is gone.
+            true
+        } else if mgr.is_connection_alive().await {
+            false
+        } else {
+            // The process is alive and correctly configured — only our CDP
+            // socket died. Chrome resets the DevTools WebSocket on its own
+            // ("Connection reset without closing handshake") on long-lived idle
+            // sessions, leaving the browser running and still listening on the
+            // same debug port. Relaunching here closes a working browser and
+            // discards its profile — cookies, storage, logged-in state — to
+            // rebuild what we already have. Reconnect first; relaunch only if
+            // that fails.
+            match mgr.reconnect().await {
+                Ok(()) => {
+                    eprintln!("[cdp] connection lost; reconnected to the running browser");
+                    false
+                }
+                Err(e) => {
+                    eprintln!("[cdp] connection lost and reconnect failed ({e}); relaunching");
+                    true
+                }
+            }
+        }
     } else {
         true
     };
