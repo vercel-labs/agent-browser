@@ -2203,6 +2203,25 @@ async fn close_active_provider_session(state: &mut DaemonState) {
     state.active_provider_connection = false;
 }
 
+/// Reset the daemon state that belongs to a specific CDP *connection* rather
+/// than to the browser itself.
+///
+/// Everything here is invalidated when the socket goes away, whether because the
+/// browser was closed or because the connection dropped and was re-established:
+/// `Target.setAutoAttach` is a per-connection command (and the flag gates
+/// re-sending it), and the session ids in the iframe maps, the WebMCP registry
+/// and the screencast flag all belong to the sessions the old socket owned.
+///
+/// Deliberately excludes `launch_hash`: that describes the browser's
+/// configuration, which a reconnect does not change.
+fn reset_cdp_connection_state(state: &mut DaemonState) {
+    state.network_auto_attach_installed = false;
+    state.iframe_sessions.clear();
+    state.active_iframe_sessions.clear();
+    state.webmcp.clear_all();
+    state.screencasting = false;
+}
+
 pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(), String> {
     let close_error = if let Some(mut mgr) = state.browser.take() {
         mgr.close().await.err()
@@ -2212,11 +2231,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
 
     close_active_provider_session(state).await;
     state.launch_hash = None;
-    state.network_auto_attach_installed = false;
-    state.iframe_sessions.clear();
-    state.active_iframe_sessions.clear();
-    state.webmcp.clear_all();
-    state.screencasting = false;
+    reset_cdp_connection_state(state);
     state.reset_input_state();
     state.update_stream_client().await;
 
@@ -4578,6 +4593,16 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             // allow-domains and answers proxy auth, so skipping this would drop
             // a security control while still reporting a healthy reused browser.
             // Rebuild the same wiring the attach branches below install.
+            //
+            // Clearing the connection-scoped state first is what makes
+            // install_network_controls_or_close effective: it re-sends
+            // Target.setAutoAttach only when network_auto_attach_installed is
+            // false, and auto-attach is a per-connection command that did not
+            // survive the drop. Leaving the flag set would silently skip it, so
+            // popups and new windows opened after a reconnect would never be
+            // attached — and therefore never filtered by allow-domains or
+            // covered by proxy auth.
+            reset_cdp_connection_state(state);
             let has_proxy_auth = store_proxy_credentials(state, &launch_options).await;
             state.reset_input_state();
             state.subscribe_to_browser_events();
