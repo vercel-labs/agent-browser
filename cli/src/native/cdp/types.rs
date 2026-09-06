@@ -141,6 +141,9 @@ pub struct SetDiscoverTargetsParams {
 #[serde(rename_all = "camelCase")]
 pub struct CreateTargetParams {
     pub url: String,
+    /// Create without foregrounding: a foreground create raises the whole
+    /// browser over the user's current app when Chrome is headed.
+    pub background: bool,
 }
 
 #[derive(Debug, Deserialize)]
