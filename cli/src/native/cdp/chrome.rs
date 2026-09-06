@@ -962,6 +962,13 @@ struct StderrScan {
 /// and survives the trim.
 const MAX_RETAINED_STDERR_LINES: usize = 1000;
 
+/// Lock the shared scan state, recovering the last good state if a previous
+/// holder panicked. A poisoned mutex must not take the daemon down during
+/// launch, so never `unwrap()` this lock.
+fn lock_scan(scan: &Arc<Mutex<StderrScan>>) -> std::sync::MutexGuard<'_, StderrScan> {
+    scan.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Wait up to 30 seconds for Chrome's DevTools endpoint, watching the
 /// DevToolsActivePort file and Chrome's stderr concurrently.
 ///
@@ -984,7 +991,7 @@ fn wait_for_chrome_endpoint(child: &mut Child, user_data_dir: &Path) -> Result<S
         move || {
             for line in BufReader::new(stderr).lines() {
                 let Ok(line) = line else { break };
-                let mut scan = scan.lock().unwrap();
+                let mut scan = lock_scan(&scan);
                 if scan.ws_url.is_none() {
                     if let Some(url) = line.strip_prefix(DEVTOOLS_LISTENING_PREFIX) {
                         scan.ws_url = Some(url.trim().to_string());
@@ -1009,7 +1016,7 @@ fn wait_for_chrome_endpoint(child: &mut Child, user_data_dir: &Path) -> Result<S
                 .code()
                 .map(|c| format!("{}", c))
                 .unwrap_or_else(|| "unknown".to_string());
-            let lines = scan.lock().unwrap().lines.clone();
+            let lines = lock_scan(&scan).lines.clone();
             return Err(chrome_launch_error(
                 &format!(
                     "Chrome exited early (exit code: {}) without providing a DevTools endpoint",
@@ -1024,12 +1031,12 @@ fn wait_for_chrome_endpoint(child: &mut Child, user_data_dir: &Path) -> Result<S
             return Ok(ws_url);
         }
 
-        if let Some(url) = scan.lock().unwrap().ws_url.clone() {
+        if let Some(url) = lock_scan(&scan).ws_url.clone() {
             return Ok(url);
         }
 
         if std::time::Instant::now() > deadline {
-            let lines = scan.lock().unwrap().lines.clone();
+            let lines = lock_scan(&scan).lines.clone();
             return Err(chrome_launch_error(
                 "Timeout waiting for Chrome DevTools endpoint",
                 &lines,
