@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::discovery::discover_cdp_url;
@@ -424,6 +424,35 @@ struct ChromeArgs {
     temp_user_data_dir: Option<PathBuf>,
 }
 
+/// Extract the port from a `--remote-debugging-port=<port>` switch.
+fn debugging_port_value(arg: &str) -> Option<&str> {
+    arg.strip_prefix("--remote-debugging-port=")
+        .map(str::trim)
+        .filter(|port| !port.is_empty())
+}
+
+/// Resolve the `--remote-debugging-port` flag for a Chrome launch.
+///
+/// Chrome's `--remote-debugging-port=0` path refuses connections on some WSL2
+/// kernels even though the socket shows as LISTEN (issue #1791). Pre-binding
+/// a free loopback port and handing Chrome the explicit port avoids that path.
+///
+/// A user-supplied port wins and skips the pre-bind. The result is the single
+/// port switch for the command line, so duplicates that previously wedged the
+/// daemon are impossible.
+fn debugging_port_flag(user_port: Option<String>) -> String {
+    if let Some(port) = user_port {
+        return format!("--remote-debugging-port={}", port);
+    }
+    match std::net::TcpListener::bind("127.0.0.1:0").and_then(|listener| listener.local_addr()) {
+        // The listener is dropped here, freeing the port for Chrome. A tiny
+        // reuse race remains if another process grabs the port first; a
+        // launch failure there surfaces as a normal Chrome startup error.
+        Ok(addr) => format!("--remote-debugging-port={}", addr.port()),
+        Err(_) => "--remote-debugging-port=0".to_string(),
+    }
+}
+
 fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
     // Chrome only honors the last --enable-features switch on the command
     // line, so every feature must be collected into a single flag.
@@ -445,20 +474,40 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
     // a preset feature off, pass --disable-features=<name>, which Chrome
     // resolves as disabled.
     let mut user_args: Vec<String> = Vec::new();
-    for arg in &options.args {
+    // A user-supplied debugging port wins over the pre-bound one. Strip all
+    // port switches from the forwarded args so Chrome sees exactly one.
+    let mut user_port: Option<String> = None;
+    let raw_args = &options.args;
+    let mut i = 0;
+    while i < raw_args.len() {
+        let arg = &raw_args[i];
         if let Some(values) = arg.strip_prefix("--enable-features=") {
             for feature in values.split(',').map(str::trim).filter(|f| !f.is_empty()) {
                 if !enable_features.iter().any(|f| f == feature) {
                     enable_features.push(feature.to_string());
                 }
             }
+        } else if let Some(port) = debugging_port_value(arg) {
+            user_port = Some(port.to_string());
+        } else if arg == "--remote-debugging-port" || arg.starts_with("--remote-debugging-port=") {
+            // Bare or empty-valued switch, with the value optionally following
+            // as the next arg (`--remote-debugging-port 9222`). The `=` form
+            // with a real value is handled above; everything reaching here is
+            // dropped so it cannot duplicate the resolved flag.
+            if arg == "--remote-debugging-port" {
+                if let Some(next) = raw_args.get(i + 1).filter(|n| !n.starts_with("--")) {
+                    user_port = Some(next.clone());
+                    i += 1;
+                }
+            }
         } else {
             user_args.push(arg.clone());
         }
+        i += 1;
     }
 
     let mut args = vec![
-        "--remote-debugging-port=0".to_string(),
+        debugging_port_flag(user_port),
         "--no-first-run".to_string(),
         "--no-default-browser-check".to_string(),
         "--disable-background-networking".to_string(),
@@ -864,33 +913,16 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
     })?;
 
-    // Shared overall deadline so we don't double-wait (poll + stderr fallback).
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-
-    // Primary path: use DevToolsActivePort written into user-data-dir.
-    // This is more reliable on Windows than scraping stderr for "DevTools listening on ...",
-    // which can be missing/empty depending on how Chrome is launched.
-    let ws_url = match wait_for_devtools_active_port(&mut child, &user_data_dir, deadline) {
+    // Watch the DevToolsActivePort file and Chrome's stderr at the same time;
+    // whichever yields the endpoint URL first wins. The file only appears when
+    // Chrome picks the port itself (--remote-debugging-port=0); with an
+    // explicit port Chrome logs the URL to stderr instead.
+    let ws_url = match wait_for_chrome_endpoint(&mut child, &user_data_dir) {
         Ok(url) => url,
-        Err(primary_err) => {
-            // Fallback: scrape stderr (legacy behavior) for better diagnostics.
-            let stderr = child.stderr.take().ok_or_else(|| {
-                terminate_launched_chrome(&mut child);
-                cleanup_temp_dir(&temp_user_data_dir);
-                "Failed to capture Chrome stderr".to_string()
-            })?;
-            let reader = BufReader::new(stderr);
-            match wait_for_ws_url_until(reader, deadline) {
-                Ok(url) => url,
-                Err(fallback_err) => {
-                    terminate_launched_chrome(&mut child);
-                    cleanup_temp_dir(&temp_user_data_dir);
-                    return Err(format!(
-                        "{}\n(also tried parsing stderr) {}",
-                        primary_err, fallback_err
-                    ));
-                }
-            }
+        Err(e) => {
+            terminate_launched_chrome(&mut child);
+            cleanup_temp_dir(&temp_user_data_dir);
+            return Err(e);
         }
     };
 
@@ -914,24 +946,76 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
     })
 }
 
-fn wait_for_devtools_active_port(
-    child: &mut Child,
-    user_data_dir: &Path,
-    deadline: std::time::Instant,
-) -> Result<String, String> {
+/// Prefix Chrome prints to stderr with the DevTools WebSocket URL.
+const DEVTOOLS_LISTENING_PREFIX: &str = "DevTools listening on ";
+
+/// What the background stderr scan has seen so far: the endpoint URL once it
+/// appears, plus recent lines kept for failure diagnostics.
+#[derive(Default)]
+struct StderrScan {
+    ws_url: Option<String>,
+    lines: Vec<String>,
+}
+
+/// Cap on retained stderr lines so a chatty Chrome cannot grow memory
+/// without bound over a long session. The endpoint URL is stored separately
+/// and survives the trim.
+const MAX_RETAINED_STDERR_LINES: usize = 1000;
+
+/// Wait up to 30 seconds for Chrome's DevTools endpoint, watching the
+/// DevToolsActivePort file and Chrome's stderr concurrently.
+///
+/// Either source can win: the file appears when Chrome picks an ephemeral
+/// port itself, while an explicit port is only reported on stderr. Waiting on
+/// both avoids a full 30 second stall on whichever path is silent.
+///
+/// stderr is drained on a detached background thread for the life of the
+/// child, which also keeps Chrome from ever blocking on a full pipe. The
+/// thread is never joined: it exits on its own at EOF, so a lingering pipe
+/// cannot hang launch or shutdown.
+fn wait_for_chrome_endpoint(child: &mut Child, user_data_dir: &Path) -> Result<String, String> {
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or("Failed to capture Chrome stderr")?;
+    let scan = Arc::new(Mutex::new(StderrScan::default()));
+    std::thread::spawn({
+        let scan = Arc::clone(&scan);
+        move || {
+            for line in BufReader::new(stderr).lines() {
+                let Ok(line) = line else { break };
+                let mut scan = scan.lock().unwrap();
+                if scan.ws_url.is_none() {
+                    if let Some(url) = line.strip_prefix(DEVTOOLS_LISTENING_PREFIX) {
+                        scan.ws_url = Some(url.trim().to_string());
+                    }
+                }
+                if scan.lines.len() >= MAX_RETAINED_STDERR_LINES {
+                    scan.lines.drain(..MAX_RETAINED_STDERR_LINES / 2);
+                }
+                scan.lines.push(line);
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let poll_interval = Duration::from_millis(50);
 
-    while std::time::Instant::now() <= deadline {
+    loop {
         if let Ok(Some(status)) = child.try_wait() {
-            // Chrome exited before writing DevToolsActivePort -- report the
-            // exit code so the caller can surface it alongside stderr output.
+            // Chrome exited before reporting an endpoint. The scan thread may
+            // still be flushing its last lines; report what we have.
             let code = status
                 .code()
                 .map(|c| format!("{}", c))
                 .unwrap_or_else(|| "unknown".to_string());
-            return Err(format!(
-                "Chrome exited early (exit code: {}) without writing DevToolsActivePort",
-                code
+            let lines = scan.lock().unwrap().lines.clone();
+            return Err(chrome_launch_error(
+                &format!(
+                    "Chrome exited early (exit code: {}) without providing a DevTools endpoint",
+                    code
+                ),
+                &lines,
             ));
         }
 
@@ -940,37 +1024,20 @@ fn wait_for_devtools_active_port(
             return Ok(ws_url);
         }
 
-        std::thread::sleep(poll_interval);
-    }
+        if let Some(url) = scan.lock().unwrap().ws_url.clone() {
+            return Ok(url);
+        }
 
-    Err("Timeout waiting for DevToolsActivePort".to_string())
-}
-
-fn wait_for_ws_url_until(
-    reader: BufReader<std::process::ChildStderr>,
-    deadline: std::time::Instant,
-) -> Result<String, String> {
-    let prefix = "DevTools listening on ";
-    let mut stderr_lines: Vec<String> = Vec::new();
-
-    for line in reader.lines() {
         if std::time::Instant::now() > deadline {
+            let lines = scan.lock().unwrap().lines.clone();
             return Err(chrome_launch_error(
-                "Timeout waiting for Chrome DevTools URL",
-                &stderr_lines,
+                "Timeout waiting for Chrome DevTools endpoint",
+                &lines,
             ));
         }
-        let line = line.map_err(|e| format!("Failed to read Chrome stderr: {}", e))?;
-        if let Some(url) = line.strip_prefix(prefix) {
-            return Ok(url.trim().to_string());
-        }
-        stderr_lines.push(line);
-    }
 
-    Err(chrome_launch_error(
-        "Chrome exited before providing DevTools URL",
-        &stderr_lines,
-    ))
+        std::thread::sleep(poll_interval);
+    }
 }
 
 fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
@@ -1910,6 +1977,162 @@ mod tests {
         assert!(result.temp_user_data_dir.is_some());
         let dir = result.temp_user_data_dir.unwrap();
         assert!(dir.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_args_uses_single_explicit_nonzero_debugging_port() {
+        let opts = LaunchOptions::default();
+        let result = build_chrome_args(&opts).unwrap();
+        let ports: Vec<&String> = result
+            .args
+            .iter()
+            .filter(|a| a.starts_with("--remote-debugging-port"))
+            .collect();
+        assert_eq!(ports.len(), 1);
+        let port: u16 = ports[0]
+            .strip_prefix("--remote-debugging-port=")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_ne!(port, 0);
+        let dir = result.temp_user_data_dir.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_args_user_debugging_port_wins_without_duplicates() {
+        let opts = LaunchOptions {
+            args: vec![
+                "--remote-debugging-port=9222".to_string(),
+                "--window-size=1920,1080".to_string(),
+            ],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        let ports: Vec<&String> = result
+            .args
+            .iter()
+            .filter(|a| a.starts_with("--remote-debugging-port"))
+            .collect();
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0], "--remote-debugging-port=9222");
+        // Other user args still forwarded.
+        assert!(result.args.iter().any(|a| a == "--window-size=1920,1080"));
+        let dir = result.temp_user_data_dir.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_args_space_separated_user_port_wins() {
+        let opts = LaunchOptions {
+            args: vec!["--remote-debugging-port".to_string(), "9333".to_string()],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        let ports: Vec<&String> = result
+            .args
+            .iter()
+            .filter(|a| a.starts_with("--remote-debugging-port"))
+            .collect();
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0], "--remote-debugging-port=9333");
+        let dir = result.temp_user_data_dir.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_args_empty_user_port_falls_back_to_prebind() {
+        // A bare or empty-valued switch carries no port: drop it and pre-bind
+        // instead of forwarding a duplicate or broken flag to Chrome.
+        for args in [
+            vec!["--remote-debugging-port=".to_string()],
+            vec!["--remote-debugging-port".to_string()],
+        ] {
+            let opts = LaunchOptions {
+                args,
+                ..Default::default()
+            };
+            let result = build_chrome_args(&opts).unwrap();
+            let ports: Vec<&String> = result
+                .args
+                .iter()
+                .filter(|a| a.starts_with("--remote-debugging-port"))
+                .collect();
+            assert_eq!(ports.len(), 1);
+            let port: u16 = ports[0]
+                .strip_prefix("--remote-debugging-port=")
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_ne!(port, 0);
+            let dir = result.temp_user_data_dir.unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_endpoint_uses_devtools_active_port_file_when_present() {
+        use std::os::unix::process::CommandExt;
+        // A live child with the port file pre-written: the file path wins
+        // without waiting on stderr.
+        let dir = std::env::temp_dir().join(format!(
+            "agent-browser-endpoint-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("DevToolsActivePort"),
+            "41234\n/devtools/browser/abc",
+        )
+        .unwrap();
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let url = wait_for_chrome_endpoint(&mut child, &dir).unwrap();
+        assert_eq!(url, "ws://127.0.0.1:41234/devtools/browser/abc");
+        child.kill().unwrap();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_endpoint_uses_stderr_url_without_waiting_for_file() {
+        use std::os::unix::process::CommandExt;
+        // No port file: the stderr URL wins well before the 30s deadline.
+        let dir = std::env::temp_dir().join(format!(
+            "agent-browser-endpoint-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("echo 'DevTools listening on ws://127.0.0.1:42345/devtools/browser/xyz' >&2; exec sleep 30")
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let start = std::time::Instant::now();
+        let url = wait_for_chrome_endpoint(&mut child, &dir).unwrap();
+        assert_eq!(url, "ws://127.0.0.1:42345/devtools/browser/xyz");
+        assert!(
+            start.elapsed() < Duration::from_secs(25),
+            "stderr path should not wait out the file poll, took {:?}",
+            start.elapsed()
+        );
+        child.kill().unwrap();
+        let _ = child.wait();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
