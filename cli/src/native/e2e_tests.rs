@@ -7517,6 +7517,100 @@ async fn e2e_tab_new_removes_replayed_init_script_by_original_identifier() {
     assert_success(&resp);
 }
 
+/// CDP allocates init-script identifiers independently in each target. Two
+/// pre-existing tabs can therefore both return `1` for different scripts, but
+/// the daemon must expose distinct handles and remove only the requested one.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_init_script_handles_are_unique_across_preexisting_tabs() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "2", "action": "tab_new" }), &mut state).await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "tab_switch", "tabId": "t1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let first = execute_command(
+        &json!({
+            "id": "4", "action": "addinitscript",
+            "script": "window.__abFirstExistingTab = true;",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&first);
+    let first_id = get_data(&first)["identifier"]
+        .as_str()
+        .expect("first init script should return an identifier")
+        .to_string();
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "tab_switch", "tabId": "t2" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let second = execute_command(
+        &json!({
+            "id": "6", "action": "addinitscript",
+            "script": "window.__abSecondExistingTab = true;",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&second);
+    let second_id = get_data(&second)["identifier"]
+        .as_str()
+        .expect("second init script should return an identifier")
+        .to_string();
+
+    assert_ne!(first_id, second_id, "user-facing handles must be unique");
+
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "removeinitscript", "identifier": second_id }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "8", "action": "tab_new",
+            "url": "data:text/html,<title>future tab</title>",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "9", "action": "evaluate",
+            "script": "[window.__abFirstExistingTab === true, window.__abSecondExistingTab === true]",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], json!([true, false]));
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// `click --new-tab` creates a tab through a separate handler from `tab new`,
 /// but it must apply the same session setup before the first request.
 #[tokio::test]

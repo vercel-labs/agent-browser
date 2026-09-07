@@ -425,10 +425,11 @@ pub struct EmulatedMedia {
 
 /// An init script tracked across target sessions.
 ///
-/// Chrome assigns a different script identifier in each target session. The
-/// identifier returned when the script was first registered remains the
-/// user-facing identifier, while `session_identifiers` records the identifier
-/// to send when removing it from a particular target.
+/// Chrome assigns script identifiers independently in each target session, so
+/// two tabs can both return the same identifier for different scripts. The
+/// daemon-owned `identifier` is the user-facing handle, while
+/// `session_identifiers` records the target-local identifier to send when
+/// removing it from a particular target.
 #[derive(Debug, Clone)]
 pub struct InitScriptSetup {
     pub identifier: String,
@@ -463,6 +464,10 @@ pub struct SessionSetup {
     /// Init scripts registered with `Page.addScriptToEvaluateOnNewDocument`:
     /// `--enable`, `--init-script`, plugin init scripts, and `addinitscript`.
     pub init_scripts: Vec<InitScriptSetup>,
+    /// Monotonic source for daemon-owned init-script handles. CDP identifiers
+    /// cannot be used here because each target session allocates them
+    /// independently, commonly starting at `1`.
+    next_init_script_handle: u64,
 }
 
 impl SessionSetup {
@@ -487,6 +492,24 @@ impl SessionSetup {
             && self.extra_headers.as_ref().is_none_or(HashMap::is_empty)
             && !self.offline.unwrap_or(false)
             && self.init_scripts.is_empty()
+    }
+
+    fn register_init_script(
+        &mut self,
+        source: String,
+        session_id: String,
+        session_identifier: String,
+    ) -> String {
+        self.next_init_script_handle += 1;
+        let identifier = format!("init-script-{}", self.next_init_script_handle);
+        let mut session_identifiers = HashMap::new();
+        session_identifiers.insert(session_id, session_identifier);
+        self.init_scripts.push(InitScriptSetup {
+            identifier: identifier.clone(),
+            source,
+            session_identifiers,
+        });
+        identifier
     }
 }
 
@@ -4089,19 +4112,17 @@ async fn apply_launch_init_scripts(
 
     let mut registered = Vec::with_capacity(sources.len());
     for source in sources {
-        let identifier = mgr
+        let session_identifier = mgr
             .add_script_to_evaluate(&source)
             .await
             .unwrap_or_default();
-        let mut session_identifiers = HashMap::new();
-        session_identifiers.insert(session_id.clone(), identifier.clone());
-        registered.push(InitScriptSetup {
-            identifier,
-            source,
-            session_identifiers,
-        });
+        registered.push((source, session_identifier));
     }
-    state.session_setup.init_scripts.extend(registered);
+    for (source, session_identifier) in registered {
+        state
+            .session_setup
+            .register_init_script(source, session_id.clone(), session_identifier);
+    }
 }
 
 async fn apply_launch_mutator_plugins(
@@ -7984,14 +8005,12 @@ async fn handle_addinitscript(cmd: &Value, state: &mut DaemonState) -> Result<Va
         .and_then(|v| v.as_str())
         .ok_or("Missing 'script' parameter")?;
 
-    let identifier = mgr.add_script_to_evaluate(source).await?;
-    let mut session_identifiers = HashMap::new();
-    session_identifiers.insert(session_id, identifier.clone());
-    state.session_setup.init_scripts.push(InitScriptSetup {
-        identifier: identifier.clone(),
-        source: source.to_string(),
-        session_identifiers,
-    });
+    let session_identifier = mgr.add_script_to_evaluate(source).await?;
+    let identifier = state.session_setup.register_init_script(
+        source.to_string(),
+        session_id,
+        session_identifier,
+    );
     Ok(json!({ "added": true, "identifier": identifier }))
 }
 
@@ -8002,19 +8021,23 @@ async fn handle_removeinitscript(cmd: &Value, state: &mut DaemonState) -> Result
         .and_then(|v| v.as_str())
         .ok_or("Missing 'identifier' parameter")?;
     let session_id = mgr.active_session_id()?;
-    let session_identifier = state
+    let tracked_index = state
         .session_setup
         .init_scripts
         .iter()
-        .find(|script| script.identifier == identifier)
-        .and_then(|script| script.session_identifiers.get(session_id))
-        .map(String::as_str)
-        .unwrap_or(identifier);
-    mgr.remove_script_to_evaluate(session_identifier).await?;
-    state
-        .session_setup
-        .init_scripts
-        .retain(|script| script.identifier != identifier);
+        .position(|script| script.identifier == identifier);
+    let session_identifier = tracked_index
+        .and_then(|index| {
+            state.session_setup.init_scripts[index]
+                .session_identifiers
+                .get(session_id)
+        })
+        .cloned()
+        .unwrap_or_else(|| identifier.to_string());
+    mgr.remove_script_to_evaluate(&session_identifier).await?;
+    if let Some(index) = tracked_index {
+        state.session_setup.init_scripts.remove(index);
+    }
     Ok(json!({ "removed": true, "identifier": identifier }))
 }
 
@@ -14063,6 +14086,27 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             .unwrap()
             .insert("X-Test".to_string(), "set".to_string());
         assert!(!setup.is_empty());
+    }
+
+    #[test]
+    fn test_init_script_handles_are_independent_from_session_identifiers() {
+        let mut setup = SessionSetup::default();
+        let first = setup.register_init_script(
+            "window.first = true".to_string(),
+            "session-a".to_string(),
+            "1".to_string(),
+        );
+        let second = setup.register_init_script(
+            "window.second = true".to_string(),
+            "session-b".to_string(),
+            "1".to_string(),
+        );
+
+        assert_eq!(first, "init-script-1");
+        assert_eq!(second, "init-script-2");
+        assert_eq!(setup.init_scripts.len(), 2);
+        assert_eq!(setup.init_scripts[0].session_identifiers["session-a"], "1");
+        assert_eq!(setup.init_scripts[1].session_identifiers["session-b"], "1");
     }
 
     #[test]
