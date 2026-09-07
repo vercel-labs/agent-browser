@@ -314,7 +314,7 @@ agent-browser stream disable          # Stop runtime streaming and remove the .s
 
 Streaming is enabled automatically for all sessions. Use these commands to check status, re-enable on a specific port, or disable streaming.
 
-Streaming is separate from file-based recordings. Use [Video Recording](/recording) when you need a saved WebM artifact.
+Streaming is separate from file-based recordings. Use [Video Recording](/recording) when you need a saved WebM or MP4 artifact.
 
 ## Debug
 
@@ -323,7 +323,7 @@ agent-browser trace start             # Start trace
 agent-browser trace stop [path]       # Stop and save trace
 agent-browser profiler start          # Start Chrome DevTools profiling
 agent-browser profiler stop [path]    # Stop and save profile (.json)
-agent-browser record start <path>     # Start video recording of the current page (WebM, 30 fps)
+agent-browser record start <path>     # Start video recording (.webm/.mp4, 30 fps; needs ffmpeg)
 agent-browser record start <path> --fps 60  # Record at 60 fps (--fps accepts 1-60)
 agent-browser record stop             # Stop and save video
 agent-browser record restart <path>   # Stop current and start new recording
@@ -336,7 +336,7 @@ agent-browser highlight <sel>         # Highlight element
 agent-browser inspect                 # Open Chrome DevTools for the active page
 ```
 
-See [Debugging](/debugging) for console, error, dialog, trace, highlight, and DevTools workflows. See [Video Recording](/recording) for `record` workflows and [Profiler](/profiler) for performance profiles.
+Recording requires `ffmpeg` on `PATH`. See [Debugging](/debugging) for console, error, dialog, trace, highlight, and DevTools workflows. See [Video Recording](/recording) for recording requirements and `record` workflows, and [Profiler](/profiler) for performance profiles.
 
 ## Auth vault
 
