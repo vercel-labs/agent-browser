@@ -7529,8 +7529,8 @@ async fn e2e_recording_rejects_extensionless_path_before_context() {
     assert_success(&resp);
 }
 
-/// Verify that a missing ffmpeg fails `recording_start` itself, not
-/// `recording_stop`, and rolls the state back so the next start works.
+/// Verify that a missing ffmpeg fails `recording_start` itself before an
+/// optional navigation, and leaves the state ready for the next start.
 #[tokio::test]
 #[ignore]
 async fn e2e_recording_fails_fast_without_ffmpeg() {
@@ -7540,6 +7540,15 @@ async fn e2e_recording_fails_fast_without_ffmpeg() {
 
     let resp = execute_command(
         &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let before_url = "data:text/html,<h1>Before</h1>";
+    let after_url = "data:text/html,<h1>After</h1>";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": before_url }),
         &mut state,
     )
     .await;
@@ -7555,7 +7564,12 @@ async fn e2e_recording_fails_fast_without_ffmpeg() {
     guard.set("PATH", &empty_dir.to_string_lossy());
 
     let resp = execute_command(
-        &json!({ "id": "2", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &json!({
+            "id": "3",
+            "action": "recording_start",
+            "path": rec_path.to_string_lossy(),
+            "url": after_url
+        }),
         &mut state,
     )
     .await;
@@ -7571,18 +7585,34 @@ async fn e2e_recording_fails_fast_without_ffmpeg() {
         !state.recording_state.active,
         "failed start must not leave the recording active"
     );
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "location.href" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        before_url,
+        "ffmpeg preflight must fail before the requested navigation"
+    );
 
     // With ffmpeg back, the same start succeeds: nothing stale was left behind.
     guard.set("PATH", &original_path);
     let resp = execute_command(
-        &json!({ "id": "3", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &json!({
+            "id": "5",
+            "action": "recording_start",
+            "path": rec_path.to_string_lossy(),
+            "url": after_url
+        }),
         &mut state,
     )
     .await;
     assert_success(&resp);
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     let resp = execute_command(
-        &json!({ "id": "4", "action": "recording_stop" }),
+        &json!({ "id": "6", "action": "recording_stop" }),
         &mut state,
     )
     .await;
