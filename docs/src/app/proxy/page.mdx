@@ -18,9 +18,9 @@ agent-browser --proxy "http://proxy.example.com:8080" --ca-cert /etc/ssl/certs/p
   <tbody>
     <tr><td><code>--proxy &lt;url&gt;</code></td><td>Proxy server URL, with optional credentials</td></tr>
     <tr><td><code>--proxy-bypass &lt;hosts&gt;</code></td><td>Hosts that should bypass the proxy</td></tr>
-    <tr><td><code>--ca-cert &lt;path&gt;</code></td><td>Add a CA certificate or PEM bundle to CLI TLS trust and to locally launched Chromium on Linux</td></tr>
-    <tr><td><code>--no-ca-cert</code></td><td>Clear CA trust retained by the running browser session</td></tr>
-    <tr><td><code>--use-system-ca</code></td><td>Verify the CLI's own connections against the OS trust store</td></tr>
+    <tr><td><code>--ca-cert &lt;path&gt;</code></td><td>Add a CA for CLI HTTPS/WSS, read, install, and local Chromium on Linux</td></tr>
+    <tr><td><code>--no-ca-cert</code></td><td>Clear the session's extra CLI CA bundle; browser commands also clear local Chromium CA trust</td></tr>
+    <tr><td><code>--use-system-ca [bool]</code></td><td>Use OS roots for CLI TLS; false selects built-in roots</td></tr>
   </tbody>
 </table>
 
@@ -50,9 +50,17 @@ agent-browser --proxy "http://proxy.example.com:8080" --ca-cert /etc/ssl/certs/p
 
 A proxy that inspects HTTPS terminates TLS and re-signs with its own CA. Both Chromium and the CLI may need to trust it.
 
-For a local Chromium launch on Linux, `--ca-cert` imports each certificate into a private NSS database used only by that browser process and also adds it to CLI TLS trust. Later commands retain browser trust when they omit the flag. A different certificate or `--no-ca-cert` relaunches Chromium without restarting the daemon. The same certificate content reuses the current browser even when supplied from a different path. `agent-browser install --with-deps` installs the required `certutil`; otherwise install `libnss3-tools` on Debian/Ubuntu or `nss-tools` on RPM Linux.
+`--ca-cert` adds a CA to CLI HTTPS/WSS trust. A direct `read URL` uses it without launching Chromium or setting up NSS. `install` runs without a daemon and uses only its invocation's flags, environment, and config.
+
+Daemon commands retain the session's CLI selection when flags, environment, and config supply no replacement. Each HTTP or WSS client acquisition rereads the selected bundle and, when enabled, native roots. Changed roots replace cached clients without restarting the daemon or browser. Operations that already acquired a client may finish with its previous roots. `--no-ca-cert` clears the extra bundle and its `SSL_CERT_FILE` fallback. `--use-system-ca false` selects built-in roots while keeping any extra bundle unless it is also cleared. Invalid explicit bundles fail instead of silently falling back.
+
+Native root loading honors `SSL_CERT_FILE` and `SSL_CERT_DIR` overrides in the daemon's environment. Their contents are reread, but changing those environment paths requires a new daemon. Clearing the extra bundle does not disable native-loader overrides while system trust remains enabled. A daemon started by an older binary may restart once to adopt per-command TLS configuration.
+
+For a local Chromium launch on Linux, `--ca-cert` also imports each certificate into a private NSS database used only by that browser process. A different certificate or `--no-ca-cert` relaunches Chromium without restarting the daemon. The same certificate content reuses the current browser even when supplied from a different path. `agent-browser install --with-deps` installs the required `certutil`; otherwise install `libnss3-tools` on Debian/Ubuntu or `nss-tools` on RPM Linux.
 
 Browser-side trust cannot be combined with `--profile`, Lightpanda, or `--ignore-https-errors`, and it is not available for local launches on macOS or Windows. With `--cdp`, `--auto-connect`, or a provider, `--ca-cert` configures only CLI TLS and cannot change the remote browser's trust store. `--use-system-ca` always affects only CLI TLS.
+
+`--ignore-https-errors` affects browser navigation only. It does not disable verification for CLI HTTPS/WSS, `read`, or `install`.
 
 ## SOCKS proxy
 

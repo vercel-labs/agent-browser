@@ -446,12 +446,14 @@ EOF
 --proxy <url>           # proxy server
 --ca-cert <path>        # add a CA to CLI TLS and local Chromium trust on Linux
 --no-ca-cert            # clear CA trust retained by the running session
---use-system-ca         # use the OS trust store for CLI TLS
+--use-system-ca [bool]  # use OS roots for CLI TLS; false selects built-in roots
 --state <path>          # load saved auth state from JSON
 --restore [name]        # auto-save/restore session state, defaults to --session
 --restore-save <policy> # auto, always, or never
 --namespace <name>      # isolate daemon sockets and restore-state directories
 ```
+
+For CLI HTTPS/WSS, including browserless `read URL`, daemon sessions retain the selected trust settings when no flags, environment, or config replace them. `--no-ca-cert` clears the extra bundle and its `SSL_CERT_FILE` fallback; `--use-system-ca false` disables native roots. Changed certificate contents take effect when later CLI clients are acquired, without restarting the daemon or browser. `install` uses only its current invocation's trust settings. Browser trust has a separate Linux Chromium lifecycle. See [references/proxy-support.md](references/proxy-support.md).
 
 ## When to load another skill
 

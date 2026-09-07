@@ -14,11 +14,19 @@
 //!   `SSL_CERT_FILE` is honored as a fallback, since sandboxes and CI images
 //!   commonly set it already.
 //!
-//! `--ca-cert` is shared with the browser-side trust flag, so one path covers
-//! both Chromium and the CLI.
+//! CLI commands patch the daemon's session selection. Omission retains it;
+//! clear and explicit false remove the extra bundle or system selection.
+//! Clients reread selected sources on acquisition. Rotated roots replace the
+//! cached generation while already admitted operations may finish.
+//!
+//! `--ca-cert` is shared with browser trust for local Chromium on Linux.
+//! Browserless commands update only CLI trust.
 
 use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use rustls::{ClientConfig, RootCertStore};
 
@@ -48,9 +56,8 @@ impl TrustOptions {
 
     /// Read the options from the environment.
     ///
-    /// The daemon runs as a separate process, so the environment is the only
-    /// channel that carries these across the spawn. `connection::apply_daemon_env`
-    /// forwards both variables.
+    /// The environment seeds a new daemon. Later CLI commands patch its
+    /// effective selection through `tlsOptions`.
     pub fn from_env() -> Self {
         let use_system_ca = crate::flags::env_var_is_truthy("AGENT_BROWSER_USE_SYSTEM_CA");
         let explicit = std::env::var("AGENT_BROWSER_CA_CERT")
@@ -138,105 +145,198 @@ fn add_ca_bundle(store: &mut RootCertStore, path: &str) -> Result<usize, String>
     Ok(added)
 }
 
-fn client_config(opts: &TrustOptions) -> Result<Arc<ClientConfig>, String> {
-    let store = build_root_store(opts)?;
-    let config = ClientConfig::builder()
-        .with_root_certificates(store)
-        .with_no_client_auth();
-    Ok(Arc::new(config))
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TrustUpdate {
+    #[serde(default)]
+    ca_cert: Option<String>,
+    #[serde(default)]
+    ca_cert_is_implicit: bool,
+    #[serde(default)]
+    clear_ca_cert: bool,
+    #[serde(default)]
+    use_system_ca: Option<bool>,
 }
 
-/// Process-wide client config, built once from the environment.
-///
-/// `Ok(None)` means the defaults are in force and callers should use the
-/// library default connector.
-pub fn shared_client_config() -> Result<Option<Arc<ClientConfig>>, String> {
-    static CACHED: OnceLock<Result<Option<Arc<ClientConfig>>, String>> = OnceLock::new();
-    CACHED
-        .get_or_init(|| {
-            let opts = TrustOptions::from_env();
-            if opts.is_default() {
-                return Ok(None);
+#[derive(Default)]
+struct TrustCache {
+    options: Option<TrustOptions>,
+    explicit_selection: bool,
+    roots: Vec<rustls::pki_types::TrustAnchor<'static>>,
+    config: Option<Arc<ClientConfig>>,
+    http: Option<reqwest::Client>,
+}
+
+impl TrustCache {
+    fn options(&self) -> TrustOptions {
+        self.options.clone().unwrap_or_else(TrustOptions::from_env)
+    }
+
+    fn update(&mut self, update: TrustUpdate) -> Result<(), String> {
+        if update.ca_cert.is_some() && update.clear_ca_cert {
+            return Err("Cannot set and clear CLI CA trust together".to_string());
+        }
+        if update.ca_cert.is_none() && !update.clear_ca_cert && update.use_system_ca.is_none() {
+            return Ok(());
+        }
+        let mut opts = self.options();
+        let mut explicit =
+            self.explicit_selection || (opts.ca_cert.is_some() && !opts.ca_cert_is_implicit);
+        if update.clear_ca_cert {
+            opts.ca_cert = None;
+            opts.ca_cert_is_implicit = false;
+            explicit = true;
+        } else if let Some(path) = update.ca_cert {
+            if !update.ca_cert_is_implicit || !explicit {
+                opts.ca_cert = Some(path);
+                opts.ca_cert_is_implicit = update.ca_cert_is_implicit;
+                explicit = !update.ca_cert_is_implicit;
             }
-            client_config(&opts).map(Some)
-        })
-        .clone()
+        }
+        if let Some(value) = update.use_system_ca {
+            opts.use_system_ca = value;
+        }
+        if self.options.as_ref() == Some(&opts) && self.explicit_selection == explicit {
+            return Ok(());
+        }
+        let roots = build_root_store(&opts)?;
+        self.replace_roots(roots);
+        self.options = Some(opts);
+        self.explicit_selection = explicit;
+        Ok(())
+    }
+
+    fn replace_roots(&mut self, mut roots: RootCertStore) {
+        roots.roots.sort_by(|a, b| {
+            (
+                a.subject.as_ref(),
+                a.subject_public_key_info.as_ref(),
+                a.name_constraints.as_ref().map(|n| n.as_ref()),
+            )
+                .cmp(&(
+                    b.subject.as_ref(),
+                    b.subject_public_key_info.as_ref(),
+                    b.name_constraints.as_ref().map(|n| n.as_ref()),
+                ))
+        });
+        roots.roots.dedup();
+        if self.config.is_none() || self.roots != roots.roots {
+            self.roots = roots.roots.clone();
+            self.config = Some(Arc::new(
+                ClientConfig::builder()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth(),
+            ));
+            self.http = None;
+        }
+    }
+
+    fn config(&mut self) -> Result<Arc<ClientConfig>, String> {
+        self.replace_roots(build_root_store(&self.options())?);
+        Ok(self
+            .config
+            .as_ref()
+            .expect("roots install a TLS config")
+            .clone())
+    }
+
+    fn http_client(&mut self) -> Result<reqwest::Client, String> {
+        let config = self.config()?;
+        if self.http.is_none() {
+            self.http = Some(
+                reqwest::Client::builder()
+                    .use_preconfigured_tls((*config).clone())
+                    .build()
+                    .map_err(|e| format!("Failed to create HTTP client: {e}"))?,
+            );
+        }
+        Ok(self.http.as_ref().expect("HTTP client was built").clone())
+    }
 }
 
-/// TLS connector for `tokio-tungstenite`, or `None` to use its default.
+fn cache() -> &'static Mutex<TrustCache> {
+    static CACHE: OnceLock<Mutex<TrustCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(TrustCache::default()))
+}
+
+static COMMAND_OPTIONS: OnceLock<Value> = OnceLock::new();
+
+fn absolute_ca_path(path: String) -> String {
+    let path = std::path::PathBuf::from(path);
+    std::env::current_dir()
+        .unwrap_or_default()
+        .join(&path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+pub fn configure_cli(flags: &crate::flags::Flags) {
+    let mut opts = TrustOptions::from_env();
+    opts.use_system_ca = flags.use_system_ca;
+    if flags.clear_ca_cert {
+        opts.ca_cert = None;
+        opts.ca_cert_is_implicit = false;
+    } else if let Some(path) = &flags.ca_cert {
+        opts.ca_cert = Some(path.clone());
+        opts.ca_cert_is_implicit = false;
+    }
+    opts.ca_cert = opts.ca_cert.map(absolute_ca_path);
+    let update = TrustUpdate {
+        ca_cert: opts.ca_cert.clone(),
+        ca_cert_is_implicit: opts.ca_cert_is_implicit,
+        clear_ca_cert: flags.clear_ca_cert,
+        use_system_ca: flags.use_system_ca_set.then_some(flags.use_system_ca),
+    };
+    let _ = COMMAND_OPTIONS.set(serde_json::to_value(update).expect("trust options serialize"));
+    let mut state = cache().lock().unwrap_or_else(|e| e.into_inner());
+    state.options = Some(opts);
+    state.explicit_selection = flags.ca_cert.is_some() || flags.clear_ca_cert;
+}
+
+pub fn command_options() -> Option<Value> {
+    COMMAND_OPTIONS.get().cloned()
+}
+
+pub fn apply_command_options(command: &Value) -> Result<(), String> {
+    let Some(value) = command.get("tlsOptions") else {
+        return Ok(());
+    };
+    let update: TrustUpdate = serde_json::from_value(value.clone())
+        .map_err(|e| format!("Invalid CLI TLS options: {e}"))?;
+    cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .update(update)
+}
+
+/// Acquire current roots for a new TLS operation. Each daemon owns one session
+/// per process; replacing a generation retires its pool without closing an
+/// in-flight operation or restarting the browser. Sources are re-read even
+/// when the selection is omitted, so rotation cannot hide behind a cached path.
+pub fn shared_client_config() -> Result<Option<Arc<ClientConfig>>, String> {
+    let mut state = cache().lock().unwrap_or_else(|e| e.into_inner());
+    if state.options().is_default() {
+        return Ok(None);
+    }
+    state.config().map(Some)
+}
+
 pub fn ws_connector() -> Result<Option<tokio_tungstenite::Connector>, String> {
     Ok(shared_client_config()?.map(tokio_tungstenite::Connector::Rustls))
 }
 
-/// Apply the configured roots to a `reqwest` client builder.
-pub fn apply_to_reqwest(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-    let opts = TrustOptions::from_env();
-    if opts.is_default() {
-        return builder;
-    }
-
-    let mut builder = builder;
-
-    // The system store replaces the built-in roots; a CA bundle adds to
-    // whichever set is active.
-    if opts.use_system_ca {
-        let native = load_native_der();
-        if native.is_empty() {
-            eprintln!("agent-browser: system trust store unavailable, using built-in roots");
-        } else {
-            builder = builder.tls_built_in_root_certs(false);
-            for der in native {
-                if let Ok(c) = reqwest::Certificate::from_der(&der) {
-                    builder = builder.add_root_certificate(c);
-                }
-            }
-        }
-    }
-
-    // The same loader the root store and the Chromium NSS path use. Parsing
-    // the bundle a third way here is how the accepted input domains drift.
-    if let Some(path) = &opts.ca_cert {
-        match crate::ca_bundle::load(path) {
-            Ok(bundle) => {
-                for der in bundle.certificates() {
-                    if let Ok(c) = reqwest::Certificate::from_der(der.as_ref()) {
-                        builder = builder.add_root_certificate(c);
-                    }
-                }
-            }
-            Err(e) => eprintln!("agent-browser: ignoring CA bundle '{path}': {e}"),
-        }
-    }
-
-    builder
+/// Apply the same validated root snapshot used by WSS. An invalid explicit
+/// bundle is an error for HTTP too; it must never silently widen trust.
+pub fn apply_to_reqwest(builder: reqwest::ClientBuilder) -> Result<reqwest::ClientBuilder, String> {
+    let config = cache().lock().unwrap_or_else(|e| e.into_inner()).config()?;
+    Ok(builder.use_preconfigured_tls((*config).clone()))
 }
 
-/// A shared `reqwest` client that honors the configured trust store.
-///
-/// Built once and cloned, which is cheap: `reqwest::Client` is a handle around
-/// a shared pool. Constructing one per call would rebuild the TLS config and
-/// the connection pool on every request, and CDP discovery calls this twice per
-/// iteration of a retry loop.
-///
-/// Falls back to a default client if the builder cannot be constructed, so a
-/// bad CA path degrades to the previous behavior instead of killing the command.
-pub fn http_client() -> reqwest::Client {
-    static CACHED: OnceLock<reqwest::Client> = OnceLock::new();
-    CACHED
-        .get_or_init(|| {
-            apply_to_reqwest(reqwest::Client::builder())
-                .build()
-                .unwrap_or_default()
-        })
-        .clone()
-}
-
-fn load_native_der() -> Vec<Vec<u8>> {
-    rustls_native_certs::load_native_certs()
-        .certs
-        .into_iter()
-        .map(|c| c.as_ref().to_vec())
-        .collect()
+pub fn http_client() -> Result<reqwest::Client, String> {
+    cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .http_client()
 }
 
 /// Warn on this process's stderr when a configured trust source is unusable.
@@ -254,7 +354,7 @@ fn load_native_der() -> Vec<Vec<u8>> {
 /// Silent when no trust source is configured, and silent when the configured
 /// one works: this fires only on the rare, actionable case.
 pub fn warn_if_trust_source_unusable() {
-    let opts = TrustOptions::from_env();
+    let opts = cache().lock().unwrap_or_else(|e| e.into_inner()).options();
     let Some(path) = &opts.ca_cert else {
         return;
     };
@@ -285,11 +385,10 @@ fn describe_path(path: &str) -> String {
 
 /// One-line description of the active trust store, for `agent-browser doctor`.
 ///
-/// Reports what is actually in force. A CA bundle that could not be read is
-/// named as ignored rather than listed as trusted, since the whole point of the
-/// line is to tell someone debugging a proxy which roots they really have.
+/// Reports the selected sources. An unusable ambient bundle is ignored;
+/// an unusable explicit bundle prevents new TLS operations.
 pub fn describe() -> String {
-    let opts = TrustOptions::from_env();
+    let opts = cache().lock().unwrap_or_else(|e| e.into_inner()).options();
     let roots = if opts.use_system_ca {
         "system trust store"
     } else {
@@ -301,8 +400,8 @@ pub fn describe() -> String {
     let mut probe = RootCertStore::empty();
     match add_ca_bundle(&mut probe, path) {
         Ok(n) if n > 0 => format!("{roots} plus {n} certificate(s) from {path}"),
-        Ok(_) => format!("{roots} ({path} holds no certificates, ignored)"),
-        Err(_) => format!("{roots} ({path} unusable, ignored)"),
+        _ if opts.ca_cert_is_implicit => format!("{roots} ({path} unusable, ignored)"),
+        _ => format!("TLS unavailable: explicit CA bundle '{path}' is unusable"),
     }
 }
 
@@ -337,6 +436,64 @@ JtnWOCSAT+dNsAXmz4ebm7kp9OnpLLKjvrNEUNPA20J5S+BXTtPv7x/koRwSX35M\n\
         let path = dir.join("ca.pem");
         std::fs::write(&path, body).unwrap();
         path
+    }
+
+    #[test]
+    fn trust_generation_tracks_material_and_preserves_omitted_selection() {
+        let path = write_temp_pem(include_str!("../tests/fixtures/tls/ca-a.pem"));
+        let mut cache = TrustCache {
+            options: Some(TrustOptions::default()),
+            ..Default::default()
+        };
+        let select = |path: &std::path::Path| TrustUpdate {
+            ca_cert: Some(path.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        cache.update(select(&path)).unwrap();
+        let first = cache.config().unwrap();
+        cache.http_client().unwrap();
+        cache.update(TrustUpdate::default()).unwrap();
+        assert!(Arc::ptr_eq(&first, &cache.config().unwrap()));
+        let equivalent = write_temp_pem(&format!(
+            "{}{}",
+            include_str!("../tests/fixtures/tls/ca-a.pem"),
+            include_str!("../tests/fixtures/tls/ca-a.pem")
+        ));
+        cache.update(select(&equivalent)).unwrap();
+        assert!(Arc::ptr_eq(&first, &cache.config().unwrap()));
+        assert!(cache.http.is_some());
+        std::fs::write(&equivalent, include_str!("../tests/fixtures/tls/ca-b.pem")).unwrap();
+        let rotated = cache.config().unwrap();
+        assert!(!Arc::ptr_eq(&first, &rotated));
+        assert!(cache.http.is_none());
+        cache.http_client().unwrap();
+        std::fs::write(&equivalent, "invalid").unwrap();
+        assert!(cache.http_client().is_err());
+        assert!(cache
+            .update(select(std::path::Path::new("/missing/ca")))
+            .is_err());
+        assert_eq!(cache.options().ca_cert.as_deref(), equivalent.to_str());
+        cache
+            .update(TrustUpdate {
+                clear_ca_cert: true,
+                use_system_ca: Some(false),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(cache.options().is_default());
+        cache
+            .update(TrustUpdate {
+                ca_cert: Some(path.to_string_lossy().into_owned()),
+                ca_cert_is_implicit: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            cache.options().is_default(),
+            "an ambient fallback must not undo an explicit clear"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let _ = std::fs::remove_dir_all(equivalent.parent().unwrap());
     }
 
     #[test]
@@ -473,7 +630,12 @@ JtnWOCSAT+dNsAXmz4ebm7kp9OnpLLKjvrNEUNPA20J5S+BXTtPv7x/koRwSX35M\n\
             !store.is_empty(),
             "system store must fall back to built-in roots rather than trust nothing"
         );
-        assert!(client_config(&opts).is_ok());
+        assert!(TrustCache {
+            options: Some(opts),
+            ..Default::default()
+        }
+        .config()
+        .is_ok());
     }
 
     #[test]

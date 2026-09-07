@@ -232,6 +232,10 @@ fn incompatible_launch_mode_error_for_action(flags: &Flags, action: &str) -> Opt
 }
 
 fn should_send_local_launch_config(flags: &Flags, command: &serde_json::Value) -> bool {
+    let action = command.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    if action != "launch" && native::actions::skip_launch_action(action) {
+        return false;
+    }
     (flags.headed
         || flags.cli_headed
         || flags.executable_path.is_some()
@@ -1050,12 +1054,7 @@ fn main() {
     if let Some(ref namespace) = flags.namespace {
         env::set_var("AGENT_BROWSER_NAMESPACE", namespace);
     }
-    if flags.use_system_ca {
-        env::set_var("AGENT_BROWSER_USE_SYSTEM_CA", "1");
-    }
-    if let Some(ref ca) = flags.ca_cert {
-        env::set_var("AGENT_BROWSER_CA_CERT", ca);
-    }
+    tls::configure_cli(&flags);
     tls::warn_if_trust_source_unusable();
     let clean = clean_args(&args);
 
@@ -2083,6 +2082,26 @@ mod tests {
         flags.provider = None;
         flags.auto_connect = false;
         flags
+    }
+
+    #[test]
+    fn browserless_commands_do_not_send_local_launch_config() {
+        let mut flags = neutral_launch_config_flags();
+        flags.ca_cert = Some("/tmp/ca.pem".to_string());
+        flags.proxy = Some("http://proxy.test:8080".to_string());
+        flags.allowed_domains = Some(vec!["example.com".to_string()]);
+        for action in ["read", "close", "auth_list", "credentials_get"] {
+            assert!(!should_send_local_launch_config(
+                &flags,
+                &json!({ "action": action }),
+            ));
+        }
+        for action in ["snapshot", "launch"] {
+            assert!(should_send_local_launch_config(
+                &flags,
+                &json!({ "action": action }),
+            ));
+        }
     }
 
     #[test]

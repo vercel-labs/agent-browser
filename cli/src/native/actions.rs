@@ -2261,7 +2261,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 
     if let Some(ref server) = state.stream_server {
         let mut broadcast_cmd;
-        let has_internal_fields = cmd.get("plugins").is_some()
+        let has_internal_fields = cmd.get("tlsOptions").is_some()
+            || cmd.get("plugins").is_some()
             || cmd.get("pinTab").is_some()
             || cmd.get("restoreKey").is_some()
             || cmd.get("restoreSave").is_some()
@@ -2271,6 +2272,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         let cmd_for_broadcast = if has_internal_fields {
             broadcast_cmd = cmd.clone();
             if let Some(obj) = broadcast_cmd.as_object_mut() {
+                obj.remove("tlsOptions");
                 obj.remove("plugins");
                 obj.remove("pinTab");
                 obj.remove("restoreKey");
@@ -2432,6 +2434,10 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 }
             }
         }
+    }
+
+    if let Err(error) = crate::tls::apply_command_options(cmd) {
+        return error_response(&id, &error);
     }
 
     let restore_transition_closed_browser =

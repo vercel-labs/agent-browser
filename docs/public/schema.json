@@ -122,15 +122,15 @@
     },
     "caCert": {
       "type": "string",
-      "description": "Path to a CA certificate or PEM bundle added to CLI TLS trust and, for a local Chromium launch on Linux, browser trust. Browser trust remains active for later commands in the same running session."
+      "description": "Path to a CA certificate or PEM bundle for CLI HTTPS/WSS, including read and install. Daemon commands retain the session selection when flags, environment, and config supply no replacement. Local Chromium commands on Linux also use it for browser trust."
     },
     "useSystemCa": {
       "type": "boolean",
-      "description": "Verify the CLI's own TLS connections against the operating system trust store."
+      "description": "Use native roots for CLI HTTPS/WSS, or select built-in roots with false. Daemon commands retain the session selection when flags, environment, and config supply no replacement."
     },
     "clearCaCert": {
       "type": "boolean",
-      "description": "Explicitly clear CA trust retained by the running browser session."
+      "description": "Clear the session's extra CLI CA bundle and its SSL_CERT_FILE fallback. Browser commands also clear local Chromium CA trust. Does not disable useSystemCa."
     },
     "allowFileAccess": {
       "type": "boolean",

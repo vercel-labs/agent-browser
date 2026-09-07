@@ -16,7 +16,7 @@ enum InstallMethod {
 }
 
 async fn fetch_latest_version() -> Result<String, String> {
-    let resp = crate::tls::http_client()
+    let resp = crate::tls::http_client()?
         .get(NPM_REGISTRY_URL)
         .send()
         .await

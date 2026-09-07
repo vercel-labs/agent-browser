@@ -389,6 +389,7 @@ pub struct Flags {
     pub ca_cert: Option<String>,
     pub clear_ca_cert: bool,
     pub use_system_ca: bool,
+    pub use_system_ca_set: bool,
     pub allow_file_access: bool,
     pub hide_scrollbars: bool,
     pub webgpu: bool,
@@ -582,8 +583,11 @@ pub fn parse_flags(args: &[String]) -> Flags {
             || config.ignore_https_errors.unwrap_or(false),
         ca_cert,
         clear_ca_cert,
-        use_system_ca: env_var_is_truthy("AGENT_BROWSER_USE_SYSTEM_CA")
-            || config.use_system_ca.unwrap_or(false),
+        use_system_ca: env_var_bool("AGENT_BROWSER_USE_SYSTEM_CA")
+            .or(config.use_system_ca)
+            .unwrap_or(false),
+        use_system_ca_set: env_var_bool("AGENT_BROWSER_USE_SYSTEM_CA").is_some()
+            || config.use_system_ca.is_some(),
         allow_file_access: env_var_is_truthy("AGENT_BROWSER_ALLOW_FILE_ACCESS")
             || config.allow_file_access.unwrap_or(false),
         hide_scrollbars: env_var_bool("AGENT_BROWSER_HIDE_SCROLLBARS")
@@ -913,6 +917,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--use-system-ca" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.use_system_ca = val;
+                flags.use_system_ca_set = true;
                 if consumed {
                     i += 1;
                 }
@@ -2006,6 +2011,7 @@ mod tests {
     fn test_parse_use_system_ca_explicit_false() {
         let flags = parse_flags(&args("--use-system-ca false open example.com"));
         assert!(!flags.use_system_ca);
+        assert!(flags.use_system_ca_set);
     }
 
     #[test]

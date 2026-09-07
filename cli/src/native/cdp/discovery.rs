@@ -203,7 +203,7 @@ async fn discover_cdp_ws(host: &str, port: u16, timeout: Duration) -> Result<Str
 }
 
 async fn reqwest_get_string(url: &str) -> Result<String, String> {
-    let resp = crate::tls::http_client()
+    let resp = crate::tls::http_client()?
         .get(url)
         .send()
         .await

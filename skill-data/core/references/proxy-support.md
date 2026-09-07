@@ -182,9 +182,11 @@ export AGENT_BROWSER_CA_CERT=/etc/ssl/certs/proxy-ca.crt
 agent-browser open https://example.com
 ```
 
-On Linux, `--ca-cert` imports the certificate or PEM bundle into an isolated NSS database used only by that locally launched Chromium process. Certificate hostname, validity period, and unrelated authority verification stay enabled. Later commands retain the CA when they omit the flag. Use `--no-ca-cert` to clear it. Different certificate content or an explicit clear relaunches Chromium without restarting the daemon, while the same content from any path reuses the browser. `agent-browser install --with-deps` installs the required `certutil`; otherwise install `libnss3-tools` on Debian/Ubuntu or `nss-tools` on RPM Linux.
+Daemon commands retain the CLI trust selection when flags, environment, and config supply no replacement. This includes browserless `read`, provider APIs, and WSS CDP connections. Each HTTP or WSS client acquisition rereads the selected bundle and, when enabled, native roots. Changed roots replace cached clients without restarting the daemon or browser. Operations that already acquired a client may finish with its previous roots. Invalid explicitly selected bundles fail instead of silently falling back.
 
-For a local Chromium launch, the option also adds the CA to the CLI's own TLS trust. Browser-side trust cannot be combined with `--profile`, Lightpanda, or `--ignore-https-errors`, and it is not available for local launches on macOS or Windows.
+Use `--no-ca-cert` to clear the extra CA bundle and suppress its `SSL_CERT_FILE` fallback for that session. Use `--use-system-ca false` to select built-in roots; this retains any extra bundle unless it is also cleared. `install` runs without a daemon and uses only its invocation's flags, environment, and config.
+
+On Linux, `--ca-cert` also imports the certificate or PEM bundle into an isolated NSS database used only by that locally launched Chromium process. Certificate hostname, validity period, and unrelated authority verification stay enabled. Different certificate content or an explicit clear relaunches Chromium without restarting the daemon, while the same content from any path reuses the browser. `agent-browser install --with-deps` installs the required `certutil`; otherwise install `libnss3-tools` on Debian/Ubuntu or `nss-tools` on RPM Linux. Browser-side trust cannot be combined with `--profile`, Lightpanda, or `--ignore-https-errors`, and it is not available for local launches on macOS or Windows.
 
 ### Two trust stores
 
@@ -196,7 +198,7 @@ An intercepting proxy can break the connection in two different places, and they
 | `net::ERR_CERT_AUTHORITY_INVALID` on a page | Chromium | `--ca-cert` |
 | `CDP WebSocket connect failed: ... UnknownIssuer` | The CLI, before the browser is reached | `--ca-cert` or `--use-system-ca` |
 
-The CLI verifies its own connections (remote CDP over `wss://`, cloud provider APIs) against a root list compiled into the binary, which cannot see a private CA. Two opt-ins widen it:
+The CLI verifies its own connections (`read`, `install`, remote CDP over `wss://`, and cloud provider APIs) against a root list compiled into the binary, which cannot see a private CA. `--use-system-ca` selects native roots instead, while `--ca-cert` adds a bundle to the selected roots:
 
 ```bash
 # Use the machine's trust store, where the proxy CA is usually already installed
@@ -207,7 +209,9 @@ agent-browser --cdp wss://remote.example.com/session open https://example.com
 agent-browser --ca-cert /etc/pki/ca-trust/source/anchors/proxy-ca.pem --cdp wss://... open https://example.com
 ```
 
-Neither disables verification. Without one of them the CLI keeps using the built-in roots, so nothing changes for setups that work today. `agent-browser doctor` reports which trust store is active.
+Neither disables hostname or validity verification. `agent-browser doctor` reports the trust settings resolved for that invocation.
+
+Native root loading honors `SSL_CERT_FILE` and `SSL_CERT_DIR` overrides in the daemon's environment. The contents are reread, but changing those environment paths requires a new daemon. Clearing the extra bundle does not disable these native-loader overrides while `--use-system-ca` remains enabled. A daemon started by an older binary may restart once to adopt per-command TLS configuration; later CLI trust updates preserve it.
 
 With `--cdp`, `--auto-connect`, or a provider, `--ca-cert` configures only the CLI's connections. It cannot change the trust store of a browser that agent-browser did not launch. `--use-system-ca` always affects only CLI TLS.
 
@@ -226,12 +230,14 @@ Which one to reach for depends on where the CA already lives, and that differs b
 
 A Vercel Sandbox network policy that rewrites requests terminates TLS and re-signs with the Vercel proxy CA, which the sandbox already installs. Set `AGENT_BROWSER_USE_SYSTEM_CA=1` in the sandbox so the CLI picks it up.
 
-Without the CA certificate on hand, fall back to ignoring every certificate error:
+For browser navigation only, certificate verification can be disabled:
 
 ```bash
 # For testing only - not recommended for production
 agent-browser open https://example.com --ignore-https-errors
 ```
+
+`--ignore-https-errors` does not disable verification for CLI HTTPS/WSS, `read`, or `install`.
 
 ### Slow Performance
 
