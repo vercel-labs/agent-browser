@@ -306,6 +306,8 @@ agent-browser set credentials username password
 agent-browser open https://protected.example.com/api
 ```
 
+The credentials also apply to tabs opened later through `tab new` or `click --new-tab`, including their first document request.
+
 ## Cookie-Based Auth
 
 Manually set authentication cookies:

@@ -290,6 +290,7 @@ pub fn walk_daemons() -> DaemonInventory {
                     inventory.dashboard = Some(DashboardInfo { pid, alive });
                     if !alive {
                         let _ = fs::remove_file(entry.path());
+                        let _ = fs::remove_file(socket_dir.join("dashboard.config"));
                         inventory.cleaned.push(CleanedSession {
                             name: "dashboard".to_string(),
                             reason: CleanReason::DashboardGone,

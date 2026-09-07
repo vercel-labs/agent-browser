@@ -9,7 +9,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::de::IgnoredAny;
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::sync::{broadcast, oneshot, watch, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::Request;
@@ -31,11 +31,34 @@ type WsTx = Arc<
     >,
 >;
 
+/// Sessions whose events go to one private receiver instead of the broadcast.
+type PrivateSessions = Arc<std::sync::Mutex<HashMap<String, mpsc::Sender<CdpEvent>>>>;
+
+/// Events buffered for a private session receiver that has fallen behind.
+/// Newer events are dropped once it is full; a screencast consumer that
+/// cannot keep up should lose frames, not stall the reader.
+const PRIVATE_SESSION_BUFFER: usize = 16;
+
 /// Interval between WebSocket ping frames sent to keep the connection alive
 /// through intermediate proxies (reverse proxies, load balancers, service meshes).
 const WS_KEEPALIVE_INTERVAL_SECS: u64 = 30;
 const TRANSPORT_CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
 const CONNECTION_CLOSED_ERROR: &str = "CDP connection closed";
+
+fn normalize_websocket_root_path(url: &str) -> String {
+    let Some(scheme_end) = url.find("://").map(|index| index + 3) else {
+        return url.to_string();
+    };
+    let authority = &url[scheme_end..];
+    let Some(query_offset) = authority.find('?') else {
+        return url.to_string();
+    };
+    if authority[..query_offset].contains('/') {
+        return url.to_string();
+    }
+    let query_index = scheme_end + query_offset;
+    format!("{}/{}", &url[..query_index], &url[query_index..])
+}
 
 /// Raw incoming CDP message (text) broadcast to all subscribers.
 /// Used by the inspect proxy to forward responses and events to DevTools.
@@ -139,6 +162,7 @@ pub struct CdpClient {
     raw_tx: broadcast::Sender<RawCdpMessage>,
     reader_handle: Mutex<Option<JoinHandle<()>>>,
     keepalive_handle: Mutex<Option<JoinHandle<()>>>,
+    private_sessions: PrivateSessions,
 }
 
 /// Removes a pending entry if `send_command` is cancelled mid-await (e.g. an
@@ -175,7 +199,9 @@ impl CdpClient {
         url: &str,
         headers: Option<Vec<(String, String)>>,
     ) -> Result<Self, String> {
-        let mut request = url
+        let normalized_url = normalize_websocket_root_path(url);
+        let mut request = normalized_url
+            .as_str()
             .into_client_request()
             .map_err(|e| format!("Invalid WebSocket URL: {}", e))?;
 
@@ -229,10 +255,13 @@ impl CdpClient {
         let (raw_tx, _) = broadcast::channel(4096);
         let closed = Arc::new(AtomicBool::new(false));
 
+        let private_sessions: PrivateSessions = Arc::new(std::sync::Mutex::new(HashMap::new()));
+
         let pending_clone = pending.clone();
         let event_tx_clone = event_tx.clone();
         let raw_tx_clone = raw_tx.clone();
         let closed_reader = closed.clone();
+        let private_clone = private_sessions.clone();
 
         // Notify used to stop the keepalive task when the reader loop exits.
         let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
@@ -328,7 +357,22 @@ impl CdpClient {
                         params: parsed.params.clone().unwrap_or(Value::Null),
                         session_id: parsed.session_id.clone(),
                     };
-                    let _ = event_tx_clone.send(event);
+                    let routed = event.session_id.as_deref().is_some_and(|sid| {
+                        let mut routes = private_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        match routes.get(sid) {
+                            Some(tx) => match tx.try_send(event.clone()) {
+                                Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => true,
+                                Err(mpsc::error::TrySendError::Closed(_)) => {
+                                    routes.remove(sid);
+                                    false
+                                }
+                            },
+                            None => false,
+                        }
+                    });
+                    if !routed {
+                        let _ = event_tx_clone.send(event);
+                    }
                 }
             }
 
@@ -378,6 +422,7 @@ impl CdpClient {
             raw_tx,
             reader_handle: Mutex::new(Some(reader_handle)),
             keepalive_handle: Mutex::new(Some(keepalive_handle)),
+            private_sessions,
         })
     }
 
@@ -484,6 +529,28 @@ impl CdpClient {
 
     pub fn subscribe(&self) -> broadcast::Receiver<CdpEvent> {
         self.event_tx.subscribe()
+    }
+
+    /// Deliver every event carrying `session_id` to the returned receiver
+    /// instead of the broadcast, so a high-volume session (a screencast) is
+    /// neither cloned to every subscriber nor able to overflow their buffers.
+    /// Events without a session id are unaffected. Call
+    /// [`unsubscribe_session`](Self::unsubscribe_session) when done; a dropped
+    /// receiver also ends the route on the next event for that session.
+    pub fn subscribe_session(&self, session_id: &str) -> mpsc::Receiver<CdpEvent> {
+        let (tx, rx) = mpsc::channel(PRIVATE_SESSION_BUFFER);
+        self.private_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session_id.to_string(), tx);
+        rx
+    }
+
+    pub fn unsubscribe_session(&self, session_id: &str) {
+        self.private_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session_id);
     }
 
     /// Subscribe to all raw incoming CDP messages (responses + events).
@@ -997,5 +1064,130 @@ mod tests {
 
         client.close().await;
         server.join().unwrap();
+    }
+
+    #[test]
+    fn normalizes_only_root_websocket_queries() {
+        assert_eq!(
+            normalize_websocket_root_path("wss://browser.example?token=a%2Fb"),
+            "wss://browser.example/?token=a%2Fb"
+        );
+        assert_eq!(
+            normalize_websocket_root_path("ws://[::1]:9222?token=test"),
+            "ws://[::1]:9222/?token=test"
+        );
+        assert_eq!(
+            normalize_websocket_root_path("wss://user:pass@browser.example?token=test"),
+            "wss://user:pass@browser.example/?token=test"
+        );
+        assert_eq!(
+            normalize_websocket_root_path("wss://browser.example?"),
+            "wss://browser.example/?"
+        );
+        assert_eq!(
+            normalize_websocket_root_path("wss://browser.example/?token=a%2Fb"),
+            "wss://browser.example/?token=a%2Fb"
+        );
+        assert_eq!(
+            normalize_websocket_root_path("wss://browser.example/cdp?token=a%2Fb"),
+            "wss://browser.example/cdp?token=a%2Fb"
+        );
+    }
+
+    #[tokio::test]
+    async fn root_websocket_url_with_query_sends_slash_request_target() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (path_tx, path_rx) = oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut path_tx = Some(path_tx);
+            let _ = tokio_tungstenite::accept_hdr_async(
+                stream,
+                move |
+                    request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                    response: tokio_tungstenite::tungstenite::handshake::server::Response,
+                | {
+                    if let Some(tx) = path_tx.take() {
+                        let path = request
+                            .uri()
+                            .path_and_query()
+                            .map(|value| value.as_str().to_string())
+                            .unwrap_or_default();
+                        let _ = tx.send(path);
+                    }
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+        });
+
+        let url = format!("ws://127.0.0.1:{}?token=a%2Fb&scope=browser%20test", port);
+        let _client = CdpClient::connect(&url).await.unwrap();
+
+        assert_eq!(path_rx.await.unwrap(), "/?token=a%2Fb&scope=browser%20test");
+        server.await.unwrap();
+    }
+    /// Events on a privately subscribed session reach only that receiver;
+    /// everything else still reaches broadcast subscribers.
+    #[tokio::test]
+    async fn private_session_events_bypass_the_broadcast() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (ready_tx, ready_rx) = oneshot::channel::<()>();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ready_rx.await.unwrap();
+            for (method, session) in [
+                ("Page.screencastFrame", Some("S-REC")),
+                ("Page.screencastFrame", Some("S-PAGE")),
+                ("Target.detachedFromTarget", None),
+            ] {
+                let mut msg = serde_json::json!({ "method": method, "params": {} });
+                if let Some(sid) = session {
+                    msg["sessionId"] = serde_json::json!(sid);
+                }
+                ws.send(Message::Text(msg.to_string())).await.unwrap();
+            }
+            // Keep the connection open until the client is done reading.
+            let _ = ws.next().await;
+        });
+
+        let client = CdpClient::connect(&format!("ws://127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        let mut broadcast_rx = client.subscribe();
+        let mut private_rx = client.subscribe_session("S-REC");
+        ready_tx.send(()).unwrap();
+
+        let wait = std::time::Duration::from_secs(2);
+        let first = tokio::time::timeout(wait, broadcast_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.session_id.as_deref(), Some("S-PAGE"));
+        let second = tokio::time::timeout(wait, broadcast_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.method, "Target.detachedFromTarget");
+
+        let private = tokio::time::timeout(wait, private_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(private.session_id.as_deref(), Some("S-REC"));
+        assert!(
+            private_rx.try_recv().is_err(),
+            "only S-REC events are routed privately"
+        );
+
+        client.unsubscribe_session("S-REC");
+        drop(client);
+        server.abort();
     }
 }

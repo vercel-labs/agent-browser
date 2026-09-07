@@ -358,6 +358,9 @@ pub struct LaunchOptions {
     /// this routes WebGPU through SwiftShader's software Vulkan with software
     /// compositing so it works without a GPU or display.
     pub webgpu: bool,
+    /// Enable Chrome's experimental WebMCP implementation for agent-browser
+    /// managed sessions. Enabled by default and disabled with `--no-webmcp`.
+    pub webmcp: bool,
     /// Disable automatic Xvfb for headed launches on displayless Linux
     /// hosts (AGENT_BROWSER_NO_XVFB). Carried as a launch option so the
     /// CLI's current environment wins over the env a long-lived daemon was
@@ -408,6 +411,7 @@ impl Default for LaunchOptions {
             viewport_size: None,
             use_real_keychain: false,
             webgpu: false,
+            webmcp: true,
             no_xvfb: false,
             restrict_webrtc: false,
         }
@@ -427,6 +431,10 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "NetworkService".to_string(),
         "NetworkServiceInProcess".to_string(),
     ];
+    if options.webmcp {
+        enable_features.push("WebMCPTesting".to_string());
+        enable_features.push("DevToolsWebMCPSupport".to_string());
+    }
     if options.webgpu && cfg!(target_os = "linux") {
         enable_features.push("Vulkan".to_string());
     }
@@ -2059,10 +2067,16 @@ mod tests {
         let result = build_chrome_args(&opts).unwrap();
         assert!(result.args.iter().any(|a| a == "--enable-unsafe-webgpu"));
         if cfg!(target_os = "linux") {
-            assert!(result
+            let features: Vec<&str> = result
                 .args
                 .iter()
-                .any(|a| a == "--enable-features=NetworkService,NetworkServiceInProcess,Vulkan"));
+                .find_map(|arg| arg.strip_prefix("--enable-features="))
+                .unwrap()
+                .split(',')
+                .collect();
+            assert!(features.contains(&"NetworkService"));
+            assert!(features.contains(&"NetworkServiceInProcess"));
+            assert!(features.contains(&"Vulkan"));
             assert!(result.args.iter().any(|a| a == "--use-angle=vulkan"));
             assert!(result.args.iter().any(|a| a == "--use-vulkan=swiftshader"));
             assert!(result
@@ -2189,6 +2203,34 @@ mod tests {
         if let Some(ref dir) = result.temp_user_data_dir {
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn test_build_args_enables_webmcp_by_default() {
+        let result = build_chrome_args(&LaunchOptions::default()).unwrap();
+        let features = result
+            .args
+            .iter()
+            .find(|arg| arg.starts_with("--enable-features="))
+            .unwrap();
+        assert!(features.contains("WebMCPTesting"));
+        assert!(features.contains("DevToolsWebMCPSupport"));
+    }
+
+    #[test]
+    fn test_build_args_webmcp_opt_out() {
+        let result = build_chrome_args(&LaunchOptions {
+            webmcp: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let features = result
+            .args
+            .iter()
+            .find(|arg| arg.starts_with("--enable-features="))
+            .unwrap();
+        assert!(!features.contains("WebMCPTesting"));
+        assert!(!features.contains("DevToolsWebMCPSupport"));
     }
 
     #[test]

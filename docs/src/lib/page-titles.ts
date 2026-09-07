@@ -4,6 +4,7 @@ export const PAGE_TITLES: Record<string, string> = {
   "quick-start": "Quick Start",
   skills: "Skills",
   commands: "Commands",
+  webmcp: "WebMCP",
   configuration: "Configuration",
   plugins: "Plugins",
   selectors: "Selectors",

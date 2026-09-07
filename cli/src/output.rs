@@ -148,6 +148,67 @@ fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> 
     }
 }
 
+fn format_webmcp_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
+    match action {
+        Some("webmcp_list") => {
+            let tools = data.get("tools")?.as_array()?;
+            if tools.is_empty() {
+                return Some("No WebMCP tools registered on the current page".to_string());
+            }
+            Some(
+                tools
+                    .iter()
+                    .map(format_webmcp_tool_text)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        }
+        Some("webmcp_invoke" | "webmcp_result" | "webmcp_cancel") => {
+            let invocation_id = data.get("invocationId")?.as_str()?;
+            let status = data.get("status")?.as_str()?;
+            let mut output = format!("{}: {}", invocation_id, status);
+            if let Some(result) = data.get("output") {
+                output.push('\n');
+                output.push_str(
+                    &serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string()),
+                );
+            }
+            if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
+                output.push('\n');
+                output.push_str(error);
+            }
+            Some(output)
+        }
+        _ => None,
+    }
+}
+
+fn format_webmcp_tool_text(tool: &serde_json::Value) -> String {
+    let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+    let description = tool
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let frame = tool.get("frameId").and_then(|v| v.as_str()).unwrap_or("?");
+    let origin = tool
+        .get("origin")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    format!("{} [{}]\n  {}\n  {}", name, frame, description, origin)
+}
+
+fn format_webmcp_availability_text(data: &serde_json::Value) -> Option<&'static str> {
+    let webmcp = data.get("webmcp")?;
+    (webmcp.get("available").and_then(|value| value.as_bool()) == Some(true)
+        && webmcp
+            .get("toolCount")
+            .and_then(|value| value.as_u64())
+            .is_some_and(|count| count > 0))
+    .then_some(
+        "WebMCP tools are available on this page (experimental)\nRun `agent-browser webmcp list` to view them",
+    )
+}
+
 fn confirmation_data(data: &serde_json::Value) -> Option<&serde_json::Value> {
     if data
         .get("confirmation_required")
@@ -384,6 +445,15 @@ fn format_a11y_target(target: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// Render a recording's capture rate as a trailing " (30 fps)", or nothing
+/// when the payload predates the field.
+fn recording_fps_suffix(data: &serde_json::Value) -> String {
+    data.get("fps")
+        .and_then(|v| v.as_u64())
+        .map(|fps| format!(" ({} fps)", fps))
+        .unwrap_or_default()
+}
+
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     if opts.json {
         if opts.content_boundaries {
@@ -458,6 +528,23 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             println!("{}", output);
             return;
         }
+        if action == Some("webmcp_list") {
+            let Some(tools) = data.get("tools").and_then(|tools| tools.as_array()) else {
+                return;
+            };
+            if tools.is_empty() {
+                println!("No WebMCP tools registered on the current page");
+                return;
+            }
+            for tool in tools {
+                print_with_boundaries(&format_webmcp_tool_text(tool), boundary_origin(tool), opts);
+            }
+            return;
+        }
+        if let Some(output) = format_webmcp_text(action, data) {
+            print_with_boundaries(&output, boundary_origin(data), opts);
+            return;
+        }
         if action == Some("vitals") {
             println!("{}", format_vitals_text(data));
             return;
@@ -504,9 +591,15 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
                 println!("{} {}", color::success_indicator(), color::bold(title));
                 println!("  {}", color::dim(url));
+                if let Some(webmcp) = format_webmcp_availability_text(data) {
+                    println!("{}", webmcp);
+                }
                 return;
             }
             println!("{}", url);
+            if let Some(webmcp) = format_webmcp_availability_text(data) {
+                println!("{}", webmcp);
+            }
             return;
         }
         if let Some(cdp_url) = data.get("cdpUrl").and_then(|v| v.as_str()) {
@@ -939,31 +1032,44 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                         println!("{} HAR recording started", color::success_indicator());
                     }
                     _ => {
+                        let rate = recording_fps_suffix(data);
                         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
-                            println!("{} Recording started: {}", color::success_indicator(), path);
+                            println!(
+                                "{} Recording started: {}{}",
+                                color::success_indicator(),
+                                path,
+                                rate
+                            );
                         } else {
-                            println!("{} Recording started", color::success_indicator());
+                            println!("{} Recording started{}", color::success_indicator(), rate);
                         }
                     }
                 }
                 return;
             }
         }
-        // Recording restart (has "stopped" field - from recording_restart action)
-        if data.get("stopped").is_some() {
+        // Recording restart (has "restarted" field - from recording_restart action)
+        if data.get("restarted").is_some() {
             let path = data
                 .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
+            let rate = recording_fps_suffix(data);
             if let Some(prev_path) = data.get("previousPath").and_then(|v| v.as_str()) {
                 println!(
-                    "{} Recording restarted: {} (previous saved to {})",
+                    "{} Recording restarted: {}{} (previous saved to {})",
                     color::success_indicator(),
                     path,
+                    rate,
                     prev_path
                 );
             } else {
-                println!("{} Recording started: {}", color::success_indicator(), path);
+                println!(
+                    "{} Recording started: {}{}",
+                    color::success_indicator(),
+                    path,
+                    rate
+                );
             }
             return;
         }
@@ -978,7 +1084,12 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                         error
                     );
                 } else {
-                    println!("{} Recording saved to {}", color::success_indicator(), path);
+                    println!(
+                        "{} Recording saved to {}{}",
+                        color::success_indicator(),
+                        path,
+                        recording_fps_suffix(data)
+                    );
                 }
             } else {
                 println!("{} Recording stopped", color::success_indicator());
@@ -1394,7 +1505,8 @@ real navigation — useful for SSR debug, auth setup, and capturing fresh
 `react suspense` / `vitals` state without noise from a prior page.
 
 With a URL, launches and navigates. If no protocol is provided, https://
-is automatically prepended.
+is automatically prepended. When the page registers WebMCP tools, successful
+navigation output tells you to run `agent-browser webmcp list`.
 
 The `goto` and `navigate` aliases still require a URL.
 
@@ -1530,8 +1642,9 @@ If another element covers the click point, agent-browser reports the
 covering element instead of dispatching a click to the wrong target.
 
 Options:
-  --new-tab            Open link in a new tab instead of navigating current tab
-                       (only works on elements with href attribute)
+  --new-tab            Open link in a new tab instead of navigating current tab.
+                       The new tab inherits session setup before its first load.
+                       Only works on elements with an href attribute.
 
 Global Options:
   --json               Output as JSON
@@ -2262,9 +2375,9 @@ Settings:
   viewport <w> <h> [scale]   Set viewport size (scale = deviceScaleFactor, e.g. 2 for retina)
   device <name>              Emulate device (e.g., "iPhone 12")
   geo <lat> <lng>            Set geolocation
-  offline [on|off]           Toggle offline mode
-  headers <json>             Set extra HTTP headers
-  credentials <user> <pass>  Set HTTP authentication
+  offline [on|off]           Toggle offline mode; off restores the new-tab default
+  headers <json>             Set extra HTTP headers; use {} to clear them for new tabs
+  credentials <user> <pass>  Set HTTP authentication for current and future tabs
   media [dark|light]         Set color scheme preference
         [reduced-motion]     Enable reduced motion
 
@@ -2427,6 +2540,10 @@ referring to the same tab across commands. Optional user-assigned labels
 (e.g. `docs`, `app`) are interchangeable with ids everywhere a tab ref is
 accepted. CDP target ids (from `tab list --json`) are also accepted as tab
 refs; unlike `t<N>` ids they stay stable across daemon restarts.
+
+Tabs opened with `tab new` or `click --new-tab` inherit the session's user
+agent, headers, HTTP credentials, init scripts, routes, and emulation
+overrides before their first document loads.
 
 Each session remembers its active tab (bound by CDP target id) and returns
 to it after a daemon restart. With --pin-tab, commands fail with a
@@ -2676,33 +2793,53 @@ The output file can be viewed in:
             r##"
 agent-browser record - Record browser session to video
 
-Usage: agent-browser record start <path.webm> [url]
+Usage: agent-browser record start <path.webm> [url] [--fps <n>]
        agent-browser record stop
-       agent-browser record restart <path.webm> [url]
+       agent-browser record restart <path.webm> [url] [--fps <n>]
 
 Record the browser to a WebM video file.
-Creates a fresh browser context but preserves cookies and localStorage.
-If no URL is provided, automatically navigates to your current page.
+Records the current active page as-is: no new context, no new tab, and no
+navigation unless you pass a URL. Capture starts on the page you already
+have open, so hydration and initial animations are not re-run cold.
+If a URL is provided, the active tab navigates there first.
+To record in a separate tab, run `tab new [url]` before `record start`.
+
+Recording captures 30 fps, which keeps scrolls and CSS transitions smooth.
+Raise it to 60 for short, motion-heavy takes (drag interactions, animation
+work); lower it for long sessions where file size matters more than motion.
 
 Operations:
-  start <path> [url]     Start recording (defaults to current URL if omitted)
+  start <path> [url]     Start recording the active page (navigates first if url given)
   stop                   Stop recording and save video
   restart <path> [url]   Stop current recording (if any) and start a new one
+
+Options:
+  --fps <n>            Capture rate, 1-60 (default: 30)
 
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
 
 Examples:
-  # Record from current page (preserves login state)
+  # Record the page you are on (keeps login state and page state)
   agent-browser open https://app.example.com/dashboard
   agent-browser snapshot -i            # Explore and plan
   agent-browser record start ./demo.webm
   agent-browser click @e3              # Execute planned actions
   agent-browser record stop
 
-  # Or specify a different URL
+  # Navigate the active tab, then record
   agent-browser record start ./demo.webm https://example.com
+
+  # Record in a separate tab
+  agent-browser tab new https://example.com
+  agent-browser record start ./demo.webm
+
+  # 60 fps for a scroll or animation capture
+  agent-browser record start ./scroll.webm --fps 60
+
+  # 10 fps for a long session where size matters more than motion
+  agent-browser record start ./soak.webm --fps 10
 
   # Restart recording with a new file (stops previous, starts new)
   agent-browser record restart ./take2.webm
@@ -2960,21 +3097,36 @@ browser viewports and command activity feeds for all sessions.
 The dashboard is bundled into the binary and requires no separate install.
 
 Subcommands:
-  start [--port <n>]   Start the dashboard server (default port: 4848)
+  start [--port <n>] [--allowed-origins <origins>]
+                        Start the dashboard server (default port: 4848)
   stop                 Stop the dashboard server
 
 Running 'agent-browser dashboard' with no subcommand is equivalent to 'dashboard start'.
 
 The dashboard runs as a standalone background process, independent of
 browser sessions. All sessions automatically stream to the dashboard.
-It works from http://localhost:4848 or a proxied/forwarded URL that
-reaches the dashboard server, such as https://dashboard.agent-browser.localhost
-or a Coder workspace URL. The browser stays on the dashboard origin;
-session tabs, status, and stream traffic are proxied internally, so
-session ports do not need to be exposed.
+Loopback origins work without configuration or a token. For a reverse-proxied or
+forwarded dashboard, pass --allowed-origins with the exact browser origin
+or set AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS. The browser stays on the
+dashboard origin; session tabs, status, and stream traffic are proxied
+internally, so session ports do not need to be exposed.
+For reverse-proxied origins, start prints private external access URLs
+containing an unguessable fragment token. Open the matching URL to establish
+the browser session and do not share it. Loopback URLs do not require or
+receive this token. Configure a reverse proxy to redact cookies from logs.
+Stop the dashboard before changing its port or allowed origins.
 
 Options:
   --port <n>           Port for the dashboard server (default: 4848)
+  --allowed-origins <origins>
+                       Comma-separated exact HTTPS origins allowed when the
+                       dashboard is exposed through a reverse proxy. Loopback
+                       origins are allowed by default. Can also be set with
+                       AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS.
+
+Ports must be integers from 1 to 65535. Every allowed origin must be valid.
+Unknown options, missing values, and malformed origins fail without starting
+the dashboard server.
 
 Global Options:
   --json               Output as JSON
@@ -2982,6 +3134,7 @@ Global Options:
 Examples:
   agent-browser dashboard start
   agent-browser dashboard start --port 8080
+  agent-browser dashboard start --allowed-origins https://dashboard.example.com
   agent-browser dashboard stop
 "##
         }
@@ -3004,6 +3157,7 @@ Supported URL formats:
   - Port number: 9222 (connects to http://localhost:9222)
   - WebSocket URL: ws://localhost:9222/devtools/browser/...
   - Remote service: wss://remote-browser.example.com/cdp?token=...
+  - Root endpoint: wss://remote-browser.example.com?token=... (slash optional)
 
 Global Options:
   --json               Output as JSON
@@ -3589,7 +3743,7 @@ Debug:
   trace start                Start Chrome DevTools trace
   trace stop [path]          Stop and save Chrome DevTools trace
   profiler start|stop [path] Record Chrome DevTools profile
-  record start <path> [url]  Start video recording (WebM)
+  record start <path> [url]  Start video recording (WebM, 30 fps; --fps 1-60)
   record stop                Stop and save video
   console [--clear]          View console logs
   errors [--clear]           View page errors
@@ -3601,6 +3755,14 @@ Streaming:
   stream enable [--port <n>] Start runtime WebSocket streaming for this session
   stream disable             Stop runtime WebSocket streaming
   stream status              Show streaming status and active port
+
+WebMCP (experimental):
+  webmcp list                List tools registered by the current page
+  webmcp invoke <tool>       Invoke a page tool; accepts --params <json|@file>,
+                             --frame <frame-id>, --detach, and --timeout <ms>
+  webmcp result <id>         Wait for a detached invocation result
+  webmcp cancel <id>         Cancel an active invocation
+  Successful navigation advertises when the page has WebMCP tools
 
 React (requires `open --enable react-devtools`):
   react tree                 Full React component tree (depth id parent name columns)
@@ -3627,7 +3789,7 @@ SPA:
                              history.pushState + popstate/navigate events for other frameworks
 
 Init scripts:
-  removeinitscript <id>      Remove a script registered via --init-script or addinitscript
+  removeinitscript <id>      Remove a registered script from every tab in the session
 
 Batch:
   batch [--bail] ["cmd" ...]  Execute multiple commands sequentially (args or stdin)
@@ -3669,6 +3831,8 @@ Chat (AI):
 Dashboard:
   dashboard [start]          Start the dashboard server (default port: 4848)
   dashboard start --port <n> Start on a specific port
+  dashboard start --allowed-origins <origins>
+                            Allow exact HTTPS reverse-proxied origins
   dashboard stop             Stop the dashboard server
 
 Setup:
@@ -3737,7 +3901,9 @@ Options:
   --screenshot-format <fmt>  Screenshot format: png, jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)
   --headed                   Show browser window (not headless) (or AGENT_BROWSER_HEADED env)
   --webgpu                   Enable WebGPU; uses SwiftShader software Vulkan on Linux, no GPU required (or AGENT_BROWSER_WEBGPU env)
-  --cdp <port>               Connect via CDP (Chrome DevTools Protocol)
+  --no-webmcp                Disable default experimental WebMCP support for locally launched Chrome
+                             (or AGENT_BROWSER_NO_WEBMCP env)
+  --cdp <port|url>           Connect via CDP; root WebSocket query slash is optional
   --pin-tab                  Pin the session to its bound tab (or AGENT_BROWSER_PIN_TAB env)
                              Commands fail with a tab_gone error instead of falling back
                              to another tab when the bound tab is closed. JSON includes
@@ -3826,6 +3992,8 @@ Environment:
   AGENT_BROWSER_STREAM_QUALITY   JPEG quality 0-100 (default: 80)
   AGENT_BROWSER_STREAM_MAX_WIDTH  Cap frame width in pixels (default: the viewport)
   AGENT_BROWSER_STREAM_MAX_HEIGHT Cap frame height in pixels (default: the viewport)
+  AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS
+                                 Comma-separated exact HTTPS origins allowed for a reverse-proxied dashboard
   AGENT_BROWSER_IDLE_TIMEOUT_MS  Auto-shutdown daemon after N ms of inactivity (default: 3600000 = 1h; 0 disables)
                                  Dashboard input resets the timer; headed, Safari/iOS WebDriver, and user-attached browsers are exempt from the default
                                  Provider-owned cloud browsers remain eligible for default cleanup
@@ -3983,6 +4151,7 @@ pub fn print_version() {
 mod tests {
     use super::{
         boundary_origin, format_a11y_text, format_storage_text, format_vitals_text,
+        format_webmcp_availability_text, format_webmcp_text, format_webmcp_tool_text,
         format_with_boundaries, OutputOptions,
     };
     use serde_json::json;
@@ -4233,5 +4402,104 @@ hydration: -  phases: 0  hydratedComponents: 0"
             boundary_origin(&json!({ "url": "https://example.com/source" })),
             Some("https://example.com/source")
         );
+    }
+
+    #[test]
+    fn test_webmcp_text_can_use_content_boundaries() {
+        let data = json!({
+            "invocationId": "i1",
+            "status": "completed",
+            "origin": "https://example.com",
+            "output": {"message": "untrusted"}
+        });
+        let text = format_webmcp_text(Some("webmcp_invoke"), &data).unwrap();
+        let rendered = format_with_boundaries(
+            &text,
+            boundary_origin(&data),
+            &OutputOptions {
+                content_boundaries: true,
+                ..OutputOptions::default()
+            },
+        );
+        assert!(rendered.contains("origin=https://example.com"));
+        assert!(rendered.contains("\"message\": \"untrusted\""));
+    }
+
+    #[test]
+    fn test_webmcp_list_tools_keep_their_own_origin() {
+        let first = json!({
+            "name": "search",
+            "frameId": "frame-a",
+            "origin": "https://a.example",
+            "description": "Search A"
+        });
+        let second = json!({
+            "name": "search",
+            "frameId": "frame-b",
+            "origin": "https://b.example",
+            "description": "Search B"
+        });
+        let opts = OutputOptions {
+            content_boundaries: true,
+            ..OutputOptions::default()
+        };
+        let first = format_with_boundaries(
+            &format_webmcp_tool_text(&first),
+            boundary_origin(&first),
+            &opts,
+        );
+        let second = format_with_boundaries(
+            &format_webmcp_tool_text(&second),
+            boundary_origin(&second),
+            &opts,
+        );
+        assert!(first.contains("origin=https://a.example"));
+        assert!(!first.contains("origin=https://b.example"));
+        assert!(second.contains("origin=https://b.example"));
+        assert!(!second.contains("origin=https://a.example"));
+    }
+
+    #[test]
+    fn test_navigation_formats_webmcp_availability_hint() {
+        let data = json!({
+            "url": "https://example.com",
+            "webmcp": {
+                "experimental": true,
+                "available": true,
+                "toolCount": 4
+            }
+        });
+
+        assert_eq!(
+            format_webmcp_availability_text(&data),
+            Some(
+                "WebMCP tools are available on this page (experimental)\nRun `agent-browser webmcp list` to view them"
+            )
+        );
+    }
+
+    #[test]
+    fn test_navigation_omits_webmcp_hint_without_available_tools() {
+        for data in [
+            json!({"url": "https://example.com"}),
+            json!({
+                "url": "https://example.com",
+                "webmcp": {
+                    "experimental": true,
+                    "available": false,
+                    "toolCount": 4
+                }
+            }),
+            json!({
+                "url": "https://example.com",
+                "webmcp": {
+                    "experimental": true,
+                    "available": true,
+                    "toolCount": 0
+                }
+            }),
+        ] {
+            assert_eq!(format_webmcp_availability_text(&data), None);
+        }
     }
 }

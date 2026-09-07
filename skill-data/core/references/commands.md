@@ -114,11 +114,17 @@ Headless Chromium screenshots hide native scrollbars for consistent image output
 
 ```bash
 agent-browser open https://example.com     # Launch a browser session first
-agent-browser record start ./demo.webm    # Start recording
+agent-browser record start ./demo.webm    # Start recording the current page at 30 fps
 agent-browser click @e1                   # Perform actions
 agent-browser record stop                 # Stop and save video
 agent-browser record restart ./take2.webm # Stop current + start new
+
+agent-browser record start ./scroll.webm --fps 60  # 60 fps for motion-heavy takes
+agent-browser record start ./soak.webm --fps 10    # Lower rate for long sessions
+agent-browser tab new https://example.com          # Open a separate tab first if you want the recording there
 ```
+
+`--fps` accepts 1 to 60 and defaults to 30. Playback duration always matches the wall clock time recorded, so a slow page holds frames instead of speeding the video up.
 
 ## Wait
 
@@ -166,7 +172,7 @@ agent-browser set device "iPhone 14"          # Emulate device
 agent-browser set geo 37.7749 -122.4194       # Set geolocation (alias: geolocation)
 agent-browser set offline on                  # Toggle offline mode
 agent-browser set headers '{"X-Key":"v"}'     # Extra HTTP headers
-agent-browser set credentials user pass       # HTTP basic auth (alias: auth)
+agent-browser set credentials user pass       # HTTP basic auth for current and future tabs (alias: auth)
 agent-browser set media dark                  # Emulate color scheme
 agent-browser set media light reduced-motion  # Light mode + reduced motion
 ```
@@ -228,6 +234,8 @@ agent-browser tab close docs             # close by label
 ```
 
 Labels are never auto-generated, never rewritten on navigation, and must be unique within a session. To interact with another tab, switch to it first: the daemon maintains a single active tab, so refs (`@eN`) belong to the tab that was active when the snapshot ran.
+
+Tabs opened through `tab new` or `click --new-tab` inherit the session's setup before their first document loads: user agent, `set headers`, `set credentials`, origin-scoped `--headers`, init scripts, `route` rules, and emulation overrides (color scheme, timezone, locale, geolocation, offline). Turning offline mode off or setting headers to `{}` restores the default setup for future tabs.
 
 `tab list --json` also reports each tab's CDP `targetId`, accepted anywhere a tab ref is accepted (`tab <targetId>`, `tab close <targetId>`). Target ids stay stable across daemon restarts, unlike `t<N>` ids, which are per-daemon counters. With `--pin-tab` the session is pinned to its bound tab: if that tab is closed, commands fail with a `tab_gone` error instead of falling back to another tab, and `tab new` or `tab list` recover. JSON errors include `code: "tab_gone"` and a recovery object with `data.targetId` plus optional sanitized `data.lastUrl`; batch uses `result` for the same object.
 
@@ -336,10 +344,29 @@ agent-browser state load auth.json    # Restore saved state
 agent-browser stream status --json    # Enabled state, port, client count
 agent-browser stream enable           # Start the WebSocket stream server
 agent-browser stream enable --port 9223
+
+# Experimental WebMCP page tools
+# Successful navigation advertises availability; JSON includes data.webmcp.toolCount
+agent-browser webmcp list
+agent-browser webmcp invoke <tool> --params '{"key":"value"}'
+agent-browser webmcp invoke <tool> --params @input.json --detach
+agent-browser webmcp result <invocation-id>
+agent-browser webmcp cancel <invocation-id>
 agent-browser stream disable          # Stop it
 ```
 
 Clients connect to `ws://127.0.0.1:<port>` and receive `frame`, `status`, `tabs`, `url`, and `console` messages. They send `input_mouse`, `input_keyboard`, and `input_touch` to drive the page, `{"type":"config","maxFps":N}` (1 to 120, `0` = uncapped) to cap their own frame rate, and `{"type":"config","pacing":"ack"}` to receive one frame at a time, acknowledged with `{"type":"ack","seq":N}`. Both settings can be declared on the URL instead (`ws://127.0.0.1:<port>/?pacing=ack&maxFps=10`). See [streaming.md](streaming.md).
+
+## Observability Dashboard
+
+```bash
+agent-browser dashboard start
+agent-browser dashboard start --port 8080
+agent-browser dashboard start --allowed-origins https://dashboard.example.com
+agent-browser dashboard stop
+```
+
+Loopback origins are allowed by default over IPv4 and IPv6 without an access token. Set `--allowed-origins` or `AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS` to a comma-separated list of exact HTTPS reverse-proxied origins. Every origin must be valid, and custom ports must be integers from 1 to 65535. Unknown options, missing values, invalid ports, and malformed origins fail without starting the server. The command prints private tokenized access URLs only for external origins; open the matching URL once to establish the browser session and do not share it. Open `http://localhost:<port>` directly for local access. Repeated starts reuse the running dashboard only when the port and allowed origins match; stop it before changing either setting.
 
 ## MCP Server
 
@@ -388,7 +415,8 @@ agent-browser --session <name> ...    # Isolated browser session
 agent-browser --json ...              # JSON output for parsing
 agent-browser --headed ...            # Show browser window (not headless; on displayless Linux an Xvfb display starts automatically)
 agent-browser --webgpu ...            # Enable WebGPU (SwiftShader software Vulkan on Linux, no GPU needed)
-agent-browser --cdp <port> ...        # Connect via Chrome DevTools Protocol
+agent-browser --no-webmcp ...         # Disable default experimental WebMCP Chrome features (or AGENT_BROWSER_NO_WEBMCP env)
+agent-browser --cdp <port|url> ...    # Connect via CDP; root query slash is optional
 agent-browser --pin-tab ...           # Pin the session to its bound tab (strict tab binding)
 agent-browser --no-pin-tab ...        # Disable a sticky pin previously enabled with --pin-tab
 agent-browser -p <provider> ...       # Browser provider or configured provider plugin
@@ -461,8 +489,10 @@ agent-browser a11y <url> --json                     # Structured results for aut
 ```bash
 agent-browser open --init-script <path>             # Register before first navigation (repeatable)
 agent-browser addinitscript <js>                    # Register at runtime (returns identifier)
-agent-browser removeinitscript <identifier>         # Remove a previously registered init script
+agent-browser removeinitscript <identifier>         # Remove from every tab in the session
 ```
+
+Runtime init-script identifiers are session-wide. Removing one clears it from every open tab where it was registered and from the setup replayed into future tabs.
 
 ## cURL cookie import
 
@@ -493,6 +523,7 @@ AGENT_BROWSER_WEBGPU="1"                     # Enable the WebGPU launch preset (
 AGENT_BROWSER_NO_XVFB="1"                    # Disable automatic Xvfb for headed mode on displayless Linux
 AGENT_BROWSER_PROVIDER="browserbase"         # Browser provider or configured provider plugin
 AGENT_BROWSER_STREAM_PORT="9223"             # Override WebSocket streaming port (default: OS-assigned)
+AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS="https://dashboard.example.com" # Trusted HTTPS reverse-proxied dashboard origins
 AGENT_BROWSER_CONFIG="./agent-browser.json"  # Custom config file
 AGENT_BROWSER_CDP="9222"                     # Connect daemon to CDP port or WebSocket URL
 AGENT_BROWSER_ALLOWED_DOMAINS="example.com"  # Restrict network domains; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins

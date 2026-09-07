@@ -824,6 +824,10 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Network.enable", Some(session_id))
             .await?;
+        let _ = self
+            .client
+            .send_command_no_params("WebMCP.enable", Some(session_id))
+            .await;
         // Enable auto-attach for cross-origin iframe support.
         // flatten: true gives each iframe its own session_id.
         // waitForDebuggerOnStart keeps child targets paused until the daemon
@@ -975,6 +979,10 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Network.enable", None)
             .await?;
+        let _ = self
+            .client
+            .send_command_no_params("WebMCP.enable", None)
+            .await;
         Ok(())
     }
 
@@ -1355,6 +1363,17 @@ impl BrowserManager {
             .get(self.active_page_index)
             .map(|p| p.target_id.as_str())
             .ok_or_else(|| "No active page".to_string())
+    }
+
+    pub fn has_page_session(&self, session_id: &str) -> bool {
+        self.pages.iter().any(|page| page.session_id == session_id)
+    }
+
+    pub fn session_id_for_target(&self, target_id: &str) -> Option<&str> {
+        self.pages
+            .iter()
+            .find(|page| page.target_id == target_id)
+            .map(|page| page.session_id.as_str())
     }
 
     /// Returns true if this manager was connected via CDP (as opposed to local launch).

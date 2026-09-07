@@ -21,6 +21,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
+#[cfg(unix)]
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{exit, Command};
 
@@ -92,6 +94,12 @@ fn attach_script_launch_options(launch_cmd: &mut serde_json::Value, flags: &Flag
     }
 }
 
+fn attach_webmcp_launch_option(launch_cmd: &mut serde_json::Value, flags: &Flags) {
+    if flags.no_webmcp || flags.cli_no_webmcp {
+        launch_cmd["webmcp"] = json!(!flags.no_webmcp);
+    }
+}
+
 fn attach_allowed_domains_to_launch_command(launch_cmd: &mut serde_json::Value, flags: &Flags) {
     if let Some(ref domains) = flags.allowed_domains {
         launch_cmd["allowedDomains"] = json!(domains);
@@ -129,6 +137,7 @@ fn build_provider_launch_command(provider: &str, flags: &Flags) -> serde_json::V
     });
     launch_cmd["plugins"] = json!(flags.plugins.clone());
     attach_script_launch_options(&mut launch_cmd, flags);
+    attach_webmcp_launch_option(&mut launch_cmd, flags);
     attach_allowed_domains_to_launch_command(&mut launch_cmd, flags);
     attach_restore_config_to_command(&mut launch_cmd, flags);
     attach_ca_cert_to_launch_command(&mut launch_cmd, flags);
@@ -250,6 +259,8 @@ fn should_send_local_launch_config(flags: &Flags, command: &serde_json::Value) -
         )
         || flags.webgpu
         || flags.cli_webgpu
+        || flags.no_webmcp
+        || flags.cli_no_webmcp
         || flags.color_scheme.is_some()
         || flags.download_path.is_some()
         || flags.engine.is_some()
@@ -764,26 +775,276 @@ fn get_dashboard_pid_path() -> std::path::PathBuf {
     get_socket_dir().join("dashboard.pid")
 }
 
-fn run_dashboard_start(port: u16, json_mode: bool) {
+fn get_dashboard_config_path() -> std::path::PathBuf {
+    get_socket_dir().join("dashboard.config")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+struct DashboardConfig {
+    port: u16,
+    allowed_origins: Vec<String>,
+    #[serde(default)]
+    access_token: Option<String>,
+}
+
+impl DashboardConfig {
+    fn new(port: u16, allowed_origins: Vec<String>) -> Result<Self, String> {
+        let access_token = if allowed_origins.is_empty() {
+            None
+        } else {
+            Some(generate_dashboard_access_token()?)
+        };
+        Ok(Self {
+            port,
+            allowed_origins,
+            access_token,
+        })
+    }
+
+    fn allowed_origins_description(&self) -> String {
+        if self.allowed_origins.is_empty() {
+            "loopback origins only".to_string()
+        } else {
+            self.allowed_origins.join(",")
+        }
+    }
+
+    fn has_valid_access_token(&self) -> bool {
+        self.allowed_origins.is_empty()
+            || self
+                .access_token
+                .as_deref()
+                .is_some_and(native::stream::is_valid_dashboard_access_token)
+    }
+
+    fn has_same_settings_as(&self, requested: &Self) -> bool {
+        self.port == requested.port && self.allowed_origins == requested.allowed_origins
+    }
+
+    fn access_urls(&self) -> Vec<String> {
+        let Some(token) = self.access_token.as_deref() else {
+            return Vec::new();
+        };
+        self.allowed_origins
+            .iter()
+            .map(|origin| format!("{origin}/#dashboard-access-token={token}"))
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DashboardCommand {
+    Start {
+        port: u16,
+        allowed_origins: Option<String>,
+    },
+    Stop,
+}
+
+/// Parse dashboard-specific arguments independently of the general command
+/// parser. This keeps the standalone lifecycle strict: unknown flags, missing
+/// values, invalid ports, and options supplied to `stop` are all errors.
+fn parse_dashboard_command(args: &[String]) -> Result<DashboardCommand, String> {
+    let (subcommand, mut index) = match args.first().map(String::as_str) {
+        Some("start") => ("start", 1),
+        Some("stop") => ("stop", 1),
+        Some(value) if !value.starts_with('-') => {
+            return Err(format!("Unknown dashboard subcommand: {value}"));
+        }
+        _ => ("start", 0),
+    };
+
+    if subcommand == "stop" {
+        if let Some(argument) = args.get(index) {
+            return Err(format!(
+                "Dashboard stop does not accept argument '{argument}'."
+            ));
+        }
+        return Ok(DashboardCommand::Stop);
+    }
+
+    let mut port = 4848;
+    let mut saw_port = false;
+    let mut allowed_origins = None;
+
+    while let Some(argument) = args.get(index) {
+        match argument.as_str() {
+            "--port" => {
+                if saw_port {
+                    return Err(
+                        "Dashboard option '--port' was provided more than once.".to_string()
+                    );
+                }
+                let value = args
+                    .get(index + 1)
+                    .filter(|value| !value.starts_with('-'))
+                    .ok_or_else(|| "Dashboard option '--port' requires a value.".to_string())?;
+                port = value.parse::<u16>().ok().filter(|port| *port > 0).ok_or_else(|| {
+                    format!("Invalid dashboard port '{value}'. Expected an integer from 1 to 65535.")
+                })?;
+                saw_port = true;
+                index += 2;
+            }
+            "--allowed-origins" => {
+                if allowed_origins.is_some() {
+                    return Err(
+                        "Dashboard option '--allowed-origins' was provided more than once."
+                            .to_string(),
+                    );
+                }
+                let value = args
+                    .get(index + 1)
+                    .filter(|value| !value.starts_with('-'))
+                    .ok_or_else(|| {
+                        "Dashboard option '--allowed-origins' requires a value.".to_string()
+                    })?;
+                allowed_origins = Some(value.clone());
+                index += 2;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("Unknown dashboard option: {value}"));
+            }
+            value => {
+                return Err(format!("Unexpected dashboard argument: {value}"));
+            }
+        }
+    }
+
+    Ok(DashboardCommand::Start {
+        port,
+        allowed_origins,
+    })
+}
+
+fn generate_dashboard_access_token() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|error| format!("Failed to generate dashboard access token: {error}"))?;
+    Ok(hex::encode(bytes))
+}
+
+fn read_dashboard_config() -> Option<DashboardConfig> {
+    let contents = fs::read_to_string(get_dashboard_config_path()).ok()?;
+    serde_json::from_str(&contents).ok()
+}
+
+fn remove_dashboard_sidecars() {
+    let _ = fs::remove_file(get_dashboard_pid_path());
+    let _ = fs::remove_file(get_dashboard_config_path());
+}
+
+fn write_dashboard_config(config: &DashboardConfig) -> std::io::Result<()> {
+    let contents = serde_json::to_vec(config).map_err(std::io::Error::other)?;
+    let path = get_dashboard_config_path();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(&contents)
+    }
+
+    #[cfg(windows)]
+    {
+        fs::write(path, contents)
+    }
+}
+
+fn dashboard_config_issue(
+    running: Option<&DashboardConfig>,
+    requested: &DashboardConfig,
+) -> Option<String> {
+    let Some(running) = running else {
+        return Some(
+            "Dashboard is already running, but its configuration could not be verified. Run 'agent-browser dashboard stop' before starting it again."
+                .to_string(),
+        );
+    };
+    if !running.has_valid_access_token() {
+        return Some(
+            "Dashboard is already running, but its access-token configuration could not be verified. Run 'agent-browser dashboard stop' before starting it again."
+                .to_string(),
+        );
+    }
+    if running.has_same_settings_as(requested) {
+        return None;
+    }
+
+    Some(format!(
+        "Dashboard is already running with port {} and {}. Run 'agent-browser dashboard stop' before starting it with different settings.",
+        running.port,
+        running.allowed_origins_description()
+    ))
+}
+
+/// Start the dashboard with an explicit proxy-origin allowlist and a unique
+/// access token. Both are kept separate from the request Host so DNS rebinding
+/// cannot grant access to an attacker-controlled origin. Persist the effective
+/// settings beside the PID so repeated starts cannot silently claim that a live
+/// process adopted different settings.
+fn run_dashboard_start(port: u16, allowed_origins: Vec<String>, json_mode: bool) {
     let pid_path = get_dashboard_pid_path();
 
     // Check if already running
     if let Ok(pid_str) = fs::read_to_string(&pid_path) {
         if let Ok(pid) = pid_str.trim().parse::<u32>() {
             if is_pid_alive(pid) {
+                let running_config = read_dashboard_config();
+                let requested_config = DashboardConfig {
+                    port,
+                    allowed_origins,
+                    access_token: None,
+                };
+                if let Some(error) =
+                    dashboard_config_issue(running_config.as_ref(), &requested_config)
+                {
+                    if json_mode {
+                        print_json_error(error);
+                    } else {
+                        eprintln!("{} {}", color::error_indicator(), error);
+                    }
+                    exit(1);
+                }
                 if json_mode {
+                    let access_urls = running_config
+                        .as_ref()
+                        .map(DashboardConfig::access_urls)
+                        .unwrap_or_default();
                     print_json_value(json!({
                         "success": true,
-                        "data": { "port": port, "pid": pid, "already_running": true },
+                        "data": { "port": requested_config.port, "pid": pid, "already_running": true, "access_urls": access_urls },
                     }));
                 } else {
-                    println!("Dashboard already running at http://localhost:{}", port);
+                    println!(
+                        "Dashboard already running at http://localhost:{}",
+                        requested_config.port
+                    );
+                    print_dashboard_access_urls(&running_config.expect("verified above"));
                 }
                 return;
             }
         }
-        let _ = fs::remove_file(&pid_path);
+        remove_dashboard_sidecars();
+    } else {
+        let _ = fs::remove_file(get_dashboard_config_path());
     }
+
+    let requested_config = match DashboardConfig::new(port, allowed_origins) {
+        Ok(config) => config,
+        Err(error) => {
+            if json_mode {
+                print_json_error(error);
+            } else {
+                eprintln!("{} {}", color::error_indicator(), error);
+            }
+            exit(1);
+        }
+    };
 
     let socket_dir = get_socket_dir();
     if !socket_dir.exists() {
@@ -807,8 +1068,26 @@ fn run_dashboard_start(port: u16, json_mode: bool) {
     };
 
     let mut cmd = std::process::Command::new(&exe_path);
-    cmd.env("AGENT_BROWSER_DASHBOARD", "1")
-        .env("AGENT_BROWSER_DASHBOARD_PORT", port.to_string());
+    cmd.env("AGENT_BROWSER_DASHBOARD", "1").env(
+        "AGENT_BROWSER_DASHBOARD_PORT",
+        requested_config.port.to_string(),
+    );
+    if requested_config.allowed_origins.is_empty() {
+        cmd.env_remove("AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS");
+        cmd.env_remove("AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN");
+    } else {
+        cmd.env(
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            requested_config.allowed_origins.join(","),
+        )
+        .env(
+            "AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN",
+            requested_config
+                .access_token
+                .as_deref()
+                .expect("generated above"),
+        );
+    }
 
     #[cfg(unix)]
     {
@@ -835,20 +1114,44 @@ fn run_dashboard_start(port: u16, json_mode: bool) {
         .stderr(std::process::Stdio::null())
         .spawn()
     {
-        Ok(child) => {
+        Ok(mut child) => {
             let pid = child.id();
-            let _ = fs::write(&pid_path, pid.to_string());
+            let write_result = write_dashboard_config(&requested_config)
+                .and_then(|()| fs::write(&pid_path, pid.to_string()));
+            if let Err(error) = write_result {
+                let _ = child.kill();
+                remove_dashboard_sidecars();
+                if json_mode {
+                    print_json_error(format!("Failed to save dashboard state: {error}"));
+                } else {
+                    eprintln!(
+                        "{} Failed to save dashboard state: {}",
+                        color::error_indicator(),
+                        error
+                    );
+                }
+                exit(1);
+            }
 
             if json_mode {
                 print_json_value(json!({
                     "success": true,
-                    "data": { "port": port, "pid": pid },
+                    "data": { "port": requested_config.port, "pid": pid, "access_urls": requested_config.access_urls() },
                 }));
             } else {
-                println!("Dashboard started at http://localhost:{}", port);
+                println!(
+                    "Dashboard started{}",
+                    if requested_config.access_urls().is_empty() {
+                        format!(" at http://localhost:{}", requested_config.port)
+                    } else {
+                        "; open one of the private access URLs below".to_string()
+                    }
+                );
+                print_dashboard_access_urls(&requested_config);
             }
         }
         Err(e) => {
+            remove_dashboard_sidecars();
             if json_mode {
                 print_json_error(format!("Failed to start dashboard: {}", e));
             } else {
@@ -863,12 +1166,28 @@ fn run_dashboard_start(port: u16, json_mode: bool) {
     }
 }
 
+fn print_dashboard_access_urls(config: &DashboardConfig) {
+    let access_urls = config.access_urls();
+    if access_urls.is_empty() {
+        return;
+    }
+
+    eprintln!(
+        "{} Keep these reverse-proxy dashboard URLs private: they contain access tokens.",
+        color::warning_indicator()
+    );
+    for url in access_urls {
+        println!("{url}");
+    }
+}
+
 fn run_dashboard_stop(json_mode: bool) {
     let pid_path = get_dashboard_pid_path();
 
     let pid_str = match fs::read_to_string(&pid_path) {
         Ok(s) => s,
         Err(_) => {
+            remove_dashboard_sidecars();
             if json_mode {
                 print_json_value(
                     json!({ "success": true, "data": { "stopped": false, "reason": "not running" } }),
@@ -883,7 +1202,7 @@ fn run_dashboard_stop(json_mode: bool) {
     let pid: u32 = match pid_str.trim().parse() {
         Ok(p) => p,
         Err(_) => {
-            let _ = fs::remove_file(&pid_path);
+            remove_dashboard_sidecars();
             if json_mode {
                 print_json_value(
                     json!({ "success": true, "data": { "stopped": false, "reason": "invalid pid" } }),
@@ -912,7 +1231,7 @@ fn run_dashboard_stop(json_mode: bool) {
         }
     }
 
-    let _ = fs::remove_file(&pid_path);
+    remove_dashboard_sidecars();
 
     if json_mode {
         print_json_value(json!({ "success": true, "data": { "stopped": true } }));
@@ -1111,28 +1430,46 @@ fn main() {
 
     // Handle dashboard subcommand
     if clean.first().map(|s| s.as_str()) == Some("dashboard") {
-        match clean.get(1).map(|s| s.as_str()) {
-            Some("start") | None => {
-                let port = clean
-                    .iter()
-                    .position(|a| a == "--port")
-                    .and_then(|i| clean.get(i + 1))
-                    .and_then(|s| s.parse::<u16>().ok())
-                    .unwrap_or(4848);
-                run_dashboard_start(port, flags.json);
-                return;
+        let dashboard_args = &clean[1..];
+        let command = match parse_dashboard_command(dashboard_args) {
+            Ok(command) => command,
+            Err(error) => {
+                if flags.json {
+                    print_json_error(error);
+                } else {
+                    eprintln!("{} {}", color::error_indicator(), error);
+                }
+                exit(1);
             }
-            Some("stop") => {
+        };
+
+        match command {
+            DashboardCommand::Stop => {
                 run_dashboard_stop(flags.json);
                 return;
             }
-            Some(unknown) => {
-                eprintln!(
-                    "{} Unknown dashboard subcommand: {}",
-                    color::error_indicator(),
-                    unknown
-                );
-                exit(1);
+            DashboardCommand::Start {
+                port,
+                allowed_origins,
+            } => {
+                let env_allowed_origins = env::var("AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS").ok();
+                let configured_origins = allowed_origins
+                    .as_deref()
+                    .or(env_allowed_origins.as_deref());
+                let allowed_origins =
+                    match native::stream::normalize_dashboard_allowed_origins(configured_origins) {
+                        Ok(origins) => origins,
+                        Err(error) => {
+                            if flags.json {
+                                print_json_error(error);
+                            } else {
+                                eprintln!("{} {}", color::error_indicator(), error);
+                            }
+                            exit(1);
+                        }
+                    };
+                run_dashboard_start(port, allowed_origins, flags.json);
+                return;
             }
         }
     }
@@ -1408,6 +1745,7 @@ fn main() {
             "autoConnect": true
         });
         attach_script_launch_options(&mut launch_cmd, &flags);
+        attach_webmcp_launch_option(&mut launch_cmd, &flags);
         attach_allowed_domains_to_launch_command(&mut launch_cmd, &flags);
         attach_pin_tab_to_command(&mut launch_cmd, &flags);
         attach_restore_config_to_command(&mut launch_cmd, &flags);
@@ -1508,6 +1846,7 @@ fn main() {
 
         let mut launch_cmd = launch_cmd;
         attach_script_launch_options(&mut launch_cmd, &flags);
+        attach_webmcp_launch_option(&mut launch_cmd, &flags);
         attach_allowed_domains_to_launch_command(&mut launch_cmd, &flags);
         attach_pin_tab_to_command(&mut launch_cmd, &flags);
         attach_restore_config_to_command(&mut launch_cmd, &flags);
@@ -1665,6 +2004,7 @@ fn main() {
         if flags.webgpu || flags.cli_webgpu {
             launch_cmd["webgpu"] = json!(flags.webgpu);
         }
+        attach_webmcp_launch_option(&mut launch_cmd, &flags);
 
         // Env-only opt-out for automatic Xvfb; always stamped from the CLI's
         // fresh environment so both setting and unsetting the var take effect
@@ -1955,6 +2295,76 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dashboard_config_comparison_rejects_unknown_or_changed_settings() {
+        let requested = DashboardConfig::new(
+            4848,
+            native::stream::normalize_dashboard_allowed_origins(Some(
+                "https://second.example.com, https://dashboard.example.com",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let equivalent = DashboardConfig::new(
+            4848,
+            native::stream::normalize_dashboard_allowed_origins(Some(
+                "https://dashboard.example.com,https://second.example.com",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let changed = DashboardConfig::new(
+            4849,
+            native::stream::normalize_dashboard_allowed_origins(Some(
+                "https://dashboard.example.com",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(dashboard_config_issue(Some(&equivalent), &requested), None);
+        assert!(dashboard_config_issue(Some(&changed), &requested).is_some());
+        assert!(dashboard_config_issue(None, &requested).is_some());
+    }
+
+    #[test]
+    fn dashboard_parser_accepts_explicit_start_options() {
+        let args = vec![
+            "start".to_string(),
+            "--port".to_string(),
+            "8080".to_string(),
+            "--allowed-origins".to_string(),
+            "https://dashboard.example.com".to_string(),
+        ];
+
+        assert_eq!(
+            parse_dashboard_command(&args),
+            Ok(DashboardCommand::Start {
+                port: 8080,
+                allowed_origins: Some("https://dashboard.example.com".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn dashboard_parser_rejects_invalid_or_unknown_options() {
+        for args in [
+            vec!["--bogus"],
+            vec!["start", "--allowed-origin", "https://dashboard.example.com"],
+            vec!["start", "--port", "nope"],
+            vec!["start", "--port", "0"],
+            vec!["start", "--port"],
+            vec!["start", "--allowed-origins"],
+            vec!["stop", "--port", "4848"],
+        ] {
+            let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+            assert!(
+                parse_dashboard_command(&args).is_err(),
+                "unexpectedly accepted {args:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_parse_proxy_simple() {
         let result = parse_proxy("http://proxy.com:8080");
         assert_eq!(result.server, "http://proxy.com:8080");
@@ -2060,6 +2470,8 @@ mod tests {
         flags.cli_hide_scrollbars = false;
         flags.webgpu = false;
         flags.cli_webgpu = false;
+        flags.no_webmcp = false;
+        flags.cli_no_webmcp = false;
         flags.color_scheme = None;
         flags.download_path = None;
         flags.engine = None;
@@ -2213,6 +2625,27 @@ mod tests {
     }
 
     #[test]
+    fn test_published_schemas_define_matching_no_webmcp_boolean() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("cli should have a repository parent");
+        let root_schema: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(repo_root.join("agent-browser.schema.json")).unwrap(),
+        )
+        .unwrap();
+        let docs_schema: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(repo_root.join("docs/public/schema.json")).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(root_schema["properties"]["noWebmcp"]["type"], "boolean");
+        assert_eq!(
+            root_schema["properties"]["noWebmcp"],
+            docs_schema["properties"]["noWebmcp"]
+        );
+    }
+
+    #[test]
     fn test_allowed_domains_requests_local_launch_configuration() {
         let mut flags = neutral_launch_config_flags();
         let command = json!({ "action": "snapshot" });
@@ -2223,6 +2656,19 @@ mod tests {
 
         flags.cdp = Some("9222".to_string());
         assert!(!should_send_local_launch_config(&flags, &command));
+    }
+
+    #[test]
+    fn test_no_webmcp_requests_local_launch_configuration() {
+        let mut flags = neutral_launch_config_flags();
+        let command = json!({ "action": "snapshot" });
+        flags.no_webmcp = true;
+        flags.cli_no_webmcp = true;
+        assert!(should_send_local_launch_config(&flags, &command));
+
+        let mut launch = json!({ "action": "launch" });
+        attach_webmcp_launch_option(&mut launch, &flags);
+        assert_eq!(launch["webmcp"], false);
     }
 
     #[test]
