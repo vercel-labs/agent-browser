@@ -1502,6 +1502,10 @@ impl BrowserManager {
         self.isolated_context_unpersisted = false;
     }
 
+    pub fn has_unpersisted_isolated_context(&self) -> bool {
+        self.isolated_context_unpersisted
+    }
+
     pub async fn dispose_unpersisted_isolated_context(&mut self) -> Result<(), String> {
         if !self.isolated_context_unpersisted {
             return Ok(());

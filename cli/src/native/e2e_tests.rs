@@ -10597,6 +10597,18 @@ async fn e2e_isolated_context_recreates_after_chrome_restart_and_restores_state(
         .and_then(|mgr| mgr.isolated_context_id())
         .unwrap();
     assert_ne!(new_context, old_context);
+    let new_context = new_context.to_string();
+    let resp = execute_command(
+        &json!({"id": "invalid-after-recreation", "action": "launch", "isolateContext": true}),
+        &mut recreated,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert!(recreated.browser.is_some(), "{resp}");
+    assert_eq!(
+        recreated.browser.as_ref().unwrap().isolated_context_id(),
+        Some(new_context.as_str())
+    );
 
     let resp = execute_command(
         &json!({ "id": "nav-restored", "action": "navigate", "url": base_url }),
@@ -10705,6 +10717,35 @@ async fn e2e_isolation_pinned_transition_and_implicit_validation() {
         Some(context.as_str())
     );
     assert!(DaemonState::new().isolate_context);
+    let binding = super::tab_binding::load(&implicit.session_id)
+        .unwrap()
+        .unwrap();
+    close_current_browser(&mut implicit).await.unwrap();
+    let response = execute_command(
+        &json!({"id": "reconnected-invalid-action", "action": "navigate"}),
+        &mut implicit,
+    )
+    .await;
+    assert_eq!(response["success"], false, "{response}");
+    assert!(implicit.browser.is_some(), "{response}");
+    assert!(implicit.isolate_context);
+    assert_eq!(
+        implicit.browser.as_ref().unwrap().isolated_context_id(),
+        Some(context.as_str())
+    );
+    assert_eq!(
+        super::tab_binding::load(&implicit.session_id)
+            .unwrap()
+            .unwrap(),
+        binding
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "after-error", "action": "url"}),
+            &mut implicit,
+        )
+        .await,
+    );
     assert_success(
         &execute_command(&json!({"id": "close", "action": "close"}), &mut implicit).await,
     );
