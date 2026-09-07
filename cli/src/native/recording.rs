@@ -339,8 +339,46 @@ pub async fn attach_capture_session(
     }
 }
 
-/// Start ffmpeg for `output_path`, so `record start` fails right away when it
-/// is missing instead of at `record stop`.
+/// Detach a capture session that was attached for recording. This is best
+/// effort because the page or browser may already be gone.
+pub async fn detach_capture_session(client: &CdpClient, capture_session: &str) {
+    let _ = tokio::time::timeout(
+        TEARDOWN_TIMEOUT,
+        client.send_command(
+            "Target.detachFromTarget",
+            Some(json!({ "sessionId": capture_session })),
+            None,
+        ),
+    )
+    .await;
+}
+
+fn ffmpeg_launch_error(error: impl std::fmt::Display) -> String {
+    format!(
+        "ffmpeg not found or failed to execute: {}. Install ffmpeg to enable recording.",
+        error
+    )
+}
+
+/// Verify that ffmpeg can run without opening or modifying the destination.
+/// This keeps missing-binary failures ahead of browser attachment while the
+/// real encoder process is deferred until that attachment succeeds.
+pub async fn check_ffmpeg_available() -> Result<(), String> {
+    let status = tokio::process::Command::new("ffmpeg")
+        .arg("-version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map_err(ffmpeg_launch_error)?;
+    if !status.success() {
+        return Err(ffmpeg_launch_error(status));
+    }
+    Ok(())
+}
+
+/// Start the encoder process after the browser capture session is ready.
 pub fn spawn_ffmpeg(output_path: &str, fps: u32) -> Result<tokio::process::Child, String> {
     spawn_ffmpeg_command(&mut build_ffmpeg_command(output_path, fps))
 }
@@ -348,12 +386,7 @@ pub fn spawn_ffmpeg(output_path: &str, fps: u32) -> Result<tokio::process::Child
 fn spawn_ffmpeg_command(
     command: &mut tokio::process::Command,
 ) -> Result<tokio::process::Child, String> {
-    command.spawn().map_err(|e| {
-        format!(
-            "ffmpeg not found or failed to execute: {}. Install ffmpeg to enable recording.",
-            e
-        )
-    })
+    command.spawn().map_err(ffmpeg_launch_error)
 }
 
 /// Spawn a background task that screencasts `capture_session` into the
@@ -429,15 +462,7 @@ pub fn spawn_recording_task(
             client.send_command_no_params("Page.stopScreencast", Some(&capture_session)),
         )
         .await;
-        let _ = tokio::time::timeout(
-            TEARDOWN_TIMEOUT,
-            client.send_command(
-                "Target.detachFromTarget",
-                Some(json!({ "sessionId": capture_session })),
-                None,
-            ),
-        )
-        .await;
+        detach_capture_session(&client, &capture_session).await;
 
         let output = ffmpeg
             .wait_with_output()
