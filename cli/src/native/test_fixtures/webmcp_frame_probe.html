@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+  <body>
+    <script>
+      const duplicateTool = document.modelContext.registerTool({
+        name: "duplicate_tool",
+        description: "Duplicate tool in a child frame",
+        inputSchema: {
+          type: "object",
+          properties: {}
+        },
+        annotations: {
+          readOnlyHint: true,
+          untrustedContentHint: false
+        },
+        execute: async () => ({ scope: "frame" })
+      });
+
+      const frameWait = document.modelContext.registerTool({
+        name: "frame_wait",
+        description: "Waits in a child frame until the frame is removed",
+        inputSchema: {
+          type: "object",
+          properties: {}
+        },
+        annotations: {
+          readOnlyHint: true,
+          untrustedContentHint: false
+        },
+        execute: async () => new Promise(() => {})
+      });
+
+      Promise.all([duplicateTool, frameWait]).then(() => {
+        document.body.dataset.webmcpReady = "true";
+      });
+    </script>
+  </body>
+</html>

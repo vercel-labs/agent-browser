@@ -22,6 +22,7 @@ export const navigation: NavSection[] = [
     title: "Reference",
     items: [
       { name: "Commands", href: "/commands" },
+      { name: "WebMCP", href: "/webmcp" },
       { name: "Configuration", href: "/configuration" },
       { name: "Plugins", href: "/plugins" },
       { name: "Selectors", href: "/selectors" },

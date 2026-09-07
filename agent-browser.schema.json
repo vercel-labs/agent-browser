@@ -116,6 +116,10 @@
       "type": "boolean",
       "description": "Enable WebGPU (SwiftShader software Vulkan on Linux; no GPU required). Defaults to false."
     },
+    "noWebmcp": {
+      "type": "boolean",
+      "description": "Disable experimental WebMCP support, which is enabled by default for locally launched Chrome. Can also be set with AGENT_BROWSER_NO_WEBMCP."
+    },
     "ignoreHttpsErrors": {
       "type": "boolean",
       "description": "Ignore HTTPS errors during navigation."

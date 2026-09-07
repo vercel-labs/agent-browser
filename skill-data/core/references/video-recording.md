@@ -8,12 +8,15 @@ Capture browser automation as video for debugging, documentation, or verificatio
 
 - [Basic Recording](#basic-recording)
 - [Recording Commands](#recording-commands)
+- [Frame Rate](#frame-rate)
 - [Use Cases](#use-cases)
 - [Best Practices](#best-practices)
 - [Output Format](#output-format)
 - [Limitations](#limitations)
 
 ## Basic Recording
+
+`record start` records the current active page as-is. Without a URL it attaches to the tab you already have open (no navigation, no new tab, page state and hydration intact). With a URL it navigates the active tab there first.
 
 ```bash
 # Launch the browser, then start recording
@@ -35,15 +38,48 @@ agent-browser record stop
 # Launch a session first
 agent-browser open
 
-# Start recording to file
+# Start recording to file (30 fps)
 agent-browser record start ./output.webm
+
+# Start recording at a specific rate (1-60)
+agent-browser record start ./output.webm --fps 60
 
 # Stop current recording
 agent-browser record stop
 
 # Restart with new file (stops current + starts new)
-agent-browser record restart ./take2.webm
+agent-browser record restart ./take2.webm --fps 60
+
+# Navigate the active tab, then record
+agent-browser record start ./output.webm https://example.com/checkout
+
+# Record in a separate tab: open it first, then start recording
+agent-browser tab new https://example.com
+agent-browser record start ./output.webm
 ```
+
+## Frame Rate
+
+Recording captures 30 fps by default, so scrolling, hover states, and CSS transitions read as motion instead of a slideshow. `--fps` takes any rate from 1 to 60.
+
+| Rate | Use it for |
+| --- | --- |
+| 60 | Short, motion-heavy takes: drag interactions, animation, scroll polish work |
+| 30 (default) | Flows, CI evidence, walkthroughs |
+| 1-15 | Long sessions where the video is a timeline, not a motion study |
+
+```bash
+# Animation review
+agent-browser record start ./transition.webm --fps 60
+agent-browser click @e1
+agent-browser wait 1500
+agent-browser record stop
+
+# Hour-long soak run
+agent-browser record start ./soak.webm --fps 5
+```
+
+Frames come from Chrome's screencast, so a 60 fps take of a scroll holds 60 distinct pictures per second. While the page is static the last frame is held, so duration matches wall clock; a gap longer than five seconds is held for five and the rest left out. `record stop --json` reports `frames` (written) and `capturedFrames` (distinct frames the page produced). 60 fps roughly doubles the bitrate of 30 fps.
 
 ## Use Cases
 
@@ -165,11 +201,13 @@ agent-browser record stop
 ## Output Format
 
 - Default format: WebM (VP8/VP9 codec)
+- Default frame rate: 30 fps (`--fps` accepts 1 to 60)
 - Compatible with all modern browsers and video players
 - Compressed but high quality
 
 ## Limitations
 
-- Recording adds slight overhead to automation
-- Large recordings can consume significant disk space
+- Recording adds slight overhead to automation, and higher frame rates add more
+- Large recordings can consume significant disk space; 60 fps roughly doubles the bitrate of 30 fps
+- Distinct frames per second are bounded by how often the page repaints, so a page rendering below 60 fps records below it too
 - Some headless environments may have codec limitations

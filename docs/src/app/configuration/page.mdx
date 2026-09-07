@@ -83,6 +83,7 @@ Global launch, output, provider, and chat options can be set in the config file 
     <tr><td><code>device</code></td><td><code>--device</code></td><td>string</td></tr>
     <tr><td><code>hideScrollbars</code></td><td><code>--hide-scrollbars</code></td><td>boolean</td></tr>
     <tr><td><code>webgpu</code></td><td><code>--webgpu</code></td><td>boolean</td></tr>
+    <tr><td><code>noWebmcp</code></td><td><code>--no-webmcp</code> or <code>AGENT_BROWSER_NO_WEBMCP</code></td><td>boolean</td></tr>
     <tr><td><code>ignoreHttpsErrors</code></td><td><code>--ignore-https-errors</code></td><td>boolean</td></tr>
     <tr><td><code>caCert</code></td><td><code>--ca-cert</code></td><td>string</td></tr>
     <tr><td><code>clearCaCert</code></td><td><code>--no-ca-cert</code></td><td>boolean</td></tr>
@@ -294,6 +295,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_ANNOTATE</code></td><td>Enable annotated screenshots by default.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_CDP</code></td><td>Connect the daemon to a CDP port or WebSocket URL.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_STREAM_PORT</code></td><td>Override the WebSocket streaming port. By default, an OS-assigned port is used. Set this to bind to a specific port (e.g., <code>9223</code>).</td><td>OS-assigned</td></tr>
+    <tr><td><code>AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS</code></td><td>Comma-separated exact HTTPS origins allowed for a reverse-proxied dashboard. Every entry must be valid or dashboard startup fails. Without this setting, only loopback origins are accepted. Loopback access does not require the external dashboard token.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_STREAM_QUALITY</code></td><td>JPEG quality for streamed frames, 0 to 100. Lower values cut bandwidth: quality 20 costs about half the bytes of the default on a busy page.</td><td><code>80</code></td></tr>
     <tr><td><code>AGENT_BROWSER_STREAM_MAX_WIDTH</code></td><td>Cap the encoded frame width in pixels. Caps the frame only and leaves the page size alone, so pointer coordinates are unaffected.</td><td>the viewport</td></tr>
     <tr><td><code>AGENT_BROWSER_STREAM_MAX_HEIGHT</code></td><td>Cap the encoded frame height in pixels.</td><td>the viewport</td></tr>

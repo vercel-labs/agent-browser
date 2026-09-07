@@ -79,6 +79,7 @@ pub struct Config {
     pub device: Option<String>,
     pub hide_scrollbars: Option<bool>,
     pub webgpu: Option<bool>,
+    pub no_webmcp: Option<bool>,
     pub ignore_https_errors: Option<bool>,
     pub ca_cert: Option<String>,
     pub clear_ca_cert: Option<bool>,
@@ -162,6 +163,7 @@ impl Config {
             device: other.device.or(self.device),
             hide_scrollbars: other.hide_scrollbars.or(self.hide_scrollbars),
             webgpu: other.webgpu.or(self.webgpu),
+            no_webmcp: other.no_webmcp.or(self.no_webmcp),
             ignore_https_errors: other.ignore_https_errors.or(self.ignore_https_errors),
             ca_cert,
             clear_ca_cert,
@@ -391,6 +393,7 @@ pub struct Flags {
     pub allow_file_access: bool,
     pub hide_scrollbars: bool,
     pub webgpu: bool,
+    pub no_webmcp: bool,
     /// Env-only (AGENT_BROWSER_NO_XVFB): disable automatic Xvfb for headed
     /// launches on displayless Linux hosts.
     pub no_xvfb: bool,
@@ -439,6 +442,7 @@ pub struct Flags {
     pub cli_download_path: bool,
     pub cli_headed: bool,
     pub cli_webgpu: bool,
+    pub cli_no_webmcp: bool,
     pub cli_restore: bool,
     /// True when --pin-tab / --no-pin-tab was passed on the command line, so
     /// an explicit disable can be sent to the daemon (a bare `pin_tab: false`
@@ -588,6 +592,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .or(config.hide_scrollbars)
             .unwrap_or(true),
         webgpu: env_var_is_truthy("AGENT_BROWSER_WEBGPU") || config.webgpu.unwrap_or(false),
+        no_webmcp: env_var_is_truthy("AGENT_BROWSER_NO_WEBMCP")
+            || config.no_webmcp.unwrap_or(false),
         no_xvfb: env_var_is_truthy("AGENT_BROWSER_NO_XVFB"),
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
@@ -671,6 +677,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_download_path: false,
         cli_headed: false,
         cli_webgpu: false,
+        cli_no_webmcp: false,
         cli_restore: false,
         cli_pin_tab: false,
     };
@@ -712,6 +719,14 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.webgpu = val;
                 flags.cli_webgpu = true;
+                if consumed {
+                    i += 1;
+                }
+            }
+            "--no-webmcp" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.no_webmcp = val;
+                flags.cli_no_webmcp = true;
                 if consumed {
                     i += 1;
                 }
@@ -1119,6 +1134,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--json",
         "--headed",
         "--webgpu",
+        "--no-webmcp",
         "--debug",
         "--ignore-https-errors",
         "--allow-file-access",
@@ -1451,6 +1467,14 @@ mod tests {
     fn test_clean_args_removes_idle_timeout_before_command() {
         let cleaned = clean_args(&args("--idle-timeout 10s open example.com"));
         assert_eq!(cleaned, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_clean_args_keeps_record_fps() {
+        // --fps belongs to `record`, so it must reach the command parser even
+        // when global flags are mixed in.
+        let cleaned = clean_args(&args("--json record start demo.webm --fps 60"));
+        assert_eq!(cleaned, vec!["record", "start", "demo.webm", "--fps", "60"]);
     }
 
     #[test]
@@ -2174,5 +2198,16 @@ mod tests {
         ];
         let clean = clean_args(&input);
         assert_eq!(clean, vec!["open", "example.com"]);
+    }
+
+    #[test]
+    fn test_no_webmcp_flag() {
+        let flags = parse_flags(&args("--no-webmcp open example.com"));
+        assert!(flags.no_webmcp);
+        assert!(flags.cli_no_webmcp);
+        assert_eq!(
+            clean_args(&args("--no-webmcp open example.com")),
+            args("open example.com")
+        );
     }
 }

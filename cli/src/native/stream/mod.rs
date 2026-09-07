@@ -6,7 +6,9 @@ mod http;
 mod websocket;
 
 pub use cdp_loop::{ack_screencast_frame, start_screencast, stop_screencast};
-pub use dashboard::run_dashboard_server;
+pub use dashboard::{
+    is_valid_dashboard_access_token, normalize_dashboard_allowed_origins, run_dashboard_server,
+};
 
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -243,12 +245,6 @@ impl StreamServer {
     /// Notify the background CDP listener that the client has changed (browser launched/closed).
     pub fn notify_client_changed(&self) {
         self.client_notify.notify_one();
-    }
-
-    /// Update the active CDP page session ID used for screencast commands.
-    pub async fn set_cdp_session_id(&self, session_id: Option<String>) {
-        let mut guard = self.cdp_session_id.write().await;
-        *guard = session_id;
     }
 
     /// Check whether the server currently has active screencast running.
@@ -585,6 +581,26 @@ impl StreamServer {
             "timestamp": timestamp_ms(),
         });
         let _ = self.frame_tx.send(msg.to_string());
+    }
+
+    pub async fn bind_cdp_session_and_broadcast_tabs(
+        &self,
+        session_id: Option<String>,
+        tabs: &[Value],
+    ) {
+        let mut session_guard = self.cdp_session_id.write().await;
+        let mut tabs_guard = self.last_tabs.write().await;
+        *session_guard = session_id;
+        *tabs_guard = tabs.to_vec();
+        let msg = json!({
+            "type": "tabs",
+            "tabs": tabs,
+            "timestamp": timestamp_ms(),
+        });
+        let _ = self.frame_tx.send(msg.to_string());
+        drop(tabs_guard);
+        drop(session_guard);
+        self.client_notify.notify_one();
     }
 }
 

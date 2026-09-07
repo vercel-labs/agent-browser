@@ -37,6 +37,8 @@ agent-browser removeinitscript <identifier>
 
 Runtime init scripts are useful after a session has started. They are still init scripts, so they affect future documents and navigations rather than rewriting already-executed page code.
 
+Runtime init-script identifiers are session-wide. `removeinitscript` removes the script from every open tab where it was registered and prevents it from being replayed into tabs opened later.
+
 ## Pre-navigation setup
 
 For flows that need routes, cookies, or scripts installed before the first real navigation, start the browser without a URL:
