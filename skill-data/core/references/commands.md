@@ -487,8 +487,10 @@ agent-browser a11y <url> --json                     # Structured results for aut
 ```bash
 agent-browser open --init-script <path>             # Register before first navigation (repeatable)
 agent-browser addinitscript <js>                    # Register at runtime (returns identifier)
-agent-browser removeinitscript <identifier>         # Remove a previously registered init script
+agent-browser removeinitscript <identifier>         # Remove from every tab in the session
 ```
+
+Runtime init-script identifiers are session-wide. Removing one clears it from every open tab where it was registered and from the setup replayed into future tabs.
 
 ## cURL cookie import
 

@@ -3762,7 +3762,7 @@ SPA:
                              history.pushState + popstate/navigate events for other frameworks
 
 Init scripts:
-  removeinitscript <id>      Remove a script registered via --init-script or addinitscript
+  removeinitscript <id>      Remove a registered script from every tab in the session
 
 Batch:
   batch [--bail] ["cmd" ...]  Execute multiple commands sequentially (args or stdin)

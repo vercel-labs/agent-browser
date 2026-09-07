@@ -3718,30 +3718,33 @@ async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Resul
     }
 
     if let Some(ref headers) = setup.extra_headers {
-        let _ = network::set_extra_headers(&client, session_id, headers).await;
+        network::set_extra_headers(&client, session_id, headers).await?;
     }
 
     if let Some(offline) = setup.offline {
-        let _ = network::set_offline(&client, session_id, offline).await;
+        network::set_offline(&client, session_id, offline).await?;
     }
 
     for (index, script) in setup.init_scripts.iter().enumerate() {
-        if let Ok(result) = client
+        let result = client
             .send_command(
                 "Page.addScriptToEvaluateOnNewDocument",
                 Some(json!({ "source": &script.source })),
                 Some(session_id),
             )
-            .await
-        {
-            if let Some(identifier) = result.get("identifier").and_then(Value::as_str) {
-                if let Some(tracked) = state.session_setup.init_scripts.get_mut(index) {
-                    tracked
-                        .session_identifiers
-                        .insert(session_id.to_string(), identifier.to_string());
-                }
-            }
-        }
+            .await?;
+        let identifier = result
+            .get("identifier")
+            .and_then(Value::as_str)
+            .ok_or("Page.addScriptToEvaluateOnNewDocument returned no identifier")?;
+        let tracked = state
+            .session_setup
+            .init_scripts
+            .get_mut(index)
+            .ok_or("Init script setup changed while it was being applied")?;
+        tracked
+            .session_identifiers
+            .insert(session_id.to_string(), identifier.to_string());
     }
 
     // `route` and origin-scoped `--headers` are resolved by the background
@@ -8015,28 +8018,57 @@ async fn handle_addinitscript(cmd: &Value, state: &mut DaemonState) -> Result<Va
 }
 
 async fn handle_removeinitscript(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let identifier = cmd
         .get("identifier")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'identifier' parameter")?;
-    let session_id = mgr.active_session_id()?;
+    let (client, active_session_id, live_session_ids) = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        (
+            mgr.client.clone(),
+            mgr.active_session_id()?.to_string(),
+            mgr.pages_list()
+                .into_iter()
+                .map(|page| page.session_id)
+                .collect::<HashSet<_>>(),
+        )
+    };
     let tracked_index = state
         .session_setup
         .init_scripts
         .iter()
         .position(|script| script.identifier == identifier);
-    let session_identifier = tracked_index
-        .and_then(|index| {
+
+    // Daemon-owned handles are session-wide. Remove each target-local CDP
+    // registration before dropping the source that would reach future tabs.
+    if let Some(index) = tracked_index {
+        let session_identifiers = state.session_setup.init_scripts[index]
+            .session_identifiers
+            .clone();
+        for (session_id, session_identifier) in session_identifiers {
+            if !live_session_ids.contains(&session_id) {
+                continue;
+            }
+            client
+                .send_command(
+                    "Page.removeScriptToEvaluateOnNewDocument",
+                    Some(json!({ "identifier": session_identifier })),
+                    Some(&session_id),
+                )
+                .await?;
             state.session_setup.init_scripts[index]
                 .session_identifiers
-                .get(session_id)
-        })
-        .cloned()
-        .unwrap_or_else(|| identifier.to_string());
-    mgr.remove_script_to_evaluate(&session_identifier).await?;
-    if let Some(index) = tracked_index {
+                .remove(&session_id);
+        }
         state.session_setup.init_scripts.remove(index);
+    } else {
+        client
+            .send_command(
+                "Page.removeScriptToEvaluateOnNewDocument",
+                Some(json!({ "identifier": identifier })),
+                Some(&active_session_id),
+            )
+            .await?;
     }
     Ok(json!({ "removed": true, "identifier": identifier }))
 }

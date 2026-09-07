@@ -7427,7 +7427,7 @@ async fn e2e_tab_new_inherits_init_script_on_first_load() {
 
 /// Replayed init scripts receive target-specific CDP identifiers. Removing a
 /// script from the new tab must translate the original user-facing identifier
-/// to the identifier Chrome assigned in that target.
+/// for every tab where Chrome registered it.
 #[tokio::test]
 #[ignore]
 async fn e2e_tab_new_removes_replayed_init_script_by_original_identifier() {
@@ -7512,6 +7512,38 @@ async fn e2e_tab_new_removes_replayed_init_script_by_original_identifier() {
     .await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["result"], false);
+
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "tab_switch", "tabId": "t1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "10", "action": "navigate",
+            "url": "data:text/html,<title>original after removal</title>",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "11", "action": "evaluate",
+            "script": "window.__abSecondInit === true",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        false,
+        "removing a replayed script should also remove its original registration"
+    );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);

@@ -548,7 +548,7 @@ The default output lists violations and incomplete checks with impact, rule ID, 
 ```bash
 agent-browser open --init-script <path>           # Register before first navigation (repeatable)
 agent-browser addinitscript <js>                  # Register at runtime (returns identifier)
-agent-browser removeinitscript <identifier>       # Remove a previously registered init script
+agent-browser removeinitscript <identifier>       # Remove from every tab in the session
 ```
 
 See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime scripts, built-in React DevTools, and extensions.

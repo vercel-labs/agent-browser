@@ -519,8 +519,10 @@ axe-core: 4.12.1  violations: 2  incomplete: 0  passes: 24
 agent-browser open --init-script <path>           # Register page init script before first navigation
                                                   # (repeatable; also AGENT_BROWSER_INIT_SCRIPTS env)
 agent-browser addinitscript <js>                  # Register at runtime (returns identifier)
-agent-browser removeinitscript <identifier>       # Remove a previously registered init script
+agent-browser removeinitscript <identifier>       # Remove from every tab in the session
 ```
+
+Runtime init-script identifiers are session-wide. `removeinitscript` removes the script from every open tab where it was registered and prevents it from being replayed into tabs opened later.
 
 ### Setup
 
