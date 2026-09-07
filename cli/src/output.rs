@@ -2358,7 +2358,7 @@ Settings:
   geo <lat> <lng>            Set geolocation
   offline [on|off]           Toggle offline mode; off restores the new-tab default
   headers <json>             Set extra HTTP headers; use {} to clear them for new tabs
-  credentials <user> <pass>  Set HTTP authentication
+  credentials <user> <pass>  Set HTTP authentication for current and future tabs
   media [dark|light]         Set color scheme preference
         [reduced-motion]     Enable reduced motion
 
@@ -2523,8 +2523,8 @@ accepted. CDP target ids (from `tab list --json`) are also accepted as tab
 refs; unlike `t<N>` ids they stay stable across daemon restarts.
 
 Tabs opened with `tab new` or `click --new-tab` inherit the session's user
-agent, headers, init scripts, routes, and emulation overrides before their
-first document loads.
+agent, headers, HTTP credentials, init scripts, routes, and emulation
+overrides before their first document loads.
 
 Each session remembers its active tab (bound by CDP target id) and returns
 to it after a daemon restart. With --pin-tab, commands fail with a

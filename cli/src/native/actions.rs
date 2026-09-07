@@ -455,8 +455,9 @@ pub struct SessionSetup {
     pub locale: Option<String>,
     /// `(latitude, longitude, accuracy)`.
     pub geolocation: Option<(f64, f64, Option<f64>)>,
-    /// Global headers from the `headers` command (`Network.setExtraHTTPHeaders`).
-    /// Origin-scoped `--headers` live in `DaemonState::origin_headers`.
+    /// Global headers from the `headers` and `credentials` commands
+    /// (`Network.setExtraHTTPHeaders`). Origin-scoped `--headers` live in
+    /// `DaemonState::origin_headers`.
     pub extra_headers: Option<HashMap<String, String>>,
     pub offline: Option<bool>,
     /// Init scripts registered with `Page.addScriptToEvaluateOnNewDocument`:
@@ -11405,7 +11406,7 @@ async fn handle_request_detail(cmd: &Value, state: &mut DaemonState) -> Result<V
     Ok(result)
 }
 
-async fn handle_http_credentials(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_http_credentials(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let username = cmd
@@ -11425,6 +11426,9 @@ async fn handle_http_credentials(cmd: &Value, state: &DaemonState) -> Result<Val
     let mut headers = HashMap::new();
     headers.insert("Authorization".to_string(), format!("Basic {}", encoded));
     network::set_extra_headers(&mgr.client, &session_id, &headers).await?;
+    // Network.setExtraHTTPHeaders replaces the target's complete global
+    // header set, so keep the same replacement ready for tabs opened later.
+    state.session_setup.extra_headers = Some(headers);
 
     Ok(json!({ "set": true }))
 }
