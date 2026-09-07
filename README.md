@@ -309,6 +309,8 @@ agent-browser set credentials <u> <p> # HTTP basic auth
 agent-browser set media [dark|light]  # Emulate color scheme
 ```
 
+`set offline off` and `set headers '{}'` restore the default setup for tabs opened later.
+
 ### Cookies & Storage
 
 ```bash
@@ -368,6 +370,8 @@ agent-browser snapshot               # populate refs for docs
 agent-browser click @e3              # click uses docs's refs
 agent-browser tab close docs         # close by label
 ```
+
+Tabs opened through `tab new` or `click --new-tab` inherit the session's user agent, headers, init scripts, routes, and emulation overrides before their first document loads.
 
 `tab list --json` also reports each tab's CDP `targetId`, and target ids are accepted anywhere a tab ref is accepted (`tab <targetId>`, `tab close <targetId>`). Unlike `t<N>` ids, which are per-daemon counters, target ids stay stable across daemon restarts, so they're the right handle for scripts coordinating multiple sessions on one browser.
 

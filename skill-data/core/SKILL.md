@@ -299,6 +299,8 @@ agent-browser tab close t2             # close tab t2
 
 Stable `tabId`s mean `t2` points at the same tab across commands even when other tabs open or close. After switching, refs from a prior snapshot on a different tab no longer apply — re-snapshot. `tab list --json` also reports each tab's CDP `targetId`, accepted anywhere a tab ref is accepted; target ids stay stable across daemon restarts, unlike `t<N>` ids.
 
+Tabs opened through `tab new` or `click --new-tab` inherit the session's user agent, headers, init scripts, routes, and emulation overrides before their first document loads.
+
 Switching has two special cases worth knowing:
 
 - **Discarded tab (Chrome Memory Saver).** A backgrounded tab may have its renderer dropped. Switching to it reactivates the tab, which reloads the page and discards unsaved state (form input, scroll position). The switch result then includes `"revived": true`, so treat prior in-page state as gone and re-snapshot. Closing the active tab onto a discarded successor reports `"activeTabRevived": true` for the same reason.

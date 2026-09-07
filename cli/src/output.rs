@@ -1623,8 +1623,9 @@ If another element covers the click point, agent-browser reports the
 covering element instead of dispatching a click to the wrong target.
 
 Options:
-  --new-tab            Open link in a new tab instead of navigating current tab
-                       (only works on elements with href attribute)
+  --new-tab            Open link in a new tab instead of navigating current tab.
+                       The new tab inherits session setup before its first load.
+                       Only works on elements with an href attribute.
 
 Global Options:
   --json               Output as JSON
@@ -2355,8 +2356,8 @@ Settings:
   viewport <w> <h> [scale]   Set viewport size (scale = deviceScaleFactor, e.g. 2 for retina)
   device <name>              Emulate device (e.g., "iPhone 12")
   geo <lat> <lng>            Set geolocation
-  offline [on|off]           Toggle offline mode
-  headers <json>             Set extra HTTP headers
+  offline [on|off]           Toggle offline mode; off restores the new-tab default
+  headers <json>             Set extra HTTP headers; use {} to clear them for new tabs
   credentials <user> <pass>  Set HTTP authentication
   media [dark|light]         Set color scheme preference
         [reduced-motion]     Enable reduced motion
@@ -2520,6 +2521,10 @@ referring to the same tab across commands. Optional user-assigned labels
 (e.g. `docs`, `app`) are interchangeable with ids everywhere a tab ref is
 accepted. CDP target ids (from `tab list --json`) are also accepted as tab
 refs; unlike `t<N>` ids they stay stable across daemon restarts.
+
+Tabs opened with `tab new` or `click --new-tab` inherit the session's user
+agent, headers, init scripts, routes, and emulation overrides before their
+first document loads.
 
 Each session remembers its active tab (bound by CDP target id) and returns
 to it after a daemon restart. With --pin-tab, commands fail with a
