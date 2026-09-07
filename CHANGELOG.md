@@ -1,8 +1,29 @@
 # agent-browser
 
-## 0.36.0
+## 0.37.0
 
 <!-- release:start -->
+### New Features
+
+- Added **higher-quality video recording**: `record start` and `record restart` now capture the current active page at 30 fps by default, support `--fps 1-60`, use `Page.startScreencast` for smoother motion, and preserve wall-clock timing. WebM and MP4 output are documented, and `doctor` reports the ffmpeg recording dependencies (#1763, #1776, #1778)
+- Added **WebMCP availability output** so navigation responses advertise when a page exposes allowed WebMCP tools, including availability metadata for CLI, JSON, and MCP clients (#1760)
+- Added **session setup inheritance for new tabs**. Tabs opened with `tab new` or through page clicks now inherit the active session's headers, credentials, user agent, locale, timezone, geolocation, offline mode, routes, color scheme, and init scripts before their first navigation (#1777)
+
+### Bug Fixes
+
+- Fixed **recording startup validation** so missing ffmpeg, extensionless output paths, and invalid recording options fail before browser or recording state changes. Failed replacements preserve the active take, and ffmpeg errors now include useful diagnostics (#1778)
+- Fixed **recording navigation state** so URL navigation during recording clears stale element refs, frame scope, and page WebMCP state like normal navigation (#1776)
+
+### Contributors
+
+- @jamesvclements
+- @ctate
+- @Railly
+
+<!-- release:end -->
+
+## 0.36.0
+
 ### New Features
 
 - Added experimental **WebMCP support** for discovering and invoking tools provided by the current page, including frame-aware tool selection, detached results, cancellation, bounded metadata and output handling, and an opt-in MCP tool profile. WebMCP is enabled by default for locally managed Chrome and can be disabled with `--no-webmcp` or `AGENT_BROWSER_NO_WEBMCP`.
@@ -23,8 +44,6 @@
 - @Railly
 - @anupamme
 - @arrufat
-
-<!-- release:end -->
 
 ## 0.35.2
 
