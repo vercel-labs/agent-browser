@@ -1722,7 +1722,6 @@ fn main() {
         engine: flags.engine.as_deref(),
         auto_connect: flags.auto_connect,
         pin_tab: flags.pin_tab,
-        isolate_context: flags.isolate_context,
         idle_timeout: flags.idle_timeout.as_deref(),
         default_timeout: flags.default_timeout,
         cdp: flags.cdp.as_deref(),

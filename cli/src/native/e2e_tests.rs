@@ -9946,6 +9946,7 @@ fn binding_test_env() -> (EnvGuard<'static>, tempfile::TempDir) {
         "AGENT_BROWSER_SESSION",
         "AGENT_BROWSER_PIN_TAB",
         "AGENT_BROWSER_ISOLATE_CONTEXT",
+        "AGENT_BROWSER_CDP",
     ]);
     let dir = tempfile::tempdir().unwrap();
     guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
@@ -9953,6 +9954,7 @@ fn binding_test_env() -> (EnvGuard<'static>, tempfile::TempDir) {
     guard.remove("AGENT_BROWSER_NAMESPACE");
     guard.remove("AGENT_BROWSER_PIN_TAB");
     guard.remove("AGENT_BROWSER_ISOLATE_CONTEXT");
+    guard.remove("AGENT_BROWSER_CDP");
     (guard, dir)
 }
 
@@ -10634,6 +10636,266 @@ async fn e2e_isolated_context_recreates_after_chrome_restart_and_restores_state(
     .await;
     assert_success(&resp);
     cleanup_restore_state_files(&restore_key);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_isolation_pinned_transition_and_implicit_validation() {
+    let (guard, _dir) = binding_test_env();
+    let (base_url, _server) = start_cookie_login_server().await;
+    let (mut host, ws_url) = launch_binding_host(&guard).await;
+    let mut pinned =
+        attach_pinned_session(&guard, "e2e-pinned-isolation", &ws_url, &base_url).await;
+    let old_target = pinned
+        .browser
+        .as_ref()
+        .unwrap()
+        .binding_snapshot()
+        .unwrap()
+        .0;
+    assert_success(&execute_command(
+        &json!({"id": "isolate-pinned", "action": "launch", "cdpUrl": ws_url, "isolateContext": true}),
+        &mut pinned,
+    ).await);
+    let binding = super::tab_binding::load(&pinned.session_id)
+        .unwrap()
+        .unwrap();
+    assert!(binding.browser_context_id.is_some());
+    assert_ne!(binding.target_id, old_target);
+    assert!(pinned
+        .browser
+        .as_ref()
+        .unwrap()
+        .binding_snapshot()
+        .is_some());
+    assert!(DaemonState::new().isolate_context);
+    assert_success(&execute_command(&json!({"id": "close", "action": "close"}), &mut pinned).await);
+
+    guard.set("AGENT_BROWSER_SESSION", "e2e-implicit-isolation");
+    guard.set("AGENT_BROWSER_CDP", &ws_url);
+    let mut implicit = DaemonState::new();
+    let response = execute_command(
+        &json!({"id": "missing-url", "action": "navigate", "isolateContext": true}),
+        &mut implicit,
+    )
+    .await;
+    assert_eq!(response["success"], false, "{response}");
+    assert!(!implicit.isolate_context);
+    assert!(implicit.browser.is_none());
+    assert!(super::tab_binding::load(&implicit.session_id)
+        .unwrap()
+        .is_none());
+    assert_success(&execute_command(
+        &json!({"id": "implicit-success", "action": "navigate", "url": base_url, "isolateContext": true}),
+        &mut implicit,
+    ).await);
+    assert!(implicit.isolate_context);
+    let context = implicit
+        .browser
+        .as_ref()
+        .unwrap()
+        .isolated_context_id()
+        .unwrap()
+        .to_string();
+    assert_success(
+        &execute_command(&json!({"id": "flagless", "action": "url"}), &mut implicit).await,
+    );
+    assert_eq!(
+        implicit.browser.as_ref().unwrap().isolated_context_id(),
+        Some(context.as_str())
+    );
+    assert!(DaemonState::new().isolate_context);
+    assert_success(
+        &execute_command(&json!({"id": "close", "action": "close"}), &mut implicit).await,
+    );
+    guard.remove("AGENT_BROWSER_CDP");
+    assert_success(
+        &execute_command(&json!({"id": "host-close", "action": "close"}), &mut host).await,
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_isolation_commits_only_after_successful_connection() {
+    let (guard, dir) = binding_test_env();
+    let (base_url, _server) = start_cookie_login_server().await;
+    let (mut host, ws_url) = launch_binding_host(&guard).await;
+    guard.set("AGENT_BROWSER_SESSION", "e2e-isolation-commit");
+    let mut state = DaemonState::new();
+    let invalid_state = dir.path().join("invalid-state.json");
+    std::fs::write(&invalid_state, "invalid JSON").unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead_port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let binding_tmp = super::tab_binding::binding_path(&state.session_id)
+        .with_extension(format!("target.tmp.{}", std::process::id()));
+    std::fs::create_dir(&binding_tmp).unwrap();
+    let response = execute_command(
+        &json!({"id": "binding-failure", "action": "launch", "cdpUrl": ws_url, "isolateContext": true}),
+        &mut state,
+    ).await;
+    assert_eq!(response["success"], false, "{response}");
+    assert!(response["error"]
+        .as_str()
+        .unwrap()
+        .contains("cannot persist"));
+    assert!(!state.isolate_context);
+    assert!(state.browser.is_none());
+    assert!(super::tab_binding::load(&state.session_id)
+        .unwrap()
+        .is_none());
+    let contexts = host
+        .browser
+        .as_ref()
+        .unwrap()
+        .client
+        .send_command_no_params("Target.getBrowserContexts", None)
+        .await
+        .unwrap();
+    assert!(
+        contexts["browserContextIds"].as_array().unwrap().is_empty(),
+        "{contexts}"
+    );
+    std::fs::remove_dir(&binding_tmp).unwrap();
+    for cmd in [
+        json!({"id": "invalid-mode", "action": "launch", "isolateContext": true}),
+        json!({"id": "transport", "action": "launch", "isolateContext": true, "cdpPort": dead_port}),
+        json!({"id": "post-attach", "action": "launch", "isolateContext": true, "cdpUrl": ws_url, "storageState": invalid_state}),
+    ] {
+        let response = execute_command(&cmd, &mut state).await;
+        assert_eq!(response["success"], false, "{response}");
+        assert!(!state.isolate_context, "{cmd}: {response}");
+        assert!(state.browser.is_none());
+        assert!(super::tab_binding::load(&state.session_id)
+            .unwrap()
+            .is_none());
+        assert!(!DaemonState::new().isolate_context);
+        let contexts = host
+            .browser
+            .as_ref()
+            .unwrap()
+            .client
+            .send_command_no_params("Target.getBrowserContexts", None)
+            .await
+            .unwrap();
+        assert!(
+            contexts["browserContextIds"].as_array().unwrap().is_empty(),
+            "{contexts}"
+        );
+        let response = execute_command(
+            &json!({"id": "flagless", "action": "launch", "cdpUrl": ws_url}),
+            &mut state,
+        )
+        .await;
+        assert_success(&response);
+        assert!(!state.browser.as_ref().unwrap().is_isolated());
+        assert!(!state.isolate_context);
+        assert_success(
+            &execute_command(&json!({"id": "close", "action": "close"}), &mut state).await,
+        );
+    }
+    let port = url::Url::parse(&ws_url).unwrap().port().unwrap();
+    for endpoint in [json!({"cdpUrl": ws_url}), json!({"cdpPort": port})] {
+        let mut command = endpoint.clone();
+        command["id"] = json!("commit");
+        command["action"] = json!("launch");
+        command["isolateContext"] = json!(true);
+        assert_success(&execute_command(&command, &mut state).await);
+        assert!(state.isolate_context);
+        assert_success(
+            &execute_command(
+                &json!({"id": "navigate", "action": "navigate", "url": base_url}),
+                &mut state,
+            )
+            .await,
+        );
+        set_isolation_probe(&mut state, "COMMITTED").await;
+        let context = state
+            .browser
+            .as_ref()
+            .unwrap()
+            .isolated_context_id()
+            .unwrap()
+            .to_string();
+        let target = state
+            .browser
+            .as_ref()
+            .unwrap()
+            .binding_snapshot()
+            .unwrap()
+            .0;
+        for requested in [None, Some(false), Some(true)] {
+            let mut command = endpoint.clone();
+            command["id"] = json!("reuse");
+            command["action"] = json!("launch");
+            if let Some(requested) = requested {
+                command["isolateContext"] = json!(requested);
+            }
+            assert_success(&execute_command(&command, &mut state).await);
+            assert!(state.isolate_context);
+            assert_eq!(
+                state.browser.as_ref().unwrap().isolated_context_id(),
+                Some(context.as_str())
+            );
+            assert_eq!(
+                state
+                    .browser
+                    .as_ref()
+                    .unwrap()
+                    .binding_snapshot()
+                    .unwrap()
+                    .0,
+                target
+            );
+            assert_isolation_probe(&read_isolation_probe(&mut state, "read").await, "COMMITTED");
+        }
+        let binding = super::tab_binding::load(&state.session_id)
+            .unwrap()
+            .unwrap();
+        let response = execute_command(
+            &json!({"id": "failed-reconnect", "action": "launch", "cdpPort": dead_port, "isolateContext": true}),
+            &mut state,
+        ).await;
+        assert_eq!(response["success"], false, "{response}");
+        assert!(state.isolate_context);
+        assert_eq!(
+            super::tab_binding::load(&state.session_id)
+                .unwrap()
+                .unwrap(),
+            binding
+        );
+        let mut command = endpoint;
+        command["id"] = json!("reconnect");
+        command["action"] = json!("launch");
+        assert_success(&execute_command(&command, &mut state).await);
+        assert_eq!(
+            state.browser.as_ref().unwrap().isolated_context_id(),
+            Some(context.as_str())
+        );
+        assert_eq!(
+            state
+                .browser
+                .as_ref()
+                .unwrap()
+                .binding_snapshot()
+                .unwrap()
+                .0,
+            target
+        );
+        assert_isolation_probe(
+            &read_isolation_probe(&mut state, "reconnected").await,
+            "COMMITTED",
+        );
+        assert!(DaemonState::new().isolate_context);
+        assert_success(
+            &execute_command(&json!({"id": "close", "action": "close"}), &mut state).await,
+        );
+        assert!(!state.isolate_context);
+        assert!(!DaemonState::new().isolate_context);
+    }
+    assert_success(
+        &execute_command(&json!({"id": "host-close", "action": "close"}), &mut host).await,
+    );
 }
 
 #[tokio::test]

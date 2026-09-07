@@ -2349,14 +2349,18 @@ impl BrowserManager {
 
     pub async fn set_download_behavior(&self, download_path: &str) -> Result<(), String> {
         let session_id = self.active_session_id()?;
+        let mut params = json!({
+            "behavior": "allowAndName",
+            "downloadPath": download_path,
+            "eventsEnabled": true,
+        });
+        if let Some(context_id) = self.isolated_context_id() {
+            params["browserContextId"] = json!(context_id);
+        }
         self.client
             .send_command(
                 "Browser.setDownloadBehavior",
-                Some(json!({
-                    "behavior": "allowAndName",
-                    "downloadPath": download_path,
-                    "eventsEnabled": true,
-                })),
+                Some(params),
                 Some(session_id),
             )
             .await?;

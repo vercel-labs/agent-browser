@@ -31,14 +31,27 @@ impl TestServer {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         thread::spawn(move || {
-                            let mut request = [0u8; 8192];
-                            let read = stream.read(&mut request).unwrap_or(0);
-                            let request = String::from_utf8_lossy(&request[..read]);
+                            stream
+                                .set_read_timeout(Some(Duration::from_secs(5)))
+                                .unwrap();
+                            let mut request = Vec::new();
+                            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                                let mut buffer = [0u8; 8192];
+                                let read = stream.read(&mut buffer).unwrap_or(0);
+                                if read == 0 || request.len() + read > 65536 {
+                                    return;
+                                }
+                                request.extend_from_slice(&buffer[..read]);
+                            }
+                            let request = String::from_utf8_lossy(&request);
                             let path = request.split_whitespace().nth(1).unwrap_or("/");
-                            let body =
-                                format!("<!doctype html><title>{path}</title><main>{path}</main>");
+                            let (content_type, body) = if path.starts_with("/download/") {
+                                ("application/octet-stream", path.to_string())
+                            } else {
+                                ("text/html", format!("<!doctype html><title>{path}</title><main>{path}</main><a id=\"download\" href=\"/download{path}\" download>Download</a>"))
+                            };
                             let response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{}",
+                                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{}",
                                 body.len(),
                                 body
                             );
@@ -153,6 +166,137 @@ impl Drop for Sessions {
             let _ = self.command(session).arg("close").output();
         }
     }
+}
+
+#[test]
+#[ignore]
+fn invalid_first_isolation_request_does_not_poison_daemon() {
+    let server = TestServer::start();
+    let sessions = Sessions::new();
+    let host = sessions.names[0];
+    let agent = sessions.names[1];
+    let url = server.url("127.0.0.1", "/first-request");
+    sessions.run_json(host, &["open", &url]);
+    sessions.run_json(
+        host,
+        &["eval", "document.cookie = 'first_request=HOST; Path=/'"],
+    );
+    let cdp = sessions.run_json(host, &["get", "cdp-url"])["data"]["cdpUrl"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let output = sessions
+        .command(agent)
+        .args(["--isolate-context", "open", "about:blank", "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    sessions.run_json(agent, &["--cdp", &cdp, "open", &url]);
+    assert_eq!(
+        sessions.run_json(agent, &["eval", "document.cookie"])["data"]["result"],
+        "first_request=HOST"
+    );
+    let binding: Value = serde_json::from_str(
+        &std::fs::read_to_string(sessions.socket_dir.path().join(format!("{agent}.target")))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(binding.get("browserContextId").is_none(), "{binding}");
+}
+
+#[test]
+#[ignore]
+fn isolated_downloads_preserve_other_context_destinations() {
+    let server = TestServer::start();
+    let sessions = Sessions::new();
+    let host = sessions.names[0];
+    let agent_a = sessions.names[1];
+    let agent_b = sessions.names[2];
+    let output = TempDir::new().unwrap();
+    sessions.run_json(
+        host,
+        &["--pin-tab", "open", &server.url("127.0.0.1", "/host")],
+    );
+    let cdp = sessions.run_json(host, &["get", "cdp-url"])["data"]["cdpUrl"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let host_file = output.path().join("host").join("first.bin");
+    let host_target = target_for_url(&sessions, host, &server.url("127.0.0.1", "/host"));
+    sessions.run_json(
+        host,
+        &["download", "#download", host_file.to_str().unwrap()],
+    );
+    assert_eq!(
+        std::fs::read_to_string(&host_file).unwrap(),
+        "/download/host"
+    );
+    for (session, page) in [(agent_a, "/a"), (agent_b, "/b")] {
+        sessions.run_json(
+            session,
+            &[
+                "--isolate-context",
+                "--cdp",
+                &cdp,
+                "open",
+                &server.url("127.0.0.1", page),
+            ],
+        );
+    }
+    for (session, name) in [(agent_a, "a"), (agent_b, "b")] {
+        let path = output.path().join(name).join("first.bin");
+        sessions.run_json(session, &["download", "#download", path.to_str().unwrap()]);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("/download/{name}")
+        );
+    }
+    for (session, name) in [(host, "host"), (agent_a, "a"), (agent_b, "b")] {
+        if session == host {
+            sessions.run_json(host, &["tab", &host_target]);
+        }
+        assert_eq!(
+            sessions.run_json(session, &["get", "url"])["data"]["url"],
+            server.url("127.0.0.1", &format!("/{name}"))
+        );
+        sessions.run_json(session, &["click", "#download"]);
+        let directory = output.path().join(name);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let completed: Vec<_> = std::fs::read_dir(&directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.file_name().unwrap() != "first.bin")
+                .filter(|path| path.extension().is_none())
+                .collect();
+            if !completed.is_empty() {
+                assert_eq!(completed.len(), 1);
+                assert_eq!(
+                    std::fs::read_to_string(&completed[0]).unwrap(),
+                    format!("/download/{name}")
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{name} download destination was changed"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+    thread::scope(|scope| {
+        for (session, name) in [(agent_a, "a"), (agent_b, "b")] {
+            let sessions = &sessions;
+            let path = output.path().join(name).join("concurrent.bin");
+            scope.spawn(move || {
+                sessions.run_json(session, &["download", "#download", path.to_str().unwrap()]);
+                assert_eq!(
+                    std::fs::read_to_string(path).unwrap(),
+                    format!("/download/{name}")
+                );
+            });
+        }
+    });
 }
 
 fn set_probe(sessions: &Sessions, session: &str, value: &str) {
