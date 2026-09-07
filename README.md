@@ -344,6 +344,8 @@ agent-browser network har start                # Start HAR recording (embeds tex
 agent-browser network har start --content all  # Embed all response bodies (binary as base64)
 agent-browser network har start --content none # Metadata only, no bodies
 agent-browser network har stop [output.har]    # Stop and save HAR (temp path if omitted)
+agent-browser network wait "/api/login" --status 200  # Wait for specific response
+agent-browser network wait "/api/data" --method POST   # Wait for POST response
 ```
 
 ### Tabs & Windows
