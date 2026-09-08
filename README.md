@@ -991,8 +991,9 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--proxy <url>` | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env) |
 | `--proxy-bypass <hosts>` | Hosts to bypass proxy (or `AGENT_BROWSER_PROXY_BYPASS` env) |
 | `--ignore-https-errors` | Ignore HTTPS certificate errors (useful for self-signed certs) |
-| `--ca-cert <path>` | Trust a CA certificate or PEM bundle for locally launched Chromium on Linux; later commands in the same running session retain it when omitted (or `AGENT_BROWSER_CA_CERT` env) |
-| `--no-ca-cert` | Clear CA trust retained by the running browser session (or `AGENT_BROWSER_CLEAR_CA_CERT`) |
+| `--ca-cert <path>` | Add a CA certificate or PEM bundle to CLI HTTPS/WSS trust, including `read` and `install`; also trust it in locally launched Chromium on Linux (or `AGENT_BROWSER_CA_CERT` env) |
+| `--no-ca-cert` | Clear the session's extra CLI CA bundle; browser commands also clear local Chromium CA trust (or `AGENT_BROWSER_CLEAR_CA_CERT`) |
+| `--use-system-ca [bool]` | Use the OS trust store for CLI TLS, or select built-in roots with `false` (or `AGENT_BROWSER_USE_SYSTEM_CA` env) |
 | `--allow-file-access` | Allow file:// URLs to access local files (Chromium only) |
 | `--hide-scrollbars <bool>` | Hide native scrollbars in headless Chromium screenshots, enabled by default (or `AGENT_BROWSER_HIDE_SCROLLBARS` env) |
 | `-p, --provider <name>` | Browser provider, including configured `browser.provider` plugins (or `AGENT_BROWSER_PROVIDER` env) |
@@ -1129,11 +1130,16 @@ Create an `agent-browser.json` file to set persistent defaults instead of repeat
 ```json
 {
   "proxy": "http://localhost:8080",
-  "caCert": "/etc/ssl/certs/proxy-ca.crt"
+  "caCert": "/etc/ssl/certs/proxy-ca.crt",
+  "useSystemCa": false
 }
 ```
 
-`caCert` remains effective for later commands in the same running session. Use `"clearCaCert": true`, `--no-ca-cert`, or `AGENT_BROWSER_CLEAR_CA_CERT=1` to remove it. Setting, changing, or clearing the CA relaunches Chromium without restarting the daemon. Repeating the same certificate content, including from a different path, reuses the current browser. On Linux, `agent-browser install --with-deps` installs the required `certutil`; otherwise install `libnss3-tools` on Debian/Ubuntu or `nss-tools` on RPM Linux.
+`caCert` adds a CA to CLI HTTPS/WSS trust. A direct `read URL` uses it without launching Chromium or setting up NSS. `install` uses the current invocation's flags, environment, and config without starting or consulting a session daemon.
+
+Daemon commands retain the session's CLI trust selection when flags, environment, and config supply no replacement. Each HTTP or WSS client acquisition rereads the selected bundle and, when enabled, native roots. Changed roots replace the cached clients without restarting the daemon or browser; operations that already acquired a client may finish with its previous roots. An invalid explicitly selected bundle fails instead of silently falling back. Use `"clearCaCert": true`, `--no-ca-cert`, or `AGENT_BROWSER_CLEAR_CA_CERT=1` to clear the extra bundle and its `SSL_CERT_FILE` fallback. Set `useSystemCa` or `--use-system-ca` to `false` to select built-in roots; this keeps any extra bundle unless it is also cleared.
+
+For local Chromium on Linux, `caCert` also configures browser trust. Changing or clearing browser CA content relaunches Chromium without restarting the daemon; equivalent certificate content, including from a different path, reuses the browser. On Linux, `agent-browser install --with-deps` installs the required `certutil`; otherwise install `libnss3-tools` on Debian/Ubuntu or `nss-tools` on RPM Linux. `useSystemCa` affects only CLI TLS.
 
 Use `--config <path>` or `AGENT_BROWSER_CONFIG` to load a specific config file instead of the defaults:
 

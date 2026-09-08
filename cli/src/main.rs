@@ -14,6 +14,7 @@ mod read;
 mod skills;
 #[cfg(test)]
 mod test_utils;
+mod tls;
 mod upgrade;
 mod validation;
 
@@ -157,7 +158,12 @@ fn is_valid_restore_save_policy(policy: &str) -> bool {
     matches!(policy, "auto" | "always" | "never")
 }
 
+#[cfg(test)]
 fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
+    incompatible_launch_mode_error_for_action(flags, "navigate")
+}
+
+fn incompatible_launch_mode_error_for_action(flags: &Flags, action: &str) -> Option<&'static str> {
     if flags.cdp.is_some() && flags.provider.is_some() {
         return Some("Cannot use --cdp and -p/--provider together");
     }
@@ -200,33 +206,24 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
         );
     }
 
-    if flags.ca_cert.is_some() && flags.ignore_https_errors {
+    let ca_cert_configures_local_browser = flags.ca_cert.is_some()
+        && flags.cdp.is_none()
+        && flags.provider.is_none()
+        && !flags.auto_connect
+        && !native::actions::skip_launch_action(action);
+
+    if ca_cert_configures_local_browser && flags.ignore_https_errors {
         return Some("Cannot use --ca-cert with --ignore-https-errors");
     }
     if flags.ca_cert.is_some() && flags.clear_ca_cert {
         return Some("Cannot use --ca-cert with --no-ca-cert");
     }
-    if flags.ca_cert.is_some() && flags.cdp.is_some() {
-        return Some(
-            "Cannot use --ca-cert with --cdp (--ca-cert requires a locally launched Chromium browser on Linux)",
-        );
-    }
-    if flags.ca_cert.is_some() && flags.auto_connect {
-        return Some(
-            "Cannot use --ca-cert with --auto-connect (--ca-cert requires a locally launched Chromium browser on Linux)",
-        );
-    }
-    if flags.ca_cert.is_some() && flags.provider.is_some() {
-        return Some(
-            "Cannot use --ca-cert with -p/--provider (--ca-cert requires a locally launched Chromium browser on Linux)",
-        );
-    }
-    if flags.ca_cert.is_some() && flags.profile.is_some() {
+    if ca_cert_configures_local_browser && flags.profile.is_some() {
         return Some(
             "Cannot use --ca-cert with --profile because isolated CA trust would change the profile's NSS environment",
         );
     }
-    if flags.ca_cert.is_some()
+    if ca_cert_configures_local_browser
         && flags
             .engine
             .as_deref()
@@ -234,14 +231,20 @@ fn incompatible_launch_mode_error(flags: &Flags) -> Option<&'static str> {
     {
         return Some("--ca-cert is supported only with the Chrome engine on Linux");
     }
-    if flags.ca_cert.is_some() && !cfg!(target_os = "linux") {
-        return Some("--ca-cert is currently supported only on Linux");
+    if ca_cert_configures_local_browser && !cfg!(target_os = "linux") {
+        return Some(
+            "--ca-cert browser trust is currently supported only for local Chromium on Linux",
+        );
     }
 
     None
 }
 
 fn should_send_local_launch_config(flags: &Flags, command: &serde_json::Value) -> bool {
+    let action = command.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    if action != "launch" && native::actions::skip_launch_action(action) {
+        return false;
+    }
     (flags.headed
         || flags.cli_headed
         || flags.executable_path.is_some()
@@ -1370,6 +1373,8 @@ fn main() {
     if let Some(ref namespace) = flags.namespace {
         env::set_var("AGENT_BROWSER_NAMESPACE", namespace);
     }
+    tls::configure_cli(&flags);
+    tls::warn_if_trust_source_unusable();
     let clean = clean_args(&args);
 
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
@@ -1647,7 +1652,11 @@ fn main() {
         return;
     }
 
-    if let Some(msg) = incompatible_launch_mode_error(&flags) {
+    let action = cmd
+        .get("action")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if let Some(msg) = incompatible_launch_mode_error_for_action(&flags, action) {
         if flags.json {
             print_json_error(msg);
         } else {
@@ -1696,6 +1705,8 @@ fn main() {
         proxy_username: proxy_username.as_deref(),
         proxy_password: proxy_password.as_deref(),
         ignore_https_errors: flags.ignore_https_errors,
+        ca_cert: flags.ca_cert.as_deref(),
+        use_system_ca: flags.use_system_ca,
         allow_file_access: flags.allow_file_access,
         hide_scrollbars: flags.hide_scrollbars,
         webgpu: flags.webgpu,
@@ -2486,6 +2497,26 @@ mod tests {
     }
 
     #[test]
+    fn browserless_commands_do_not_send_local_launch_config() {
+        let mut flags = neutral_launch_config_flags();
+        flags.ca_cert = Some("/tmp/ca.pem".to_string());
+        flags.proxy = Some("http://proxy.test:8080".to_string());
+        flags.allowed_domains = Some(vec!["example.com".to_string()]);
+        for action in ["read", "close", "auth_list", "credentials_get"] {
+            assert!(!should_send_local_launch_config(
+                &flags,
+                &json!({ "action": action }),
+            ));
+        }
+        for action in ["snapshot", "launch"] {
+            assert!(should_send_local_launch_config(
+                &flags,
+                &json!({ "action": action }),
+            ));
+        }
+    }
+
+    #[test]
     fn test_attach_allowed_domains_to_launch_command() {
         let mut flags = neutral_launch_config_flags();
         flags.allowed_domains = Some(vec!["example.com".to_string(), "*.example.org".to_string()]);
@@ -2621,6 +2652,11 @@ mod tests {
         assert_eq!(
             root_schema["properties"]["clearCaCert"],
             docs_schema["properties"]["clearCaCert"]
+        );
+        assert_eq!(root_schema["properties"]["useSystemCa"]["type"], "boolean");
+        assert_eq!(
+            root_schema["properties"]["useSystemCa"],
+            docs_schema["properties"]["useSystemCa"]
         );
     }
 
@@ -2836,7 +2872,7 @@ mod tests {
     }
 
     #[test]
-    fn test_incompatible_launch_mode_error_rejects_ca_cert_modes() {
+    fn test_incompatible_launch_mode_error_rejects_local_browser_ca_cert_modes() {
         let with_ca = |mut flags: Flags| {
             flags.ca_cert = Some("/tmp/ca.pem".to_string());
             flags
@@ -2851,18 +2887,6 @@ mod tests {
         lightpanda.engine = Some("lightpanda".to_string());
 
         let cases = [
-            (
-                with_ca(launch_mode_flags(false, true, false, false)),
-                "Cannot use --ca-cert with --cdp (--ca-cert requires a locally launched Chromium browser on Linux)",
-            ),
-            (
-                with_ca(launch_mode_flags(true, false, false, false)),
-                "Cannot use --ca-cert with --auto-connect (--ca-cert requires a locally launched Chromium browser on Linux)",
-            ),
-            (
-                with_ca(launch_mode_flags(false, false, true, false)),
-                "Cannot use --ca-cert with -p/--provider (--ca-cert requires a locally launched Chromium browser on Linux)",
-            ),
             (
                 ignore_errors,
                 "Cannot use --ca-cert with --ignore-https-errors",
@@ -2881,6 +2905,19 @@ mod tests {
         for (flags, expected) in cases {
             assert_eq!(incompatible_launch_mode_error(&flags), Some(expected));
         }
+
+        assert_eq!(
+            incompatible_launch_mode_error(&with_ca(launch_mode_flags(false, true, false, false))),
+            None
+        );
+        assert_eq!(
+            incompatible_launch_mode_error(&with_ca(launch_mode_flags(true, false, false, false))),
+            None
+        );
+        assert_eq!(
+            incompatible_launch_mode_error(&with_ca(launch_mode_flags(false, false, true, false))),
+            None
+        );
     }
 
     #[test]
@@ -2906,7 +2943,11 @@ mod tests {
 
         let error = incompatible_launch_mode_error(&flags);
         assert!(
-            error.is_none() || error == Some("--ca-cert is currently supported only on Linux"),
+            error.is_none()
+                || error
+                    == Some(
+                        "--ca-cert browser trust is currently supported only for local Chromium on Linux",
+                    ),
             "README proxy CA configuration is incompatible: {error:?}"
         );
     }

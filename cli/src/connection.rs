@@ -445,6 +445,8 @@ pub struct DaemonOptions<'a> {
     pub proxy_username: Option<&'a str>,
     pub proxy_password: Option<&'a str>,
     pub ignore_https_errors: bool,
+    pub ca_cert: Option<&'a str>,
+    pub use_system_ca: bool,
     pub allow_file_access: bool,
     pub hide_scrollbars: bool,
     pub webgpu: bool,
@@ -514,6 +516,15 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     if opts.ignore_https_errors {
         cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
     }
+    if let Some(ca) = opts.ca_cert {
+        cmd.env("AGENT_BROWSER_CA_CERT", ca);
+    } else {
+        cmd.env_remove("AGENT_BROWSER_CA_CERT");
+    }
+    cmd.env(
+        "AGENT_BROWSER_USE_SYSTEM_CA",
+        if opts.use_system_ca { "1" } else { "0" },
+    );
     if opts.allow_file_access {
         cmd.env("AGENT_BROWSER_ALLOW_FILE_ACCESS", "1");
     }
@@ -591,6 +602,7 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
 
 fn daemon_config_fingerprint(opts: &DaemonOptions) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    "cli-tls-options-v1".hash(&mut hasher);
     opts.debug.hash(&mut hasher);
     opts.action_policy.hash(&mut hasher);
     opts.confirm_actions.hash(&mut hasher);
@@ -1010,7 +1022,10 @@ fn connect(session: &str) -> Result<Connection, String> {
     }
 }
 
-pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
+pub fn send_command(mut cmd: Value, session: &str) -> Result<Response, String> {
+    if let Some(options) = crate::tls::command_options() {
+        cmd["tlsOptions"] = options;
+    }
     // Retry logic for transient errors (EAGAIN/EWOULDBLOCK/connection issues)
     const MAX_RETRIES: u32 = 5;
     const RETRY_DELAY_MS: u64 = 200;
@@ -1257,6 +1272,8 @@ mod tests {
             proxy_username: None,
             proxy_password: None,
             ignore_https_errors: false,
+            ca_cert: None,
+            use_system_ca: false,
             allow_file_access: false,
             hide_scrollbars: true,
             webgpu: false,
@@ -1282,6 +1299,29 @@ mod tests {
             no_auto_dialog,
             plugins: None,
         }
+    }
+
+    #[test]
+    fn tls_options_are_command_state_and_old_protocols_restart_once() {
+        let base = test_daemon_options(None, false, None);
+        let mut changed = test_daemon_options(None, false, None);
+        changed.ca_cert = Some("/tmp/rotated.pem");
+        changed.use_system_ca = true;
+        assert_eq!(
+            daemon_config_fingerprint(&base),
+            daemon_config_fingerprint(&changed)
+        );
+        let mut legacy = std::collections::hash_map::DefaultHasher::new();
+        base.debug.hash(&mut legacy);
+        base.action_policy.hash(&mut legacy);
+        base.confirm_actions.hash(&mut legacy);
+        base.idle_timeout.hash(&mut legacy);
+        base.default_timeout.hash(&mut legacy);
+        base.no_auto_dialog.hash(&mut legacy);
+        assert_ne!(
+            daemon_config_fingerprint(&base),
+            format!("{:016x}", legacy.finish())
+        );
     }
 
     #[test]

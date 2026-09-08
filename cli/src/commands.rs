@@ -3453,6 +3453,8 @@ mod tests {
             ignore_https_errors: false,
             ca_cert: None,
             clear_ca_cert: false,
+            use_system_ca: false,
+            use_system_ca_set: false,
             allow_file_access: false,
             hide_scrollbars: true,
             webgpu: false,

@@ -8,10 +8,8 @@ use super::http::cors_headers_for_origin;
 
 pub(crate) const DEFAULT_AI_GATEWAY_URL: &str = "https://ai-gateway.vercel.sh";
 
-static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-
-pub(crate) fn http_client() -> &'static reqwest::Client {
-    HTTP_CLIENT.get_or_init(reqwest::Client::new)
+pub(crate) fn http_client() -> Result<reqwest::Client, String> {
+    crate::tls::http_client()
 }
 
 pub(crate) fn is_chat_enabled() -> bool {
@@ -53,12 +51,15 @@ pub(super) async fn handle_models_request(
     };
 
     let url = format!("{}/v1/models", gateway_url);
-    let client = http_client();
-    let result = client
-        .get(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .send()
-        .await;
+    let result = async {
+        http_client()?
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .send()
+            .await
+            .map_err(|e| e.to_string())
+    }
+    .await;
 
     let body = match result {
         Ok(r) if r.status().is_success() => r
@@ -773,7 +774,15 @@ pub(super) async fn handle_chat_request(
 
     let tools: Value = serde_json::from_str(CHAT_TOOLS).unwrap();
     let url = format!("{}/v1/chat/completions", gateway_url);
-    let client = http_client();
+    let client = match http_client() {
+        Ok(client) => client,
+        Err(error) => {
+            let body = json!({ "error": error }).to_string();
+            let response = format!("HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{cors}\r\n{body}", body.len());
+            let _ = stream.write_all(response.as_bytes()).await;
+            return;
+        }
+    };
 
     let total_chars = estimate_chars(&openai_messages);
     let mut compaction_summary: Option<String> = None;
@@ -785,7 +794,7 @@ pub(super) async fn handle_chat_request(
         let to_summarize = &openai_messages[1..split];
 
         if let Some(summary) =
-            summarize_for_compaction(client, &url, &api_key, &model, to_summarize).await
+            summarize_for_compaction(&client, &url, &api_key, &model, to_summarize).await
         {
             let summary_msg = json!({
                 "role": "system",

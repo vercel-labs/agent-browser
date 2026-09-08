@@ -87,6 +87,7 @@ Global launch, output, provider, and chat options can be set in the config file 
     <tr><td><code>ignoreHttpsErrors</code></td><td><code>--ignore-https-errors</code></td><td>boolean</td></tr>
     <tr><td><code>caCert</code></td><td><code>--ca-cert</code></td><td>string</td></tr>
     <tr><td><code>clearCaCert</code></td><td><code>--no-ca-cert</code></td><td>boolean</td></tr>
+    <tr><td><code>useSystemCa</code></td><td><code>--use-system-ca</code></td><td>boolean</td></tr>
     <tr><td><code>allowFileAccess</code></td><td><code>--allow-file-access</code></td><td>boolean</td></tr>
     <tr><td><code>cdp</code></td><td><code>--cdp</code></td><td>string</td></tr>
     <tr><td><code>autoConnect</code></td><td><code>--auto-connect</code></td><td>boolean</td></tr>
@@ -133,9 +134,13 @@ Global launch, output, provider, and chat options can be set in the config file 
 }
 ```
 
-`caCert` imports the supplied CA certificate or PEM bundle into an isolated NSS database for locally launched Chromium on Linux. Hostname, validity period, and unrelated CA verification remain enabled. The CA remains active when later commands omit it. Setting different certificate content or `clearCaCert: true` relaunches Chromium without restarting the daemon. `agent-browser install --with-deps` installs the required `certutil`; otherwise install `libnss3-tools` on Debian/Ubuntu or `nss-tools` on RPM Linux. This initial implementation does not support Chrome profiles, CDP attach, providers, Lightpanda, macOS, or Windows.
+`caCert` adds the supplied CA certificate or PEM bundle to CLI HTTPS/WSS trust. A direct `read URL` uses it without launching a browser or setting up NSS. `install` runs without a daemon and uses only its invocation's flags, environment, and config.
 
-Without the CA certificate on hand, fall back to ignoring every certificate error, which is less secure:
+Daemon commands retain the session's CLI selection when flags, environment, and config supply no replacement. Each HTTP or WSS client acquisition rereads the selected bundle and, when enabled, native roots. Changed roots replace cached clients without restarting the daemon or browser; operations that already acquired a client may finish with its previous roots. Invalid explicit bundles fail instead of silently falling back. Set `clearCaCert: true` to clear the extra bundle and suppress its `SSL_CERT_FILE` fallback. Set `useSystemCa` to `false` to select built-in roots; this keeps any extra bundle unless it is also cleared.
+
+For locally launched Chromium on Linux, `caCert` also imports each certificate into an isolated NSS database used only by that browser process. Different browser CA content or `clearCaCert: true` relaunches Chromium without restarting the daemon; equivalent content reuses Chromium. `agent-browser install --with-deps` installs the required `certutil`; otherwise install `libnss3-tools` on Debian/Ubuntu or `nss-tools` on RPM Linux. Browser-side trust does not support Chrome profiles, Lightpanda, macOS, or Windows. With CDP attach, auto-connect, or providers, `caCert` affects only CLI TLS and cannot change the remote browser's trust store. Set `useSystemCa` when the CA already lives in the operating system trust store.
+
+For browser navigation only, certificate verification can be disabled:
 
 ```json
 {
@@ -144,6 +149,8 @@ Without the CA certificate on hand, fall back to ignoring every certificate erro
   "ignoreHttpsErrors": true
 }
 ```
+
+`ignoreHttpsErrors` does not disable verification for CLI HTTPS/WSS, `read`, or `install`.
 
 ### CI / Devcontainer
 
@@ -289,7 +296,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_HEADED</code></td><td>Show browser window instead of running headless (<code>1</code> to enable).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_WEBGPU</code></td><td>Enable WebGPU; SwiftShader software Vulkan on Linux, no GPU required (<code>1</code> to enable).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_NO_XVFB</code></td><td>Disable automatic Xvfb virtual display for headed mode on displayless Linux hosts (<code>1</code> to disable).</td><td>(auto-Xvfb enabled)</td></tr>
-    <tr><td><code>AGENT_BROWSER_CLEAR_CA_CERT</code></td><td>Clear CA trust retained by the running browser session.</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_CLEAR_CA_CERT</code></td><td>Clear the session's extra CLI CA bundle; browser commands also clear local Chromium CA trust.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_JSON</code></td><td>Use JSON output by default.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_ANNOTATE</code></td><td>Enable annotated screenshots by default.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_CDP</code></td><td>Connect the daemon to a CDP port or WebSocket URL.</td><td>(none)</td></tr>

@@ -821,7 +821,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_READ,
             "Read URL",
-            "Fetch a URL as agent-readable text, preferring text/markdown. Omit url to read the active tab.",
+            "Fetch a URL as agent-readable text, preferring text/markdown. A direct URL uses CLI TLS trust without launching a browser. Omit url to read the active tab.",
             json!({
                 "url": { "type": "string", "description": "URL to read. Bare hosts are normalized to https. Omit to read the active tab." },
                 "raw": { "type": "boolean", "description": "Return the response body without HTML extraction." },
@@ -1850,7 +1850,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_INSTALL,
             "Install",
-            "Install browser binaries.",
+            "Install browser binaries. Downloads use CLI TLS trust; an invalid explicitly selected CA bundle is an error.",
             json!({ "withDeps": { "type": "boolean" } }),
             &[],
         ),
@@ -1995,14 +1995,21 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         "caCert".to_string(),
         json!({
             "type": "string",
-            "description": "Path to a CA certificate or PEM bundle trusted by a locally launched Chromium browser on Linux."
+            "description": "Path to a CA certificate or PEM bundle added to CLI TLS trust and, for a local Chromium command on Linux, browser trust. Omit to retain the session's CLI bundle unless environment or config supplies one. CLI clients reload certificate contents when acquired, so rotation applies to later requests without restarting the daemon or browser."
+        }),
+    );
+    props.insert(
+        "useSystemCa".to_string(),
+        json!({
+            "type": "boolean",
+            "description": "Use the operating system trust store for CLI TLS. false selects built-in roots; omit to retain the session's selection unless environment or config supplies one. Roots are reloaded when a CLI client is acquired. Does not change browser trust."
         }),
     );
     props.insert(
         "clearCaCert".to_string(),
         json!({
             "type": "boolean",
-            "description": "Explicitly clear CA trust retained by the running browser session."
+            "description": "Clear the session's extra CLI CA bundle and its SSL_CERT_FILE fallback. Local Chromium commands also clear retained browser CA trust. Does not disable useSystemCa."
         }),
     );
     props.insert(
@@ -3776,6 +3783,10 @@ fn append_common_global_args(
     } else if clear_ca_cert {
         args.push("--no-ca-cert".to_string());
     }
+    if let Some(use_system_ca) = optional_bool(arguments, "useSystemCa")? {
+        args.push("--use-system-ca".to_string());
+        args.push(use_system_ca.to_string());
+    }
 
     Ok(())
 }
@@ -4528,6 +4539,48 @@ mod tests {
         append_common_global_args(&mut args, &json!({ "clearCaCert": true }), None).unwrap();
 
         assert_eq!(args, vec!["--no-ca-cert"]);
+    }
+
+    #[test]
+    fn common_global_args_include_use_system_ca() {
+        let mut args = Vec::new();
+
+        append_common_global_args(&mut args, &json!({ "useSystemCa": true }), None).unwrap();
+
+        assert_eq!(args, vec!["--use-system-ca", "true"]);
+    }
+
+    #[test]
+    fn common_global_args_preserve_omitted_trust_selection() {
+        for input in [json!({}), json!({ "clearCaCert": false })] {
+            let mut args = Vec::new();
+            append_common_global_args(&mut args, &input, None).unwrap();
+            assert!(args.is_empty(), "{input}: {args:?}");
+        }
+    }
+
+    #[test]
+    fn common_global_args_keep_explicit_trust_changes_in_cli_parser() {
+        for use_system_ca in [true, false] {
+            let mut args = Vec::new();
+            append_common_global_args(
+                &mut args,
+                &json!({ "useSystemCa": use_system_ca, "clearCaCert": true }),
+                None,
+            )
+            .unwrap();
+            args.extend(["read".to_string(), "https://example.com".to_string()]);
+
+            let flags = crate::flags::parse_flags(&args);
+            assert_eq!(flags.use_system_ca, use_system_ca);
+            assert!(flags.use_system_ca_set);
+            assert!(flags.clear_ca_cert);
+            assert!(flags.ca_cert.is_none());
+            let command =
+                crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+            assert_eq!(command["action"], "read");
+            assert_eq!(command["url"], "https://example.com");
+        }
     }
 
     #[test]

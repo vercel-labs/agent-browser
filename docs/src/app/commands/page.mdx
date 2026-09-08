@@ -574,8 +574,9 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime 
 --proxy <url>            # Proxy server URL
 --proxy-bypass <hosts>   # Hosts to bypass proxy
 --ignore-https-errors    # Ignore HTTPS certificate errors
---ca-cert <path>         # Trust a CA for locally launched Chromium on Linux
---no-ca-cert             # Clear CA trust retained by the running session
+--ca-cert <path>         # Add a CA for CLI TLS/read/install and local Chromium on Linux
+--no-ca-cert             # Clear the extra CLI CA bundle; browser commands also clear browser CA
+--use-system-ca [bool]   # Use OS roots for CLI TLS; false selects built-in roots
 --allow-file-access      # Allow file:// URLs to access local files (Chromium only)
 --hide-scrollbars <bool> # Hide native scrollbars in headless Chromium screenshots
 -p, --provider <name>    # Browser provider or configured provider plugin

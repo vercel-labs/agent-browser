@@ -16,13 +16,11 @@ use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug)]
 pub struct CaBundle {
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     certs: Vec<CertificateDer<'static>>,
     digest: [u8; 32],
 }
 
 impl CaBundle {
-    #[cfg(any(target_os = "linux", test))]
     pub fn certificates(&self) -> &[CertificateDer<'static>] {
         &self.certs
     }

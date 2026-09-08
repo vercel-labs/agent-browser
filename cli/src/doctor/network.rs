@@ -26,23 +26,33 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         }
     };
 
-    let client = match reqwest::Client::builder()
-        .user_agent(format!("agent-browser/{}", env!("CARGO_PKG_VERSION")))
-        .timeout(Duration::from_secs(3))
-        .connect_timeout(Duration::from_secs(3))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            checks.push(Check::new(
-                "net.client",
-                category,
-                Status::Fail,
-                format!("Could not build HTTP client: {}", e),
-            ));
-            return;
-        }
-    };
+    let client =
+        match crate::tls::apply_to_reqwest(reqwest::Client::builder()).and_then(|builder| {
+            builder
+                .user_agent(format!("agent-browser/{}", env!("CARGO_PKG_VERSION")))
+                .timeout(Duration::from_secs(3))
+                .connect_timeout(Duration::from_secs(3))
+                .build()
+                .map_err(|e| e.to_string())
+        }) {
+            Ok(c) => c,
+            Err(e) => {
+                checks.push(Check::new(
+                    "net.client",
+                    category,
+                    Status::Fail,
+                    format!("Could not build HTTP client: {}", e),
+                ));
+                return;
+            }
+        };
+
+    checks.push(Check::new(
+        "net.trust_store",
+        category,
+        Status::Info,
+        format!("TLS roots: {}", crate::tls::describe()),
+    ));
 
     let chrome_url =
         "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";

@@ -344,10 +344,7 @@ fn validate_ca_cert_launch_mode(
         return Ok(());
     }
     if external_launch {
-        return Err(
-            "CA trust is active for this session and requires a locally launched Chromium browser on Linux. Pass --no-ca-cert to clear it before using CDP, auto-connect, or a provider."
-                .to_string(),
-        );
+        return Ok(());
     }
     if engine.is_some_and(|value| !value.eq_ignore_ascii_case("chrome")) {
         return Err("--ca-cert is supported only with the Chrome engine on Linux".to_string());
@@ -2406,7 +2403,7 @@ fn provider_plugin_launch_options_from_command(cmd: &Value) -> Value {
     Value::Object(options)
 }
 
-fn skip_launch_action(action: &str) -> bool {
+pub(crate) fn skip_launch_action(action: &str) -> bool {
     if action == INTERNAL_DAEMON_SHUTDOWN_ACTION {
         return true;
     }
@@ -2527,7 +2524,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 
     if let Some(ref server) = state.stream_server {
         let mut broadcast_cmd;
-        let has_internal_fields = cmd.get("plugins").is_some()
+        let has_internal_fields = cmd.get("tlsOptions").is_some()
+            || cmd.get("plugins").is_some()
             || cmd.get("pinTab").is_some()
             || cmd.get("restoreKey").is_some()
             || cmd.get("restoreSave").is_some()
@@ -2537,6 +2535,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         let cmd_for_broadcast = if has_internal_fields {
             broadcast_cmd = cmd.clone();
             if let Some(obj) = broadcast_cmd.as_object_mut() {
+                obj.remove("tlsOptions");
                 obj.remove("plugins");
                 obj.remove("pinTab");
                 obj.remove("restoreKey");
@@ -2698,6 +2697,10 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 }
             }
         }
+    }
+
+    if let Err(error) = crate::tls::apply_command_options(cmd) {
+        return error_response(&id, &error);
     }
 
     let restore_transition_closed_browser =
@@ -4825,6 +4828,11 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     state.session_setup = SessionSetup::default();
 
     let has_cdp = cdp_url.is_some() || cdp_port.is_some();
+    let browser_ca_cert = if external_launch {
+        None
+    } else {
+        launch_options.ca_cert.as_deref()
+    };
     super::browser::validate_launch_options(
         launch_options.extensions.as_deref(),
         has_cdp,
@@ -4832,7 +4840,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         storage_state,
         launch_options.allow_file_access,
         launch_options.executable_path.as_deref(),
-        launch_options.ca_cert.as_deref(),
+        browser_ca_cert,
     )?;
 
     // Store proxy credentials before any local or remote CDP branch enables
@@ -14617,7 +14625,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[test]
-    fn test_provider_compatibility_uses_resolved_ca_cert_transition() {
+    fn test_provider_compatibility_keeps_browser_ca_state_for_cli_tls() {
         let mut state = DaemonState::new();
         state.effective_ca_cert = Some(EffectiveCaCert {
             path: "/tmp/first.pem".to_string(),
@@ -14627,10 +14635,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         let retained = resolve_effective_ca_cert(&json!({}), &state).unwrap();
         let mut retained_options = LaunchOptions::default();
         apply_effective_ca_cert(&mut retained_options, &retained);
-        let error =
-            validate_ca_cert_launch_mode(&retained_options, Some("chrome"), true).unwrap_err();
-        assert!(error.contains("CA trust is active for this session"));
-        assert!(error.contains("--no-ca-cert"));
+        assert!(validate_ca_cert_launch_mode(&retained_options, Some("chrome"), true).is_ok());
 
         let cleared = resolve_effective_ca_cert(&json!({ "clearCaCert": true }), &state).unwrap();
         let mut cleared_options = LaunchOptions::default();
@@ -14683,12 +14688,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[test]
-    fn test_daemon_rejects_ca_cert_outside_local_chrome() {
+    fn test_daemon_uses_ca_cert_for_cli_tls_in_external_launches() {
         let ca = LaunchOptions {
             ca_cert: Some("/tmp/proxy-ca.pem".to_string()),
             ..Default::default()
         };
-        assert!(validate_ca_cert_launch_mode(&ca, Some("chrome"), true).is_err());
+        assert!(validate_ca_cert_launch_mode(&ca, Some("chrome"), true).is_ok());
         assert!(validate_ca_cert_launch_mode(&ca, Some("lightpanda"), false).is_err());
 
         let ignored = LaunchOptions {

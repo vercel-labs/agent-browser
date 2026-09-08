@@ -130,8 +130,6 @@ async fn run_interactive(session: &str, model: &str, verbosity: Verbosity, json_
         .to_string();
     let api_key = std::env::var("AI_GATEWAY_API_KEY").unwrap_or_default();
     let url = format!("{}/v1/chat/completions", gateway_url);
-    let client = chat::http_client();
-
     loop {
         if !json_mode {
             eprint!("{} ", color::cyan(">"));
@@ -163,8 +161,15 @@ async fn run_interactive(session: &str, model: &str, verbosity: Verbosity, json_
         {
             let split = chat::find_safe_split(&openai_messages, chat::KEEP_RECENT_MESSAGES);
             let to_summarize = &openai_messages[1..split];
+            let client = match chat::http_client() {
+                Ok(client) => client,
+                Err(error) => {
+                    eprintln!("{error}");
+                    return;
+                }
+            };
             if let Some(summary) =
-                chat::summarize_for_compaction(client, &url, &api_key, model, to_summarize).await
+                chat::summarize_for_compaction(&client, &url, &api_key, model, to_summarize).await
             {
                 let summary_msg = json!({
                     "role": "system",
@@ -220,7 +225,17 @@ async fn run_chat_turn(
 
     let tools: Value = serde_json::from_str(chat::CHAT_TOOLS).unwrap();
     let url = format!("{}/v1/chat/completions", gateway_url);
-    let client = chat::http_client();
+    let client = match chat::http_client() {
+        Ok(client) => client,
+        Err(error) => {
+            if json_mode {
+                println!("{}", json!({ "error": error }));
+            } else {
+                eprintln!("{error}");
+            }
+            return false;
+        }
+    };
 
     let total_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
     let tool_timeout = std::time::Duration::from_secs(60);
