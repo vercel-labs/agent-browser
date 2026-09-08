@@ -6,6 +6,7 @@ Capture browser automation as video for debugging, documentation, or verificatio
 
 ## Contents
 
+- [Requirements](#requirements)
 - [Basic Recording](#basic-recording)
 - [Recording Commands](#recording-commands)
 - [Frame Rate](#frame-rate)
@@ -14,7 +15,15 @@ Capture browser automation as video for debugging, documentation, or verificatio
 - [Output Format](#output-format)
 - [Limitations](#limitations)
 
+## Requirements
+
+Recording pipes frames into `ffmpeg`, which must be on `PATH` with the `libvpx` and `libx264` encoders. Install it with `brew install ffmpeg` (macOS) or `sudo apt install ffmpeg` (Debian/Ubuntu); `agent-browser doctor` reports it under "Recording". Nothing else in agent-browser needs ffmpeg.
+
+Supported formats are `.webm` (VP8 via libvpx) and `.mp4` (H.264 via libx264). Other extensions are handed to ffmpeg as-is with H.264 video. A path with no extension is rejected before recording starts.
+
 ## Basic Recording
+
+`record start` records the current active page as-is. Without a URL it attaches to the tab you already have open (no navigation, no new tab, page state and hydration intact). With a URL it navigates the active tab there first.
 
 ```bash
 # Launch the browser, then start recording
@@ -47,6 +56,13 @@ agent-browser record stop
 
 # Restart with new file (stops current + starts new)
 agent-browser record restart ./take2.webm --fps 60
+
+# Navigate the active tab, then record
+agent-browser record start ./output.webm https://example.com/checkout
+
+# Record in a separate tab: open it first, then start recording
+agent-browser tab new https://example.com
+agent-browser record start ./output.webm
 ```
 
 ## Frame Rate
@@ -191,7 +207,7 @@ agent-browser record stop
 
 ## Output Format
 
-- Default format: WebM (VP8/VP9 codec)
+- Format follows the extension: `.webm` (VP8 via libvpx) or `.mp4` (H.264 via libx264); other extensions get H.264 in that container
 - Default frame rate: 30 fps (`--fps` accepts 1 to 60)
 - Compatible with all modern browsers and video players
 - Compressed but high quality
@@ -201,4 +217,4 @@ agent-browser record stop
 - Recording adds slight overhead to automation, and higher frame rates add more
 - Large recordings can consume significant disk space; 60 fps roughly doubles the bitrate of 30 fps
 - Distinct frames per second are bounded by how often the page repaints, so a page rendering below 60 fps records below it too
-- Some headless environments may have codec limitations
+- Some headless environments may have codec limitations; an ffmpeg built without libvpx or libx264 cannot write the matching format

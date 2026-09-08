@@ -18,10 +18,9 @@ use super::browser::{should_track_target, BrowserManager, WaitUntil};
 use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
-    AttachToTargetParams, AttachToTargetResult, CdpEvent, CreateTargetResult,
-    DispatchMouseEventParams, ExceptionThrownEvent, GetFullAXTreeResult,
-    JavascriptDialogOpeningEvent, TargetCreatedEvent, TargetDestroyedEvent, TargetInfo,
-    TargetInfoChangedEvent,
+    AttachToTargetParams, AttachToTargetResult, CdpEvent, DispatchMouseEventParams,
+    ExceptionThrownEvent, GetFullAXTreeResult, JavascriptDialogOpeningEvent, TargetCreatedEvent,
+    TargetDestroyedEvent, TargetInfo, TargetInfoChangedEvent,
 };
 use super::cookies;
 use super::diff;
@@ -414,6 +413,105 @@ fn apply_effective_ca_cert(
     options.ca_cert_digest = effective_ca_cert.as_ref().map(|ca| *ca.bundle.digest());
 }
 
+/// Arguments of the last `Emulation.setEmulatedMedia` call, kept so the same
+/// emulation can be replayed onto a new page session.
+#[derive(Debug, Clone)]
+pub struct EmulatedMedia {
+    pub media: Option<String>,
+    /// `(name, value)` media features, e.g. `("prefers-color-scheme", "dark")`.
+    pub features: Vec<(String, String)>,
+}
+
+/// An init script tracked across target sessions.
+///
+/// Chrome assigns script identifiers independently in each target session, so
+/// two tabs can both return the same identifier for different scripts. The
+/// daemon-owned `identifier` is the user-facing handle, while
+/// `session_identifiers` records the target-local identifier to send when
+/// removing it from a particular target.
+#[derive(Debug, Clone)]
+pub struct InitScriptSetup {
+    pub identifier: String,
+    pub source: String,
+    pub session_identifiers: HashMap<String, String>,
+}
+
+/// Page-level setup the daemon has applied to the active page session.
+///
+/// CDP scopes all of these to a single target session, so a tab the daemon
+/// creates itself starts without them. This record lets
+/// [`apply_session_setup`] replay them onto the new tab before its first
+/// navigation. Reset whenever a browser is (re)launched. Permissions are not
+/// tracked: `Browser.grantPermissions` is context-scoped and already covers
+/// new tabs in the default context.
+#[derive(Debug, Default, Clone)]
+pub struct SessionSetup {
+    /// `--user-agent`, `useragent`, or the UA half of `device`.
+    pub user_agent: Option<String>,
+    /// Last `Emulation.setEmulatedMedia` call: `--color-scheme` at launch or
+    /// `set_media` / `emulatemedia`.
+    pub emulated_media: Option<EmulatedMedia>,
+    pub timezone: Option<String>,
+    pub locale: Option<String>,
+    /// `(latitude, longitude, accuracy)`.
+    pub geolocation: Option<(f64, f64, Option<f64>)>,
+    /// Global headers from the `headers` and `credentials` commands
+    /// (`Network.setExtraHTTPHeaders`). Origin-scoped `--headers` live in
+    /// `DaemonState::origin_headers`.
+    pub extra_headers: Option<HashMap<String, String>>,
+    pub offline: Option<bool>,
+    /// Init scripts registered with `Page.addScriptToEvaluateOnNewDocument`:
+    /// `--enable`, `--init-script`, plugin init scripts, and `addinitscript`.
+    pub init_scripts: Vec<InitScriptSetup>,
+    /// Monotonic source for daemon-owned init-script handles. CDP identifiers
+    /// cannot be used here because each target session allocates them
+    /// independently, commonly starting at `1`.
+    next_init_script_handle: u64,
+}
+
+impl SessionSetup {
+    fn from_launch_options(options: &LaunchOptions) -> Self {
+        Self {
+            user_agent: options.user_agent.clone(),
+            emulated_media: options.color_scheme.as_ref().map(|scheme| EmulatedMedia {
+                media: None,
+                features: vec![("prefers-color-scheme".to_string(), scheme.clone())],
+            }),
+            ..Self::default()
+        }
+    }
+
+    /// True when nothing has been configured, so there is nothing to replay.
+    fn is_empty(&self) -> bool {
+        self.user_agent.is_none()
+            && self.emulated_media.is_none()
+            && self.timezone.is_none()
+            && self.locale.is_none()
+            && self.geolocation.is_none()
+            && self.extra_headers.as_ref().is_none_or(HashMap::is_empty)
+            && !self.offline.unwrap_or(false)
+            && self.init_scripts.is_empty()
+    }
+
+    fn register_init_script(
+        &mut self,
+        source: String,
+        session_id: String,
+        session_identifier: String,
+    ) -> String {
+        self.next_init_script_handle += 1;
+        let identifier = format!("init-script-{}", self.next_init_script_handle);
+        let mut session_identifiers = HashMap::new();
+        session_identifiers.insert(session_id, session_identifier);
+        self.init_scripts.push(InitScriptSetup {
+            identifier: identifier.clone(),
+            source,
+            session_identifiers,
+        });
+        identifier
+    }
+}
+
 pub struct DaemonState {
     pub browser: Option<BrowserManager>,
     pub appium: Option<AppiumManager>,
@@ -516,6 +614,9 @@ pub struct DaemonState {
     /// Last viewport settings (width, height, deviceScaleFactor, mobile),
     /// re-applied to new contexts (e.g., recording).
     pub viewport: Option<(i32, i32, f64, bool)>,
+    /// Session-scoped setup applied to the active page, re-applied to tabs the
+    /// daemon creates. See [`SessionSetup`].
+    pub session_setup: SessionSetup,
     /// Init script sources returned by launch mutator plugins for this launch.
     pub plugin_init_scripts: Vec<String>,
     /// Provider cleanup metadata for the active external browser session.
@@ -633,6 +734,7 @@ impl DaemonState {
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(25_000),
             viewport: None,
+            session_setup: SessionSetup::default(),
             plugin_init_scripts: Vec::new(),
             active_provider_session: None,
             active_provider_connection: false,
@@ -974,7 +1076,9 @@ impl DaemonState {
     }
 
     /// Attach the recorder's own CDP session to the page behind `session_id`
-    /// and spawn the task that screencasts it into ffmpeg.
+    /// and spawn the task that screencasts into ffmpeg. The caller verifies
+    /// ffmpeg before any navigation or restart teardown. Failures here roll the
+    /// recording state back so the next `record start` is not blocked.
     async fn start_recording_task(
         &mut self,
         client: Arc<CdpClient>,
@@ -989,8 +1093,21 @@ impl DaemonState {
         {
             Ok(capture_session) => capture_session,
             Err(e) => {
-                // `recording_start` already marked the state active.
-                self.recording_state.active = false;
+                self.rollback_failed_recording_start().await;
+                return Err(e);
+            }
+        };
+        let ffmpeg = match recording::spawn_ffmpeg(
+            &self.recording_state.output_path,
+            self.recording_state.fps,
+        ) {
+            Ok(ffmpeg) => ffmpeg,
+            Err(e) => {
+                recording::detach_capture_session(&client, &capture_session).await;
+                if let Ok(mut guard) = self.recording_state.capture_session.lock() {
+                    *guard = None;
+                }
+                self.rollback_failed_recording_start().await;
                 return Err(e);
             }
         };
@@ -1000,7 +1117,7 @@ impl DaemonState {
         let handle = recording::spawn_recording_task(
             client,
             capture_session,
-            self.recording_state.output_path.clone(),
+            ffmpeg,
             self.recording_state.fps,
             shared_count.clone(),
             shared_captured.clone(),
@@ -1011,6 +1128,14 @@ impl DaemonState {
         self.recording_state.shared_captured_count = Some(shared_captured);
         self.recording_state.cancel_tx = Some(cancel_tx);
         Ok(())
+    }
+
+    /// Reconcile every externally visible recording flag after startup fails.
+    async fn rollback_failed_recording_start(&mut self) {
+        self.recording_state.active = false;
+        if let Some(ref server) = self.stream_server {
+            server.set_recording(false, &self.engine).await;
+        }
     }
 
     async fn stop_recording_task(&mut self) -> Result<(), String> {
@@ -3542,6 +3667,141 @@ async fn install_network_controls_or_resume_prepared_session(
     }
 }
 
+/// True when [`apply_session_setup`] has anything to replay onto a new tab.
+async fn session_setup_pending(state: &DaemonState) -> bool {
+    !state.session_setup.is_empty()
+        || !state.routes.read().await.is_empty()
+        || !state.origin_headers.read().await.is_empty()
+}
+
+/// Replay the session-scoped setup the user configured on the active page
+/// (see [`SessionSetup`]) onto a tab the daemon just created, plus the
+/// `Fetch.enable` needed for `route` and origin-scoped `--headers` to reach
+/// the shared fetch handler from that tab.
+///
+/// Call after `Page`/`Network` are enabled on `session_id` and before its
+/// first navigation, so init scripts, UA, and headers cover the initial
+/// document. Emulation failures are ignored: a call the engine rejects
+/// should not abort creating the tab.
+async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Result<(), String> {
+    let client = state
+        .browser
+        .as_ref()
+        .ok_or("Browser not launched")?
+        .client
+        .clone();
+    let setup = state.session_setup.clone();
+
+    if let Some(ref ua) = setup.user_agent {
+        let _ = client
+            .send_command(
+                "Emulation.setUserAgentOverride",
+                Some(json!({ "userAgent": ua })),
+                Some(session_id),
+            )
+            .await;
+    }
+
+    if let Some(ref emulated) = setup.emulated_media {
+        let mut params = json!({});
+        if let Some(ref m) = emulated.media {
+            params["media"] = Value::String(m.clone());
+        }
+        if !emulated.features.is_empty() {
+            params["features"] = Value::Array(
+                emulated
+                    .features
+                    .iter()
+                    .map(|(name, value)| json!({ "name": name, "value": value }))
+                    .collect(),
+            );
+        }
+        let _ = client
+            .send_command("Emulation.setEmulatedMedia", Some(params), Some(session_id))
+            .await;
+    }
+
+    if let Some(ref tz) = setup.timezone {
+        let _ = client
+            .send_command(
+                "Emulation.setTimezoneOverride",
+                Some(json!({ "timezoneId": tz })),
+                Some(session_id),
+            )
+            .await;
+    }
+
+    if let Some(ref locale) = setup.locale {
+        let _ = client
+            .send_command(
+                "Emulation.setLocaleOverride",
+                Some(json!({ "locale": locale })),
+                Some(session_id),
+            )
+            .await;
+    }
+
+    if let Some((lat, lon, accuracy)) = setup.geolocation {
+        let _ = client
+            .send_command(
+                "Emulation.setGeolocationOverride",
+                Some(json!({
+                    "latitude": lat,
+                    "longitude": lon,
+                    "accuracy": accuracy.unwrap_or(1.0),
+                })),
+                Some(session_id),
+            )
+            .await;
+    }
+
+    if let Some(ref headers) = setup.extra_headers {
+        network::set_extra_headers(&client, session_id, headers).await?;
+    }
+
+    if let Some(offline) = setup.offline {
+        network::set_offline(&client, session_id, offline).await?;
+    }
+
+    for (index, script) in setup.init_scripts.iter().enumerate() {
+        let result = client
+            .send_command(
+                "Page.addScriptToEvaluateOnNewDocument",
+                Some(json!({ "source": &script.source })),
+                Some(session_id),
+            )
+            .await?;
+        let identifier = result
+            .get("identifier")
+            .and_then(Value::as_str)
+            .ok_or("Page.addScriptToEvaluateOnNewDocument returned no identifier")?;
+        let tracked = state
+            .session_setup
+            .init_scripts
+            .get_mut(index)
+            .ok_or("Init script setup changed while it was being applied")?;
+        tracked
+            .session_identifiers
+            .insert(session_id.to_string(), identifier.to_string());
+    }
+
+    // `route` and origin-scoped `--headers` are resolved by the background
+    // fetch handler for any session, but only sessions with Fetch enabled
+    // emit requestPaused. Domain filtering and proxy auth install their own
+    // Fetch.enable; this covers the case where neither is active.
+    let has_routes = !state.routes.read().await.is_empty();
+    let has_origin_headers = !state.origin_headers.read().await.is_empty();
+    if has_routes || has_origin_headers {
+        let patterns = build_fetch_patterns(state).await;
+        let params = build_fetch_enable_params(state, patterns).await;
+        client
+            .send_command("Fetch.enable", Some(params), Some(session_id))
+            .await?;
+    }
+
+    Ok(())
+}
+
 async fn auto_launch(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
@@ -3550,6 +3810,7 @@ async fn auto_launch(
     let effective_ca_cert = state.effective_ca_cert.clone();
     apply_effective_ca_cert(&mut options, &effective_ca_cert);
     state.plugin_init_scripts.clear();
+    state.session_setup = SessionSetup::default();
 
     // Use the stream server's viewport dimensions for --window-size so the
     // content area matches the desired viewport from the start.
@@ -3782,6 +4043,7 @@ async fn auto_launch(
     if let Some(ref ca) = effective_ca_cert {
         options.prepared_nss_home = Some(prepare_nss_home(&ca.bundle)?);
     }
+    state.session_setup = SessionSetup::from_launch_options(&options);
     let mgr = BrowserManager::launch(options, engine.as_deref()).await?;
     state.reset_input_state();
     state.browser = Some(mgr);
@@ -3853,18 +4115,16 @@ fn allowed_domains_from_launch_command(cmd: &Value) -> Option<Vec<String>> {
 }
 
 async fn apply_launch_init_scripts(
-    state: &DaemonState,
+    state: &mut DaemonState,
     enable_features: &[String],
     init_script_paths: &[String],
 ) {
-    let Some(mgr) = state.browser.as_ref() else {
-        return;
-    };
+    let mut sources: Vec<String> = Vec::new();
 
     for feature in enable_features {
         match feature.as_str() {
             "react-devtools" | "react" => {
-                let _ = mgr.add_script_to_evaluate(react::INSTALL_HOOK_JS).await;
+                sources.push(react::INSTALL_HOOK_JS.to_string());
             }
             other => {
                 eprintln!("warning: unknown --enable feature '{}'", other);
@@ -3874,17 +4134,34 @@ async fn apply_launch_init_scripts(
 
     for path in init_script_paths {
         match fs::read_to_string(path) {
-            Ok(source) => {
-                let _ = mgr.add_script_to_evaluate(&source).await;
-            }
+            Ok(source) => sources.push(source),
             Err(e) => {
                 eprintln!("warning: failed to read --init-script '{}': {}", path, e);
             }
         }
     }
 
-    for source in &state.plugin_init_scripts {
-        let _ = mgr.add_script_to_evaluate(source).await;
+    sources.extend(state.plugin_init_scripts.iter().cloned());
+
+    let Some(mgr) = state.browser.as_ref() else {
+        return;
+    };
+    let Ok(session_id) = mgr.active_session_id().map(str::to_string) else {
+        return;
+    };
+
+    let mut registered = Vec::with_capacity(sources.len());
+    for source in sources {
+        let session_identifier = mgr
+            .add_script_to_evaluate(&source)
+            .await
+            .unwrap_or_default();
+        registered.push((source, session_identifier));
+    }
+    for (source, session_identifier) in registered {
+        state
+            .session_setup
+            .register_init_script(source, session_id.clone(), session_identifier);
     }
 }
 
@@ -4545,6 +4822,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         return Ok(json!({ "launched": true, "reused": true, "relaunchedBrowser": false }));
     }
     state.ref_map.clear();
+    state.session_setup = SessionSetup::default();
 
     let has_cdp = cdp_url.is_some() || cdp_port.is_some();
     super::browser::validate_launch_options(
@@ -4731,6 +5009,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     write_engine_file(&state.session_id, &state.engine);
     write_extensions_file_from_paths(&state.session_id, launch_options.extensions.as_deref());
     state.reset_input_state();
+    state.session_setup = SessionSetup::from_launch_options(&launch_options);
     state.browser = Some(BrowserManager::launch(launch_options, engine.as_deref()).await?);
     state.launch_hash = Some(new_hash);
     state.subscribe_to_browser_events();
@@ -4859,38 +5138,16 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         }
     }
 
-    if let Some(session_id) = state
-        .browser
-        .as_ref()
-        .and_then(|browser| browser.active_session_id().ok())
-        .map(ToString::to_string)
-    {
-        state.webmcp.clear_page_scope(&session_id);
-    } else {
-        state.webmcp.clear_invocations();
-    }
-    let _ = enable_webmcp_events(state).await;
-
     // WebDriver backend path
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
+            state.webmcp.clear_invocations();
             state.ref_map.clear();
             wb.navigate(url).await?;
             let new_url = wb.get_url().await.unwrap_or_else(|_| url.to_string());
             let title = wb.get_title().await.unwrap_or_default();
             return Ok(json!({ "url": new_url, "title": title }));
         }
-    }
-
-    // With one tab, every tracked iframe belongs to the page being replaced.
-    // With multiple tabs, retain the other tabs' sessions so switching back to
-    // an already-attached OOPIF does not lose its execution context.
-    let has_background_tabs = state
-        .browser
-        .as_ref()
-        .is_some_and(|browser| browser.page_count() > 1);
-    if !has_background_tabs {
-        state.iframe_sessions.clear();
     }
 
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
@@ -4943,9 +5200,45 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         }
     }
 
+    navigate_active_page(state, url, wait_until).await
+}
+
+/// Navigate the active page and drop the state that belonged to the document
+/// being replaced: element refs, frame scope, and WebMCP page state. Every
+/// command that replaces the active document must go through here, or a
+/// stale `@e3` from the previous page keeps resolving.
+async fn navigate_active_page(
+    state: &mut DaemonState,
+    url: &str,
+    wait_until: WaitUntil,
+) -> Result<Value, String> {
+    if let Some(session_id) = state
+        .browser
+        .as_ref()
+        .and_then(|browser| browser.active_session_id().ok())
+        .map(ToString::to_string)
+    {
+        state.webmcp.clear_page_scope(&session_id);
+    } else {
+        state.webmcp.clear_invocations();
+    }
+    let _ = enable_webmcp_events(state).await;
+
+    // With one tab, every tracked iframe belongs to the page being replaced.
+    // With multiple tabs, retain the other tabs' sessions so switching back to
+    // an already-attached OOPIF does not lose its execution context.
+    let has_background_tabs = state
+        .browser
+        .as_ref()
+        .is_some_and(|browser| browser.page_count() > 1);
+    if !has_background_tabs {
+        state.iframe_sessions.clear();
+    }
+
     state.ref_map.clear();
     state.active_iframe_sessions.clear();
     state.active_frame_id = None;
+    let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let result = mgr.navigate(url, wait_until).await?;
     state.refresh_active_iframe_sessions().await;
     Ok(result)
@@ -5112,6 +5405,7 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
         let mut map = state.origin_headers.write().await;
         map.clear();
     }
+    state.session_setup = SessionSetup::default();
 
     if let Some(server) = state.inspect_server.take() {
         server.shutdown();
@@ -5363,28 +5657,31 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             has_proxy_creds,
             Some(&href),
         )?;
+        // `click --new-tab` creates the same kind of daemon-owned tab as
+        // `tab new`, so it must use the same pre-navigation setup path.
+        let defer_url = defer_url_until_controls || session_setup_pending(state).await;
 
         state.ref_map.clear();
-        {
+        state.active_iframe_sessions.clear();
+        state.active_frame_id = None;
+        state.webmcp.clear_invocations();
+        let new_session_id = {
             let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-            mgr.tab_new(
-                if defer_url_until_controls {
-                    None
-                } else {
-                    Some(&href)
-                },
-                None,
-            )
-            .await?;
-        }
+            mgr.tab_new(if defer_url { None } else { Some(&href) }, None)
+                .await?;
+            mgr.active_session_id()?.to_string()
+        };
 
+        apply_session_setup(state, &new_session_id).await?;
         install_network_controls_or_close(state, has_proxy_creds).await?;
         state.drain_cdp_events_background().await?;
 
-        if defer_url_until_controls {
+        if defer_url {
             let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
             mgr.navigate(&href, WaitUntil::Load).await?;
         }
+
+        state.refresh_active_iframe_sessions().await;
 
         return Ok(json!({ "clicked": selector, "newTab": true, "url": href }));
     }
@@ -6204,7 +6501,7 @@ async fn handle_setcontent(cmd: &Value, state: &DaemonState) -> Result<Value, St
     Ok(json!({ "set": true }))
 }
 
-async fn handle_headers(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_headers(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
@@ -6220,14 +6517,19 @@ async fn handle_headers(cmd: &Value, state: &DaemonState) -> Result<Value, Strin
         .unwrap_or_default();
 
     network::set_extra_headers(&mgr.client, &session_id, &headers).await?;
+    // A fresh target already has no extra headers, so an empty map clears the
+    // inherited setup instead of forcing later tabs through deferred loading.
+    state.session_setup.extra_headers = (!headers.is_empty()).then_some(headers);
     Ok(json!({ "set": true }))
 }
 
-async fn handle_offline(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_offline(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let offline = cmd.get("offline").and_then(|v| v.as_bool()).unwrap_or(true);
     network::set_offline(&mgr.client, &session_id, offline).await?;
+    // Online is the default for a fresh target and needs no replay.
+    state.session_setup.offline = offline.then_some(true);
     Ok(json!({ "offline": offline }))
 }
 
@@ -6588,21 +6890,29 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
     let defer_url_until_controls =
         should_defer_url_until_network_controls(domain_filter.as_ref(), has_proxy_creds, url)?;
+    // UA, init scripts, headers, and routes are per-session in CDP, so when
+    // any are configured the tab is created blank and navigated only after
+    // they are replayed onto it; otherwise the first document would miss them.
+    let defer_url =
+        defer_url_until_controls || (url.is_some() && session_setup_pending(state).await);
 
     state.ref_map.clear();
     state.active_iframe_sessions.clear();
     state.active_frame_id = None;
     state.webmcp.clear_invocations();
-    let mut result = {
+    let (mut result, new_session_id) = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-        mgr.tab_new(if defer_url_until_controls { None } else { url }, label)
-            .await?
+        let result = mgr
+            .tab_new(if defer_url { None } else { url }, label)
+            .await?;
+        (result, mgr.active_session_id()?.to_string())
     };
 
+    apply_session_setup(state, &new_session_id).await?;
     install_network_controls_or_close(state, has_proxy_creds).await?;
     state.drain_cdp_events_background().await?;
 
-    if defer_url_until_controls {
+    if defer_url {
         if let Some(url) = url {
             let nav = {
                 let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
@@ -6733,17 +7043,18 @@ async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     Ok(json!({ "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile }))
 }
 
-async fn handle_user_agent(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_user_agent(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let ua = cmd
         .get("userAgent")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'userAgent' parameter")?;
     mgr.set_user_agent(ua).await?;
+    state.session_setup.user_agent = Some(ua.to_string());
     Ok(json!({ "userAgent": ua }))
 }
 
-async fn handle_set_media(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_set_media(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let media = cmd.get("media").and_then(|v| v.as_str());
 
@@ -6765,10 +7076,14 @@ async fn handle_set_media(cmd: &Value, state: &DaemonState) -> Result<Value, Str
     let features = if feat_list.is_empty() {
         None
     } else {
-        Some(feat_list)
+        Some(feat_list.clone())
     };
 
     mgr.set_emulated_media(media, features).await?;
+    state.session_setup.emulated_media = Some(EmulatedMedia {
+        media: media.map(String::from),
+        features: feat_list,
+    });
     Ok(json!({ "set": true }))
 }
 
@@ -6984,6 +7299,12 @@ fn recording_fps_from_command(cmd: &Value) -> Result<Option<u32>, String> {
     }
 }
 
+/// Start recording the current active page. The recorder attaches to the
+/// active session as-is: no new browser context, no new tab, and no
+/// navigation unless a URL is given (in which case the active tab navigates
+/// there first). Capture therefore starts on an already-hydrated page instead
+/// of at `load` on a cold navigation. Use `tab new` first to record in a
+/// separate tab.
 async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let path = cmd
         .get("path")
@@ -6995,155 +7316,39 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
 
-    // Validate the rate before spinning up a recording context so a bad value
+    // Validate the rate and output path before any browser work so a bad value
     // costs nothing.
     let fps = recording_fps_from_command(cmd)?;
-
-    let viewport = state.viewport;
-    let domain_filter = state.domain_filter.read().await.clone();
-    if let Some(url) = recording_url {
-        check_url_allowed_by_filter(domain_filter.as_ref(), url)?;
-    }
-
-    let (client, new_session_id, nav_url) = {
-        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-        let old_session_id = mgr.active_session_id()?.to_string();
-
-        // Capture current URL if no URL specified
-        let nav_url = if let Some(u) = recording_url {
-            u.to_string()
-        } else {
-            mgr.get_url()
-                .await
-                .unwrap_or_else(|_| "about:blank".to_string())
-        };
-        check_url_allowed_by_filter(domain_filter.as_ref(), &nav_url)?;
-
-        // Capture current cookies
-        let cookies_result = mgr
-            .client
-            .send_command_no_params("Network.getAllCookies", Some(&old_session_id))
-            .await
-            .ok();
-
-        // Create new browser context
-        let ctx_result = mgr
-            .client
-            .send_command_no_params("Target.createBrowserContext", None)
-            .await?;
-        let context_id = ctx_result
-            .get("browserContextId")
-            .and_then(|v| v.as_str())
-            .ok_or("Failed to get browserContextId")?
-            .to_string();
-
-        // Create page in new context
-        let create_result: CreateTargetResult = mgr
-            .client
-            .send_command_typed(
-                "Target.createTarget",
-                &json!({ "url": "about:blank", "browserContextId": context_id }),
-                None,
-            )
-            .await?;
-
-        let attach_result: AttachToTargetResult = mgr
-            .client
-            .send_command_typed(
-                "Target.attachToTarget",
-                &AttachToTargetParams {
-                    target_id: create_result.target_id.clone(),
-                    flatten: true,
-                },
-                None,
-            )
-            .await?;
-
-        let new_session_id = attach_result.session_id.clone();
-        mgr.prepare_domains_pub(&new_session_id).await?;
-
-        // Re-apply download behavior to the recording context.
-        // Without this, downloads in the recording context are silently dropped
-        // because Browser.setDownloadBehavior at launch only applies to the default context.
-        if let Some(ref dl_path) = mgr.download_path {
-            let _ = mgr
-                .client
-                .send_command(
-                    "Browser.setDownloadBehavior",
-                    Some(json!({
-                        "behavior": "allow",
-                        "downloadPath": dl_path,
-                        "browserContextId": context_id,
-                        "eventsEnabled": true
-                    })),
-                    None,
-                )
-                .await;
-        }
-
-        // Re-apply HTTPS error ignore to the recording context.
-        // Security.setIgnoreCertificateErrors at launch only applies to the session it was sent on.
-        if mgr.ignore_https_errors {
-            let _ = mgr
-                .client
-                .send_command(
-                    "Security.setIgnoreCertificateErrors",
-                    Some(json!({ "ignore": true })),
-                    Some(&new_session_id),
-                )
-                .await;
-        }
-
-        // Transfer cookies to new context
-        if let Some(ref cr) = cookies_result {
-            if let Some(cookie_arr) = cr.get("cookies").and_then(|v| v.as_array()) {
-                if !cookie_arr.is_empty() {
-                    let _ = mgr
-                        .client
-                        .send_command(
-                            "Network.setCookies",
-                            Some(json!({ "cookies": cookie_arr })),
-                            Some(&new_session_id),
-                        )
-                        .await;
-                }
-            }
-        }
-
-        // Add page and switch to it
-        let tab_id = mgr.assign_tab_id();
-        mgr.add_page(super::browser::PageInfo {
-            tab_id,
-            label: None,
-            target_id: create_result.target_id,
-            session_id: new_session_id.clone(),
-            url: "about:blank".to_string(),
-            title: String::new(),
-            target_type: "page".to_string(),
-        });
-
-        (mgr.client.clone(), new_session_id, nav_url)
-    };
-
-    let has_proxy_creds = state.proxy_credentials.read().await.is_some();
-    install_network_controls_or_resume_prepared_session(state, has_proxy_creds, &new_session_id)
-        .await?;
-    state.drain_cdp_events_background().await?;
+    recording::validate_output_path(path)?;
 
     {
-        let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
-        if let Some((w, h, scale, mobile)) = viewport {
-            let _ = mgr.set_viewport(w, h, scale, mobile).await;
-        }
-
-        // Navigate only after domain filtering and WebRTC containment are active.
-        if nav_url != "about:blank" {
-            mgr.navigate(&nav_url, WaitUntil::Load).await?;
+        let domain_filter = state.domain_filter.read().await;
+        if let Some(url) = recording_url {
+            check_url_allowed_by_filter(domain_filter.as_ref(), url)?;
         }
     }
 
+    if state.recording_state.active {
+        return Err("Recording already active".to_string());
+    }
+    if state.browser.is_none() {
+        return Err("Browser not launched".to_string());
+    }
+
+    // Check the external dependency before an optional navigation mutates the
+    // active page. State is still inactive, so a failure needs no rollback.
+    recording::check_ffmpeg_available().await?;
+
+    if let Some(url) = recording_url {
+        navigate_active_page(state, url, WaitUntil::Load).await?;
+    }
+    let (client, session_id) = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        (mgr.client.clone(), mgr.active_session_id()?.to_string())
+    };
+
     let result = recording::recording_start(&mut state.recording_state, path, fps)?;
-    state.start_recording_task(client, new_session_id).await?;
+    state.start_recording_task(client, session_id).await?;
 
     if let Some(ref server) = state.stream_server {
         server.set_recording(true, &state.engine).await;
@@ -7177,7 +7382,8 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         .filter(|s| !s.is_empty())
         .map(String::from);
 
-    // Validate the rate before stopping the in-flight take.
+    // Validate the path and rate before stopping the in-flight take.
+    recording::validate_output_path(path)?;
     let fps = recording_fps_from_command(cmd)?;
 
     {
@@ -7185,6 +7391,12 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         if let Some(ref url) = recording_url {
             check_url_allowed_by_filter(domain_filter.as_ref(), url)?;
         }
+    }
+
+    // Preserve the in-flight take when the replacement cannot start. A
+    // restart without a browser keeps its existing state-only behavior.
+    if state.browser.is_some() {
+        recording::check_ffmpeg_available().await?;
     }
 
     let _ = state.stop_recording_task().await;
@@ -7196,12 +7408,15 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         None
     };
 
-    let recording_target = if let Some(ref mut browser) = state.browser {
-        if let Some(url) = recording_url {
-            browser.navigate(&url, WaitUntil::Load).await?;
+    let recording_target = if state.browser.is_some() {
+        if let Some(ref url) = recording_url {
+            navigate_active_page(state, url, WaitUntil::Load).await?;
         }
-        let session_id = browser.active_session_id()?.to_string();
-        Some((browser.client.clone(), session_id))
+        let browser = state.browser.as_ref().ok_or("Browser not launched")?;
+        Some((
+            browser.client.clone(),
+            browser.active_session_id()?.to_string(),
+        ))
     } else {
         None
     };
@@ -7565,7 +7780,7 @@ async fn handle_bringtofront(state: &DaemonState) -> Result<Value, String> {
     Ok(json!({ "broughtToFront": true }))
 }
 
-async fn handle_timezone(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_timezone(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let timezone = cmd
         .get("timezoneId")
@@ -7573,20 +7788,22 @@ async fn handle_timezone(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
         .and_then(|v| v.as_str())
         .ok_or("Missing 'timezoneId' parameter")?;
     mgr.set_timezone(timezone).await?;
+    state.session_setup.timezone = Some(timezone.to_string());
     Ok(json!({ "timezoneId": timezone }))
 }
 
-async fn handle_locale(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_locale(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let locale = cmd
         .get("locale")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'locale' parameter")?;
     mgr.set_locale(locale).await?;
+    state.session_setup.locale = Some(locale.to_string());
     Ok(json!({ "locale": locale }))
 }
 
-async fn handle_geolocation(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_geolocation(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let latitude = cmd
         .get("latitude")
@@ -7599,6 +7816,7 @@ async fn handle_geolocation(cmd: &Value, state: &DaemonState) -> Result<Value, S
     let accuracy = cmd.get("accuracy").and_then(|v| v.as_f64());
 
     mgr.set_geolocation(latitude, longitude, accuracy).await?;
+    state.session_setup.geolocation = Some((latitude, longitude, accuracy));
     Ok(json!({ "latitude": latitude, "longitude": longitude }))
 }
 
@@ -7731,8 +7949,9 @@ async fn handle_addscript(cmd: &Value, state: &DaemonState) -> Result<Value, Str
     Ok(json!({ "added": true }))
 }
 
-async fn handle_addinitscript(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_addinitscript(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
     let source = cmd
         .get("script")
         .or_else(|| cmd.get("source"))
@@ -7740,17 +7959,68 @@ async fn handle_addinitscript(cmd: &Value, state: &DaemonState) -> Result<Value,
         .and_then(|v| v.as_str())
         .ok_or("Missing 'script' parameter")?;
 
-    let identifier = mgr.add_script_to_evaluate(source).await?;
+    let session_identifier = mgr.add_script_to_evaluate(source).await?;
+    let identifier = state.session_setup.register_init_script(
+        source.to_string(),
+        session_id,
+        session_identifier,
+    );
     Ok(json!({ "added": true, "identifier": identifier }))
 }
 
-async fn handle_removeinitscript(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+async fn handle_removeinitscript(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let identifier = cmd
         .get("identifier")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'identifier' parameter")?;
-    mgr.remove_script_to_evaluate(identifier).await?;
+    let (client, active_session_id, live_session_ids) = {
+        let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+        (
+            mgr.client.clone(),
+            mgr.active_session_id()?.to_string(),
+            mgr.pages_list()
+                .into_iter()
+                .map(|page| page.session_id)
+                .collect::<HashSet<_>>(),
+        )
+    };
+    let tracked_index = state
+        .session_setup
+        .init_scripts
+        .iter()
+        .position(|script| script.identifier == identifier);
+
+    // Daemon-owned handles are session-wide. Remove each target-local CDP
+    // registration before dropping the source that would reach future tabs.
+    if let Some(index) = tracked_index {
+        let session_identifiers = state.session_setup.init_scripts[index]
+            .session_identifiers
+            .clone();
+        for (session_id, session_identifier) in session_identifiers {
+            if !live_session_ids.contains(&session_id) {
+                continue;
+            }
+            client
+                .send_command(
+                    "Page.removeScriptToEvaluateOnNewDocument",
+                    Some(json!({ "identifier": session_identifier })),
+                    Some(&session_id),
+                )
+                .await?;
+            state.session_setup.init_scripts[index]
+                .session_identifiers
+                .remove(&session_id);
+        }
+        state.session_setup.init_scripts.remove(index);
+    } else {
+        client
+            .send_command(
+                "Page.removeScriptToEvaluateOnNewDocument",
+                Some(json!({ "identifier": identifier })),
+                Some(&active_session_id),
+            )
+            .await?;
+    }
     Ok(json!({ "removed": true, "identifier": identifier }))
 }
 
@@ -8192,6 +8462,7 @@ async fn handle_device(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     mgr.set_user_agent(ua).await?;
 
     state.viewport = Some((width, height, scale, mobile));
+    state.session_setup.user_agent = Some(ua.to_string());
 
     // Update stream server viewport so status messages and screencast use the new dimensions
     if let Some(ref server) = state.stream_server {
@@ -10166,10 +10437,12 @@ async fn handle_video_start(cmd: &Value, state: &mut DaemonState) -> Result<Valu
     }
 
     let fps = recording_fps_from_command(cmd)?;
+    recording::validate_output_path(path)?;
 
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
+    recording::check_ffmpeg_available().await?;
     recording::recording_start(&mut state.recording_state, path, fps)?;
     state
         .start_recording_task(mgr.client.clone(), session_id)
@@ -11142,7 +11415,7 @@ async fn handle_request_detail(cmd: &Value, state: &mut DaemonState) -> Result<V
     Ok(result)
 }
 
-async fn handle_http_credentials(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_http_credentials(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let username = cmd
@@ -11162,6 +11435,9 @@ async fn handle_http_credentials(cmd: &Value, state: &DaemonState) -> Result<Val
     let mut headers = HashMap::new();
     headers.insert("Authorization".to_string(), format!("Basic {}", encoded));
     network::set_extra_headers(&mgr.client, &session_id, &headers).await?;
+    // Network.setExtraHTTPHeaders replaces the target's complete global
+    // header set, so keep the same replacement ready for tabs opened later.
+    state.session_setup.extra_headers = Some(headers);
 
     Ok(json!({ "set": true }))
 }
@@ -13338,6 +13614,139 @@ mod tests {
         assert_eq!(state.recording_state.output_path, "/tmp/current.webm");
     }
 
+    /// A browser-side attachment failure happens before ffmpeg opens the
+    /// destination, so an existing recording must remain untouched.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_recording_attach_failure_preserves_existing_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("existing.webm");
+        fs::write(&output_path, b"existing recording").unwrap();
+
+        let mut state = DaemonState::new();
+        handle_launch(&json!({ "action": "launch", "headless": true }), &mut state)
+            .await
+            .expect("browser should launch");
+
+        recording::recording_start(
+            &mut state.recording_state,
+            output_path.to_str().unwrap(),
+            None,
+        )
+        .unwrap();
+        let client = state.browser.as_ref().unwrap().client.clone();
+        let error = state
+            .start_recording_task(client, "invalid-recording-session".to_string())
+            .await
+            .expect_err("invalid session should fail attachment");
+        let contents_after_failure = fs::read(&output_path);
+
+        let _ = close_current_browser(&mut state).await;
+
+        assert!(error.to_ascii_lowercase().contains("session"), "{error}");
+        assert_eq!(
+            contents_after_failure.unwrap(),
+            b"existing recording",
+            "a failed start must preserve the previous destination"
+        );
+    }
+
+    /// A failed ffmpeg preflight preserves both the active recording and the
+    /// status published to stream and dashboard clients.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_recording_failed_restart_preserves_active_recording() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let guard = EnvGuard::new(&["PATH", "AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let socket_dir = tempfile::tempdir().unwrap();
+        let empty_path = tempfile::tempdir().unwrap();
+        guard.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            socket_dir.path().to_str().unwrap(),
+        );
+        guard.set("AGENT_BROWSER_SESSION", "failed-record-restart");
+
+        let mut state = DaemonState::new();
+        handle_launch(&json!({ "action": "launch", "headless": true }), &mut state)
+            .await
+            .expect("browser should launch");
+        let status = handle_stream_enable(&json!({ "port": 0 }), &mut state)
+            .await
+            .expect("stream should start");
+        let port = status["port"].as_u64().unwrap() as u16;
+        let previous_path = socket_dir.path().join("previous.webm");
+        handle_recording_start(
+            &json!({
+                "action": "recording_start",
+                "path": previous_path.to_string_lossy()
+            }),
+            &mut state,
+        )
+        .await
+        .expect("initial recording should start");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let restarted_path = socket_dir.path().join("restarted.webm");
+        guard.set("PATH", empty_path.path().to_str().unwrap());
+        let error = handle_recording_restart(
+            &json!({
+                "action": "recording_restart",
+                "path": restarted_path.to_string_lossy()
+            }),
+            &mut state,
+        )
+        .await;
+        let error = error.expect_err("restart should fail without ffmpeg");
+        let active_after_failure = state.recording_state.active;
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
+            .await
+            .expect("stream client should connect");
+        let reported_recording = loop {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+                .await
+                .expect("status should arrive")
+                .expect("stream should stay open")
+                .expect("status should be readable");
+            if let Message::Text(text) = message {
+                let value: Value = serde_json::from_str(&text).unwrap();
+                if value["type"] == "status" {
+                    break value["recording"].as_bool().unwrap();
+                }
+            }
+        };
+
+        guard.set("PATH", &original_path);
+        let stop = handle_recording_stop(&mut state)
+            .await
+            .expect("preserved recording should still stop normally");
+        let _ = ws.close(None).await;
+        let _ = handle_stream_disable(&mut state).await;
+        let _ = close_current_browser(&mut state).await;
+        let _ = fs::remove_file(previous_path);
+
+        assert!(error.contains("ffmpeg"), "{error}");
+        assert!(
+            active_after_failure,
+            "failed replacement must leave the current recording active"
+        );
+        assert!(
+            reported_recording,
+            "stream clients must still see the preserved recording"
+        );
+        assert!(
+            stop["frames"].as_u64().unwrap_or(0) > 0,
+            "preserved recording should keep capturing frames"
+        );
+        assert!(
+            !restarted_path.exists(),
+            "failed preflight must not create the replacement output"
+        );
+    }
+
     #[tokio::test]
     async fn test_read_without_url_blocks_disallowed_active_tab_before_content() {
         let (port, server) = start_webdriver_response_server(vec![(
@@ -13935,6 +14344,48 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         assert_eq!(state.mouse_state.x, 0.0);
         assert_eq!(state.mouse_state.y, 0.0);
         assert_eq!(state.mouse_state.buttons, 0);
+    }
+
+    #[test]
+    fn test_session_setup_treats_cleared_values_as_empty() {
+        let mut setup = SessionSetup {
+            extra_headers: Some(HashMap::new()),
+            offline: Some(false),
+            ..SessionSetup::default()
+        };
+        assert!(setup.is_empty());
+
+        setup.offline = Some(true);
+        assert!(!setup.is_empty());
+
+        setup.offline = None;
+        setup
+            .extra_headers
+            .as_mut()
+            .unwrap()
+            .insert("X-Test".to_string(), "set".to_string());
+        assert!(!setup.is_empty());
+    }
+
+    #[test]
+    fn test_init_script_handles_are_independent_from_session_identifiers() {
+        let mut setup = SessionSetup::default();
+        let first = setup.register_init_script(
+            "window.first = true".to_string(),
+            "session-a".to_string(),
+            "1".to_string(),
+        );
+        let second = setup.register_init_script(
+            "window.second = true".to_string(),
+            "session-b".to_string(),
+            "1".to_string(),
+        );
+
+        assert_eq!(first, "init-script-1");
+        assert_eq!(second, "init-script-2");
+        assert_eq!(setup.init_scripts.len(), 2);
+        assert_eq!(setup.init_scripts[0].session_identifiers["session-a"], "1");
+        assert_eq!(setup.init_scripts[1].session_identifiers["session-b"], "1");
     }
 
     #[test]

@@ -7210,15 +7210,15 @@ async fn e2e_upload_with_css_selector() {
 }
 
 // ---------------------------------------------------------------------------
-// Recording: viewport inheritance
+// Recording: default records the current active page
 // ---------------------------------------------------------------------------
 
-/// Verify that `recording_start` inherits the current viewport dimensions
-/// into the newly created recording context. Without this, the recording
-/// context falls back to the default 1280×720 regardless of what the user set.
+/// `recording_start` attaches the recorder to the active page
+/// as-is: no new browser context, no new tab, no navigation. Page state set
+/// before `record start` must survive, and the viewport must be untouched.
 #[tokio::test]
 #[ignore]
-async fn e2e_recording_inherits_viewport() {
+async fn e2e_recording_default_records_active_page() {
     let mut state = DaemonState::new();
 
     let resp = execute_command(
@@ -7228,8 +7228,9 @@ async fn e2e_recording_inherits_viewport() {
     .await;
     assert_success(&resp);
 
+    let page_url = "data:text/html,<h1>Current</h1>";
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>Viewport</h1>" }),
+        &json!({ "id": "2", "action": "navigate", "url": page_url }),
         &mut state,
     )
     .await;
@@ -7242,44 +7243,155 @@ async fn e2e_recording_inherits_viewport() {
     .await;
     assert_success(&resp);
 
-    let tmp_dir = std::env::temp_dir();
-    let rec_path = tmp_dir.join(format!("ab-e2e-rec-viewport-{}.webm", std::process::id()));
+    // In-memory page state: a cold navigation or a new page would lose this.
     let resp = execute_command(
-        &json!({ "id": "4", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &json!({ "id": "4", "action": "evaluate", "script": "window.__abMarker = 42; window.__abMarker" }),
         &mut state,
     )
     .await;
     assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], 42);
+
+    let tmp_dir = std::env::temp_dir();
+    let rec_path = tmp_dir.join(format!("ab-e2e-rec-current-{}.webm", std::process::id()));
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(700)).await;
+
+    // Still exactly one tab: no recording tab was added.
+    let resp = execute_command(&json!({ "id": "6", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    let tabs = get_data(&resp)["tabs"].as_array().unwrap();
+    assert_eq!(
+        tabs.len(),
+        1,
+        "default record start must not open a new tab, got {tabs:?}"
+    );
+
+    // Same page, same JS heap: the marker survived and the URL is unchanged.
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "evaluate", "script": "window.__abMarker" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        42,
+        "default record start must not navigate or replace the page"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "evaluate", "script": "location.href" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], page_url);
+
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "evaluate", "script": "[window.innerWidth, window.innerHeight]" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], json!([800, 600]));
+
+    let resp = execute_command(
+        &json!({ "id": "10", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        get_data(&resp)["frames"].as_u64().unwrap_or(0) > 0,
+        "recorder attached to the active page should have captured frames"
+    );
+
+    let _ = std::fs::remove_file(&rec_path);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// `recording_start` with a URL navigates the active
+/// tab to that URL before recording. No new tab is created.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_default_with_url_navigates_active_tab() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": "data:text/html,<button id='before'>Before</button>"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Refs from the page being replaced must not survive the navigation.
+    let resp = execute_command(
+        &json!({ "id": "2b", "action": "snapshot", "selector": "#before" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(state.ref_map.get("e1").is_some());
+
+    let target_url = "data:text/html,<h1>Recorded</h1>";
+    let tmp_dir = std::env::temp_dir();
+    let rec_path = tmp_dir.join(format!("ab-e2e-rec-url-{}.webm", std::process::id()));
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "recording_start",
+            "path": rec_path.to_string_lossy(),
+            "url": target_url
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        state.ref_map.entries_sorted().is_empty(),
+        "record start <url> must clear refs like navigate does"
+    );
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
+    let resp = execute_command(&json!({ "id": "4", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    let tabs = get_data(&resp)["tabs"].as_array().unwrap();
+    assert_eq!(
+        tabs.len(),
+        1,
+        "record start <url> must reuse the active tab"
+    );
+
     let resp = execute_command(
-        &json!({ "id": "5", "action": "evaluate", "script": "window.innerWidth" }),
+        &json!({ "id": "5", "action": "evaluate", "script": "location.href" }),
         &mut state,
     )
     .await;
     assert_success(&resp);
-    let rec_width = get_data(&resp)["result"].as_i64().unwrap();
+    assert_eq!(get_data(&resp)["result"], target_url);
 
     let resp = execute_command(
-        &json!({ "id": "6", "action": "evaluate", "script": "window.innerHeight" }),
-        &mut state,
-    )
-    .await;
-    assert_success(&resp);
-    let rec_height = get_data(&resp)["result"].as_i64().unwrap();
-
-    assert_eq!(
-        rec_width, 800,
-        "Recording context width should be 800 (inherited from viewport), got {rec_width}"
-    );
-    assert_eq!(
-        rec_height, 600,
-        "Recording context height should be 600 (inherited from viewport), got {rec_height}"
-    );
-
-    let resp = execute_command(
-        &json!({ "id": "7", "action": "recording_stop" }),
+        &json!({ "id": "6", "action": "recording_stop" }),
         &mut state,
     )
     .await;
@@ -7336,14 +7448,11 @@ async fn e2e_recording_honors_requested_fps() {
     assert_eq!(get_data(&resp)["fps"].as_u64(), Some(FPS));
 
     // The recorder screencasts on its own CDP session attached to the
-    // recording page. That attachment must not surface as a tab.
+    // active page. That attachment must not surface as a tab.
     let resp = execute_command(&json!({ "id": "3b", "action": "tab_list" }), &mut state).await;
     assert_success(&resp);
     let tabs = get_data(&resp)["tabs"].as_array().unwrap().len();
-    assert_eq!(
-        tabs, 2,
-        "original page plus the recording page, nothing else"
-    );
+    assert_eq!(tabs, 1, "the recorded page only, nothing else");
 
     tokio::time::sleep(tokio::time::Duration::from_millis(RECORD_MS)).await;
 
@@ -7378,8 +7487,146 @@ async fn e2e_recording_honors_requested_fps() {
     assert_success(&resp);
 }
 
+/// Verify that an output path without an extension is rejected before the
+/// recording context exists: no new tab, no file, nothing to stop.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_rejects_extensionless_path_before_context() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let rec_path = std::env::temp_dir().join(format!("ab-e2e-rec-noext-{}", std::process::id()));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp.get("success").and_then(|v| v.as_bool()), Some(false));
+    let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        err.contains("no extension"),
+        "error should explain the path: {}",
+        err
+    );
+    assert!(!rec_path.exists(), "no file should be created");
+    assert!(!state.recording_state.active);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    let tabs = get_data(&resp)["tabs"].as_array().unwrap().len();
+    assert_eq!(
+        tabs, 1,
+        "a rejected path must not leave a recording tab behind"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Verify that a missing ffmpeg fails `recording_start` itself before an
+/// optional navigation, and leaves the state ready for the next start.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_fails_fast_without_ffmpeg() {
+    let guard = EnvGuard::new(&["PATH"]);
+    let original_path = std::env::var("PATH").unwrap_or_default();
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let before_url = "data:text/html,<h1>Before</h1>";
+    let after_url = "data:text/html,<h1>After</h1>";
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": before_url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let tmp_dir = std::env::temp_dir();
+    let rec_path = tmp_dir.join(format!("ab-e2e-rec-noffmpeg-{}.webm", std::process::id()));
+
+    // A PATH with no ffmpeg on it. Chrome is already running, so nothing else
+    // needs resolving.
+    let empty_dir = tmp_dir.join(format!("ab-e2e-empty-path-{}", std::process::id()));
+    std::fs::create_dir_all(&empty_dir).unwrap();
+    guard.set("PATH", &empty_dir.to_string_lossy());
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "recording_start",
+            "path": rec_path.to_string_lossy(),
+            "url": after_url
+        }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(|v| v.as_bool()),
+        Some(false),
+        "record start must fail without ffmpeg: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
+    let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(err.contains("ffmpeg"), "error should name ffmpeg: {}", err);
+    assert!(
+        !state.recording_state.active,
+        "failed start must not leave the recording active"
+    );
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "location.href" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        before_url,
+        "ffmpeg preflight must fail before the requested navigation"
+    );
+
+    // With ffmpeg back, the same start succeeds: nothing stale was left behind.
+    guard.set("PATH", &original_path);
+    let resp = execute_command(
+        &json!({
+            "id": "5",
+            "action": "recording_start",
+            "path": rec_path.to_string_lossy(),
+            "url": after_url
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let _ = std::fs::remove_file(&rec_path);
+    let _ = std::fs::remove_dir(&empty_dir);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// Verify that an out-of-range frame rate is rejected before the recorder
-/// builds its context, leaving no file and no active recording behind.
+/// builds its context or attaches to the page, leaving no file and no active
+/// recording behind.
 #[tokio::test]
 #[ignore]
 async fn e2e_recording_rejects_invalid_fps() {
@@ -7421,6 +7668,486 @@ async fn e2e_recording_rejects_invalid_fps() {
     )
     .await;
     assert_eq!(resp.get("success").and_then(|v| v.as_bool()), Some(false));
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// tab new: session setup inheritance
+// ---------------------------------------------------------------------------
+
+/// `tab new <url>` must replay the session's setup onto the new tab before
+/// its first document: an init script registered on the primary page has to
+/// run on the initial load, not only after a later navigation.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_new_inherits_init_script_on_first_load() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "addinitscript", "script": "window.__abTab = 'seeded';" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3", "action": "tab_new",
+            "url": "data:text/html,<script>document.title = String(window.__abTab)</script>",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.title" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        "seeded",
+        "init script should run on the new tab's first document"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Replayed init scripts receive target-specific CDP identifiers. Removing a
+/// script from the new tab must translate the original user-facing identifier
+/// for every tab where Chrome registered it.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_new_removes_replayed_init_script_by_original_identifier() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let first = execute_command(
+        &json!({
+            "id": "2", "action": "addinitscript",
+            "script": "window.__abFirstInit = true;",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&first);
+    let first_id = get_data(&first)["identifier"]
+        .as_str()
+        .expect("first init script should return an identifier")
+        .to_string();
+
+    let second = execute_command(
+        &json!({
+            "id": "3", "action": "addinitscript",
+            "script": "window.__abSecondInit = true;",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&second);
+    let second_id = get_data(&second)["identifier"]
+        .as_str()
+        .expect("second init script should return an identifier")
+        .to_string();
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "removeinitscript", "identifier": first_id }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "5", "action": "tab_new",
+            "url": "data:text/html,<title>new tab</title>",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "removeinitscript", "identifier": second_id }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "7", "action": "navigate",
+            "url": "data:text/html,<title>after removal</title>",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "8", "action": "evaluate",
+            "script": "window.__abSecondInit === true",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], false);
+
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "tab_switch", "tabId": "t1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "10", "action": "navigate",
+            "url": "data:text/html,<title>original after removal</title>",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "11", "action": "evaluate",
+            "script": "window.__abSecondInit === true",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        false,
+        "removing a replayed script should also remove its original registration"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// CDP allocates init-script identifiers independently in each target. Two
+/// pre-existing tabs can therefore both return `1` for different scripts, but
+/// the daemon must expose distinct handles and remove only the requested one.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_init_script_handles_are_unique_across_preexisting_tabs() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "2", "action": "tab_new" }), &mut state).await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "tab_switch", "tabId": "t1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let first = execute_command(
+        &json!({
+            "id": "4", "action": "addinitscript",
+            "script": "window.__abFirstExistingTab = true;",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&first);
+    let first_id = get_data(&first)["identifier"]
+        .as_str()
+        .expect("first init script should return an identifier")
+        .to_string();
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "tab_switch", "tabId": "t2" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let second = execute_command(
+        &json!({
+            "id": "6", "action": "addinitscript",
+            "script": "window.__abSecondExistingTab = true;",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&second);
+    let second_id = get_data(&second)["identifier"]
+        .as_str()
+        .expect("second init script should return an identifier")
+        .to_string();
+
+    assert_ne!(first_id, second_id, "user-facing handles must be unique");
+
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "removeinitscript", "identifier": second_id }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "8", "action": "tab_new",
+            "url": "data:text/html,<title>future tab</title>",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "9", "action": "evaluate",
+            "script": "[window.__abFirstExistingTab === true, window.__abSecondExistingTab === true]",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], json!([true, false]));
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// `click --new-tab` creates a tab through a separate handler from `tab new`,
+/// but it must apply the same session setup before the first request.
+#[tokio::test]
+#[ignore]
+async fn e2e_click_new_tab_inherits_user_agent_and_headers() {
+    let (base_url, _server) = start_echo_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({
+            "id": "1", "action": "launch", "headless": true,
+            "userAgent": "ab-click-new-tab-test/1.0",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "headers", "headers": { "X-Global": "global" } }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3", "action": "navigate",
+            "url": format!("data:text/html,<a id='next' href='{}/click'>next</a>", base_url),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "click", "selector": "#next", "newTab": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "5", "action": "evaluate",
+            "script": "JSON.parse(document.body.innerText)",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let headers = &get_data(&resp)["result"]["headers"];
+    assert_eq!(headers["X-Global"], "global");
+    assert_eq!(headers["User-Agent"], "ab-click-new-tab-test/1.0");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Clearing headers and offline mode restores the default setup, so future
+/// tabs can use the non-blocking target creation path.
+#[tokio::test]
+#[ignore]
+async fn e2e_cleared_session_setup_is_not_pending() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "offline", "offline": false }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "headers", "headers": {} }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    assert!(state.session_setup.offline.is_none());
+    assert!(state.session_setup.extra_headers.is_none());
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// The launch `--user-agent` (Emulation.setUserAgentOverride) and global
+/// `set headers` (Network.setExtraHTTPHeaders) are per CDP session. A new tab
+/// opened with a URL must send both on its very first document request.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_new_inherits_user_agent_and_headers() {
+    let (base_url, _server) = start_echo_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({
+            "id": "1", "action": "launch", "headless": true,
+            "userAgent": "ab-tab-new-test/1.0",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "headers", "headers": { "X-Global": "global" } }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "tab_new", "url": format!("{}/tab", base_url) }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "4", "action": "evaluate",
+            "script": "JSON.parse(document.body.innerText)",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let headers = &get_data(&resp)["result"]["headers"];
+    assert_eq!(
+        headers["X-Global"], "global",
+        "global `headers` should apply to the new tab's first document request, got {headers}"
+    );
+    assert_eq!(
+        headers["User-Agent"], "ab-tab-new-test/1.0",
+        "new tab's first document request should carry the launch user agent, got {headers}"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": "navigator.userAgent" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "ab-tab-new-test/1.0");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// `set credentials` uses target-scoped extra headers, so a new tab must send
+/// the resulting Authorization header on its first document request.
+#[tokio::test]
+#[ignore]
+async fn e2e_tab_new_inherits_http_credentials_on_first_load() {
+    let (base_url, _server) = start_echo_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2", "action": "credentials",
+            "username": "tab-user", "password": "tab-password",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "tab_new", "url": format!("{}/credentials", base_url) }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "4", "action": "evaluate",
+            "script": "JSON.parse(document.body.innerText)",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let expected = format!("Basic {}", STANDARD.encode("tab-user:tab-password"));
+    assert_eq!(
+        get_data(&resp)["result"]["headers"]["Authorization"],
+        expected,
+        "HTTP credentials should apply to the new tab's first document request"
+    );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);

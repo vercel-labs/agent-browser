@@ -114,16 +114,17 @@ Headless Chromium screenshots hide native scrollbars for consistent image output
 
 ```bash
 agent-browser open https://example.com     # Launch a browser session first
-agent-browser record start ./demo.webm    # Start recording at 30 fps
+agent-browser record start ./demo.webm    # Start recording the current page at 30 fps
 agent-browser click @e1                   # Perform actions
 agent-browser record stop                 # Stop and save video
 agent-browser record restart ./take2.webm # Stop current + start new
 
 agent-browser record start ./scroll.webm --fps 60  # 60 fps for motion-heavy takes
 agent-browser record start ./soak.webm --fps 10    # Lower rate for long sessions
+agent-browser tab new https://example.com          # Open a separate tab first if you want the recording there
 ```
 
-`--fps` accepts 1 to 60 and defaults to 30. Playback duration always matches the wall clock time recorded, so a slow page holds frames instead of speeding the video up.
+Needs `ffmpeg` on PATH; use a `.webm` or `.mp4` path (other extensions go to ffmpeg as-is, an extensionless path is rejected). `--fps` accepts 1 to 60 and defaults to 30. Playback duration always matches the wall clock time recorded, so a slow page holds frames instead of speeding the video up.
 
 ## Wait
 
@@ -171,7 +172,7 @@ agent-browser set device "iPhone 14"          # Emulate device
 agent-browser set geo 37.7749 -122.4194       # Set geolocation (alias: geolocation)
 agent-browser set offline on                  # Toggle offline mode
 agent-browser set headers '{"X-Key":"v"}'     # Extra HTTP headers
-agent-browser set credentials user pass       # HTTP basic auth (alias: auth)
+agent-browser set credentials user pass       # HTTP basic auth for current and future tabs (alias: auth)
 agent-browser set media dark                  # Emulate color scheme
 agent-browser set media light reduced-motion  # Light mode + reduced motion
 ```
@@ -233,6 +234,8 @@ agent-browser tab close docs             # close by label
 ```
 
 Labels are never auto-generated, never rewritten on navigation, and must be unique within a session. To interact with another tab, switch to it first: the daemon maintains a single active tab, so refs (`@eN`) belong to the tab that was active when the snapshot ran.
+
+Tabs opened through `tab new` or `click --new-tab` inherit the session's setup before their first document loads: user agent, `set headers`, `set credentials`, origin-scoped `--headers`, init scripts, `route` rules, and emulation overrides (color scheme, timezone, locale, geolocation, offline). Turning offline mode off or setting headers to `{}` restores the default setup for future tabs.
 
 `tab list --json` also reports each tab's CDP `targetId`, accepted anywhere a tab ref is accepted (`tab <targetId>`, `tab close <targetId>`). Target ids stay stable across daemon restarts, unlike `t<N>` ids, which are per-daemon counters. With `--pin-tab` the session is pinned to its bound tab: if that tab is closed, commands fail with a `tab_gone` error instead of falling back to another tab, and `tab new` or `tab list` recover. JSON errors include `code: "tab_gone"` and a recovery object with `data.targetId` plus optional sanitized `data.lastUrl`; batch uses `result` for the same object.
 
@@ -433,6 +436,8 @@ agent-browser <command> --help        # Show detailed help for a command
 
 ## Debugging
 
+On Windows, owned headless Chrome runs on a private desktop so hidden windows cannot draw stray rectangles over the user's desktop. This applies to custom Chrome executables and windows created later through CDP. Headed and extension sessions use the interactive desktop. Owned Chrome trees are terminated when their daemon exits, including forced termination; attaching to an external browser does not take ownership of it.
+
 ```bash
 agent-browser --headed open example.com   # Show browser window
 agent-browser --cdp 9222 snapshot         # Connect via CDP port
@@ -486,8 +491,10 @@ agent-browser a11y <url> --json                     # Structured results for aut
 ```bash
 agent-browser open --init-script <path>             # Register before first navigation (repeatable)
 agent-browser addinitscript <js>                    # Register at runtime (returns identifier)
-agent-browser removeinitscript <identifier>         # Remove a previously registered init script
+agent-browser removeinitscript <identifier>         # Remove from every tab in the session
 ```
+
+Runtime init-script identifiers are session-wide. Removing one clears it from every open tab where it was registered and from the setup replayed into future tabs.
 
 ## cURL cookie import
 

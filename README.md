@@ -305,9 +305,11 @@ agent-browser set device <name>       # Emulate device ("iPhone 14")
 agent-browser set geo <lat> <lng>     # Set geolocation
 agent-browser set offline [on|off]    # Toggle offline mode
 agent-browser set headers <json>      # Extra HTTP headers
-agent-browser set credentials <u> <p> # HTTP basic auth
+agent-browser set credentials <u> <p> # HTTP basic auth for current and future tabs
 agent-browser set media [dark|light]  # Emulate color scheme
 ```
+
+`set credentials` applies HTTP Basic Authentication to the current tab and tabs opened later. `set offline off` and `set headers '{}'` restore the default setup for future tabs.
 
 ### Cookies & Storage
 
@@ -369,6 +371,8 @@ agent-browser click @e3              # click uses docs's refs
 agent-browser tab close docs         # close by label
 ```
 
+Tabs opened through `tab new` or `click --new-tab` inherit the session's user agent, headers, HTTP credentials, init scripts, routes, and emulation overrides before their first document loads.
+
 `tab list --json` also reports each tab's CDP `targetId`, and target ids are accepted anywhere a tab ref is accepted (`tab <targetId>`, `tab close <targetId>`). Unlike `t<N>` ids, which are per-daemon counters, target ids stay stable across daemon restarts, so they're the right handle for scripts coordinating multiple sessions on one browser.
 
 Switching to a tab discarded by Chrome's Memory Saver reactivates it, since a discarded tab has no renderer to drive. Reactivation reloads the discarded page and resets its unsaved state, and the switch result reports `"revived": true`. A tab whose page is paused by a JavaScript dialog is alive rather than discarded, so the switch leaves it untouched and reports `"dialogBlocked": true`; resolve the dialog with `dialog accept` or `dialog dismiss` before interacting. Closing the active tab onto a discarded successor revives it the same way and reports `"activeTabRevived": true`.
@@ -414,7 +418,7 @@ agent-browser trace start             # Start recording trace
 agent-browser trace stop [path]       # Stop and save trace
 agent-browser profiler start          # Start Chrome DevTools profiling
 agent-browser profiler stop [path]    # Stop and save profile (.json)
-agent-browser record start ./demo.webm           # Start video recording at 30 fps
+agent-browser record start ./demo.webm           # Start video recording at 30 fps (.webm or .mp4; needs ffmpeg on PATH)
 agent-browser record start ./demo.webm --fps 60  # 60 fps for motion-heavy takes (1-60 allowed)
 agent-browser record stop                        # Stop and save the video
 agent-browser record restart ./take2.webm        # Stop the current recording, start a new one
@@ -515,8 +519,10 @@ axe-core: 4.12.1  violations: 2  incomplete: 0  passes: 24
 agent-browser open --init-script <path>           # Register page init script before first navigation
                                                   # (repeatable; also AGENT_BROWSER_INIT_SCRIPTS env)
 agent-browser addinitscript <js>                  # Register at runtime (returns identifier)
-agent-browser removeinitscript <identifier>       # Remove a previously registered init script
+agent-browser removeinitscript <identifier>       # Remove from every tab in the session
 ```
+
+Runtime init-script identifiers are session-wide. `removeinitscript` removes the script from every open tab where it was registered and prevents it from being replayed into tabs opened later.
 
 ### Setup
 
@@ -996,7 +1002,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--screenshot-dir <path>` | Default screenshot output directory (or `AGENT_BROWSER_SCREENSHOT_DIR` env) |
 | `--screenshot-quality <n>` | JPEG quality 0-100 (or `AGENT_BROWSER_SCREENSHOT_QUALITY` env) |
 | `--screenshot-format <fmt>` | Screenshot format: `png`, `jpeg` (or `AGENT_BROWSER_SCREENSHOT_FORMAT` env) |
-| `--headed` | Show browser window (not headless) (or `AGENT_BROWSER_HEADED` env) |
+| `--headed` | Show browser window on the interactive desktop (or `AGENT_BROWSER_HEADED` env) |
 | `--webgpu` | Enable WebGPU; SwiftShader software Vulkan on Linux, no GPU required (or `AGENT_BROWSER_WEBGPU` env) |
 | `--no-webmcp` | Disable experimental WebMCP support, which is enabled by default for locally launched Chrome (or `AGENT_BROWSER_NO_WEBMCP` env) |
 | `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) |
@@ -1349,6 +1355,8 @@ agent-browser set headers '{"X-Custom-Header": "value"}'
 ```
 
 ## Custom Browser Executable
+
+On Windows, agent-browser launches headless Chrome on a private desktop so hidden browser windows cannot leave visible rectangles on your desktop, including with affected Chrome 150 builds. This also applies to custom executables and windows opened later in the session. Headed browsers, including sessions with extensions, use the interactive desktop. Chrome processes launched by agent-browser belong to a Windows Job Object and are terminated when their daemon exits or is forcibly killed. Browsers connected through `--cdp` or `--auto-connect` remain externally owned.
 
 Use a custom browser executable instead of the bundled Chromium. This is useful for:
 

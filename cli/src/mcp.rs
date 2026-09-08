@@ -5,6 +5,8 @@
 //! so MCP behavior stays aligned with the normal CLI command surface. Daemon
 //! lifecycle settings, including the default idle timeout, use the same CLI
 //! parser and daemon as direct commands.
+//! Owned Windows Chrome uses the same private headless desktop and Job Object
+//! lifetime through MCP; headed and external-connection semantics are unchanged.
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
@@ -768,7 +770,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_OPEN,
             "Open page",
-            "Launch the browser and optionally navigate to a URL. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools.",
+            "Launch the browser and optionally navigate to a URL. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools.",
             json!({
                 "url": { "type": "string", "description": "URL to open. Omit to launch about:blank." },
                 "headed": { "type": "boolean", "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults." },
@@ -850,7 +852,7 @@ fn tools() -> Vec<Value> {
             "Click an element by @ref or CSS selector.",
             json!({
                 "selector": selector_schema(),
-                "newTab": { "type": "boolean", "default": false, "description": "Open link targets in a new tab." }
+                "newTab": { "type": "boolean", "default": false, "description": "Open link targets in a new tab after applying session setup." }
             }),
             &["selector"],
         ),
@@ -1171,7 +1173,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SET_CREDENTIALS,
             "Set credentials",
-            "Set HTTP credentials.",
+            "Set HTTP credentials for the current tab and tabs opened later.",
             json!({ "username": { "type": "string" }, "password": { "type": "string" } }),
             &["username", "password"],
         ),
@@ -1276,7 +1278,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_TAB_NEW,
             "Tab new",
-            "Open a new tab.",
+            "Open a new tab after applying session setup before its first navigation.",
             json!({ "url": { "type": "string" }, "label": { "type": "string" } }),
             &[],
         ),
@@ -1368,10 +1370,13 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_RECORD_START,
             "Record start",
-            "Start video recording. Captures 30 fps by default; pass fps up to 60 for motion-heavy takes.",
+            "Start video recording of the current active page. Captures 30 fps by default; pass fps up to 60 for motion-heavy takes. Pass url to navigate the active tab there first. Use agent_browser_tab_new beforehand to record in a separate tab.",
             json!({
-                "path": { "type": "string" },
-                "url": { "type": "string" },
+                "path": {
+                    "type": "string",
+                    "description": "Output file; .webm (VP8) and .mp4 (H.264) are the supported formats, other extensions are handed to ffmpeg as-is with H.264 video. Must have an extension. Needs ffmpeg on PATH.",
+                },
+                "url": { "type": "string", "description": "Navigate the active tab to this URL before recording starts." },
                 "fps": {
                     "type": "integer",
                     "minimum": 1,
@@ -1393,7 +1398,10 @@ fn parity_tools() -> Vec<Value> {
             "Record restart",
             "Restart video recording. Captures 30 fps by default; pass fps up to 60 for motion-heavy takes.",
             json!({
-                "path": { "type": "string" },
+                "path": {
+                    "type": "string",
+                    "description": "Output file; .webm (VP8) and .mp4 (H.264) are the supported formats, other extensions are handed to ffmpeg as-is with H.264 video. Must have an extension. Needs ffmpeg on PATH.",
+                },
                 "url": { "type": "string" },
                 "fps": {
                     "type": "integer",
@@ -1665,7 +1673,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_REMOVE_INIT_SCRIPT,
             "Remove init script",
-            "Remove a registered init script.",
+            "Remove a registered init script from every tab in the session.",
             json!({ "id": { "type": "string" } }),
             &["id"],
         ),
@@ -2399,17 +2407,25 @@ fn call_cli_tool(
     validate_arguments_object(arguments)?;
     let session = optional_string(arguments, "session")?;
     let timeout_ms = optional_timeout(arguments)?;
-    let extra_args = optional_string_array(arguments, "extraArgs")?.unwrap_or_default();
-
-    let mut cli_args = vec!["--json".to_string()];
-    append_common_global_args(&mut cli_args, arguments, session.as_deref())?;
-    cli_args.extend(command_args);
-    cli_args.extend(extra_args);
+    let cli_args = cli_tool_args(arguments, command_args, session.as_deref())?;
 
     let run = run_cli(&cli_args, stdin_body, timeout_ms).map_err(|e| {
         ProtocolError::invalid_params(format!("Failed to run agent-browser: {}", e))
     })?;
     Ok(tool_result_from_run(run))
+}
+
+fn cli_tool_args(
+    arguments: &Value,
+    command_args: Vec<String>,
+    session: Option<&str>,
+) -> Result<Vec<String>, ProtocolError> {
+    let extra_args = optional_string_array(arguments, "extraArgs")?.unwrap_or_default();
+    let mut args = vec!["--json".to_string()];
+    append_common_global_args(&mut args, arguments, session)?;
+    args.extend(command_args);
+    args.extend(extra_args);
+    Ok(args)
 }
 
 fn command_parts(command: &str) -> Vec<String> {
@@ -4068,6 +4084,35 @@ mod tests {
     }
 
     #[test]
+    fn open_uses_cli_headless_selection_with_custom_windows_chrome() {
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_HEADED"]);
+        guard.set("AGENT_BROWSER_HEADED", "true");
+        // An MCP caller can explicitly select the headless/private-desktop
+        // launch path even when the user's default is headed.
+        let arguments = json!({
+            "headed": false,
+            "url": "https://example.com",
+            "extraArgs": ["--executable-path", "C:\\Chrome for Testing\\chrome.exe"]
+        });
+        let args = cli_tool_args(&arguments, open_args(&arguments).unwrap(), None).unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        assert!(!flags.headed);
+        assert!(flags.cli_headed);
+        assert_eq!(
+            flags.executable_path.as_deref(),
+            Some("C:\\Chrome for Testing\\chrome.exe")
+        );
+        let command =
+            crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+        assert_eq!(command["action"], "navigate");
+        assert_eq!(command["url"], "https://example.com");
+        assert_eq!(
+            open_args(&json!({"headed": true})).unwrap(),
+            ["--headed", "true", "open"]
+        );
+    }
+
+    #[test]
     fn webmcp_profile_is_opt_in_and_forwards_cli_arguments() {
         let default = McpConfig::default();
         assert!(!default.allows(TOOL_WEBMCP_LIST));
@@ -4557,6 +4602,21 @@ mod tests {
             assert_eq!(fps["minimum"], json!(1));
             // Must stay in sync with the CLI parser's --fps ceiling.
             assert_eq!(fps["maximum"], json!(crate::native::recording::MAX_FPS));
+
+            // The parser requires an extension and the two tuned formats are
+            // the ones to steer callers toward.
+            let path_desc = tool["inputSchema"]["properties"]["path"]["description"]
+                .as_str()
+                .unwrap();
+            for needle in [".webm", ".mp4", "ffmpeg"] {
+                assert!(
+                    path_desc.contains(needle),
+                    "{} path description should mention {}: {}",
+                    name,
+                    needle,
+                    path_desc
+                );
+            }
         }
 
         assert_eq!(

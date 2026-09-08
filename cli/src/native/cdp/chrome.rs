@@ -1,5 +1,8 @@
+#[cfg(windows)]
+use super::windows_process::Child;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -868,7 +871,9 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
     #[cfg(target_os = "linux")]
     let xvfb = maybe_start_xvfb(options);
 
+    #[cfg(not(windows))]
     let mut cmd = Command::new(chrome_path);
+    #[cfg(not(windows))]
     cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -908,7 +913,11 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         }
     }
 
-    let mut child = cmd.spawn().map_err(|e| {
+    #[cfg(not(windows))]
+    let spawned = cmd.spawn();
+    #[cfg(windows)]
+    let spawned = Child::spawn(chrome_path, &args, options.effectively_headless());
+    let mut child = spawned.map_err(|e| {
         cleanup_temp_dir(&temp_user_data_dir);
         format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
     })?;
@@ -1872,13 +1881,8 @@ mod tests {
 
     #[cfg(windows)]
     fn spawn_noop_child() -> Child {
-        Command::new("cmd.exe")
-            .args(["/C", "exit 0"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap()
+        let cmd = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe");
+        Child::spawn(&cmd, &["/C".into(), "exit 0".into()], false).unwrap()
     }
 
     #[test]
