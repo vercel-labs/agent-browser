@@ -1195,6 +1195,13 @@ impl DaemonState {
 
         // Track cross-origin iframe sessions
         for (frame_id, iframe_sid) in &drained.attached_iframe_sessions {
+            // The attach and its detach can land in the same drain (a consent or
+            // error page swapping its frames out while the queue was pending).
+            // A detached session has no renderer and can never issue a request,
+            // so there is nothing to control; skip it instead of failing below.
+            if drained.detached_iframe_sessions.contains(iframe_sid) {
+                continue;
+            }
             self.iframe_sessions
                 .insert(frame_id.clone(), iframe_sid.clone());
             let filter = self.domain_filter.read().await.clone();
@@ -1227,6 +1234,17 @@ impl DaemonState {
                 Ok(())
             };
             if let Err(error) = setup_result {
+                if is_session_gone_error(&error) {
+                    // Chrome detached the frame between the attach event and our
+                    // setup (same race as above, detach not drained yet). The
+                    // frame is gone, so the controls have nothing left to guard.
+                    self.iframe_sessions.retain(|_, v| v != iframe_sid);
+                    eprintln!(
+                        "Warning: iframe session detached before its controls were installed: {}",
+                        error
+                    );
+                    continue;
+                }
                 if controls_active {
                     return close_after_network_control_failure(self, error).await;
                 }
@@ -3258,6 +3276,14 @@ async fn current_allowed_domains(state: &DaemonState) -> Vec<String> {
         .as_ref()
         .map(|filter| filter.allowed_domains.clone())
         .unwrap_or_default()
+}
+
+/// True when a CDP error says the session no longer exists. Chrome sends this
+/// for a target that detached (frame swapped out, tab closed) between the
+/// auto-attach event and the command; the caller's `Target.detachedFromTarget`
+/// may not have been drained yet.
+fn is_session_gone_error(error: &str) -> bool {
+    error.contains("Session with given id not found")
 }
 
 fn network_control_session_ids_from_pages(
@@ -12440,6 +12466,17 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 mod tests {
     use super::super::cdp::types::{AXNode, AXValue};
     use super::*;
+
+    #[test]
+    fn session_gone_error_matches_chrome_detached_session_message() {
+        assert!(is_session_gone_error(
+            "CDP error (Page.enable): Session with given id not found"
+        ));
+        assert!(!is_session_gone_error(
+            "CDP error (Page.enable): Target closed"
+        ));
+        assert!(!is_session_gone_error("Browser not launched"));
+    }
     use crate::test_utils::EnvGuard;
     use std::fs;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
