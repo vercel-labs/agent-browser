@@ -387,6 +387,8 @@ agent-browser dialog dismiss          # cancel
 
 ## Diagnosing install issues
 
+On Windows, locally launched headless Chrome uses a private desktop to prevent visible desktop rectangles in affected Chromium versions. Browser automation, screenshots, and GPU rendering remain available through CDP. Use `--headed` when the browser needs to be visible; sessions with extensions also use the interactive desktop. The daemon owns its Chrome process tree and Windows terminates that tree even if the daemon is forcibly killed. Browsers attached through `--cdp` or `--auto-connect` remain externally owned.
+
 If a command fails unexpectedly (`Unknown command`, `Failed to connect`, stale daemons, version mismatches after `upgrade`, missing Chrome, etc.) run `doctor` before anything else:
 
 ```bash

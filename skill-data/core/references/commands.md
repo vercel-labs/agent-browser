@@ -436,6 +436,8 @@ agent-browser <command> --help        # Show detailed help for a command
 
 ## Debugging
 
+On Windows, owned headless Chrome runs on a private desktop so hidden windows cannot draw stray rectangles over the user's desktop. This applies to custom Chrome executables and windows created later through CDP. Headed and extension sessions use the interactive desktop. Owned Chrome trees are terminated when their daemon exits, including forced termination; attaching to an external browser does not take ownership of it.
+
 ```bash
 agent-browser --headed open example.com   # Show browser window
 agent-browser --cdp 9222 snapshot         # Connect via CDP port
