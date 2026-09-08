@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.37.1
+
+<p className="text-[#888] text-sm">September 8, 2026</p>
+
+### Bug Fixes
+
+- Fixed **Windows headless Chrome desktop artifacts** by isolating owned headless Chrome on a private desktop and ensuring its process tree is cleaned up when the daemon exits or is forcibly terminated. Headed and externally connected browsers retain their existing desktop behavior (#1498, #1820)
+
+---
+
 ## v0.37.0
 
 <p className="text-[#888] text-sm">September 7, 2026</p>

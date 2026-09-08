@@ -1,8 +1,19 @@
 # agent-browser
 
-## 0.37.0
+## 0.37.1
 
 <!-- release:start -->
+### Bug Fixes
+
+- Fixed **Windows headless Chrome desktop artifacts** by isolating owned headless Chrome on a private desktop and ensuring its process tree is cleaned up when the daemon exits or is forcibly terminated. Headed and externally connected browsers retain their existing desktop behavior (#1498, #1820)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.37.0
+
 ### New Features
 
 - Added **higher-quality video recording**: `record start` and `record restart` now capture the current active page at 30 fps by default, support `--fps 1-60`, use `Page.startScreencast` for smoother motion, and preserve wall-clock timing. WebM and MP4 output are documented, and `doctor` reports the ffmpeg recording dependencies (#1763, #1776, #1778)
@@ -19,8 +30,6 @@
 - @jamesvclements
 - @ctate
 - @Railly
-
-<!-- release:end -->
 
 ## 0.36.0
 
