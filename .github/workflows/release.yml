@@ -230,12 +230,23 @@ jobs:
           path: artifacts/${{ matrix.binary }}
           retention-days: 7
 
-  publish:
-    name: Publish to npm
+  publish-packages:
+    name: Publish packages to npm
     needs: [check-release, build-binaries]
-    if: needs.check-release.outputs.should_release == 'true'
+    if: >-
+      always() &&
+      needs.check-release.result == 'success' &&
+      (
+        needs.check-release.outputs.should_release == 'true' ||
+        needs.check-release.outputs.should_publish_sandbox == 'true' ||
+        needs.check-release.outputs.should_publish_eve == 'true'
+      ) &&
+      (
+        needs.check-release.outputs.should_release != 'true' ||
+        needs.build-binaries.result == 'success'
+      )
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     environment: Release
     permissions:
       contents: read
@@ -257,12 +268,17 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Sync version
+        run: pnpm run version:sync
+
       - name: Download all binary artifacts
+        if: needs.check-release.outputs.should_release == 'true'
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
 
       - name: Move binaries to bin directory
+        if: needs.check-release.outputs.should_release == 'true'
         run: |
           mkdir -p bin
           find artifacts -type f -name 'agent-browser-*' -exec mv {} bin/ \;
@@ -272,6 +288,7 @@ jobs:
           ls -la bin/
 
       - name: Verify all binaries exist
+        if: needs.check-release.outputs.should_release == 'true'
         run: |
           EXPECTED_BINARIES=(
             "agent-browser-linux-x64"
@@ -304,103 +321,55 @@ jobs:
           fi
           echo "All 7 platform binaries present and valid"
 
-      - name: Publish to npm
-        run: pnpm publish --provenance --no-git-checks
+      - name: Publish agent-browser
+        if: needs.check-release.outputs.should_release == 'true'
+        env:
+          PACKAGE_NAME: agent-browser
+          VERSION: ${{ needs.check-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          if pnpm view "${PACKAGE_NAME}@${VERSION}" version >/dev/null 2>&1; then
+            echo "${PACKAGE_NAME}@${VERSION} is already published; skipping"
+          else
+            pnpm publish --provenance --no-git-checks
+          fi
 
-  publish-sandbox:
-    name: Publish sandbox package to npm
-    needs: [check-release, publish]
-    if: >-
-      always() &&
-      needs.check-release.outputs.should_publish_sandbox == 'true' &&
-      (
-        needs.check-release.outputs.should_release != 'true' ||
-        needs.publish.result == 'success'
-      )
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment: Release
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: .node-version
-          cache: pnpm
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Sync version
-        run: pnpm run version:sync
-
-      - name: Publish sandbox package to npm
+      - name: Publish @agent-browser/sandbox
+        if: needs.check-release.outputs.should_publish_sandbox == 'true'
         working-directory: packages/@agent-browser/sandbox
-        run: pnpm publish --provenance --access public --no-git-checks
+        env:
+          PACKAGE_NAME: '@agent-browser/sandbox'
+          VERSION: ${{ needs.check-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          if pnpm view "${PACKAGE_NAME}@${VERSION}" version >/dev/null 2>&1; then
+            echo "${PACKAGE_NAME}@${VERSION} is already published; skipping"
+          else
+            pnpm publish --provenance --access public --no-git-checks
+          fi
 
-  publish-eve:
-    name: Publish Eve package to npm
-    needs: [check-release, publish, publish-sandbox]
-    if: >-
-      always() &&
-      needs.check-release.outputs.should_publish_eve == 'true' &&
-      (
-        needs.check-release.outputs.should_release != 'true' ||
-        needs.publish.result == 'success'
-      ) &&
-      (
-        needs.check-release.outputs.should_publish_sandbox != 'true' ||
-        needs.publish-sandbox.result == 'success'
-      )
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment: Release
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: .node-version
-          cache: pnpm
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Sync version
-        run: pnpm run version:sync
-
-      - name: Publish Eve package to npm
+      - name: Publish @agent-browser/eve
+        if: needs.check-release.outputs.should_publish_eve == 'true'
         working-directory: packages/@agent-browser/eve
-        run: pnpm publish --provenance --access public --no-git-checks
+        env:
+          PACKAGE_NAME: '@agent-browser/eve'
+          VERSION: ${{ needs.check-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          if pnpm view "${PACKAGE_NAME}@${VERSION}" version >/dev/null 2>&1; then
+            echo "${PACKAGE_NAME}@${VERSION} is already published; skipping"
+          else
+            pnpm publish --provenance --access public --no-git-checks
+          fi
 
   github-release:
     name: Create GitHub Release
-    needs: [check-release, build-binaries, publish, publish-sandbox, publish-eve]
+    needs: [check-release, build-binaries, publish-packages]
     if: >-
       always() &&
       needs.build-binaries.result == 'success' &&
       needs.check-release.outputs.needs_github_release == 'true' &&
-      (needs.publish.result == 'success' || needs.publish.result == 'skipped') &&
-      (needs.publish-sandbox.result == 'success' || needs.publish-sandbox.result == 'skipped') &&
-      (needs.publish-eve.result == 'success' || needs.publish-eve.result == 'skipped')
+      (needs.publish-packages.result == 'success' || needs.publish-packages.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
