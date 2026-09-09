@@ -1155,6 +1155,22 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             println!("{} Trace stopped", color::success_indicator());
             return;
         }
+        if action == Some("screenshot")
+            && data.get("changed").and_then(|v| v.as_bool()) == Some(false)
+        {
+            let revision = data.get("revision").and_then(|v| v.as_u64()).unwrap_or(0);
+            let ratio = data
+                .get("pixelChangeRatio")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            println!(
+                "{} Screenshot unchanged (revision {}, {:.4}% pixels changed)",
+                color::success_indicator(),
+                revision,
+                ratio * 100.0
+            );
+            return;
+        }
         // Path-based operations (screenshot/pdf/trace/har/download/state/video)
         if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
             match action.unwrap_or("") {
@@ -2101,6 +2117,9 @@ Pass --hide-scrollbars false when launching to keep native scrollbars visible.
 
 Options:
   --full, -f           Capture full page (not just viewport)
+  --if-changed         Recommended: skip unchanged images to save tokens
+  --threshold <0-1>    Maximum changed-pixel ratio treated as unchanged
+                       (implies --if-changed, default: 0)
   --annotate           Overlay numbered labels on interactive elements.
                        Each label [N] corresponds to ref @eN from snapshot.
                        Prints a legend mapping labels to element roles/names.
@@ -2121,6 +2140,8 @@ Examples:
   agent-browser screenshot
   agent-browser screenshot ./screenshot.png
   agent-browser screenshot --full ./full-page.png
+  agent-browser screenshot --if-changed
+  agent-browser screenshot --if-changed --threshold 0.01
   agent-browser screenshot --annotate              # Labeled screenshot + legend
   agent-browser screenshot --annotate ./page.png   # Save annotated screenshot
   agent-browser screenshot --annotate --json       # JSON output with annotations

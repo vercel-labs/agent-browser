@@ -937,7 +937,9 @@ fn tools() -> Vec<Value> {
                 "annotate": { "type": "boolean", "default": false, "description": "Number visible elements in the screenshot." },
                 "format": { "type": "string", "enum": ["png", "jpeg"], "description": "Screenshot format." },
                 "quality": { "type": "integer", "minimum": 0, "maximum": 100, "description": "JPEG quality." },
-                "screenshotDir": { "type": "string", "description": "Default output directory when path is omitted." }
+                "screenshotDir": { "type": "string", "description": "Default output directory when path is omitted." },
+                "ifChanged": { "type": "boolean", "default": false, "description": "Recommended for repeated captures to save tokens: return image content only when pixels changed." },
+                "threshold": { "type": "number", "minimum": 0, "maximum": 1, "description": "Maximum changed-pixel ratio to treat as unchanged. Implies ifChanged." }
             }),
             &[],
         ),
@@ -2775,6 +2777,13 @@ fn call_screenshot(arguments: &Value) -> Result<Value, ProtocolError> {
     }
     if optional_bool(arguments, "fullPage")?.unwrap_or(false) {
         args.push("--full".to_string());
+    }
+    if optional_bool(arguments, "ifChanged")?.unwrap_or(false) {
+        args.push("--if-changed".to_string());
+    }
+    if let Some(threshold) = optional_number_string(arguments, "threshold")? {
+        args.push("--threshold".to_string());
+        args.push(threshold);
     }
     call_cli_tool(arguments, args, None)
 }

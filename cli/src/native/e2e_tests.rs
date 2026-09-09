@@ -1207,6 +1207,28 @@ async fn e2e_screenshot() {
     let _ = std::fs::remove_file(&tmp_path);
 
     let resp = execute_command(
+        &json!({ "id": "4a", "action": "screenshot", "ifChanged": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["changed"], true);
+    assert_eq!(get_data(&resp)["revision"], 1);
+    let conditional_path = get_data(&resp)["path"].as_str().unwrap().to_string();
+
+    let resp = execute_command(
+        &json!({ "id": "4b", "action": "screenshot", "ifChanged": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["changed"], false);
+    assert_eq!(get_data(&resp)["revision"], 2);
+    assert_eq!(get_data(&resp)["pixelChangeRatio"], 0.0);
+    assert!(get_data(&resp).get("path").is_none());
+    let _ = std::fs::remove_file(conditional_path);
+
+    let resp = execute_command(
         &json!({
             "id": "5",
             "action": "setcontent",
@@ -1222,6 +1244,17 @@ async fn e2e_screenshot() {
     )
     .await;
     assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "5a", "action": "screenshot", "ifChanged": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["changed"], true);
+    assert_eq!(get_data(&resp)["revision"], 3);
+    assert!(get_data(&resp)["pixelChangeRatio"].as_f64().unwrap() > 0.0);
+    let _ = std::fs::remove_file(get_data(&resp)["path"].as_str().unwrap());
 
     let resp = execute_command(
         &json!({ "id": "6", "action": "screenshot", "annotate": true }),
