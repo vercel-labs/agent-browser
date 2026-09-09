@@ -4637,6 +4637,19 @@ mod tests {
     }
 
     #[test]
+    fn record_urls_preserve_navigation_schemes() {
+        for url in ["data:text/html,hello", "about:blank", "https://example.com"] {
+            let args =
+                record_command_args(&json!({"path": "demo.webm", "url": url}), "start").unwrap();
+            let flags = crate::flags::parse_flags(&args);
+            assert_eq!(
+                crate::commands::parse_command(&args, &flags).unwrap()["url"],
+                url
+            );
+        }
+    }
+
+    #[test]
     fn record_schema_and_args_include_fps() {
         for name in [TOOL_RECORD_START, TOOL_RECORD_RESTART] {
             let tool = tools()

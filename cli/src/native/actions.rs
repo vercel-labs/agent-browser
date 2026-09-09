@@ -1099,27 +1099,13 @@ impl DaemonState {
                 return Err(e);
             }
         };
-        let ffmpeg = match recording::spawn_ffmpeg(
-            &self.recording_state.output_path,
-            self.recording_state.fps,
-        ) {
-            Ok(ffmpeg) => ffmpeg,
-            Err(e) => {
-                recording::detach_capture_session(&client, &capture_session).await;
-                if let Ok(mut guard) = self.recording_state.capture_session.lock() {
-                    *guard = None;
-                }
-                self.rollback_failed_recording_start().await;
-                return Err(e);
-            }
-        };
         let shared_count = Arc::new(AtomicU64::new(0));
         let shared_captured = Arc::new(AtomicU64::new(0));
         let (cancel_tx, cancel_rx) = oneshot::channel();
         let handle = recording::spawn_recording_task(
             client,
             capture_session,
-            ffmpeg,
+            self.recording_state.output_path.clone(),
             self.recording_state.fps,
             shared_count.clone(),
             shared_captured.clone(),
@@ -7326,6 +7312,11 @@ fn recording_fps_from_command(cmd: &Value) -> Result<Option<u32>, String> {
 /// of at `load` on a cold navigation. Use `tab new` first to record in a
 /// separate tab.
 async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    // Reject before creating a context or changing the active page.
+    if state.recording_state.active {
+        return Err("Recording already active".to_string());
+    }
+
     let path = cmd
         .get("path")
         .and_then(|v| v.as_str())
@@ -12667,6 +12658,18 @@ mod tests {
     /// plain text, not generated from `FIND_ACTIONS`; this pins their
     /// wording to the actual accepted set so an edit to one without the
     /// others fails here instead of drifting silently again.
+    #[tokio::test]
+    async fn recording_start_rejects_active_take_before_browser_work() {
+        let mut state = DaemonState::new();
+        state.recording_state.active = true;
+        let error = handle_recording_start(&json!({"path":"unused.webm"}), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "Recording already active");
+        assert!(state.recording_state.active);
+        assert!(state.browser.is_none());
+    }
+
     #[test]
     fn find_actions_help_text_matches_the_accepted_set() {
         assert_eq!(FIND_ACTIONS.join(", "), "click, fill, check, hover, text");

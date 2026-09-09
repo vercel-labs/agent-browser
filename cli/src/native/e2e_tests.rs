@@ -7808,10 +7808,8 @@ async fn e2e_recording_default_with_url_navigates_active_tab() {
 // Recording: requested frame rate
 // ---------------------------------------------------------------------------
 
-/// Verify that `recording_start` honors an explicit frame rate and that the
-/// frame count tracks wall clock. Screencast frames arrive only when the page
-/// repaints, and the ticker holds the last frame through gaps, so roughly
-/// `fps * seconds` frames must reach ffmpeg even for a static page.
+/// Verify that a requested frame rate sets the timestamp resolution without
+/// filling a static recording with duplicate encoded frames.
 #[tokio::test]
 #[ignore]
 async fn e2e_recording_honors_requested_fps() {
@@ -7868,21 +7866,36 @@ async fn e2e_recording_honors_requested_fps() {
     assert_eq!(data["fps"].as_u64(), Some(FPS));
 
     let frames = data["frames"].as_u64().unwrap();
-    let expected = FPS * RECORD_MS / 1000;
     assert!(
-        frames >= expected / 2 && frames <= expected * 2,
-        "expected roughly {expected} frames at {FPS} fps over {RECORD_MS}ms, got {frames}"
+        (2..FPS / 4).contains(&frames),
+        "static page should use sparse frames at {FPS} fps, got {frames}"
     );
-    // A static page repaints once, so the file is one captured frame held
-    // for the whole take.
     let captured = data["capturedFrames"].as_u64().unwrap();
-    assert!(
-        (1..frames).contains(&captured),
-        "static page should yield a few captured frames held across {frames} written, got {captured}"
-    );
+    assert!(captured >= 1, "static page should produce an initial frame");
 
     let size = std::fs::metadata(&rec_path).map(|m| m.len()).unwrap_or(0);
     assert!(size > 0, "recording file should not be empty");
+    let probe = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=nw=1:nk=1",
+        ])
+        .arg(&rec_path)
+        .output()
+        .expect("ffprobe should inspect the recording");
+    assert!(probe.status.success());
+    let duration: f64 = String::from_utf8_lossy(&probe.stdout)
+        .trim()
+        .parse()
+        .expect("ffprobe duration should be numeric");
+    assert!(
+        (0.8..1.5).contains(&duration),
+        "sparse recording should retain wall-clock duration, got {duration}"
+    );
 
     let _ = std::fs::remove_file(&rec_path);
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
