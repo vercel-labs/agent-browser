@@ -14,7 +14,7 @@ const COMMAND_CONTEXT = `You already ran \`agent-browser skills get core\` and l
 - agent-browser click @ref (click element)
 - agent-browser fill @ref "text" (clear and type)
 - agent-browser type @ref "text" (type without clearing)
-- agent-browser select @ref "option" (select dropdown)
+- agent-browser select @ref "option" (select a native or ARIA dropdown option)
 - agent-browser screenshot (screenshot to temp dir)
 - agent-browser screenshot --full (full page screenshot)
 - agent-browser diff url <url1> <url2> (compare two pages)

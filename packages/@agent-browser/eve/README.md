@@ -87,7 +87,7 @@ export default browser({
 | `fill` | Type into an input (clearing first by default) |
 | `press_key` | Press a key or combination (`Enter`, `Control+a`) |
 | `hover` | Hover an element |
-| `select_option` | Pick a `<select>` option |
+| `select_option` | Pick an option from a native or supported ARIA dropdown |
 | `set_checked` | Check/uncheck a checkbox or radio |
 | `scroll` | Scroll the page, a container, or an element into view |
 | `drag` | Drag and drop |

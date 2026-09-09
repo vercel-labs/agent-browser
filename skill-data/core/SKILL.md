@@ -135,13 +135,15 @@ agent-browser press Enter                 # press a key at current focus
 agent-browser press Control+a             # key combination
 agent-browser check @e3                   # check checkbox
 agent-browser uncheck @e3                 # uncheck
-agent-browser select @e4 "option-value"   # select dropdown option
-agent-browser select @e4 "a" "b"          # select multiple
+agent-browser select @e4 "option-value"   # select native or ARIA dropdown option
+agent-browser select @e4 "a" "b"          # final set in multiselectable listbox
 agent-browser upload @e5 file1.pdf        # upload file(s)
 agent-browser scroll down 500             # scroll page (up/down/left/right)
 agent-browser scrollintoview @e1          # scroll element into view
 agent-browser drag @e1 @e2                # drag and drop
 ```
+
+For a native `<select>` or standard ARIA `combobox`/`listbox`, use `select` with an exact option value or label. Closed comboboxes are opened with real browser input; input-backed comboboxes receive the requested value as a filter when needed; dynamically rendered associated options are re-queried; and the command verifies selected state, a committed combobox value/display, or an associated form value before returning success. Use one value for a single-select control. Native multiple selects retain multi-value behavior; multiple ARIA values are a final set and require `aria-multiselectable="true"` on a listbox. After a widget opens or rerenders, take a fresh snapshot before using any newly exposed refs. The action uses CDP-managed browser sessions; WebDriver backends report it as unsupported.
 
 ### When refs don't work or you don't want to snapshot
 
