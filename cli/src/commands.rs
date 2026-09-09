@@ -1704,7 +1704,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     "recording_start",
                     &rest[1..],
                     "record start",
-                    "record start <output.webm|output.mp4> [url] [--fps <n>] [--contact-sheet] [--contact-sheet-threshold <0-1>]",
+                    "record start <output.webm|output.mp4> [url] [--fps <n>] [--cursor] [--contact-sheet] [--contact-sheet-threshold <0-1>]",
                 ),
                 Some("stop") => Ok(json!({ "id": id, "action": "recording_stop" })),
                 Some("restart") => parse_record_take(
@@ -1712,7 +1712,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     "recording_restart",
                     &rest[1..],
                     "record restart",
-                    "record restart <output.webm|output.mp4> [url] [--fps <n>] [--contact-sheet] [--contact-sheet-threshold <0-1>]",
+                    "record restart <output.webm|output.mp4> [url] [--fps <n>] [--cursor] [--contact-sheet] [--contact-sheet-threshold <0-1>]",
                 ),
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
@@ -2349,7 +2349,7 @@ fn parse_read(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseErro
 }
 
 /// Parse the arguments shared by `record start` and `record restart`:
-/// `<path> [url] [--fps <n>] [--contact-sheet]` plus an optional
+/// `<path> [url] [--fps <n>] [--cursor] [--contact-sheet]` plus an optional
 /// contact-sheet pixel-difference threshold.
 ///
 /// `rest` excludes the subcommand. `path` needs an extension so ffmpeg can
@@ -2368,6 +2368,7 @@ fn parse_record_take(
     let mut path: Option<&str> = None;
     let mut url: Option<&str> = None;
     let mut fps: Option<u32> = None;
+    let mut cursor = false;
     let mut contact_sheet = false;
     let mut contact_sheet_threshold: Option<f64> = None;
 
@@ -2396,6 +2397,10 @@ fn parse_record_take(
                 }
                 fps = Some(parsed);
                 i += 2;
+            }
+            "--cursor" => {
+                cursor = true;
+                i += 1;
             }
             "--contact-sheet" => {
                 contact_sheet = true;
@@ -2467,6 +2472,9 @@ fn parse_record_take(
     }
     if let Some(rate) = fps {
         cmd["fps"] = json!(rate);
+    }
+    if cursor {
+        cmd["cursor"] = json!(true);
     }
     if contact_sheet {
         cmd["contactSheet"] = json!(true);
@@ -4980,6 +4988,14 @@ mod tests {
         assert_eq!(cmd["action"], "recording_start");
         assert_eq!(cmd["path"], "output.webm");
         assert_eq!(cmd["fps"], 60);
+    }
+
+    #[test]
+    fn test_record_start_with_cursor() {
+        let cmd =
+            parse_command(&args("record start output.webm --cursor"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "recording_start");
+        assert_eq!(cmd["cursor"], true);
     }
 
     #[test]

@@ -10,6 +10,7 @@ Capture browser automation as video for debugging, documentation, or verificatio
 - [Basic Recording](#basic-recording)
 - [Recording Commands](#recording-commands)
 - [Frame Rate](#frame-rate)
+- [Visible Cursor](#visible-cursor)
 - [Contact Sheets](#contact-sheets)
 - [Use Cases](#use-cases)
 - [Best Practices](#best-practices)
@@ -88,6 +89,14 @@ agent-browser record start ./soak.webm --fps 5
 ```
 
 The video uses the requested frame rate and holds the latest Chrome frame between repaints. `record stop --json` reports `frames` (written) and `capturedFrames` (distinct frames from Chrome).
+
+## Visible Cursor
+
+Chrome's screencast does not include the native pointer. Pass `--cursor` to add an animated pointer and click ripple.
+
+```bash
+agent-browser record start ./walkthrough.webm --cursor
+```
 
 ## Contact Sheets
 

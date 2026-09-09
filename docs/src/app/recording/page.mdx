@@ -41,6 +41,14 @@ agent-browser tab new https://example.com
 agent-browser record start ./demo.webm
 ```
 
+## Visible cursor
+
+Chrome recordings do not normally include the native pointer. Add `--cursor` for an animated pointer and click ripple:
+
+```bash
+agent-browser record start ./walkthrough.webm --cursor
+```
+
 ## Contact sheets
 
 Add `--contact-sheet` for a timestamped PNG with highlighted changes.
@@ -90,9 +98,9 @@ Valid rates are 1 to 60. The latest Chrome frame is held between repaints so the
     <tr><th>Command</th><th>Description</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>record start &lt;path.webm|path.mp4&gt; [url] [--fps &lt;n&gt;] [--contact-sheet]</code></td><td>Start recording the active page; a URL navigates the active tab first</td></tr>
+    <tr><td><code>record start &lt;path.webm|path.mp4&gt; [url] [--fps &lt;n&gt;] [--cursor] [--contact-sheet]</code></td><td>Start recording the active page; a URL navigates the active tab first</td></tr>
     <tr><td><code>record stop</code></td><td>Stop the active recording and save the file</td></tr>
-    <tr><td><code>record restart &lt;path.webm|path.mp4&gt; [url] [--fps &lt;n&gt;] [--contact-sheet]</code></td><td>Stop the current recording and immediately start another</td></tr>
+    <tr><td><code>record restart &lt;path.webm|path.mp4&gt; [url] [--fps &lt;n&gt;] [--cursor] [--contact-sheet]</code></td><td>Stop the current recording and immediately start another</td></tr>
   </tbody>
 </table>
 

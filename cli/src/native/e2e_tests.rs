@@ -8088,10 +8088,11 @@ async fn e2e_recording_rejects_invalid_fps() {
     assert_success(&resp);
 }
 
-/// Verify changed-frame contact-sheet export through the full daemon pipeline.
+/// Verify the composited pointer and changed-frame contact sheet through the
+/// full daemon pipeline.
 #[tokio::test]
 #[ignore]
-async fn e2e_recording_contact_sheet() {
+async fn e2e_recording_cursor_and_contact_sheet() {
     let mut state = DaemonState::new();
     let resp = execute_command(
         &json!({ "id": "1", "action": "launch", "headless": true }),
@@ -8121,6 +8122,7 @@ async fn e2e_recording_contact_sheet() {
             "id": "3",
             "action": "recording_start",
             "path": rec_path.to_string_lossy(),
+            "cursor": true,
             "contactSheet": true,
             "contactSheetThreshold": 0.01
         }),
@@ -8128,9 +8130,32 @@ async fn e2e_recording_contact_sheet() {
     )
     .await;
     assert_success(&resp);
+    assert_eq!(get_data(&resp)["cursor"], true);
     assert_eq!(get_data(&resp)["contactSheet"], true);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "Boolean(document.getElementById('__agent_browser_recording_cursor__'))" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], false);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "mousemove", "x": 360, "y": 260 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let cursor = state
+        .recording_state
+        .shared_cursor
+        .lock()
+        .unwrap()
+        .at(super::recording::cursor_timestamp());
+    assert!(cursor.visible);
+    assert_eq!((cursor.x, cursor.y), (360.0, 260.0));
     let resp = execute_command(
         &json!({ "id": "6", "action": "evaluate", "script": "document.querySelector('.card').style.background='#dbeafe'; document.querySelector('h1').textContent='Ready to continue'; true" }),
         &mut state,
@@ -8169,6 +8194,14 @@ async fn e2e_recording_contact_sheet() {
         }
         std::fs::copy(&sheet_path, example_path).unwrap();
     }
+
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "evaluate", "script": "Boolean(document.getElementById('__agent_browser_recording_cursor__'))" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], false);
 
     let _ = std::fs::remove_file(&rec_path);
     let _ = std::fs::remove_file(&sheet_path);
