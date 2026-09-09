@@ -213,6 +213,15 @@ pub struct MouseState {
     pub buttons: i32,
 }
 
+#[derive(Debug, Clone)]
+struct SnapshotRevision {
+    revision: u64,
+    url: String,
+    options: String,
+    tree: String,
+    refs: serde_json::Map<String, Value>,
+}
+
 #[derive(Default)]
 struct DrainedEvents {
     pending_acks: Vec<i64>,
@@ -521,6 +530,8 @@ pub struct DaemonState {
     pub webdriver_backend: Option<super::webdriver::backend::WebDriverBackend>,
     pub backend_type: BackendType,
     pub ref_map: RefMap,
+    /// Last delta snapshot per page session. Bounded to the currently tracked tabs.
+    snapshot_revisions: HashMap<String, SnapshotRevision>,
     pub domain_filter: Arc<RwLock<Option<DomainFilter>>>,
     pub event_tracker: EventTracker,
     pub session_name: Option<String>,
@@ -666,6 +677,7 @@ impl DaemonState {
             webdriver_backend: None,
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
+            snapshot_revisions: HashMap::new(),
             domain_filter: Arc::new(RwLock::new(
                 env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
                     .ok()
@@ -5521,7 +5533,133 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             .unwrap_or(usize::MAX)
     });
 
-    Ok(json!({ "snapshot": tree, "origin": url, "refs": refs, "removedRefs": removed_refs }))
+    if !cmd.get("delta").and_then(Value::as_bool).unwrap_or(false) {
+        return Ok(
+            json!({ "snapshot": tree, "origin": url, "refs": refs, "removedRefs": removed_refs }),
+        );
+    }
+
+    let options_key = serde_json::to_string(&json!({
+        "selector": options.selector,
+        "interactive": options.interactive,
+        "compact": options.compact,
+        "depth": options.depth,
+        "urls": options.urls,
+    }))
+    .unwrap_or_default();
+    let previous = state.snapshot_revisions.get(&session_id).cloned();
+    let revision = previous.as_ref().map_or(1, |entry| entry.revision + 1);
+    let force_full = cmd.get("full").and_then(Value::as_bool).unwrap_or(false)
+        || previous
+            .as_ref()
+            .is_none_or(|entry| entry.url != url || entry.options != options_key);
+    let response = if force_full {
+        json!({
+            "snapshot": { "kind": "full", "revision": revision, "tree": tree, "refs": refs },
+            "origin": url,
+        })
+    } else {
+        snapshot_delta_response(previous.as_ref().unwrap(), revision, &tree, &refs, &url)
+    };
+
+    if state.snapshot_revisions.len() >= 32 && !state.snapshot_revisions.contains_key(&session_id) {
+        if let Some(oldest_key) = state
+            .snapshot_revisions
+            .iter()
+            .min_by_key(|(_, entry)| entry.revision)
+            .map(|(key, _)| key.clone())
+        {
+            state.snapshot_revisions.remove(&oldest_key);
+        }
+    }
+    state.snapshot_revisions.insert(
+        session_id,
+        SnapshotRevision {
+            revision,
+            url,
+            options: options_key,
+            tree,
+            refs,
+        },
+    );
+    Ok(response)
+}
+
+fn snapshot_delta_response(
+    previous: &SnapshotRevision,
+    revision: u64,
+    tree: &str,
+    refs: &serde_json::Map<String, Value>,
+    origin: &str,
+) -> Value {
+    if previous.tree == tree {
+        return json!({
+            "snapshot": { "kind": "unchanged", "baseRevision": previous.revision, "revision": revision },
+            "origin": origin,
+        });
+    }
+
+    let mut changes = Vec::new();
+    for (ref_id, old_node) in &previous.refs {
+        match refs.get(ref_id) {
+            None => changes.push(json!({ "op": "remove", "ref": format!("@{}", ref_id) })),
+            Some(new_node) => {
+                for field in ["role", "name"] {
+                    if old_node.get(field) != new_node.get(field) {
+                        changes.push(json!({
+                            "op": "replace",
+                            "ref": format!("@{}", ref_id),
+                            "field": field,
+                            "value": new_node.get(field).cloned().unwrap_or(Value::Null),
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    for (ref_id, node) in refs {
+        if !previous.refs.contains_key(ref_id) {
+            changes.push(json!({ "op": "add", "ref": format!("@{}", ref_id), "node": node }));
+        }
+    }
+
+    // Ref metadata contains only role/name, so it cannot describe checkbox
+    // state, text, values, hierarchy, or ordering. Include an exact tree splice
+    // alongside ref operations so every accepted revision can be reconstructed.
+    let before_lines: Vec<&str> = previous.tree.split('\n').collect();
+    let after_lines: Vec<&str> = tree.split('\n').collect();
+    let prefix = before_lines
+        .iter()
+        .zip(&after_lines)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let suffix = before_lines[prefix..]
+        .iter()
+        .rev()
+        .zip(after_lines[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let tree_change = json!({
+        "startLine": prefix,
+        "deleteCount": before_lines.len() - prefix - suffix,
+        "lines": after_lines[prefix..after_lines.len() - suffix],
+    });
+    let delta = json!({
+        "kind": "delta",
+        "baseRevision": previous.revision,
+        "revision": revision,
+        "changes": changes,
+        "treeChange": tree_change,
+    });
+    let delta_size = serde_json::to_vec(&delta).map_or(usize::MAX, |bytes| bytes.len());
+    if delta_size >= tree.len().saturating_mul(7) / 10 {
+        json!({
+            "snapshot": { "kind": "full", "revision": revision, "tree": tree, "refs": refs },
+            "origin": origin,
+        })
+    } else {
+        json!({ "snapshot": delta, "origin": origin })
+    }
 }
 
 /// Loader IDs change only when the top-level document is replaced, while the
@@ -14467,6 +14605,93 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
 
         drop(listener);
         let _ = fs::remove_dir_all(&socket_dir);
+    }
+
+    #[test]
+    fn snapshot_delta_tree_splice_preserves_changes_missing_from_ref_metadata() {
+        let padding = "- button \"Unchanged\" [ref=e99]\n".repeat(40);
+        let before = format!("{padding}- button \"Save\" [ref=e1]\n- checkbox \"Agree\" [ref=e2]");
+        let after = format!(
+            "{padding}- button \"Saved\" [ref=e1]\n- checkbox \"Agree\" [ref=e2] [checked]"
+        );
+        let previous = SnapshotRevision {
+            revision: 1, url: "about:blank".into(), options: "{}".into(), tree: before.clone(),
+            refs: serde_json::from_value(json!({"e1": {"role": "button", "name": "Save"}, "e2": {"role": "checkbox", "name": "Agree"}})).unwrap(),
+        };
+        let mut refs = previous.refs.clone();
+        refs["e1"]["name"] = json!("Saved");
+        for current in [after, before.replace("[ref=e2]", "[ref=e2] [checked]")] {
+            let result = snapshot_delta_response(&previous, 2, &current, &refs, &previous.url);
+            assert_eq!(result["snapshot"]["kind"], "delta");
+            let patch = &result["snapshot"]["treeChange"];
+            let start = patch["startLine"].as_u64().unwrap() as usize;
+            let count = patch["deleteCount"].as_u64().unwrap() as usize;
+            let mut reconstructed: Vec<&str> = before.split('\n').collect();
+            reconstructed.splice(
+                start..start + count,
+                patch["lines"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap()),
+            );
+            assert_eq!(reconstructed.join("\n"), current);
+        }
+    }
+
+    #[test]
+    fn test_snapshot_delta_unchanged_is_tiny() {
+        let previous = SnapshotRevision {
+            revision: 4,
+            url: "https://example.com".to_string(),
+            options: "{}".to_string(),
+            tree: "- button \"Save\" [ref=e1]".to_string(),
+            refs: serde_json::from_value(json!({"e1": {"role": "button", "name": "Save"}}))
+                .unwrap(),
+        };
+        let result =
+            snapshot_delta_response(&previous, 5, &previous.tree, &previous.refs, &previous.url);
+        assert_eq!(result["snapshot"]["kind"], "unchanged");
+        assert_eq!(result["snapshot"]["baseRevision"], 4);
+        assert!(result["snapshot"].get("tree").is_none());
+    }
+
+    #[test]
+    fn test_snapshot_delta_reports_replacements_and_removals() {
+        let previous = SnapshotRevision {
+            revision: 1,
+            url: "https://example.com".to_string(),
+            options: "{}".to_string(),
+            tree: format!("{}\nold", "x".repeat(1000)),
+            refs: serde_json::from_value(json!({
+                "e1": {"role": "button", "name": "Save"},
+                "e2": {"role": "alert", "name": "Old"}
+            }))
+            .unwrap(),
+        };
+        let refs = serde_json::from_value(json!({
+            "e1": {"role": "button", "name": "Saved"},
+            "e3": {"role": "status", "name": "Done"}
+        }))
+        .unwrap();
+        let result = snapshot_delta_response(
+            &previous,
+            2,
+            &format!("{}\nnew", "x".repeat(1000)),
+            &refs,
+            &previous.url,
+        );
+        assert_eq!(result["snapshot"]["kind"], "delta");
+        let changes = result["snapshot"]["changes"].as_array().unwrap();
+        assert!(changes
+            .iter()
+            .any(|change| change["op"] == "replace" && change["ref"] == "@e1"));
+        assert!(changes
+            .iter()
+            .any(|change| change["op"] == "remove" && change["ref"] == "@e2"));
+        assert!(changes
+            .iter()
+            .any(|change| change["op"] == "add" && change["ref"] == "@e3"));
     }
 
     #[test]

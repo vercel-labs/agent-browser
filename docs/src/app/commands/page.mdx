@@ -271,6 +271,15 @@ agent-browser click @e3         # uses docs's refs
 
 Browsers discard background tabs to save memory, leaving a tab with no renderer to drive. Switching to a discarded tab reactivates it, which reloads the page and resets its unsaved state; the switch result adds `"revived": true` so the reload is visible rather than silent. A tab whose page is paused by a JavaScript dialog is alive rather than discarded: the switch leaves it untouched and adds `"dialogBlocked": true`. Resolve the dialog with `dialog accept` or `dialog dismiss` and the tab keeps its state. Closing the active tab onto a discarded successor revives it the same way and reports `"activeTabRevived": true`.
 
+### Snapshot deltas
+
+```bash
+agent-browser snapshot --delta
+agent-browser snapshot --delta --full
+```
+
+`snapshot --delta` returns `full`, `unchanged`, or incremental updates per tab and option set. URL changes or large deltas return full state; `--full` resets the baseline. Apply a delta’s `changes` to ref metadata and `treeChange` to the previous tree: split on newlines, replace `deleteCount` lines at zero-based `startLine` with `lines`, then rejoin. Apply both to `baseRevision` before advancing to `revision`.
+
 ### Iframe support
 
 Iframes are detected automatically during snapshots. `Iframe` nodes are resolved and their content is inlined beneath the iframe element in the snapshot output. Refs assigned to elements inside iframes carry frame context, so `click`, `fill`, and other interactions work without manually switching frames.

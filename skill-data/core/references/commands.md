@@ -48,7 +48,11 @@ agent-browser snapshot -i         # Interactive elements only (recommended)
 agent-browser snapshot -c         # Compact output
 agent-browser snapshot -d 3       # Limit depth to 3
 agent-browser snapshot -s "#main" # Scope to CSS selector
+agent-browser snapshot --delta     # Full state once, then bounded structural deltas
+agent-browser snapshot --delta --full # Force full state and refresh baseline
 ```
+
+Delta history is per tab and option set. Responses are `full`, `unchanged`, or `delta`; URL changes or large deltas return full state. For a delta, apply `changes` (`add`, `remove`, `replace`) to ref metadata. Split the previous tree on newlines, splice `treeChange.lines` at zero-based `startLine`, replacing `deleteCount` lines, then join with newlines. Apply both parts to `baseRevision` before advancing to `revision`; use `--full` if the baseline is unavailable.
 
 ## Interactions (use @refs from snapshot)
 
