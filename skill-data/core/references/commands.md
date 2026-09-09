@@ -122,9 +122,10 @@ agent-browser record restart ./take2.webm # Stop current + start new
 agent-browser record start ./scroll.webm --fps 60  # 60 fps for motion-heavy takes
 agent-browser record start ./soak.webm --fps 10    # Lower rate for long sessions
 agent-browser tab new https://example.com          # Open a separate tab first if you want the recording there
+agent-browser record start ./demo.webm --contact-sheet # Save a timestamped PNG summary
 ```
 
-Needs `ffmpeg` on PATH; use a `.webm` or `.mp4` path (other extensions go to ffmpeg as-is, an extensionless path is rejected). `--fps` accepts 1 to 60 and defaults to 30. Playback duration always matches the wall clock time recorded, so a slow page holds frames instead of speeding the video up.
+Needs `ffmpeg` on PATH; use a path with an extension. `--fps` accepts 1 to 60 and defaults to 30. `--contact-sheet-threshold <0-1>` adjusts keyframe sensitivity and implies `--contact-sheet`.
 
 ## Wait
 

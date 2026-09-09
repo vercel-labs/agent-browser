@@ -1696,7 +1696,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     "recording_start",
                     &rest[1..],
                     "record start",
-                    "record start <output.webm|output.mp4> [url] [--fps <n>]",
+                    "record start <output.webm|output.mp4> [url] [--fps <n>] [--contact-sheet] [--contact-sheet-threshold <0-1>]",
                 ),
                 Some("stop") => Ok(json!({ "id": id, "action": "recording_stop" })),
                 Some("restart") => parse_record_take(
@@ -1704,7 +1704,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     "recording_restart",
                     &rest[1..],
                     "record restart",
-                    "record restart <output.webm|output.mp4> [url] [--fps <n>]",
+                    "record restart <output.webm|output.mp4> [url] [--fps <n>] [--contact-sheet] [--contact-sheet-threshold <0-1>]",
                 ),
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
@@ -2341,7 +2341,8 @@ fn parse_read(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseErro
 }
 
 /// Parse the arguments shared by `record start` and `record restart`:
-/// `<path> [url] [--fps <n>]`.
+/// `<path> [url] [--fps <n>] [--contact-sheet]` plus an optional
+/// contact-sheet pixel-difference threshold.
 ///
 /// `rest` excludes the subcommand. `path` needs an extension so ffmpeg can
 /// pick a container (`.webm` and `.mp4` are the tuned ones). Recording
@@ -2359,6 +2360,8 @@ fn parse_record_take(
     let mut path: Option<&str> = None;
     let mut url: Option<&str> = None;
     let mut fps: Option<u32> = None;
+    let mut contact_sheet = false;
+    let mut contact_sheet_threshold: Option<f64> = None;
 
     let mut i = 0;
     while i < rest.len() {
@@ -2384,6 +2387,37 @@ fn parse_record_take(
                     });
                 }
                 fps = Some(parsed);
+                i += 2;
+            }
+            "--contact-sheet" => {
+                contact_sheet = true;
+                i += 1;
+            }
+            "--contact-sheet-threshold" => {
+                let value = rest
+                    .get(i + 1)
+                    .ok_or_else(|| ParseError::MissingArguments {
+                        context: format!("{} --contact-sheet-threshold", context),
+                        usage,
+                    })?;
+                let parsed = value.parse::<f64>().map_err(|_| ParseError::InvalidValue {
+                    message: format!(
+                        "Invalid contact sheet threshold: '{}' is not a number",
+                        value
+                    ),
+                    usage,
+                })?;
+                if !parsed.is_finite() || !(0.0..=1.0).contains(&parsed) {
+                    return Err(ParseError::InvalidValue {
+                        message: format!(
+                            "Invalid contact sheet threshold: {} is out of range (valid range: 0-1)",
+                            parsed
+                        ),
+                        usage,
+                    });
+                }
+                contact_sheet = true;
+                contact_sheet_threshold = Some(parsed);
                 i += 2;
             }
             flag if flag.starts_with("--") => {
@@ -2425,6 +2459,12 @@ fn parse_record_take(
     }
     if let Some(rate) = fps {
         cmd["fps"] = json!(rate);
+    }
+    if contact_sheet {
+        cmd["contactSheet"] = json!(true);
+    }
+    if let Some(threshold) = contact_sheet_threshold {
+        cmd["contactSheetThreshold"] = json!(threshold);
     }
     Ok(cmd)
 }
@@ -4885,6 +4925,42 @@ mod tests {
         assert_eq!(cmd["action"], "recording_start");
         assert_eq!(cmd["path"], "output.webm");
         assert_eq!(cmd["fps"], 60);
+    }
+
+    #[test]
+    fn test_record_start_with_contact_sheet() {
+        let cmd = parse_command(
+            &args("record start output.webm --contact-sheet --contact-sheet-threshold 0.12"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["contactSheet"], true);
+        assert_eq!(cmd["contactSheetThreshold"], 0.12);
+    }
+
+    #[test]
+    fn test_record_start_threshold_implies_contact_sheet() {
+        let cmd = parse_command(
+            &args("record start output.webm --contact-sheet-threshold 0.01"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["contactSheet"], true);
+        assert_eq!(cmd["contactSheetThreshold"], 0.01);
+    }
+
+    #[test]
+    fn test_record_start_rejects_invalid_contact_sheet_threshold() {
+        for value in ["-0.1", "1.1", "many"] {
+            let result = parse_command(
+                &args(&format!(
+                    "record start output.webm --contact-sheet-threshold {}",
+                    value
+                )),
+                &default_flags(),
+            );
+            assert!(result.is_err(), "threshold {value} should fail");
+        }
     }
 
     #[test]

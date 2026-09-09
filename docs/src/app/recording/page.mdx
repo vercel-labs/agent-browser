@@ -41,6 +41,21 @@ agent-browser tab new https://example.com
 agent-browser record start ./demo.webm
 ```
 
+## Contact sheets
+
+Add `--contact-sheet` for a timestamped PNG with highlighted changes.
+
+```bash
+agent-browser record start ./checkout.webm --contact-sheet
+
+# Select a frame when at least 2% of pixels change
+agent-browser record start ./checkout.webm --contact-sheet-threshold 0.02
+```
+
+The threshold accepts `0` to `1`, defaults to `0.05`, and implies `--contact-sheet`. Contact sheets contain at most 100 frames.
+
+![Example contact sheet with timestamps and highlighted change regions](/recording/contact-sheet-example.png)
+
 ## Frame rate
 
 Recording captures 30 frames per second by default, which is enough for scrolling, hover states, and CSS transitions to read as motion rather than as a slideshow. Use `--fps` to change it:
@@ -75,9 +90,9 @@ Valid rates are 1 to 60. The latest Chrome frame is held between repaints so the
     <tr><th>Command</th><th>Description</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>record start &lt;path.webm|path.mp4&gt; [url] [--fps &lt;n&gt;]</code></td><td>Start recording the active page to a WebM or MP4 file; a URL navigates the active tab first</td></tr>
+    <tr><td><code>record start &lt;path.webm|path.mp4&gt; [url] [--fps &lt;n&gt;] [--contact-sheet]</code></td><td>Start recording the active page; a URL navigates the active tab first</td></tr>
     <tr><td><code>record stop</code></td><td>Stop the active recording and save the file</td></tr>
-    <tr><td><code>record restart &lt;path.webm|path.mp4&gt; [url] [--fps &lt;n&gt;]</code></td><td>Stop the current recording and immediately start another on the active page</td></tr>
+    <tr><td><code>record restart &lt;path.webm|path.mp4&gt; [url] [--fps &lt;n&gt;] [--contact-sheet]</code></td><td>Stop the current recording and immediately start another</td></tr>
   </tbody>
 </table>
 
