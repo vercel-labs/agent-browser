@@ -233,6 +233,8 @@ See [Plugins](/plugins) for the plugin author protocol and implementation exampl
 
 Project-level plugin entries are appended after user-level entries. If two entries use the same name, agent-browser resolves the later entry, so a project can override a user default. `AGENT_BROWSER_PLUGINS` can replace config discovery with a JSON array using the same shape.
 
+A staged TOTP provider declares both `credential.read` and `credential.challenge`. See [Staged TOTP providers](/plugins#credential-plugin) for its optional selector, opaque challenge reference, and second request.
+
 Do not put vault tokens or passwords in plugin command args. Use the vault vendor's own login/session mechanism or environment outside agent-browser config.
 
 ```bash

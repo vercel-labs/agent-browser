@@ -28,6 +28,328 @@ fn assert_success(resp: &Value) {
     );
 }
 
+/// Staged-auth E2E never uses Chrome discovery, so it cannot attach to a
+/// developer's personal browser or profile by accident.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod staged_auth_real_browser {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    fn chrome_for_testing_executable() -> PathBuf {
+        let configured = std::env::var("AGENT_BROWSER_E2E_EXECUTABLE_PATH")
+            .expect("staged-auth E2E requires a dedicated Chrome-for-Testing executable");
+        let executable = std::fs::canonicalize(&configured)
+            .unwrap_or_else(|error| panic!("cannot resolve '{}': {}", configured, error));
+        let metadata = std::fs::metadata(&executable).unwrap();
+        assert!(metadata.is_file() && metadata.permissions().mode() & 0o111 != 0);
+
+        #[cfg(target_os = "macos")]
+        let is_chrome_for_testing = executable.file_name().and_then(|name| name.to_str())
+            == Some("Google Chrome for Testing")
+            && executable.ancestors().any(|ancestor| {
+                ancestor.file_name().and_then(|name| name.to_str())
+                    == Some("Google Chrome for Testing.app")
+            });
+        #[cfg(target_os = "linux")]
+        let is_chrome_for_testing = executable.file_name().and_then(|name| name.to_str())
+            == Some("chrome")
+            && executable
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                == Some("chrome-linux64");
+
+        assert!(
+            is_chrome_for_testing,
+            "refusing non-Chrome-for-Testing executable '{}'",
+            executable.display()
+        );
+        executable
+    }
+
+    fn isolated_browser_environment() -> EnvGuard<'static> {
+        let environment = EnvGuard::new(&[
+            "AGENT_BROWSER_AUTO_CONNECT",
+            "AGENT_BROWSER_CDP",
+            "AGENT_BROWSER_ENGINE",
+            "AGENT_BROWSER_PROFILE",
+            "AGENT_BROWSER_PROVIDER",
+            "AGENT_BROWSER_STATE",
+        ]);
+        for variable in [
+            "AGENT_BROWSER_AUTO_CONNECT",
+            "AGENT_BROWSER_CDP",
+            "AGENT_BROWSER_ENGINE",
+            "AGENT_BROWSER_PROFILE",
+            "AGENT_BROWSER_PROVIDER",
+            "AGENT_BROWSER_STATE",
+        ] {
+            environment.remove(variable);
+        }
+        environment
+    }
+
+    async fn start_login_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut request = [0_u8; 4096];
+                    let request_len = stream.read(&mut request).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&request[..request_len]);
+                    let body = if request.starts_with("GET /challenge ") {
+                        r#"<!doctype html>
+<form id="otp-form">
+  <input id="OfNqHf0LkX" type="text" autocomplete="off" placeholder="123456">
+  <button type="submit">Verify</button>
+</form>
+<script>
+  window.otpSubmitCount = 0;
+  document.getElementById('otp-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    window.otpSubmitCount += 1;
+  });
+</script>"#
+                            .to_string()
+                    } else {
+                        r#"<!doctype html>
+<form id="login">
+  <input id="username" type="email">
+  <input id="password" type="password">
+  <button id="submit" type="submit">Sign in</button>
+</form>
+<script>
+  document.getElementById('login').addEventListener('submit', (event) => {
+    event.preventDefault();
+    location.href = '/challenge';
+  });
+</script>"#
+                            .to_string()
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (origin, task)
+    }
+
+    fn staged_plugin(
+        origin: &str,
+        provider_selector: Option<&str>,
+    ) -> (
+        tempfile::TempDir,
+        crate::plugins::PluginConfig,
+        PathBuf,
+        PathBuf,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("staged-vault");
+        let challenge_count = dir.path().join("challenge-count");
+        let challenge_request = dir.path().join("challenge-request.json");
+        std::fs::write(
+            &path,
+            r##"#!/bin/sh
+input=$(cat)
+case "$input" in
+  *credential.resolve.challenge*)
+    printf '%s' "$input" > "$3"
+    count=0
+    if [ -f "$2" ]; then count=$(cat "$2"); fi
+    printf '%s' "$((count + 1))" > "$2"
+    expiry=$(( $(date +%s) * 1000 + 30000 ))
+    printf '{"protocol":"agent-browser.plugin.v1","success":true,"challenge":{"kind":"totp","code":"481516","expiresAtUnixMs":%s}}' "$expiry"
+    ;;
+  *)
+    if [ -n "$4" ]; then
+      printf '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{"username":"alice@example.com","password":"secret","url":"%s/","usernameSelector":"#username","passwordSelector":"#password","submitSelector":"#submit","stagedChallenge":{"kind":"totp","selector":"%s","challengeRef":"opaque-item-reference"}}}' "$1" "$4"
+    else
+      printf '{"protocol":"agent-browser.plugin.v1","success":true,"credential":{"username":"alice@example.com","password":"secret","url":"%s/","usernameSelector":"#username","passwordSelector":"#password","submitSelector":"#submit","stagedChallenge":{"kind":"totp","challengeRef":"opaque-item-reference"}}}' "$1"
+    fi
+    ;;
+esac
+"##,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        let plugin = crate::plugins::PluginConfig {
+            name: "staged-vault".to_string(),
+            command: path.to_string_lossy().to_string(),
+            args: vec![
+                origin.to_string(),
+                challenge_count.to_string_lossy().to_string(),
+                challenge_request.to_string_lossy().to_string(),
+                provider_selector.unwrap_or_default().to_string(),
+            ],
+            capabilities: vec![
+                crate::plugins::CAPABILITY_CREDENTIAL_READ.to_string(),
+                crate::plugins::CAPABILITY_CREDENTIAL_CHALLENGE.to_string(),
+            ],
+            ..crate::plugins::PluginConfig::default()
+        };
+        (dir, plugin, challenge_count, challenge_request)
+    }
+
+    async fn launch_test_browser(executable: &Path) -> DaemonState {
+        let mut state = DaemonState::new();
+        state.restore_save = "never".to_string();
+        let launch = execute_command(
+            &json!({
+                "id": "launch",
+                "action": "launch",
+                "headless": true,
+                "executablePath": executable.to_string_lossy(),
+                "args": ["--disable-background-networking", "--no-first-run", "--no-proxy-server"]
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&launch);
+        state
+    }
+
+    async fn execute_staged_login(
+        state: &mut DaemonState,
+        plugin: crate::plugins::PluginConfig,
+        otp_selector: Option<&str>,
+    ) -> Value {
+        let mut command = json!({
+            "id": "login",
+            "action": "auth_login",
+            "name": "example",
+            "credentialProvider": "staged-vault",
+            "plugins": [plugin]
+        });
+        if let Some(selector) = otp_selector {
+            command["otpSelector"] = json!(selector);
+        }
+        tokio::time::timeout(Duration::from_secs(45), execute_command(&command, state))
+            .await
+            .expect("staged login exceeded 45 seconds")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires explicit Chrome for Testing"]
+    async fn e2e_staged_auth_fills_once_without_submitting() {
+        let _environment = isolated_browser_environment();
+        let executable = chrome_for_testing_executable();
+        let (origin, server) = start_login_server().await;
+        let (_plugin_dir, plugin, challenge_count, challenge_request) =
+            staged_plugin(&origin, None);
+        let mut state = launch_test_browser(&executable).await;
+
+        let response = execute_staged_login(&mut state, plugin, None).await;
+        assert_success(&response);
+        assert_eq!(get_data(&response)["status"], "challenge_filled");
+        assert_eq!(get_data(&response)["loggedIn"], false);
+        assert!(!response.to_string().contains("481516"));
+
+        let verify = execute_command(
+            &json!({
+                "id": "verify",
+                "action": "evaluate",
+                "script": "document.querySelector('input[placeholder=\"123456\"]')?.value === '481516' && document.querySelector('#otp-form') !== null && window.otpSubmitCount === 0"
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&verify);
+        assert_eq!(get_data(&verify)["result"], true);
+        assert_eq!(std::fs::read_to_string(challenge_count).unwrap(), "1");
+        let request: Value =
+            serde_json::from_slice(&std::fs::read(challenge_request).unwrap()).unwrap();
+        assert_eq!(request["request"]["origin"], origin);
+        assert_eq!(request["request"]["challengeRef"], "opaque-item-reference");
+
+        close_current_browser(&mut state).await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires explicit Chrome for Testing"]
+    async fn e2e_staged_auth_caller_selector_overrides_provider_selector() {
+        let _environment = isolated_browser_environment();
+        let executable = chrome_for_testing_executable();
+        let (origin, server) = start_login_server().await;
+        let (_plugin_dir, plugin, challenge_count, _) =
+            staged_plugin(&origin, Some("#provider-otp"));
+        let mut state = launch_test_browser(&executable).await;
+
+        let response =
+            execute_staged_login(&mut state, plugin, Some("input[placeholder='123456']")).await;
+        assert_success(&response);
+        assert_eq!(get_data(&response)["status"], "challenge_filled");
+        assert_eq!(get_data(&response)["loggedIn"], false);
+        assert!(!response.to_string().contains("481516"));
+        assert_eq!(std::fs::read_to_string(challenge_count).unwrap(), "1");
+
+        let verify = execute_command(
+            &json!({
+                "id": "verify",
+                "action": "evaluate",
+                "script": "document.querySelector('input[placeholder=\"123456\"]')?.value === '481516' && window.otpSubmitCount === 0"
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&verify);
+        assert_eq!(get_data(&verify)["result"], true);
+
+        close_current_browser(&mut state).await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires explicit Chrome for Testing"]
+    async fn e2e_password_only_plugin_behavior_is_unchanged() {
+        let _environment = isolated_browser_environment();
+        let executable = chrome_for_testing_executable();
+        let (origin, server) = start_login_server().await;
+        let (_plugin_dir, mut plugin, challenge_count, _) = staged_plugin(&origin, None);
+        plugin.capabilities = vec![crate::plugins::CAPABILITY_CREDENTIAL_READ.to_string()];
+        let mut state = launch_test_browser(&executable).await;
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(45),
+            execute_command(
+                &json!({
+                    "id": "login",
+                    "action": "auth_login",
+                    "name": "example",
+                    "credentialProvider": "staged-vault",
+                    "credentialItem": "Existing Item",
+                    "url": format!("{origin}/"),
+                    "usernameSelector": "#username",
+                    "passwordSelector": "#password",
+                    "submitSelector": "#submit",
+                    "plugins": [plugin]
+                }),
+                &mut state,
+            ),
+        )
+        .await
+        .expect("password-only login exceeded 45 seconds");
+        assert_success(&response);
+        assert_eq!(get_data(&response)["loggedIn"], true);
+        assert!(get_data(&response).get("status").is_none());
+        assert!(!challenge_count.exists());
+
+        close_current_browser(&mut state).await.unwrap();
+        server.abort();
+    }
+}
+
 fn get_data(resp: &Value) -> &Value {
     resp.get("data").expect("Missing 'data' in response")
 }

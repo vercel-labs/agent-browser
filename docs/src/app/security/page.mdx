@@ -130,9 +130,11 @@ agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"...","url"
 
 Credential plugins receive `credential.resolve` and return username, password, and optionally URL or selector metadata. Browser provider plugins receive `browser.launch` and return a CDP WebSocket URL. Launch mutator plugins receive `launch.mutate` and can append local launch args, extensions, or init script source before Chrome starts. Generic command plugins receive the request type passed to `plugin run`.
 
+A credential plugin may also declare `credential.challenge`. After an OTP selector resolves, agent-browser derives the current page origin, returns any opaque challenge reference unchanged to the same provider, requests a current code with `credential.resolve.challenge`, and fills the selector through the normal `auth login` interaction path without submitting or returning the code. The caller may override an optional provider selector, and common OTP selectors are used when neither supplies one. Concurrent external observers and capture surfaces retain their existing behavior.
+
 `plugin run` is for `command.run` and custom capabilities. Core capabilities and protocol request types use their dedicated command paths so credential, browser-provider, and launch-mutator access stays inside the normal policy gates.
 
-agent-browser keeps browser automation, redaction-sensitive output, and policy enforcement in core. Credential plugin secrets do not appear in command arguments, dashboard events, or normal command output.
+agent-browser keeps browser automation and policy enforcement in core. Credential plugin values do not appear in command arguments or normal command output. Staged TOTP uses the existing capture behavior, so concurrent external observers may see the rendered field.
 
 Gate plugin access with capability actions:
 
