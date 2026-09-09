@@ -141,11 +141,15 @@ agent-browser wait --fn "window.ready"     # Wait for JS condition (or -f)
 ## Mouse Control
 
 ```bash
-agent-browser mouse move 100 200      # Move mouse
+agent-browser mouse move 100 200      # Move mouse instantly
+agent-browser mouse move 600 400 --duration 250 --steps 24
+agent-browser mouse move 600 400 --human --seed 42
 agent-browser mouse down left         # Press button
 agent-browser mouse up left           # Release button
 agent-browser mouse wheel 100         # Scroll wheel
 ```
+
+Use `--human` with `click` or `drag` when pointer-path events matter. Movement starts at the current cursor position and ends at the target; `mouse move --seed` makes the path reproducible.
 
 ## Semantic Locators (alternative to refs)
 

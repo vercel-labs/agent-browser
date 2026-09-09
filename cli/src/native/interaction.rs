@@ -14,6 +14,8 @@ use super::element::{resolve_element_center, resolve_element_object_id, RefMap};
 /// next click would register as a drag or double-click.
 #[derive(Default)]
 pub struct ClickResult {
+    /// Final dispatched pointer position, including clicks that open a dialog.
+    pub position: (f64, f64),
     pub dialog_opened: bool,
     pub pending_release: Option<PendingRelease>,
 }
@@ -82,7 +84,7 @@ pub async fn hover(
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<(f64, f64), String> {
     let (x, y, effective_session_id) = resolve_element_center(
         client,
         session_id,
@@ -108,7 +110,7 @@ pub async fn hover(
             Some(&effective_session_id),
         )
         .await?;
-    Ok(())
+    Ok((x, y))
 }
 
 pub async fn fill(
@@ -492,7 +494,8 @@ pub async fn check(
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<Option<(f64, f64)>, String> {
+    let mut position = None;
     let is_checked = super::element::is_element_checked(
         client,
         session_id,
@@ -502,7 +505,7 @@ pub async fn check(
     )
     .await?;
     if !is_checked {
-        click(
+        let result = click(
             client,
             session_id,
             ref_map,
@@ -512,6 +515,7 @@ pub async fn check(
             iframe_sessions,
         )
         .await?;
+        position = Some(result.position);
 
         // Verify the click changed the state (Playwright parity: _setChecked re-checks).
         // If the coordinate-based click missed (e.g. hidden input, overlay), retry
@@ -535,7 +539,7 @@ pub async fn check(
             .await?;
         }
     }
-    Ok(())
+    Ok(position)
 }
 
 pub async fn uncheck(
@@ -544,7 +548,8 @@ pub async fn uncheck(
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<Option<(f64, f64)>, String> {
+    let mut position = None;
     let is_checked = super::element::is_element_checked(
         client,
         session_id,
@@ -554,7 +559,7 @@ pub async fn uncheck(
     )
     .await?;
     if is_checked {
-        click(
+        let result = click(
             client,
             session_id,
             ref_map,
@@ -564,6 +569,7 @@ pub async fn uncheck(
             iframe_sessions,
         )
         .await?;
+        position = Some(result.position);
 
         // Same verify-and-retry as check().
         if super::element::is_element_checked(
@@ -585,7 +591,7 @@ pub async fn uncheck(
             .await?;
         }
     }
-    Ok(())
+    Ok(position)
 }
 
 /// Fallback for when the coordinate-based CDP click did not toggle the
@@ -1017,6 +1023,7 @@ async fn dispatch_click(
     {
         // No button was pressed yet, nothing to release.
         return Ok(ClickResult {
+            position: (x, y),
             dialog_opened: true,
             pending_release: None,
         });
@@ -1051,6 +1058,7 @@ async fn dispatch_click(
         // release will never arrive on its own. Hand the caller what it needs
         // to release once the dialog is resolved.
         return Ok(ClickResult {
+            position: (x, y),
             dialog_opened: true,
             pending_release: Some(PendingRelease {
                 session_id: session_id.to_string(),
@@ -1081,6 +1089,7 @@ async fn dispatch_click(
     )
     .await?;
     Ok(ClickResult {
+        position: (x, y),
         dialog_opened,
         pending_release: None,
     })

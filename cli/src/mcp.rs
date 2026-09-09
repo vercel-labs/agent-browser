@@ -852,7 +852,8 @@ fn tools() -> Vec<Value> {
             "Click an element by @ref or CSS selector.",
             json!({
                 "selector": selector_schema(),
-                "newTab": { "type": "boolean", "default": false, "description": "Open link targets in a new tab after applying session setup." }
+                "newTab": { "type": "boolean", "default": false, "description": "Open link targets in a new tab after applying session setup." },
+                "human": { "type": "boolean", "default": false, "description": "Approach the target with seeded, curved mouse movement before clicking." }
             }),
             &["selector"],
         ),
@@ -984,7 +985,7 @@ fn parity_tools() -> Vec<Value> {
             TOOL_DRAG,
             "Drag and drop",
             "Drag one element to another.",
-            json!({ "source": selector_schema(), "target": selector_schema() }),
+            json!({ "source": selector_schema(), "target": selector_schema(), "human": { "type": "boolean", "default": false, "description": "Use seeded, curved mouse movement." } }),
             &["source", "target"],
         ),
         tool(
@@ -1110,8 +1111,15 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_MOUSE_MOVE,
             "Mouse move",
-            "Move the mouse.",
-            json!({ "x": number_schema(), "y": number_schema() }),
+            "Move the mouse. Interpolation starts at the last pointer or element interaction.",
+            json!({
+                "x": number_schema(),
+                "y": number_schema(),
+                "durationMs": { "type": "integer", "minimum": 0, "description": "Total movement duration in milliseconds." },
+                "steps": { "type": "integer", "minimum": 1, "maximum": 240, "description": "Number of interpolated events." },
+                "human": { "type": "boolean", "default": false, "description": "Add a seeded perpendicular curve." },
+                "seed": { "type": "integer", "minimum": 0, "description": "Seed for reproducible human movement." }
+            }),
             &["x", "y"],
         ),
         tool(
@@ -2632,6 +2640,9 @@ fn click_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     if optional_bool(arguments, "newTab")?.unwrap_or(false) {
         args.push("--new-tab".to_string());
     }
+    if optional_bool(arguments, "human")?.unwrap_or(false) {
+        args.push("--human".to_string());
+    }
     Ok(args)
 }
 
@@ -2667,7 +2678,11 @@ fn call_press(arguments: &Value) -> Result<Value, ProtocolError> {
 fn call_drag(arguments: &Value) -> Result<Value, ProtocolError> {
     let source = required_string(arguments, "source")?;
     let target = required_string(arguments, "target")?;
-    call_cli_tool(arguments, vec!["drag".to_string(), source, target], None)
+    let mut args = vec!["drag".to_string(), source, target];
+    if optional_bool(arguments, "human")?.unwrap_or(false) {
+        args.push("--human".to_string());
+    }
+    call_cli_tool(arguments, args, None)
 }
 
 fn call_upload(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -2837,11 +2852,21 @@ fn call_find(arguments: &Value) -> Result<Value, ProtocolError> {
 fn call_mouse_move(arguments: &Value) -> Result<Value, ProtocolError> {
     let x = required_number_string(arguments, "x")?;
     let y = required_number_string(arguments, "y")?;
-    call_cli_tool(
-        arguments,
-        vec!["mouse".to_string(), "move".to_string(), x, y],
-        None,
-    )
+    let mut args = vec!["mouse".to_string(), "move".to_string(), x, y];
+    for (field, flag) in [
+        ("durationMs", "--duration"),
+        ("steps", "--steps"),
+        ("seed", "--seed"),
+    ] {
+        if let Some(value) = optional_u64(arguments, field)? {
+            args.push(flag.to_string());
+            args.push(value.to_string());
+        }
+    }
+    if optional_bool(arguments, "human")?.unwrap_or(false) {
+        args.push("--human".to_string());
+    }
+    call_cli_tool(arguments, args, None)
 }
 
 fn call_mouse_button(arguments: &Value, action: &str) -> Result<Value, ProtocolError> {

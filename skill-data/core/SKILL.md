@@ -126,6 +126,7 @@ For sessions that handle sensitive data, use `--allowed-domains` to restrict nav
 ```bash
 agent-browser click @e1                   # click
 agent-browser click @e1 --new-tab         # open link in new tab instead of navigating
+agent-browser click @e1 --human           # approach with reproducible curved movement
 agent-browser dblclick @e1                # double-click
 agent-browser hover @e1                   # hover
 agent-browser focus @e1                   # focus (useful before keyboard input)
@@ -141,6 +142,7 @@ agent-browser upload @e5 file1.pdf        # upload file(s)
 agent-browser scroll down 500             # scroll page (up/down/left/right)
 agent-browser scrollintoview @e1          # scroll element into view
 agent-browser drag @e1 @e2                # drag and drop
+agent-browser drag @e1 @e2 --human        # drag with curved, eased movement
 ```
 
 ### When refs don't work or you don't want to snapshot

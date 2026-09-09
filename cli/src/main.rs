@@ -1550,6 +1550,9 @@ fn main() {
             exit(1);
         }
     };
+    if flags.cli_input_mode {
+        cmd["inputMode"] = json!(flags.input_mode);
+    }
 
     // Handle --password-stdin for auth save
     if cmd.get("action").and_then(|v| v.as_str()) == Some("auth_save") {
@@ -2209,6 +2212,9 @@ fn run_batch(
                 continue;
             }
         };
+        if flags.cli_input_mode {
+            parsed["inputMode"] = json!(flags.input_mode);
+        }
 
         let action = parsed
             .get("action")

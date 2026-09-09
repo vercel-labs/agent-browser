@@ -150,11 +150,15 @@ See [Files & Clipboard](/files) for upload, download, local file, screenshot, PD
 ## Mouse
 
 ```bash
-agent-browser mouse move <x> <y>      # Move mouse
+agent-browser mouse move <x> <y>      # Move mouse instantly
+agent-browser mouse move 600 400 --duration 250 --steps 24
+agent-browser mouse move 600 400 --human --seed 42
 agent-browser mouse down [button]     # Press button
 agent-browser mouse up [button]       # Release button
 agent-browser mouse wheel <dy> [dx]   # Scroll wheel
 ```
+
+Use `--human` with `click`, `drag`, or `mouse move` for curved, eased movement from the current cursor position. For `mouse move`, `--duration` sets milliseconds, `--steps` sets the number of events, and `--seed` makes the path reproducible.
 
 ## Clipboard
 
@@ -615,6 +619,7 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime 
 --confirm-actions <list> # Action categories requiring confirmation
 --confirm-interactive    # Interactive confirmation prompts (auto-denies if stdin is not a TTY)
 --engine <name>          # Browser engine: chrome (default), lightpanda
+--input-mode <mode>      # Pointer movement: instant (default), smooth, human
 --idle-timeout <time>    # Auto-shutdown daemon after inactivity (default: 1h; 0 disables)
 --no-auto-dialog         # Disable auto-accept for alert and beforeunload dialogs
 --model <name>           # AI model for chat (or AI_GATEWAY_MODEL env)
