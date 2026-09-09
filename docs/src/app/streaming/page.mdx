@@ -22,7 +22,7 @@ agent-browser stream disable           # Stop streaming for the session
 
 `stream status` returns the enabled state, active port, browser connection state, and whether screencasting is active. `stream disable` tears the server down and removes the session's `.stream` metadata file.
 
-Use [Video Recording](/recording) when you need a saved WebM artifact instead of a live WebSocket stream.
+Use [Video Recording](/recording) when you need a saved WebM or MP4 artifact instead of a live WebSocket stream. Recording requires `ffmpeg` on `PATH`.
 
 ## Runtime status response
 

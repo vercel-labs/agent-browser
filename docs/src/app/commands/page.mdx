@@ -33,12 +33,16 @@ agent-browser snapshot                # Accessibility tree with refs
 agent-browser eval <js>               # Run JavaScript
 agent-browser connect <port|url>      # Connect to browser via CDP
 agent-browser stream enable [--port <port>]  # Start runtime WebSocket streaming
+agent-browser webmcp list                     # List experimental page tools
+agent-browser webmcp invoke <tool> --params @input.json
 agent-browser stream status           # Show runtime streaming state and bound port
 agent-browser stream disable          # Stop runtime WebSocket streaming
 agent-browser close                   # Close browser (aliases: quit, exit)
 agent-browser close --all             # Close all active sessions
 agent-browser mcp                     # Start an MCP stdio server
 ```
+
+Successful `open <url>` and `navigate` commands advertise when WebMCP tools are available. With `--json`, the navigation response includes `data.webmcp.toolCount`.
 
 Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, take a fresh snapshot, then retry the original action.
 
@@ -171,7 +175,7 @@ agent-browser set device <name>       # Emulate device ("iPhone 14")
 agent-browser set geo <lat> <lng>     # Set geolocation
 agent-browser set offline [on|off]    # Toggle offline mode
 agent-browser set headers <json>      # Extra HTTP headers
-agent-browser set credentials <u> <p> # HTTP basic auth
+agent-browser set credentials <u> <p> # HTTP basic auth for current and future tabs
 agent-browser set media [dark|light]  # Emulate color scheme (persists for session)
 ```
 
@@ -249,6 +253,8 @@ agent-browser tab close docs    # close by label
 
 Labels are never auto-generated and never rewritten on navigation — an agent that names a tab `docs` keeps that name until the tab is closed. Labels are unique within a session; creating a second tab with an existing label errors.
 
+Tabs opened through `tab new` or `click --new-tab` inherit the session's setup before their first document loads: user agent, `set headers`, `set credentials`, origin-scoped `--headers`, init scripts, `route` rules, and emulation overrides (color scheme, timezone, locale, geolocation, offline). Turning offline mode off or setting headers to `{}` restores the default setup for future tabs.
+
 `tab list --json` also reports each tab's CDP `targetId`, and target ids are accepted anywhere a tab ref is accepted (`tab <targetId>`, `tab close <targetId>`). Unlike `t<N>` ids, which are per-daemon counters, target ids stay stable across daemon restarts. Each session is bound to its active tab by target id and returns to it after a daemon restart; with `--pin-tab` the binding is strict and a closed bound tab produces a `tab_gone` error instead of a silent fallback. JSON errors include <code>code: "tab_gone"</code>, <code>data.targetId</code>, and optional sanitized <code>data.lastUrl</code>. Batch output carries the recovery object under <code>result</code>. See [CDP Mode](/cdp-mode) for the multi-session workflow.
 
 Refs (`@e1`, etc.) are scoped to the tab that was active when the snapshot ran, so switch tabs first, then snapshot and interact:
@@ -308,7 +314,7 @@ agent-browser stream disable          # Stop runtime streaming and remove the .s
 
 Streaming is enabled automatically for all sessions. Use these commands to check status, re-enable on a specific port, or disable streaming.
 
-Streaming is separate from file-based recordings. Use [Video Recording](/recording) when you need a saved WebM artifact.
+Streaming is separate from file-based recordings. Use [Video Recording](/recording) when you need a saved WebM or MP4 artifact.
 
 ## Debug
 
@@ -317,7 +323,8 @@ agent-browser trace start             # Start trace
 agent-browser trace stop [path]       # Stop and save trace
 agent-browser profiler start          # Start Chrome DevTools profiling
 agent-browser profiler stop [path]    # Stop and save profile (.json)
-agent-browser record start <path>     # Start video recording (WebM)
+agent-browser record start <path>     # Start video recording (.webm/.mp4, 30 fps; needs ffmpeg)
+agent-browser record start <path> --fps 60  # Record at 60 fps (--fps accepts 1-60)
 agent-browser record stop             # Stop and save video
 agent-browser record restart <path>   # Stop current and start new recording
 agent-browser console                 # View console messages
@@ -329,13 +336,15 @@ agent-browser highlight <sel>         # Highlight element
 agent-browser inspect                 # Open Chrome DevTools for the active page
 ```
 
-See [Debugging](/debugging) for console, error, dialog, trace, highlight, and DevTools workflows. See [Video Recording](/recording) for `record` workflows and [Profiler](/profiler) for performance profiles.
+Recording requires `ffmpeg` on `PATH`. See [Debugging](/debugging) for console, error, dialog, trace, highlight, and DevTools workflows. See [Video Recording](/recording) for recording requirements and `record` workflows, and [Profiler](/profiler) for performance profiles.
 
 ## Auth vault
 
 ```bash
 agent-browser auth save <name> [opts]    # Save auth profile
 agent-browser auth login <name>          # Login using saved credentials
+agent-browser auth login <name> --no-navigate
+                                          # Use active page after origin validation
 agent-browser auth login <name> --credential-provider <plugin> [--item <ref>] [--url <url>]
                                           # Resolve credentials from plugin
 agent-browser auth login <name> --username-selector <s> --password-selector <s> [--submit-selector <s>]
@@ -362,11 +371,22 @@ Save options:
 
 `auth login` navigates with `load` and then waits for the username/password/submit selectors to appear before interacting. This improves reliability on SPA login pages where fields render after initial page load.
 
+Use `--no-navigate` after an in-page click, challenge clearance, consent dismissal, or other stateful setup that must survive credential entry:
+
+```bash
+agent-browser open https://example.com/
+agent-browser click "a[href='/login']"
+agent-browser auth login work --no-navigate
+```
+
+The flag suppresses only the initial auth-login navigation. It requires an existing active top-level HTTP(S) page and compares that page with the effective credential URL by scheme, host, and effective port. Paths, queries, and fragments may differ. Waiting, filling, clicking submit, and any submit-triggered navigation are unchanged. A command-level `--url` overrides profile or provider URL metadata and acts as the expected-origin constraint rather than a navigation destination.
+
 Plugin login options:
 
 - `--credential-provider <plugin>`: resolve credentials from a configured plugin
 - `--item <ref>`: provider-specific vault item reference
 - `--url <url>`: login URL override
+- `--no-navigate`: use the active top-level page after validating it against the effective credential origin
 - `--username-selector <sel>`: selector override for this login
 - `--password-selector <sel>`: selector override for this login
 - `--submit-selector <sel>`: selector override for this login
@@ -386,6 +406,7 @@ echo "pass" | agent-browser auth save github --url https://github.com/login --us
 agent-browser auth login github
 agent-browser plugin add agent-browser-plugin-vault --name vault
 agent-browser auth login my-app --credential-provider vault --item "My App"
+agent-browser auth login my-app --credential-provider vault --item "My App" --no-navigate --url https://identity.example.com/login
 agent-browser --provider cloud-browser open https://example.com
 agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"...","url":"https://example.com"}'
 agent-browser auth list
@@ -441,10 +462,11 @@ agent-browser --profile Default open https://gmail.com  # Reuse a profile's logi
 ```bash
 agent-browser dashboard [start]       # Start the dashboard server (default port: 4848)
 agent-browser dashboard start --port <n>  # Start on a specific port
+agent-browser dashboard start --allowed-origins <origins> # Allow exact HTTPS reverse-proxied browser origins
 agent-browser dashboard stop          # Stop the dashboard server
 ```
 
-Open the dashboard through `http://localhost:4848` or a proxied/forwarded dashboard URL such as `https://dashboard.agent-browser.localhost`. The browser stays on the dashboard origin; per-session tabs, status, and stream traffic are proxied internally, so session ports do not need to be exposed.
+Loopback dashboard origins are accepted by default without an access token. For a reverse-proxied or forwarded URL, pass its exact browser origin with `--allowed-origins` or set `AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS`. Every configured origin must be a valid exact HTTPS origin. Ports must be integers from 1 to 65535. Unknown options, missing values, invalid ports, and malformed origins fail without starting the server. The command prints private tokenized access URLs only for external origins; open the matching URL once to establish the browser session and do not share it. Open the normal `http://localhost:<port>` URL for local access. The browser stays on the dashboard origin; per-session tabs, status, and stream traffic are proxied internally, so session ports do not need to be exposed. Stop the running dashboard before changing the port or allowed origins.
 
 ## Doctor
 
@@ -542,7 +564,7 @@ The default output lists violations and incomplete checks with impact, rule ID, 
 ```bash
 agent-browser open --init-script <path>           # Register before first navigation (repeatable)
 agent-browser addinitscript <js>                  # Register at runtime (returns identifier)
-agent-browser removeinitscript <identifier>       # Remove a previously registered init script
+agent-browser removeinitscript <identifier>       # Remove from every tab in the session
 ```
 
 See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime scripts, built-in React DevTools, and extensions.
@@ -579,7 +601,8 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime 
 --screenshot-format <fmt> # Format: png (default), jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)
 --headed                 # Show browser window (not headless)
 --webgpu                 # Enable WebGPU (software Vulkan on Linux, no GPU needed)
---cdp <port|url>         # Connect via Chrome DevTools Protocol (port or WebSocket URL)
+--no-webmcp              # Disable default experimental WebMCP Chrome features (or AGENT_BROWSER_NO_WEBMCP env)
+--cdp <port|url>         # Connect via CDP; root WebSocket query slash is optional
 --auto-connect           # Auto-discover and connect to running Chrome
 --color-scheme <scheme>  # Color scheme: dark, light, no-preference
 --download-path <path>   # Default download directory

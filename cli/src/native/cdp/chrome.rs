@@ -1,5 +1,8 @@
+#[cfg(windows)]
+use super::windows_process::Child;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
@@ -358,6 +361,9 @@ pub struct LaunchOptions {
     /// this routes WebGPU through SwiftShader's software Vulkan with software
     /// compositing so it works without a GPU or display.
     pub webgpu: bool,
+    /// Enable Chrome's experimental WebMCP implementation for agent-browser
+    /// managed sessions. Enabled by default and disabled with `--no-webmcp`.
+    pub webmcp: bool,
     /// Disable automatic Xvfb for headed launches on displayless Linux
     /// hosts (AGENT_BROWSER_NO_XVFB). Carried as a launch option so the
     /// CLI's current environment wins over the env a long-lived daemon was
@@ -408,6 +414,7 @@ impl Default for LaunchOptions {
             viewport_size: None,
             use_real_keychain: false,
             webgpu: false,
+            webmcp: true,
             no_xvfb: false,
             restrict_webrtc: false,
         }
@@ -427,6 +434,10 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "NetworkService".to_string(),
         "NetworkServiceInProcess".to_string(),
     ];
+    if options.webmcp {
+        enable_features.push("WebMCPTesting".to_string());
+        enable_features.push("DevToolsWebMCPSupport".to_string());
+    }
     if options.webgpu && cfg!(target_os = "linux") {
         enable_features.push("Vulkan".to_string());
     }
@@ -811,7 +822,9 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
     #[cfg(target_os = "linux")]
     let xvfb = maybe_start_xvfb(options);
 
+    #[cfg(not(windows))]
     let mut cmd = Command::new(chrome_path);
+    #[cfg(not(windows))]
     cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -851,7 +864,11 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         }
     }
 
-    let mut child = cmd.spawn().map_err(|e| {
+    #[cfg(not(windows))]
+    let spawned = cmd.spawn();
+    #[cfg(windows)]
+    let spawned = Child::spawn(chrome_path, &args, options.effectively_headless());
+    let mut child = spawned.map_err(|e| {
         cleanup_temp_dir(&temp_user_data_dir);
         format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
     })?;
@@ -939,7 +956,7 @@ fn wait_for_devtools_active_port(
 }
 
 fn wait_for_ws_url_until(
-    reader: BufReader<std::process::ChildStderr>,
+    reader: impl BufRead,
     deadline: std::time::Instant,
 ) -> Result<String, String> {
     let prefix = "DevTools listening on ";
@@ -1790,13 +1807,8 @@ mod tests {
 
     #[cfg(windows)]
     fn spawn_noop_child() -> Child {
-        Command::new("cmd.exe")
-            .args(["/C", "exit 0"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap()
+        let cmd = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe");
+        Child::spawn(&cmd, &["/C".into(), "exit 0".into()], false).unwrap()
     }
 
     #[test]
@@ -2059,10 +2071,16 @@ mod tests {
         let result = build_chrome_args(&opts).unwrap();
         assert!(result.args.iter().any(|a| a == "--enable-unsafe-webgpu"));
         if cfg!(target_os = "linux") {
-            assert!(result
+            let features: Vec<&str> = result
                 .args
                 .iter()
-                .any(|a| a == "--enable-features=NetworkService,NetworkServiceInProcess,Vulkan"));
+                .find_map(|arg| arg.strip_prefix("--enable-features="))
+                .unwrap()
+                .split(',')
+                .collect();
+            assert!(features.contains(&"NetworkService"));
+            assert!(features.contains(&"NetworkServiceInProcess"));
+            assert!(features.contains(&"Vulkan"));
             assert!(result.args.iter().any(|a| a == "--use-angle=vulkan"));
             assert!(result.args.iter().any(|a| a == "--use-vulkan=swiftshader"));
             assert!(result
@@ -2189,6 +2207,34 @@ mod tests {
         if let Some(ref dir) = result.temp_user_data_dir {
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn test_build_args_enables_webmcp_by_default() {
+        let result = build_chrome_args(&LaunchOptions::default()).unwrap();
+        let features = result
+            .args
+            .iter()
+            .find(|arg| arg.starts_with("--enable-features="))
+            .unwrap();
+        assert!(features.contains("WebMCPTesting"));
+        assert!(features.contains("DevToolsWebMCPSupport"));
+    }
+
+    #[test]
+    fn test_build_args_webmcp_opt_out() {
+        let result = build_chrome_args(&LaunchOptions {
+            webmcp: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let features = result
+            .args
+            .iter()
+            .find(|arg| arg.starts_with("--enable-features="))
+            .unwrap();
+        assert!(!features.contains("WebMCPTesting"));
+        assert!(!features.contains("DevToolsWebMCPSupport"));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -8,7 +9,7 @@ use crate::connection::get_socket_dir;
 
 use super::chat::{chat_status_json, handle_chat_request, handle_models_request};
 use super::discovery::discover_sessions;
-use super::http::{serve_embedded_file, CORS_HEADERS};
+use super::http::serve_embedded_file;
 
 /// Dashboard same-origin proxy endpoints for session metadata and streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +43,11 @@ impl DashboardProxyError {
 
 const PROXY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const PROXY_MAX_RESPONSE_SIZE: u64 = 16 * 1024 * 1024;
+const DASHBOARD_ACCESS_TOKEN_COOKIE: &str = "__Host-agent-browser-dashboard-token";
+
+#[cfg(test)]
+static EXEC_CLI_INVOCATIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 fn build_json_error_body(error: &str) -> String {
     let escaped = serde_json::to_string(error).unwrap_or_else(|_| format!("\"{}\"", error));
@@ -53,24 +59,13 @@ async fn write_http_response_inner(
     status: &str,
     content_type: &str,
     body: &[u8],
-    include_cors: bool,
 ) {
-    let cors_headers = if include_cors { CORS_HEADERS } else { "" };
     let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n{cors_headers}\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     let _ = stream.write_all(response.as_bytes()).await;
     let _ = stream.write_all(body).await;
-}
-
-async fn write_http_response(
-    stream: &mut tokio::net::TcpStream,
-    status: &str,
-    content_type: &str,
-    body: &[u8],
-) {
-    write_http_response_inner(stream, status, content_type, body, true).await;
 }
 
 async fn write_http_response_no_cors(
@@ -79,7 +74,7 @@ async fn write_http_response_no_cors(
     content_type: &str,
     body: &[u8],
 ) {
-    write_http_response_inner(stream, status, content_type, body, false).await;
+    write_http_response_inner(stream, status, content_type, body).await;
 }
 
 async fn write_json_error_response_no_cors(
@@ -116,7 +111,7 @@ fn is_websocket_upgrade(request: &str) -> bool {
 }
 
 fn request_header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
-    request.lines().find_map(|line| {
+    request_headers(request).lines().find_map(|line| {
         let (header_name, value) = line.split_once(':')?;
         if header_name.trim().eq_ignore_ascii_case(name) {
             Some(value.trim())
@@ -126,22 +121,38 @@ fn request_header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
     })
 }
 
+fn request_headers(request: &str) -> &str {
+    request
+        .find("\r\n\r\n")
+        .or_else(|| request.find("\n\n"))
+        .map(|header_end| &request[..header_end])
+        .unwrap_or(request)
+}
+
 fn normalize_origin_authority(origin: &str) -> Option<String> {
     let url = url::Url::parse(origin).ok()?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    // `url::Url::host_str` already includes brackets around IPv6 literals.
+    // Adding another pair would turn `[::1]` into `[[::1]]` and prevent the
+    // documented IPv6 loopback origin from matching the Host header.
     let host = url.host_str()?.to_ascii_lowercase();
-    let host = if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host
-    };
+    let default_port = (url.scheme() == "http" && url.port() == Some(80))
+        || (url.scheme() == "https" && url.port() == Some(443));
     Some(match url.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host,
+        Some(port) if !default_port => format!("{host}:{port}"),
+        _ => host,
     })
 }
 
-fn normalize_host_authority(host: &str) -> String {
+fn normalize_host_authority(host: &str, scheme: Option<&str>) -> String {
     let host = host.trim().to_ascii_lowercase();
+    let default_port = match scheme {
+        Some("http") => Some("80"),
+        Some("https") => Some("443"),
+        _ => None,
+    };
 
     if let Some(bracket_end) = host.rfind(']') {
         if bracket_end == host.len() - 1 {
@@ -150,7 +161,7 @@ fn normalize_host_authority(host: &str) -> String {
 
         if host.as_bytes().get(bracket_end + 1) == Some(&b':') {
             let port = &host[bracket_end + 2..];
-            if port == "80" || port == "443" {
+            if Some(port) == default_port {
                 return host[..=bracket_end].to_string();
             }
         }
@@ -159,7 +170,7 @@ fn normalize_host_authority(host: &str) -> String {
     }
 
     if let Some((name, port)) = host.rsplit_once(':') {
-        if !name.contains(':') && (port == "80" || port == "443") {
+        if !name.contains(':') && Some(port) == default_port {
             return name.to_string();
         }
     }
@@ -167,19 +178,181 @@ fn normalize_host_authority(host: &str) -> String {
     host
 }
 
-fn header_matches_host(request: &str, header_name: &str) -> Option<bool> {
-    let authority =
-        request_header_value(request, header_name).and_then(normalize_origin_authority)?;
-    let host = request_header_value(request, "host").map(normalize_host_authority)?;
-    Some(authority == host)
+fn authority_host(authority: &str) -> &str {
+    if let Some(stripped) = authority.strip_prefix('[') {
+        if let Some(bracket_end) = stripped.find(']') {
+            return &authority[..=bracket_end + 1];
+        }
+    }
+
+    if let Some((host, _port)) = authority.rsplit_once(':') {
+        if !host.contains(':') {
+            return host;
+        }
+    }
+
+    authority
 }
 
-/// Validates that a proxied WebSocket request either has no Origin header or
-/// presents an Origin whose authority matches the request Host header.
+fn is_loopback_authority(authority: &str) -> bool {
+    matches!(
+        authority_host(authority),
+        "localhost" | "127.0.0.1" | "::1" | "[::1]"
+    )
+}
+
+fn is_loopback_dashboard_origin(origin: &str) -> bool {
+    normalize_origin_authority(origin).is_some_and(|authority| is_loopback_authority(&authority))
+}
+
+fn normalized_dashboard_origin(value: &str) -> Option<String> {
+    let url = url::Url::parse(value).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+
+    let authority = normalize_origin_authority(value)?;
+    Some(format!("{}://{authority}", url.scheme()))
+}
+
+fn normalized_dashboard_allowed_origin(value: &str) -> Option<String> {
+    let url = url::Url::parse(value).ok()?;
+    if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+        return None;
+    }
+    let origin = normalized_dashboard_origin(value)?;
+    let authority = normalize_origin_authority(&origin)?;
+    if is_loopback_authority(&authority) {
+        return None;
+    }
+    if url.scheme() != "https" {
+        return None;
+    }
+    Some(origin)
+}
+
+/// Validate and normalize a comma-separated dashboard origin allowlist into
+/// the exact set enforced by the server. Invalid entries reject the entire
+/// configuration so a typo cannot silently weaken reverse-proxy protection.
+/// Sorting makes equivalent configurations stable for lifecycle comparisons
+/// in the parent CLI process.
+pub fn normalize_dashboard_allowed_origins(value: Option<&str>) -> Result<Vec<String>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+
+    if value.trim().is_empty() {
+        return Err("Dashboard allowed origins cannot be empty.".to_string());
+    }
+
+    let mut origins = Vec::new();
+    for value in value.split(',') {
+        let value = value.trim();
+        let origin = normalized_dashboard_allowed_origin(value).ok_or_else(|| {
+            format!(
+                "Invalid dashboard allowed origin '{value}'. Expected an exact non-loopback HTTPS origin without a path, query, fragment, or credentials."
+            )
+        })?;
+        origins.push(origin);
+    }
+    origins.sort();
+    origins.dedup();
+    Ok(origins)
+}
+
+fn allowed_dashboard_origins() -> Result<Vec<String>, String> {
+    let configured = std::env::var("AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS").ok();
+    normalize_dashboard_allowed_origins(configured.as_deref())
+}
+
+pub fn is_valid_dashboard_access_token(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn dashboard_access_token() -> Option<String> {
+    std::env::var("AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN")
+        .ok()
+        .filter(|token| is_valid_dashboard_access_token(token))
+}
+
+fn access_token_matches(request: &str) -> bool {
+    let Ok(allowed_origins) = allowed_dashboard_origins() else {
+        return false;
+    };
+
+    // Same-origin validation runs before this check. Once it has established a
+    // loopback Host and loopback browser origin, no token is needed. In
+    // particular, never place the external dashboard credential in a cookie on
+    // plain-http localhost, where cookies are shared across ports.
+    if request_header_value(request, "host")
+        .map(|host| normalize_host_authority(host, None))
+        .is_some_and(|host| is_loopback_authority(&host))
+    {
+        return true;
+    }
+
+    if allowed_origins.is_empty() {
+        return true;
+    }
+    dashboard_access_token().as_deref().is_some_and(|expected| {
+        request_access_token(request).is_some_and(|provided| constant_time_eq(expected, provided))
+    })
+}
+
+fn constant_time_eq(expected: &str, provided: &str) -> bool {
+    if expected.len() != provided.len() {
+        return false;
+    }
+    expected
+        .bytes()
+        .zip(provided.bytes())
+        .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+        == 0
+}
+
+fn request_access_token(request: &str) -> Option<&str> {
+    request_header_value(request, "cookie")?
+        .split(';')
+        .find_map(|part| {
+            let (name, value) = part.trim().split_once('=')?;
+            (name == DASHBOARD_ACCESS_TOKEN_COOKIE).then_some(value)
+        })
+}
+
+fn header_is_trusted_dashboard_origin(request: &str, header_name: &str) -> bool {
+    let Some(origin) =
+        request_header_value(request, header_name).and_then(normalized_dashboard_origin)
+    else {
+        return false;
+    };
+    let Some((scheme, _)) = origin.split_once("://") else {
+        return false;
+    };
+    let Some(host) = request_header_value(request, "host")
+        .map(|host| normalize_host_authority(host, Some(scheme)))
+    else {
+        return false;
+    };
+
+    if normalize_origin_authority(&origin).as_deref() != Some(host.as_str()) {
+        return false;
+    }
+
+    (is_loopback_authority(&host) && is_loopback_dashboard_origin(&origin))
+        || allowed_dashboard_origins()
+            .is_ok_and(|allowed| allowed.iter().any(|allowed| allowed == &origin))
+}
+
+/// Validates that a proxied WebSocket request came from a trusted dashboard
+/// origin. Non-browser clients may omit Origin only when connecting through a
+/// loopback Host, which prevents DNS rebinding from trusting an attacker host.
 fn is_same_origin_ws_request(request: &str) -> bool {
-    match header_matches_host(request, "origin") {
-        Some(matches) => matches,
-        None => request_header_value(request, "origin").is_none(),
+    if request_header_value(request, "origin").is_some() {
+        header_is_trusted_dashboard_origin(request, "origin")
+    } else {
+        request_header_value(request, "host")
+            .map(|host| normalize_host_authority(host, None))
+            .is_some_and(|host| is_loopback_authority(&host))
     }
 }
 
@@ -189,8 +362,25 @@ fn is_same_origin_ws_request(request: &str) -> bool {
 /// `Referer` so browsers cannot hit the proxy routes via side-channel tags or
 /// arbitrary cross-origin fetches.
 fn is_same_origin_http_request(request: &str) -> bool {
-    matches!(header_matches_host(request, "origin"), Some(true))
-        || matches!(header_matches_host(request, "referer"), Some(true))
+    if request_header_value(request, "origin").is_some() {
+        header_is_trusted_dashboard_origin(request, "origin")
+    } else {
+        header_is_trusted_dashboard_origin(request, "referer")
+    }
+}
+
+/// Protect dashboard API requests from cross-origin forms and DNS rebinding.
+///
+/// Local dashboard origins are trusted by default. A dashboard exposed through
+/// a reverse proxy must explicitly opt in its browser origin with
+/// `AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS` and present the generated access
+/// token, since direct clients can forge Origin and Host headers.
+fn is_same_origin_dashboard_request(request: &str) -> bool {
+    is_same_origin_http_request(request) && access_token_matches(request)
+}
+
+fn is_authorized_dashboard_websocket_request(request: &str) -> bool {
+    is_same_origin_ws_request(request) && access_token_matches(request)
 }
 
 /// Parse a dashboard route of the form `/api/session/<port>/<endpoint>`.
@@ -423,15 +613,40 @@ async fn proxy_session_stream(mut stream: tokio::net::TcpStream, port: u16) {
 }
 
 pub async fn run_dashboard_server(port: u16) {
-    let addr = format!("127.0.0.1:{}", port);
-    let listener = match TcpListener::bind(&addr).await {
+    let ipv4_addr = (Ipv4Addr::LOCALHOST, port);
+    let ipv4_listener = match TcpListener::bind(ipv4_addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("Failed to bind dashboard server on {}: {}", addr, e);
+            eprintln!("Failed to bind dashboard server on 127.0.0.1:{port}: {e}");
             return;
         }
     };
 
+    // Port zero is useful for internal tests. Bind IPv6 to the same selected
+    // port so both loopback families reach one dashboard instance.
+    let bound_port = ipv4_listener
+        .local_addr()
+        .map(|address| address.port())
+        .unwrap_or(port);
+    let ipv6_listener = match TcpListener::bind((Ipv6Addr::LOCALHOST, bound_port)).await {
+        Ok(listener) => Some(listener),
+        Err(error) => {
+            eprintln!("Failed to bind dashboard server on [::1]:{bound_port}: {error}");
+            None
+        }
+    };
+
+    if let Some(ipv6_listener) = ipv6_listener {
+        tokio::join!(
+            run_dashboard_listener(ipv4_listener),
+            run_dashboard_listener(ipv6_listener)
+        );
+    } else {
+        run_dashboard_listener(ipv4_listener).await;
+    }
+}
+
+async fn run_dashboard_listener(listener: TcpListener) {
     loop {
         let Ok((stream, _addr)) = listener.accept().await else {
             break;
@@ -480,11 +695,11 @@ async fn handle_dashboard_connection(mut stream: tokio::net::TcpStream) {
                     .await;
                     return;
                 }
-                if !is_same_origin_ws_request(&peeked_request) {
+                if !is_authorized_dashboard_websocket_request(&peeked_request) {
                     write_json_error_response_no_cors(
                         &mut stream,
                         "403 Forbidden",
-                        "Origin does not match Host header.",
+                        "Origin or dashboard access token is invalid.",
                     )
                     .await;
                     return;
@@ -520,10 +735,18 @@ async fn handle_dashboard_connection(mut stream: tokio::net::TcpStream) {
     let (method, path) = parse_request_method_and_path(&request);
     let origin = request_header_value(&request, "origin").map(|value| value.to_string());
 
+    if path.starts_with("/api/") && !is_same_origin_dashboard_request(&request) {
+        write_json_error_response_no_cors(
+            &mut stream,
+            "403 Forbidden",
+            "Origin, Referer, or dashboard access token is invalid.",
+        )
+        .await;
+        return;
+    }
+
     if method == "OPTIONS" {
-        let response = format!(
-            "HTTP/1.1 204 No Content\r\n{CORS_HEADERS}Access-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        );
+        let response = "HTTP/1.1 204 No Content\r\nAccess-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         let _ = stream.write_all(response.as_bytes()).await;
         return;
     }
@@ -552,7 +775,7 @@ async fn handle_dashboard_connection(mut stream: tokio::net::TcpStream) {
             Ok(msg) => ("200 OK", msg),
             Err(e) => ("400 Bad Request", build_json_error_body(&e)),
         };
-        write_http_response(
+        write_http_response_no_cors(
             &mut stream,
             status,
             "application/json; charset=utf-8",
@@ -573,16 +796,6 @@ async fn handle_dashboard_connection(mut stream: tokio::net::TcpStream) {
 
         match endpoint {
             SessionProxyEndpoint::Tabs | SessionProxyEndpoint::Status => {
-                if !is_same_origin_http_request(&request) {
-                    write_json_error_response_no_cors(
-                        &mut stream,
-                        "403 Forbidden",
-                        "Origin or Referer does not match Host header.",
-                    )
-                    .await;
-                    return;
-                }
-
                 match proxy_session_http_route(port, endpoint).await {
                     Ok((status, content_type, body)) => {
                         write_http_response_no_cors(&mut stream, &status, &content_type, &body)
@@ -627,7 +840,7 @@ async fn handle_dashboard_connection(mut stream: tokio::net::TcpStream) {
         serve_embedded_file(path)
     };
 
-    write_http_response(&mut stream, status, content_type, &body).await;
+    write_http_response_no_cors(&mut stream, status, content_type, &body).await;
 }
 
 async fn read_post_body(stream: &mut tokio::net::TcpStream, initial: &[u8], n: usize) -> String {
@@ -694,6 +907,9 @@ async fn exec_cli(body: &str) -> Result<String, String> {
     if args.is_empty() {
         return Err("Empty args array".to_string());
     }
+
+    #[cfg(test)]
+    EXEC_CLI_INVOCATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
     let exe = std::env::current_exe().map_err(|e| format!("Cannot resolve executable: {}", e))?;
 
@@ -806,6 +1022,324 @@ pub(super) async fn spawn_session(body: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::EnvGuard;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn send_request_to_dashboard_handler(request: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_dashboard_connection(stream).await;
+        });
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client.write_all(request.as_bytes()).await.unwrap();
+        client.shutdown().await.unwrap();
+
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        server.await.unwrap();
+
+        String::from_utf8(response).unwrap()
+    }
+
+    fn dashboard_request(method: &str, path: &str, headers: &str, body: &str) -> String {
+        format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost:4848\r\n{headers}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_origin_text_plain_exec_is_rejected_without_execution() {
+        let _guard = EnvGuard::new(&[]);
+        EXEC_CLI_INVOCATIONS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let body = r#"{"args":["--version"],"z":"="}"#;
+        let request = dashboard_request(
+            "POST",
+            "/api/exec",
+            "Origin: https://evil.example\r\nContent-Type: text/plain\r\n",
+            body,
+        );
+
+        let response = send_request_to_dashboard_handler(&request).await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin"),
+            "forbidden exec response exposed CORS: {response}"
+        );
+        assert_eq!(
+            EXEC_CLI_INVOCATIONS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "cross-origin request reached exec_cli"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_mutations_reject_cross_origin_requests_without_wildcard_cors() {
+        for (method, path) in [
+            ("POST", "/api/exec"),
+            ("POST", "/api/kill"),
+            ("POST", "/api/sessions"),
+            ("POST", "/api/chat"),
+            ("GET", "/api/sessions"),
+        ] {
+            let request = dashboard_request(
+                method,
+                path,
+                "Origin: https://evil.example\r\nContent-Type: application/json\r\n",
+                "{}",
+            );
+            let response = send_request_to_dashboard_handler(&request).await;
+
+            assert!(
+                response.starts_with("HTTP/1.1 403 Forbidden"),
+                "unexpected response for {path}: {response}"
+            );
+            assert!(
+                !response.contains("Access-Control-Allow-Origin"),
+                "forbidden {path} response exposed CORS: {response}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_sensitive_routes_reject_cross_origin_preflight_without_cors() {
+        for path in [
+            "/api/exec",
+            "/api/kill",
+            "/api/sessions",
+            "/api/chat",
+            "/api/models",
+        ] {
+            let request = dashboard_request(
+                "OPTIONS",
+                path,
+                "Origin: https://evil.example\r\nAccess-Control-Request-Method: POST\r\n",
+                "",
+            );
+            let response = send_request_to_dashboard_handler(&request).await;
+
+            assert!(
+                response.starts_with("HTTP/1.1 403 Forbidden"),
+                "unexpected response for {path}: {response}"
+            );
+            assert!(
+                !response.contains("Access-Control-Allow-Origin"),
+                "forbidden {path} preflight exposed CORS: {response}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_exec_rejects_missing_origin_or_cross_origin_referer_without_execution() {
+        let _guard = EnvGuard::new(&[]);
+        EXEC_CLI_INVOCATIONS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let body = r#"{"args":["--version"]}"#;
+
+        for headers in [
+            "Content-Type: application/json\r\n",
+            "Referer: https://evil.example/\r\nContent-Type: application/json\r\n",
+        ] {
+            let request = dashboard_request("POST", "/api/exec", headers, body);
+            let response = send_request_to_dashboard_handler(&request).await;
+
+            assert!(
+                response.starts_with("HTTP/1.1 403 Forbidden"),
+                "unexpected response: {response}"
+            );
+            assert!(
+                !response.contains("Access-Control-Allow-Origin"),
+                "forbidden exec response exposed CORS: {response}"
+            );
+        }
+
+        assert_eq!(
+            EXEC_CLI_INVOCATIONS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "untrusted requests reached exec_cli"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn same_origin_dashboard_exec_runs_without_cors() {
+        let _guard = EnvGuard::new(&[]);
+        EXEC_CLI_INVOCATIONS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let body = r#"{"args":["--version"]}"#;
+        let request = dashboard_request(
+            "POST",
+            "/api/exec",
+            "Origin: http://localhost:4848\r\nContent-Type: application/json\r\n",
+            body,
+        );
+
+        let response = send_request_to_dashboard_handler(&request).await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin"),
+            "dashboard exec response exposed CORS: {response}"
+        );
+        assert_eq!(
+            EXEC_CLI_INVOCATIONS.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "same-origin request did not reach exec_cli"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn reverse_proxy_dashboard_requires_an_access_token() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN",
+        ]);
+        let token = "a".repeat(64);
+        guard.set(
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "https://dashboard.example.com",
+        );
+        guard.set("AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN", &token);
+        EXEC_CLI_INVOCATIONS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let body = r#"{"args":["--version"]}"#;
+
+        let without_token = format!(
+            "POST /api/exec HTTP/1.1\r\nHost: dashboard.example.com\r\nOrigin: https://dashboard.example.com\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len(),
+        );
+        let response = send_request_to_dashboard_handler(&without_token).await;
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden"));
+        assert_eq!(
+            EXEC_CLI_INVOCATIONS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "tokenless reverse-proxy request reached exec_cli"
+        );
+
+        let with_token = format!(
+            "POST /api/exec HTTP/1.1\r\nHost: dashboard.example.com\r\nOrigin: https://dashboard.example.com\r\nCookie: {DASHBOARD_ACCESS_TOKEN_COOKIE}={token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len(),
+        );
+        let response = send_request_to_dashboard_handler(&with_token).await;
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert_eq!(
+            EXEC_CLI_INVOCATIONS.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "authenticated reverse-proxy request did not reach exec_cli"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn loopback_dashboard_does_not_require_external_access_token() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN",
+        ]);
+        guard.set(
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "https://dashboard.example.com",
+        );
+        guard.set("AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN", &"a".repeat(64));
+        EXEC_CLI_INVOCATIONS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let body = r#"{"args":["--version"]}"#;
+        let request = format!(
+            "POST /api/exec HTTP/1.1\r\nHost: localhost:4848\r\nOrigin: http://localhost:4848\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len(),
+        );
+
+        let response = send_request_to_dashboard_handler(&request).await;
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "unexpected response: {response}"
+        );
+        assert_eq!(
+            EXEC_CLI_INVOCATIONS.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "tokenless loopback request did not reach exec_cli"
+        );
+
+        let websocket = "GET /api/session/9222/stream HTTP/1.1\r\nHost: localhost:4848\r\nOrigin: http://localhost:4848\r\nUpgrade: websocket\r\n\r\n";
+        assert!(is_authorized_dashboard_websocket_request(websocket));
+    }
+
+    #[test]
+    fn reverse_proxy_with_a_missing_access_token_fails_closed() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN",
+        ]);
+        guard.set(
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "https://dashboard.example.com",
+        );
+        guard.remove("AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN");
+        let request = "POST /api/exec HTTP/1.1\r\nHost: dashboard.example.com\r\nOrigin: https://dashboard.example.com\r\n\r\n";
+
+        assert!(!is_same_origin_dashboard_request(request));
+    }
+
+    #[test]
+    fn reverse_proxy_websocket_requires_an_access_token() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN",
+        ]);
+        let token = "b".repeat(64);
+        guard.set(
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "https://dashboard.example.com",
+        );
+        guard.set("AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN", &token);
+
+        let without_token = "GET /api/session/9222/stream HTTP/1.1\r\nHost: dashboard.example.com\r\nOrigin: https://dashboard.example.com\r\nUpgrade: websocket\r\n\r\n";
+        assert!(!is_authorized_dashboard_websocket_request(without_token));
+
+        let with_token = format!(
+            "GET /api/session/9222/stream HTTP/1.1\r\nHost: dashboard.example.com\r\nOrigin: https://dashboard.example.com\r\nCookie: {DASHBOARD_ACCESS_TOKEN_COOKIE}={token}\r\nUpgrade: websocket\r\n\r\n"
+        );
+        assert!(is_authorized_dashboard_websocket_request(&with_token));
+    }
+
+    #[test]
+    fn dashboard_allowed_origin_enables_a_matching_proxy_origin() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN",
+        ]);
+        let token = "a".repeat(64);
+        guard.set(
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "https://dashboard.agent-browser.localhost",
+        );
+        guard.set("AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN", &token);
+        let request = format!(
+            "POST /api/exec HTTP/1.1\r\nHost: dashboard.agent-browser.localhost\r\nOrigin: https://dashboard.agent-browser.localhost\r\nCookie: {DASHBOARD_ACCESS_TOKEN_COOKIE}={token}\r\n\r\n"
+        );
+
+        assert!(is_same_origin_dashboard_request(&request));
+    }
+
+    #[test]
+    fn dashboard_rejects_dns_rebinding_host_even_when_origin_matches() {
+        let request = "POST /api/exec HTTP/1.1\r\nHost: attacker.example:4848\r\nOrigin: http://attacker.example:4848\r\n\r\n";
+
+        assert!(!is_same_origin_dashboard_request(request));
+    }
+
+    #[test]
+    fn dashboard_rejects_header_like_body_lines() {
+        let request = "POST /api/exec HTTP/1.1\r\nHost: localhost:4848\r\nContent-Type: text/plain\r\n\r\nOrigin: http://localhost:4848\r\n{\"args\":[\"--version\"]}";
+
+        assert!(!is_same_origin_dashboard_request(request));
+    }
 
     #[test]
     fn test_same_origin_ws_request_matching() {
@@ -815,8 +1349,20 @@ mod tests {
 
     #[test]
     fn test_same_origin_ws_request_proxied() {
-        let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: dashboard.agent-browser.localhost\r\nOrigin: https://dashboard.agent-browser.localhost\r\nUpgrade: websocket\r\n\r\n";
-        assert!(is_same_origin_ws_request(req));
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN",
+        ]);
+        let token = "a".repeat(64);
+        guard.set(
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "https://dashboard.agent-browser.localhost",
+        );
+        guard.set("AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN", &token);
+        let req = format!(
+            "GET /api/session/9222/stream HTTP/1.1\r\nHost: dashboard.agent-browser.localhost\r\nOrigin: https://dashboard.agent-browser.localhost\r\nCookie: {DASHBOARD_ACCESS_TOKEN_COOKIE}={token}\r\nUpgrade: websocket\r\n\r\n"
+        );
+        assert!(is_authorized_dashboard_websocket_request(&req));
     }
 
     #[test]
@@ -828,9 +1374,112 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_origin_authority_ignores_default_ports_and_rejects_credentials() {
+        assert_eq!(
+            normalize_origin_authority("https://dashboard.agent-browser.localhost:443"),
+            Some("dashboard.agent-browser.localhost".to_string())
+        );
+        assert_eq!(
+            normalize_origin_authority("http://localhost:80"),
+            Some("localhost".to_string())
+        );
+        assert_eq!(
+            normalize_origin_authority("http://attacker@localhost:4848"),
+            None
+        );
+        assert_eq!(
+            normalize_origin_authority("http://[::1]:4848"),
+            Some("[::1]:4848".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_dashboard_allowed_origins_canonicalizes_a_set() {
+        assert_eq!(
+            normalize_dashboard_allowed_origins(Some(
+                "https://second.example.com, https://dashboard.example.com:443,https://second.example.com"
+            )).unwrap(),
+            vec![
+                "https://dashboard.example.com".to_string(),
+                "https://second.example.com".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_normalize_dashboard_allowed_origins_rejects_every_invalid_entry() {
+        for value in [
+            "",
+            "invalid",
+            "http://dashboard.example.com",
+            "https://dashboard.example.com/path",
+            "https://dashboard.example.com,invalid",
+            "http://localhost:4848",
+        ] {
+            assert!(
+                normalize_dashboard_allowed_origins(Some(value)).is_err(),
+                "unexpectedly accepted {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn ipv6_loopback_dashboard_request_is_authorized() {
+        let _guard = EnvGuard::new(&[]);
+        let request =
+            "GET /api/sessions HTTP/1.1\r\nHost: [::1]:4848\r\nOrigin: http://[::1]:4848\r\n\r\n";
+
+        assert!(is_same_origin_dashboard_request(request));
+    }
+
+    #[test]
+    fn dashboard_access_token_comparison_rejects_prefixes_and_suffixes() {
+        let token = "a".repeat(64);
+        assert!(constant_time_eq(&token, &token));
+        assert!(!constant_time_eq(&token, &format!("{token}a")));
+        assert!(!constant_time_eq(&token, &token[1..]));
+    }
+
+    #[test]
     fn test_same_origin_ws_request_default_https_port() {
-        let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: dashboard.agent-browser.localhost:443\r\nOrigin: https://dashboard.agent-browser.localhost\r\nUpgrade: websocket\r\n\r\n";
-        assert!(is_same_origin_ws_request(req));
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN",
+        ]);
+        let token = "a".repeat(64);
+        guard.set(
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "https://dashboard.agent-browser.localhost",
+        );
+        guard.set("AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN", &token);
+        let req = format!(
+            "GET /api/session/9222/stream HTTP/1.1\r\nHost: dashboard.agent-browser.localhost:443\r\nOrigin: https://dashboard.agent-browser.localhost\r\nCookie: {DASHBOARD_ACCESS_TOKEN_COOKIE}={token}\r\nUpgrade: websocket\r\n\r\n"
+        );
+        assert!(is_authorized_dashboard_websocket_request(&req));
+    }
+
+    #[test]
+    fn test_same_origin_requests_preserve_non_default_https_port() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN",
+        ]);
+        let token = "a".repeat(64);
+        guard.set(
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "https://dashboard.agent-browser.localhost:80",
+        );
+        guard.set("AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN", &token);
+
+        let http = format!(
+            "GET /api/sessions HTTP/1.1\r\nHost: dashboard.agent-browser.localhost:80\r\nOrigin: https://dashboard.agent-browser.localhost:80\r\nCookie: {DASHBOARD_ACCESS_TOKEN_COOKIE}={token}\r\n\r\n"
+        );
+        assert!(is_same_origin_dashboard_request(&http));
+
+        let websocket = format!(
+            "GET /api/session/9222/stream HTTP/1.1\r\nHost: dashboard.agent-browser.localhost:80\r\nOrigin: https://dashboard.agent-browser.localhost:80\r\nCookie: {DASHBOARD_ACCESS_TOKEN_COOKIE}={token}\r\nUpgrade: websocket\r\n\r\n"
+        );
+        assert!(is_authorized_dashboard_websocket_request(&websocket));
     }
 
     #[test]
@@ -841,6 +1490,16 @@ mod tests {
 
     #[test]
     fn test_same_origin_http_request_matching_referer() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN",
+        ]);
+        let token = "a".repeat(64);
+        guard.set(
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "https://dashboard.agent-browser.localhost",
+        );
+        guard.set("AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN", &token);
         let req = "GET /api/session/9222/tabs HTTP/1.1\r\nHost: dashboard.agent-browser.localhost:443\r\nReferer: https://dashboard.agent-browser.localhost/sessions\r\n\r\n";
         assert!(is_same_origin_http_request(req));
     }
@@ -859,8 +1518,20 @@ mod tests {
 
     #[test]
     fn test_same_origin_ws_request_coder() {
-        let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: workspace.coder.com\r\nOrigin: https://workspace.coder.com\r\nUpgrade: websocket\r\n\r\n";
-        assert!(is_same_origin_ws_request(req));
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN",
+        ]);
+        let token = "a".repeat(64);
+        guard.set(
+            "AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS",
+            "https://workspace.coder.com",
+        );
+        guard.set("AGENT_BROWSER_DASHBOARD_ACCESS_TOKEN", &token);
+        let req = format!(
+            "GET /api/session/9222/stream HTTP/1.1\r\nHost: workspace.coder.com\r\nOrigin: https://workspace.coder.com\r\nCookie: {DASHBOARD_ACCESS_TOKEN_COOKIE}={token}\r\nUpgrade: websocket\r\n\r\n"
+        );
+        assert!(is_authorized_dashboard_websocket_request(&req));
     }
 
     #[test]

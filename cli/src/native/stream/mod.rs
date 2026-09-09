@@ -6,7 +6,9 @@ mod http;
 mod websocket;
 
 pub use cdp_loop::{ack_screencast_frame, start_screencast, stop_screencast};
-pub use dashboard::run_dashboard_server;
+pub use dashboard::{
+    is_valid_dashboard_access_token, normalize_dashboard_allowed_origins, run_dashboard_server,
+};
 
 use serde_json::{json, Value};
 use std::sync::Arc;

@@ -447,6 +447,7 @@ fn tab_gone_error(target_id: &str, last_url: &str) -> String {
 const LIGHTPANDA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const LIGHTPANDA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
+const FAILED_INITIALIZATION_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
 impl BrowserManager {
     /// True when a *default* idle timeout must not close this browser:
@@ -517,7 +518,7 @@ impl BrowserManager {
             }
         };
 
-        let manager = if engine == "lightpanda" {
+        let mut manager = if engine == "lightpanda" {
             initialize_lightpanda_manager(ws_url, process).await?
         } else {
             let client = Arc::new(CdpClient::connect(&ws_url).await?);
@@ -538,11 +539,24 @@ impl BrowserManager {
                 bound_target_gone: None,
                 headless,
             };
-            manager.discover_and_attach_targets().await?;
+            if let Err(error) = manager.discover_and_attach_targets().await {
+                let _ = manager
+                    .close_with_timeout(Some(FAILED_INITIALIZATION_CLOSE_TIMEOUT))
+                    .await;
+                return Err(error);
+            }
             manager
         };
 
-        let session_id = manager.active_session_id()?.to_string();
+        let session_id = match manager.active_session_id() {
+            Ok(session_id) => session_id.to_string(),
+            Err(error) => {
+                let _ = manager
+                    .close_with_timeout(Some(FAILED_INITIALIZATION_CLOSE_TIMEOUT))
+                    .await;
+                return Err(error);
+            }
+        };
 
         if ignore_https_errors {
             let _ = manager
@@ -633,7 +647,7 @@ impl BrowserManager {
             headless: true,
         };
 
-        if direct_page {
+        let initialization = if direct_page {
             let tab_id = manager.assign_tab_id();
             manager.pages.push(PageInfo {
                 tab_id,
@@ -645,9 +659,15 @@ impl BrowserManager {
                 target_type: "page".to_string(),
             });
             manager.active_page_index = 0;
-            manager.enable_domains_direct().await?;
+            manager.enable_domains_direct().await
         } else {
-            manager.discover_and_attach_targets().await?;
+            manager.discover_and_attach_targets().await
+        };
+        if let Err(error) = initialization {
+            let _ = manager
+                .close_with_timeout(Some(FAILED_INITIALIZATION_CLOSE_TIMEOUT))
+                .await;
+            return Err(error);
         }
         Ok(manager)
     }
@@ -824,6 +844,10 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Network.enable", Some(session_id))
             .await?;
+        let _ = self
+            .client
+            .send_command_no_params("WebMCP.enable", Some(session_id))
+            .await;
         // Enable auto-attach for cross-origin iframe support.
         // flatten: true gives each iframe its own session_id.
         // waitForDebuggerOnStart keeps child targets paused until the daemon
@@ -975,6 +999,10 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Network.enable", None)
             .await?;
+        let _ = self
+            .client
+            .send_command_no_params("WebMCP.enable", None)
+            .await;
         Ok(())
     }
 
@@ -1276,15 +1304,26 @@ impl BrowserManager {
     }
 
     pub async fn close(&mut self) -> Result<(), String> {
+        self.close_with_timeout(None).await
+    }
+
+    async fn close_with_timeout(
+        &mut self,
+        browser_close_timeout: Option<Duration>,
+    ) -> Result<(), String> {
         if self.browser_process.is_some() {
             // Only send Browser.close when we launched the browser ourselves.
             // For external connections (--auto-connect, --cdp) we just disconnect
             // without shutting down the user's browser.
-            let _ = self
-                .client
-                .send_command_no_params("Browser.close", None)
-                .await;
+            let close = self.client.send_command_no_params("Browser.close", None);
+            if let Some(timeout) = browser_close_timeout {
+                let _ = tokio::time::timeout(timeout, close).await;
+            } else {
+                let _ = close.await;
+            }
         }
+
+        self.client.close().await;
 
         if let Some(mut process) = self.browser_process.take() {
             let timeout = std::time::Duration::from_secs(5);
@@ -1353,6 +1392,17 @@ impl BrowserManager {
             .get(self.active_page_index)
             .map(|p| p.target_id.as_str())
             .ok_or_else(|| "No active page".to_string())
+    }
+
+    pub fn has_page_session(&self, session_id: &str) -> bool {
+        self.pages.iter().any(|page| page.session_id == session_id)
+    }
+
+    pub fn session_id_for_target(&self, target_id: &str) -> Option<&str> {
+        self.pages
+            .iter()
+            .find(|page| page.target_id == target_id)
+            .map(|page| page.session_id.as_str())
     }
 
     /// Returns true if this manager was connected via CDP (as opposed to local launch).
@@ -2315,6 +2365,9 @@ async fn initialize_lightpanda_manager(
                 return Ok(manager);
             }
             Err(err) => {
+                let _ = manager
+                    .close_with_timeout(Some(FAILED_INITIALIZATION_CLOSE_TIMEOUT))
+                    .await;
                 if Instant::now() >= deadline {
                     return Err(lightpanda_target_init_timeout(Some(&err)));
                 }
@@ -3012,6 +3065,341 @@ mod tests {
             bound_target_gone: None,
             headless: true,
         }
+    }
+
+    #[tokio::test]
+    async fn test_close_external_manager_disconnects_without_closing_browser() {
+        use futures_util::StreamExt;
+        use tokio::io::AsyncReadExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut browser_close_seen = false;
+
+            loop {
+                match ws.next().await {
+                    Some(Ok(Message::Text(text))) => {
+                        let command: Value = serde_json::from_str(&text).unwrap();
+                        browser_close_seen |= command["method"] == "Browser.close";
+                    }
+                    Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) | None => break,
+                }
+            }
+
+            let mut byte = [0u8; 1];
+            let count = tokio::time::timeout(Duration::from_secs(1), ws.get_mut().read(&mut byte))
+                .await
+                .expect("external manager close should shut down TCP")
+                .expect("external manager TCP read should succeed");
+            (browser_close_seen, count)
+        });
+
+        let client = CdpClient::connect(&format!("ws://{}", addr)).await.unwrap();
+        let mut manager = BrowserManager {
+            client: Arc::new(client),
+            browser_process: None,
+            ws_url: format!("ws://{}", addr),
+            pages: Vec::new(),
+            active_page_index: 0,
+            default_timeout_ms: 25_000,
+            download_path: None,
+            ignore_https_errors: false,
+            visited_origins: HashSet::new(),
+            next_tab_id: 1,
+            direct_page: false,
+            pin_tab: false,
+            bound_target_id: None,
+            bound_target_gone: None,
+            headless: true,
+        };
+        manager.close().await.unwrap();
+
+        let (browser_close_seen, count) = server.await.unwrap();
+        assert!(!browser_close_seen);
+        assert_eq!(count, 0);
+    }
+
+    async fn initialization_server(
+        fail_method: &'static str,
+        existing_target: bool,
+        attempts: usize,
+        ignore_browser_close: bool,
+    ) -> (String, tokio::task::JoinHandle<Vec<Vec<String>>>) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio::io::AsyncReadExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut observed = Vec::new();
+            for attempt in 0..attempts {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let mut methods = Vec::new();
+                loop {
+                    let message = tokio::time::timeout(Duration::from_secs(2), ws.next())
+                        .await
+                        .expect("failed initialization must disconnect before retry or return");
+                    match message {
+                        Some(Ok(Message::Text(text))) => {
+                            let command: Value = serde_json::from_str(&text).unwrap();
+                            let method = command["method"].as_str().unwrap();
+                            methods.push(method.to_string());
+                            if ignore_browser_close && method == "Browser.close" {
+                                continue;
+                            }
+                            let response = if attempt == 0 && method == fail_method {
+                                json!({"id": command["id"], "error": {
+                                    "code": -32000, "message": "injected initialization failure"
+                                }})
+                            } else {
+                                let result = match method {
+                                    "Target.getTargets" if existing_target => {
+                                        json!({"targetInfos": [{
+                                            "targetId": "page-1", "type": "page", "url": "about:blank",
+                                            "title": "", "attached": false
+                                        }]})
+                                    }
+                                    "Target.getTargets" => json!({"targetInfos": []}),
+                                    "Target.createTarget" => json!({"targetId": "page-1"}),
+                                    "Target.attachToTarget" => json!({"sessionId": "session-1"}),
+                                    "Runtime.evaluate" => {
+                                        json!({"result": {"type": "number", "value": 1}})
+                                    }
+                                    _ => json!({}),
+                                };
+                                json!({"id": command["id"], "result": result})
+                            };
+                            ws.send(Message::Text(response.to_string())).await.unwrap();
+                        }
+                        Some(Ok(Message::Close(_))) => break,
+                        Some(Ok(_)) => {}
+                        other => panic!("expected client close, got {other:?}"),
+                    }
+                }
+                let mut byte = [0u8; 1];
+                let count =
+                    tokio::time::timeout(Duration::from_secs(1), ws.get_mut().read(&mut byte))
+                        .await
+                        .expect("initialization cleanup must shut down TCP");
+                assert!(
+                    matches!(count, Ok(0))
+                        || matches!(count, Err(ref error) if error.kind() == std::io::ErrorKind::ConnectionReset),
+                    "connection remained readable: {count:?}"
+                );
+                observed.push(methods);
+            }
+            observed
+        });
+        (url, server)
+    }
+
+    async fn assert_failed_external_initialization(
+        fail_method: &'static str,
+        direct: bool,
+        existing: bool,
+    ) {
+        let (url, server) = initialization_server(fail_method, existing, 2, false).await;
+        let error = BrowserManager::connect_cdp_inner(&url, direct, None)
+            .await
+            .err()
+            .expect("initialization should fail");
+        assert!(error.contains("injected initialization failure"), "{error}");
+        let mut manager = tokio::time::timeout(
+            Duration::from_secs(4),
+            BrowserManager::connect_cdp_inner(&url, direct, None),
+        )
+        .await
+        .expect("retry should succeed after cleanup")
+        .unwrap();
+        manager.close().await.unwrap();
+        for methods in server.await.unwrap() {
+            assert!(!methods.iter().any(|method| method == "Browser.close"));
+        }
+    }
+
+    macro_rules! failed_initialization_test {
+        ($name:ident, $method:literal, $direct:literal, $existing:literal) => {
+            #[tokio::test]
+            async fn $name() {
+                assert_failed_external_initialization($method, $direct, $existing).await;
+            }
+        };
+    }
+
+    failed_initialization_test!(
+        test_failed_discover_disconnects,
+        "Target.setDiscoverTargets",
+        false,
+        false
+    );
+    failed_initialization_test!(
+        test_failed_get_targets_disconnects,
+        "Target.getTargets",
+        false,
+        false
+    );
+    failed_initialization_test!(
+        test_failed_create_target_disconnects,
+        "Target.createTarget",
+        false,
+        false
+    );
+    failed_initialization_test!(
+        test_failed_attach_disconnects,
+        "Target.attachToTarget",
+        false,
+        false
+    );
+    failed_initialization_test!(
+        test_failed_direct_page_disconnects,
+        "Page.enable",
+        true,
+        false
+    );
+    failed_initialization_test!(
+        test_failed_new_page_page_disconnects,
+        "Page.enable",
+        false,
+        false
+    );
+    failed_initialization_test!(
+        test_failed_existing_page_page_disconnects,
+        "Page.enable",
+        false,
+        true
+    );
+    failed_initialization_test!(
+        test_failed_direct_runtime_disconnects,
+        "Runtime.enable",
+        true,
+        false
+    );
+    failed_initialization_test!(
+        test_failed_new_page_runtime_disconnects,
+        "Runtime.enable",
+        false,
+        false
+    );
+    failed_initialization_test!(
+        test_failed_existing_page_runtime_disconnects,
+        "Runtime.enable",
+        false,
+        true
+    );
+    failed_initialization_test!(
+        test_failed_direct_network_disconnects,
+        "Network.enable",
+        true,
+        false
+    );
+    failed_initialization_test!(
+        test_failed_new_page_network_disconnects,
+        "Network.enable",
+        false,
+        false
+    );
+    failed_initialization_test!(
+        test_failed_existing_page_network_disconnects,
+        "Network.enable",
+        false,
+        true
+    );
+
+    #[cfg(unix)]
+    fn initialization_process(url: &str) -> (tempfile::TempDir, LaunchOptions) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("chrome");
+        let port = url::Url::parse(url).unwrap().port().unwrap();
+        std::fs::write(&executable, format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do\ncase \"$arg\" in\n--user-data-dir=*) profile=${{arg#*=}} ;;\nesac\ndone\nprintf '%s\\n' {port} /devtools/browser/test > \"$profile/DevToolsActivePort\"\nprintf '%s\\n' \"$$\" > '{}/pid'\nexec sleep 60\n",
+            dir.path().display()
+        )).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let options = LaunchOptions {
+            executable_path: Some(executable.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        (dir, options)
+    }
+
+    #[cfg(unix)]
+    fn assert_initialization_process_reaped(dir: &std::path::Path) {
+        let pid: i32 = std::fs::read_to_string(dir.join("pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "browser process is still alive"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert_eq!(
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_failed_local_initialization_disconnects_and_reaps() {
+        for (method, ignore_close) in [
+            ("Target.getTargets", false),
+            ("Network.enable", false),
+            ("Network.enable", true),
+        ] {
+            let (url, server) = initialization_server(method, false, 1, ignore_close).await;
+            let (dir, options) = initialization_process(&url);
+            let error = BrowserManager::launch(options, None)
+                .await
+                .err()
+                .expect("launch should fail");
+            assert!(error.contains("injected initialization failure"), "{error}");
+            let observed = server.await.unwrap();
+            assert!(observed[0].iter().any(|method| method == "Browser.close"));
+            assert_initialization_process_reaped(dir.path());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_failed_lightpanda_initialization_disconnects_before_retry() {
+        let (url, server) = initialization_server("Network.enable", false, 2, false).await;
+        let (dir, options) = initialization_process(&url);
+        let process = tokio::task::spawn_blocking(move || launch_chrome(&options))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut manager = tokio::time::timeout(
+            Duration::from_secs(4),
+            initialize_lightpanda_manager(url, BrowserProcess::Chrome(process)),
+        )
+        .await
+        .expect("Lightpanda should release the failed connection and retry")
+        .unwrap();
+        assert!(!manager.browser_process.as_mut().unwrap().has_exited());
+        manager.close().await.unwrap();
+        let observed = server.await.unwrap();
+        assert!(!observed[0].iter().any(|method| method == "Browser.close"));
+        assert!(observed[1].iter().any(|method| method == "Browser.close"));
+        assert_initialization_process_reaped(dir.path());
     }
 
     const TARGET_A: &str = "AAAA0000BBBB1111CCCC2222DDDD3333";

@@ -11,9 +11,13 @@ agent-browser dashboard start
 agent-browser open example.com
 ```
 
-Then open `http://localhost:4848` or a proxied/forwarded dashboard URL such as `https://dashboard.agent-browser.localhost` in your browser to see the live dashboard.
+Then open `http://localhost:4848` in your browser to see the live dashboard. If you expose the dashboard through a reverse proxy or port forward, explicitly allow its browser HTTPS origin when starting the server:
 
-All sessions automatically stream to the dashboard. No extra flags are needed. The browser stays on the dashboard origin while the server proxies per-session tabs, status, and stream traffic internally, so session ports do not need to be exposed.
+```bash
+agent-browser dashboard start --allowed-origins https://dashboard.example.com
+```
+
+All sessions automatically stream to the dashboard. Local loopback origins are allowed automatically over IPv4 and IPv6 without an access token. For a reverse-proxied dashboard, use a comma-separated list of exact origins with `--allowed-origins` or `AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS`; this lets the dashboard reject cross-origin requests and DNS-rebinding attacks. Every configured origin must be valid, and custom ports must be integers from 1 to 65535. Unknown options, missing values, invalid ports, and malformed origins fail without starting the server. The command prints private tokenized access URLs only for external origins. Open the matching URL once to establish the browser session and do not share it. Its unguessable token stays in the initial URL fragment, then the browser stores it in a Secure, host-bound, same-site cookie for dashboard API and stream requests. Open `http://localhost:<port>` directly for local access; the external token is never written to a loopback cookie. Configure the reverse proxy to redact cookies from logs. The browser stays on the dashboard origin while the server proxies per-session tabs, status, and stream traffic internally, so session ports do not need to be exposed. Repeated starts reuse the dashboard only when these settings match; stop it before changing the port or allowed origins.
 
 ### Custom stream port
 

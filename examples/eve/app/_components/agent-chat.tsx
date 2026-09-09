@@ -20,20 +20,27 @@ const AGENT_NAME = "eve + agent-browser Example";
 
 export function AgentChat() {
   const agent = useEveAgent();
-  const isBusy = agent.status === "submitted" || agent.status === "streaming";
+  const isResuming = agent.status === "resuming";
+  const isInputDisabled =
+    agent.status === "submitted" || agent.status === "streaming" || isResuming;
   const isEmpty = agent.data.messages.length === 0;
+  const promptStatus = isResuming ? "ready" : agent.status;
 
   const handleSubmit = async (message: PromptInputMessage) => {
     const text = message.text.trim();
-    if (!text || isBusy) return;
+    if (!text || isInputDisabled) return;
 
-    await agent.send({ message: text });
+    await agent.send(text);
   };
 
   const composer = (
     <PromptInput onSubmit={handleSubmit}>
-      <PromptInputTextarea autoFocus placeholder="Send a message…" />
-      <PromptInputSubmit onStop={agent.stop} status={agent.status} />
+      <PromptInputTextarea autoFocus disabled={isResuming} placeholder="Send a message…" />
+      <PromptInputSubmit
+        disabled={isResuming}
+        onStop={() => void agent.cancel()}
+        status={promptStatus}
+      />
     </PromptInput>
   );
 
@@ -62,13 +69,13 @@ export function AgentChat() {
           <ConversationContent className="mx-auto w-full max-w-3xl gap-6 px-4 py-6 sm:px-6">
             {agent.data.messages.map((message, index) => (
               <AgentMessage
-                canRespond={!isBusy}
+                canRespond={!isInputDisabled}
                 isStreaming={
                   agent.status === "streaming" && index === agent.data.messages.length - 1
                 }
                 key={message.id}
                 message={message}
-                onInputResponses={(inputResponses) => agent.send({ inputResponses })}
+                onInputResponses={(inputResponses) => agent.respond(inputResponses)}
               />
             ))}
           </ConversationContent>
