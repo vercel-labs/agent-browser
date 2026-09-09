@@ -909,6 +909,137 @@ async fn e2e_form_interaction() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_select_option_label_override_names() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<html><body></body></html>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let script = r#"(() => {
+        const select = document.createElement('select');
+        select.id = 'label-overrides';
+        for (const [value, label, text] of [
+            ['initial', 'Initial', 'Initial'],
+            ['target', 'Capital\u00A0Federal', 'Target source'],
+            ['decoy', 'Other Province', 'Capital\u00A0\u00A0Federal'],
+            ['hidden', 'Visible Province', 'Hidden\u00A0Only'],
+            ['plain', null, 'Plain\u00A0Text']
+        ]) {
+            const option = document.createElement('option');
+            option.value = value;
+            if (label !== null) option.label = label;
+            option.textContent = text;
+            select.appendChild(option);
+        }
+        select.value = 'initial';
+        select.dataset.changes = '0';
+        select.addEventListener('change', () => select.dataset.changes++);
+        document.body.appendChild(select);
+        const multi = select.cloneNode(true);
+        multi.id = 'label-overrides-multi';
+        multi.multiple = true;
+        multi.value = 'initial';
+        multi.addEventListener('change', () => multi.dataset.changes++);
+        document.body.appendChild(multi);
+    })()"#;
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": script }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = execute_command(&json!({ "id": "4", "action": "snapshot" }), &mut state).await;
+    let mut results = Vec::new();
+    for (selector, values, expected_values, changes, success) in [
+        (
+            "#label-overrides",
+            vec!["Capital Federal"],
+            vec!["target"],
+            "1",
+            true,
+        ),
+        (
+            "#label-overrides",
+            vec!["Hidden Only"],
+            vec!["target"],
+            "1",
+            false,
+        ),
+        ("#label-overrides", vec!["decoy"], vec!["decoy"], "2", true),
+        (
+            "#label-overrides",
+            vec!["Capital\u{00A0}Federal"],
+            vec!["target"],
+            "3",
+            true,
+        ),
+        (
+            "#label-overrides",
+            vec!["Hidden\u{00A0}Only"],
+            vec!["hidden"],
+            "4",
+            true,
+        ),
+        (
+            "#label-overrides",
+            vec!["Plain Text"],
+            vec!["plain"],
+            "5",
+            true,
+        ),
+        (
+            "#label-overrides-multi",
+            vec!["target", "Hidden Only"],
+            vec!["initial"],
+            "0",
+            false,
+        ),
+    ] {
+        let selection = select_values(&mut state, "select", selector, &values).await;
+        let script = format!(
+            "(() => {{ const select = document.querySelector('{}'); return {{ values: [...select.selectedOptions].map(option => option.value), changes: select.dataset.changes }}; }})()",
+            selector
+        );
+        let actual = execute_command(
+            &json!({ "id": "state", "action": "evaluate", "script": script }),
+            &mut state,
+        )
+        .await;
+        results.push((selection, actual, expected_values, changes, success));
+    }
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert_success(&snapshot);
+    let snapshot = get_data(&snapshot)["snapshot"].as_str().unwrap();
+    assert!(snapshot.contains("option \"Capital Federal\""));
+    assert!(snapshot.contains("option \"Other Province\""));
+    assert!(!snapshot.contains("option \"Hidden Only\""));
+    for (selection, actual, expected_values, changes, success) in results {
+        assert_eq!(selection["success"], success, "{selection}");
+        if !success {
+            assert!(selection["error"]
+                .as_str()
+                .unwrap()
+                .contains("No option matched"));
+        }
+        assert_success(&actual);
+        assert_eq!(
+            get_data(&actual)["result"],
+            json!({ "values": expected_values, "changes": changes })
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_select_option_normalized_names() {
     let mut state = DaemonState::new();
 

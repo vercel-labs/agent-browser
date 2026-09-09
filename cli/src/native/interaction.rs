@@ -457,8 +457,7 @@ pub async fn select_option(
                 if (matches.length === 0) {
                     const normalizedValue = normalize(value);
                     matches = options.filter((opt) =>
-                        normalize(opt.label) === normalizedValue ||
-                        normalize(opt.textContent) === normalizedValue
+                        normalize(opt.label) === normalizedValue
                     );
                     if (matches.length > 1) {
                         return { error: 'Multiple options matched ' + JSON.stringify(value) + ' after whitespace normalization' };
