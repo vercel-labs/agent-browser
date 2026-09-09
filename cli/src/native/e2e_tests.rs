@@ -3827,6 +3827,19 @@ async fn e2e_diff_snapshot() {
     .await;
     assert_success(&resp);
 
+    // A bare diff before any snapshot has been taken must fail with
+    // guidance instead of silently comparing against an empty baseline.
+    let resp = execute_command(
+        &json!({ "id": "2b", "action": "diff_snapshot" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false);
+    assert!(resp["error"]
+        .as_str()
+        .unwrap()
+        .contains("No snapshot has been taken in this session"));
+
     // Take a snapshot and use it as baseline for diff
     let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
     assert_success(&resp);
@@ -3835,6 +3848,20 @@ async fn e2e_diff_snapshot() {
     let baseline_dir = tempfile::tempdir().unwrap();
     let baseline_path = baseline_dir.path().join("baseline.txt");
     std::fs::write(&baseline_path, format!("{}\n", baseline)).unwrap();
+
+    // A bare diff on an unchanged page compares against the stored last
+    // snapshot and must report no changes (not the whole page as additions).
+    let resp = execute_command(
+        &json!({ "id": "3b", "action": "diff_snapshot" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["changed"], false);
+    assert_eq!(data["additions"], 0);
+    assert_eq!(data["removals"], 0);
+    assert_eq!(data["diff"], "");
 
     // A failed diff must preserve the refs from the last successful snapshot.
     let resp = execute_command(
@@ -3898,6 +3925,22 @@ async fn e2e_diff_snapshot() {
     assert_eq!(
         data["changed"], true,
         "Diff should detect the button change"
+    );
+    assert_eq!(data["additions"], 1);
+    assert_eq!(data["removals"], 1);
+    assert!(data["diff"].as_str().unwrap().contains("Updated action"));
+
+    // A bare diff must also detect the change against the stored snapshot.
+    let resp = execute_command(
+        &json!({ "id": "9b", "action": "diff_snapshot" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(
+        data["changed"], true,
+        "Bare diff should detect the button change"
     );
     assert_eq!(data["additions"], 1);
     assert_eq!(data["removals"], 1);

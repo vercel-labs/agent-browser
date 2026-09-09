@@ -533,6 +533,11 @@ pub struct DaemonState {
     pub restore_validation_pending: bool,
     pub restore_save_status: String,
     pub restore_saved_path: Option<String>,
+    /// Text of the last successful `snapshot` command in this session.
+    /// Used by `diff snapshot` as the implicit baseline when `--baseline`
+    /// is not passed. Only the `snapshot` command updates this; internal
+    /// snapshot consumers (annotated screenshots, diffs) do not.
+    pub last_snapshot: Option<String>,
     /// When the most recent browser-touching command finished. Periodic
     /// autosaves wait for a quiet period after this so a multi-second save
     /// never lands in the middle of an active command burst.
@@ -685,6 +690,7 @@ impl DaemonState {
             restore_validation_pending: false,
             restore_save_status: "not_attempted".to_string(),
             restore_saved_path: None,
+            last_snapshot: None,
             last_command_finished: None,
             last_autosave_attempt: None,
             session_id,
@@ -5474,6 +5480,10 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 
     let url = mgr.get_url().await.unwrap_or_default();
 
+    // Retain the text so a later bare `diff snapshot` can use it as the
+    // implicit baseline ("the last snapshot taken in this session").
+    state.last_snapshot = Some(tree.clone());
+
     let refs: serde_json::Map<String, Value> = state
         .ref_map
         .entries_sorted()
@@ -6666,7 +6676,12 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
             contents
         }
         Some(b) => b.to_string(),
-        None => String::new(),
+        // Without --baseline the documented behavior is to compare against
+        // the last snapshot taken in this session. Comparing against an
+        // empty baseline instead would report every line as an addition.
+        None => state.last_snapshot.clone().ok_or_else(|| {
+            "No snapshot has been taken in this session yet. Run `snapshot` first, or pass --baseline with a saved snapshot file or text.".to_string()
+        })?,
     };
 
     let result = diff::diff_snapshots(&baseline_text, &current);
