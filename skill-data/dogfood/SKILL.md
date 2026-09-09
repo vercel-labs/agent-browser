@@ -24,6 +24,12 @@ If the user says something like "dogfood vercel.com", start immediately with def
 
 Always use `agent-browser` directly -- never `npx agent-browser`. The direct binary uses the fast Rust client. `npx` routes through Node.js and is significantly slower.
 
+Before authenticating, check whether the target repository or application has
+an app-specific auth runbook, credential helper, role selector, or prebuilt
+state file. Those instructions override the generic login example below. Do not
+copy credentials out of a vault-backed helper into shell history merely to fit
+this workflow.
+
 ## Workflow
 
 ```
@@ -56,7 +62,7 @@ agent-browser --session {SESSION} wait --load networkidle
 
 ### 2. Authenticate
 
-If the app requires login:
+If the app requires login and has no app-specific auth helper:
 
 ```bash
 agent-browser --session {SESSION} snapshot -i
@@ -74,6 +80,12 @@ After successful login, save state for potential reuse:
 ```bash
 agent-browser --session {SESSION} state save {OUTPUT_DIR}/auth-state.json
 ```
+
+Do not save auth state inside a report or evidence directory when it may contain
+cookies, tokens, or user data. Use the application's approved private state
+location, keep it out of version control, and record only which auth method and
+role were exercised. A session label is not proof of identity; where the app
+offers a role or account diagnostic, verify it before testing authorization.
 
 ### 3. Orient
 
