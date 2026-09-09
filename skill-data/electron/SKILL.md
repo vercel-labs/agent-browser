@@ -17,7 +17,7 @@ Automate any Electron desktop app using agent-browser. Electron apps are built o
 5. **Re-snapshot** after navigation or state changes
 
 ```bash
-# Launch an Electron app with remote debugging
+# macOS (launch Slack with remote debugging on port 9222)
 open -a "Slack" --args --remote-debugging-port=9222
 
 # Connect agent-browser to the app
@@ -25,7 +25,7 @@ agent-browser connect 9222
 
 # Standard workflow from here
 agent-browser snapshot -i
-agent-browser click @e5
+agent-browser find role button click --name "New Message"
 agent-browser screenshot slack-desktop.png
 ```
 
@@ -66,8 +66,13 @@ discord --remote-debugging-port=9224
 ### Windows
 
 ```bash
-"C:\Users\%USERNAME%\AppData\Local\slack\slack.exe" --remote-debugging-port=9222
-"C:\Users\%USERNAME%\AppData\Local\Programs\Microsoft VS Code\Code.exe" --remote-debugging-port=9223
+# Windows (launch from the user's AppData Local directory)
+
+# Slack
+"$HOME/AppData/Local/slack/slack.exe" --remote-debugging-port=9222
+
+# Visual Studio Code
+"$HOME/AppData/Local/Programs/Microsoft VS Code/Code.exe" --remote-debugging-port=9223
 ```
 
 **Important:** If the app is already running, quit it first, then relaunch with the flag. The `--remote-debugging-port` flag must be present at launch time.

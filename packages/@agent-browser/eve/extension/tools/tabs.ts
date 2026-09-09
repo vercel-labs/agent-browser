@@ -1,7 +1,7 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 
-import { runBrowser } from "../lib/browser";
+import { runBrowser } from "../lib/browser.js";
 
 export default defineTool({
   description:

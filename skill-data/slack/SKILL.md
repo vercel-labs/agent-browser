@@ -29,7 +29,7 @@ agent-browser snapshot -i
 ## Core Workflow
 
 1. **Connect/Navigate**: Open or connect to Slack
-2. **Snapshot**: Get interactive elements with refs (`@e1`, `@e2`, etc.)
+- **Snapshot**: Get interactive elements with refs (e.g. `@e1`, `@e2`)
 3. **Navigate**: Click tabs, expand sections, or navigate to specific channels
 4. **Extract/Interact**: Read data or perform actions
 5. **Screenshot**: Capture evidence of findings
@@ -38,8 +38,8 @@ agent-browser snapshot -i
 # Example: Check unread channels
 agent-browser connect 9222
 agent-browser snapshot -i
-# Look for "More unreads" button
-agent-browser click @e21  # Ref for "More unreads" button
+# Find the "More unreads" button by text
+agent-browser find text "More unreads" click
 agent-browser screenshot slack-unreads.png
 ```
 
@@ -60,16 +60,19 @@ agent-browser snapshot -i
 # - Channel names with badges/bold text indicating unreads
 
 # Navigate to Activity tab to see all unreads in one view
-agent-browser click @e14  # Activity tab (ref may vary)
+agent-browser snapshot -i
+agent-browser find role tab click --name "Activity"
 agent-browser wait 1000
 agent-browser screenshot activity-unreads.png
 
 # Or check DMs tab
-agent-browser click @e13  # DMs tab
+agent-browser snapshot -i
+agent-browser find role tab click --name "DMs"
 agent-browser screenshot dms.png
 
 # Or expand "More unreads" in sidebar
-agent-browser click @e21  # More unreads button
+agent-browser snapshot -i
+agent-browser find text "More unreads" click
 agent-browser wait 500
 agent-browser screenshot expanded-unreads.png
 ```
@@ -80,9 +83,9 @@ agent-browser screenshot expanded-unreads.png
 # Search for channel in sidebar or by name
 agent-browser snapshot -i
 
-# Look for channel name in the list (e.g., "engineering", "product-design")
-# Click on the channel treeitem ref
-agent-browser click @e94  # Example: engineering channel ref
+# Find channel name in the list (e.g., "engineering", "product-design")
+# and click on it
+agent-browser find text "engineering" click
 agent-browser wait --load networkidle
 agent-browser screenshot channel.png
 ```
@@ -92,8 +95,11 @@ agent-browser screenshot channel.png
 ```bash
 # Use Slack search
 agent-browser snapshot -i
-agent-browser click @e5  # Search button (typical ref)
-agent-browser fill @e_search "keyword"
+agent-browser find role button click --name "Search"
+agent-browser snapshot -i
+agent-browser find role searchbox fill "keyword" --name "Search"
+# Or if the search input has a placeholder:
+# agent-browser find placeholder "Search" fill "keyword"
 agent-browser press Enter
 agent-browser wait --load networkidle
 agent-browser screenshot search-results.png
@@ -143,9 +149,33 @@ agent-browser get url
 agent-browser get title
 ```
 
-## Sidebar Structure
+## Finding Elements Reliably
 
-Understanding Slack's sidebar helps you navigate efficiently:
+Slack assigns element refs (`@eN`) fresh on every snapshot — they are never stable across sessions. Always take a fresh snapshot and locate the element you need by name, role, or text before interacting with it. Do not rely on specific `@eN` numbers from examples or prior sessions.
+
+**How to locate common elements:**
+
+```bash
+# Find the Search button
+agent-browser snapshot -i
+agent-browser find role button --name "Search"
+
+# Find a tab by name (e.g., DMs, Activity)
+agent-browser snapshot -i
+agent-browser find role tab --name "DMs"
+
+# Find "More unreads" button
+agent-browser snapshot -i
+agent-browser find text "More unreads"
+
+# Find a specific channel in the sidebar by name
+agent-browser snapshot -i
+agent-browser find text "engineering" click
+```
+
+The `references/slack-tasks.md` file has detailed patterns for each task and a table of common ref discovery patterns organized by element type.
+
+Understanding Slack's sidebar helps you navigate efficiently. The sidebar contains:
 
 ```
 - Threads
@@ -160,15 +190,6 @@ Understanding Slack's sidebar helps you navigate efficiently:
   - [App shortcuts]
 - [More unreads] button (toggles unread channels list)
 ```
-
-Key refs to look for:
-- `@e12` - Home tab (usually)
-- `@e13` - DMs tab
-- `@e14` - Activity tab
-- `@e5` - Search button
-- `@e21` - More unreads button (varies by session)
-
-## Tabs in Slack
 
 After clicking on a channel, you'll see tabs:
 - **Messages** - Channel conversation
@@ -185,7 +206,7 @@ Click tab refs to switch views and get different information.
 
 ```bash
 # Get a message or element's text
-agent-browser get text @e_message_ref
+agent-browser get text @e_message_ref  # Replace with the actual message ref from a fresh snapshot
 ```
 
 ### Parse Accessibility Tree
@@ -204,9 +225,21 @@ agent-browser snapshot --json > output.json
 ### Count Unreads
 
 ```bash
-# After expanding unreads section:
-agent-browser snapshot -i | grep -c "treeitem"
-# Each treeitem with a channel name in the unreads section is one unread
+# After expanding the "More unreads" section, count the visible
+# channel treeitems in the sidebar. This is a rough estimate:
+# each treeitem with a channel name in the expanded unreads section
+# corresponds to one channel with unread messages.
+#
+# For an accurate count, use the annotated screenshot of the
+# expanded unreads section and count visually, or parse the
+# JSON snapshot for treeitems within the unreads section only.
+#
+# Example: take a screenshot and count via visual inspection
+agent-browser snapshot -i
+agent-browser find text "More unreads" click
+agent-browser wait 500
+agent-browser screenshot unreads-count.png
+# Then count the channel treeitems in the screenshot
 ```
 
 ## Best Practices
@@ -256,19 +289,22 @@ echo "=== Checking Slack unreads ==="
 agent-browser snapshot -i > snapshot.txt
 
 # Check Activity tab for unreads
-agent-browser click @e14  # Activity tab
+agent-browser snapshot -i
+agent-browser find role tab click --name "Activity"
 agent-browser wait 1000
 agent-browser screenshot activity.png
-ACTIVITY_RESULT=$(agent-browser get text @e_main_area)
+ACTIVITY_RESULT=$(agent-browser snapshot -i | grep -A1 "Activity" | tail -1)
 echo "Activity: $ACTIVITY_RESULT"
 
 # Check DMs
-agent-browser click @e13  # DMs tab
+agent-browser snapshot -i
+agent-browser find role tab click --name "DMs"
 agent-browser wait 1000
 agent-browser screenshot dms.png
 
 # Check unread channels in sidebar
-agent-browser click @e21  # More unreads button
+agent-browser snapshot -i
+agent-browser find text "More unreads" click
 agent-browser wait 500
 agent-browser snapshot -i > unreads-expanded.txt
 agent-browser screenshot unreads.png
@@ -283,3 +319,10 @@ echo "See activity.png, dms.png, and unreads.png for full details"
 - **Slack docs**: https://slack.com/help
 - **Web experience**: https://app.slack.com
 - **Keyboard shortcuts**: Type `?` in Slack for shortcut list
+
+### Reference Files
+
+| Reference | Purpose |
+|-----------|---------|
+| [references/slack-tasks.md](references/slack-tasks.md) | Common Slack automation tasks and patterns (check unreads, find channels, search, monitor channels, extract conversations, track reactions, review pins) |
+| [templates/slack-report-template.md](templates/slack-report-template.md) | Structured report template for Slack analysis findings |

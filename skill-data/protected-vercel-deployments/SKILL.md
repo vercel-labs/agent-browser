@@ -1,7 +1,7 @@
 ---
 name: protected-vercel-deployments
 description: Access and test Vercel deployments protected by Vercel Authentication, SSO, or Deployment Protection with agent-browser. Use when a preview or production URL redirects to a Vercel login page, returns a protection 401 or 403, or needs short-lived Trusted Sources OIDC authentication instead of a static bypass secret or public exception.
-allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*), Bash(vc:*), Bash(vercel:*)
+allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*), Bash(vercel:*), Bash(npx vercel:*)
 ---
 
 # Protected Vercel deployments
@@ -15,13 +15,13 @@ A local development token for the target project can access that project's prote
 Confirm the local identity and Vercel CLI version:
 
 ```bash
-vc whoami
-vc --version
+vercel whoami
+vercel --version
 ```
 
-Require Vercel CLI `53.3.0` or newer before running `vc project token`. Versions `50.25.0` through `53.2.x` write the token to stderr, so command substitution captures nothing and the credential can appear in logs. If the installed version is older, stop and ask the user to upgrade it. Do not attempt to capture or recover the token from stderr.
+Require Vercel CLI `53.3.0` or newer before running `vercel project token`. Versions `50.25.0` through `53.2.x` write the token to stderr, so command substitution captures nothing and the credential can appear in logs. If the installed version is older, stop and ask the user to upgrade it. Do not attempt to capture or recover the token from stderr.
 
-Set the target project and scope explicitly. If they cannot be inferred safely, ask the user. In a directory whose existing `.vercel/project.json` link has been verified against the target, `vc project token` without a project name is also valid. Do not run `vc link` merely to get an OIDC token: current Vercel CLI versions also pull development variables into `.env.local` when linking.
+Set the target project and scope explicitly. If they cannot be inferred safely, ask the user. In a directory whose existing `.vercel/project.json` link has been verified against the target, `vercel project token` without a project name is also valid. Do not run `vercel link` merely to get an OIDC token: current Vercel CLI versions also pull development variables into `.env.local` when linking.
 
 Create a named browser session, mint a development OIDC token with the Vercel CLI, then inject it without printing or persisting it:
 
@@ -32,7 +32,7 @@ export VERCEL_PROJECT="my-app"
 export VERCEL_SCOPE="my-team"
 
 (
-  TOKEN="$(vc project token "$VERCEL_PROJECT" --scope "$VERCEL_SCOPE")"
+  TOKEN="$(vercel project token "$VERCEL_PROJECT" --scope "$VERCEL_SCOPE")"
   test -n "$TOKEN"
   agent-browser open "$VERCEL_PREVIEW_URL" --headers \
     "{\"x-vercel-trusted-oidc-idp-token\":\"$TOKEN\"}"
@@ -62,12 +62,12 @@ Stop and hand off the exact rule to the human. Do not use browser automation to 
 
 The same-project development to Preview path should run without human intervention when the Vercel CLI is already authenticated and the target project and scope are known. A human is needed only when:
 
-- the Vercel CLI has no authenticated identity and no existing `VERCEL_TOKEN`; interactive `vc login` requires the user;
+- the Vercel CLI has no authenticated identity and no existing `VERCEL_TOKEN`; interactive `vercel login` requires the user;
 - the installed Vercel CLI is older than `53.3.0` and must be upgraded before token minting;
 - the correct target project or scope cannot be inferred safely for token minting;
 - a Trusted Sources rule must be added or changed; the dashboard is the only supported management surface, and this changes access control;
 - Secure Backend Access with OIDC Federation was disabled on the calling project and must be re-enabled in **Settings → Security**; or
-- the static-secret fallback must be enabled or rotated and the agent needs explicit authorization for that access-control change. After approval, the agent can use `vc project protection` instead of requiring dashboard interaction.
+- the static-secret fallback must be enabled or rotated and the agent needs explicit authorization for that access-control change. After approval, the agent can use `vercel project protection` instead of requiring dashboard interaction.
 
 The agent can diagnose each case and state the exact action required, then continue after the user confirms completion.
 
@@ -93,7 +93,7 @@ Do not substitute `x-vercel-oidc-token`. That header carries workload identity i
 Use Protection Bypass for Automation only when OIDC is not viable or the tool cannot send the Trusted Sources header. Enabling or rotating it changes access control, so obtain explicit authorization first. Create a dedicated secret so it can be rotated independently, keep it in an environment variable, and pass it as a header:
 
 ```bash
-vc project protection enable <project> --protection-bypass \
+vercel project protection enable <project> --protection-bypass \
   --protection-bypass-secret "$VERCEL_AUTOMATION_BYPASS_SECRET"
 
 agent-browser open "$VERCEL_PREVIEW_URL" --headers \

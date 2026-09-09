@@ -17,11 +17,11 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "default": "./dist/index.mjs"
+      "default": "./dist/index.js"
     },
     "./tools": {
       "types": "./dist/tools/index.d.ts",
-      "default": "./dist/tools/index.mjs"
+      "default": "./dist/tools/index.js"
     },
     "./sandbox": {
       "types": "./dist/sandbox/sandbox.d.ts",
@@ -29,7 +29,7 @@
     }
   },
   "scripts": {
-    "build": "eve extension build && tsc -p tsconfig.sandbox.json",
+    "build": "tsc -p tsconfig.extension.json && tsc -p tsconfig.sandbox.json",
     "prepare": "pnpm -C ../sandbox run build && pnpm run build",
     "test": "pnpm -C ../sandbox run build && pnpm run build && node --test test/*.test.mjs",
     "typecheck": "tsc"
@@ -65,7 +65,7 @@
     "@types/node": "24.x",
     "ai": "7.0.58",
     "eve": "^0.47.3",
-    "typescript": "7.0.2"
+    "typescript": "5.9.3"
   },
   "engines": {
     "node": ">=24.0.0"

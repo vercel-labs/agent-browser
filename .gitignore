@@ -71,3 +71,6 @@ docs/package-lock.json
 .next/
 out/
 next-env.d.ts
+
+# Generated artifact listing repository paths
+project-files.txt

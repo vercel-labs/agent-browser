@@ -8,8 +8,31 @@ import test from "node:test";
 // (`extension({ ... })`) bind config that the tools then read.
 globalThis[Symbol.for("eve.ext-config-scope")] = "@agent-browser/eve.test";
 
-const { default: extension } = await import("../dist/index.mjs");
-const tools = await import("../dist/tools/index.mjs");
+const { default: extension } = await import("../dist/index.js");
+const toolsMod = await import("../dist/tools/index.js");
+const tools = {
+  click: toolsMod.click,
+  close: toolsMod.close,
+  console: toolsMod.console,
+  drag: toolsMod.drag,
+  evaluate: toolsMod.evaluate,
+  fill: toolsMod.fill,
+  find: toolsMod.find,
+  get: toolsMod.get,
+  hover: toolsMod.hover,
+  navigate: toolsMod.navigate,
+  network_requests: toolsMod.network_requests,
+  press_key: toolsMod.press_key,
+  read: toolsMod.read,
+  screenshot: toolsMod.screenshot,
+  scroll: toolsMod.scroll,
+  select_option: toolsMod.select_option,
+  set_checked: toolsMod.set_checked,
+  snapshot: toolsMod.snapshot,
+  tabs: toolsMod.tabs,
+  upload: toolsMod.upload,
+  wait_for: toolsMod.wait_for,
+};
 
 const OK = (data) => JSON.stringify({ success: true, data, error: null });
 

@@ -1,7 +1,7 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 
-import { runBrowser, SELECTOR_HINT } from "../lib/browser";
+import { runBrowser, SELECTOR_HINT } from "../lib/browser.js";
 
 export default defineTool({
   description: "Select an option in a <select> dropdown by value.",

@@ -22,7 +22,7 @@ Only the **Target URL** is required. Everything else has sensible defaults -- us
 
 If the user says something like "dogfood vercel.com", start immediately with defaults. Do not ask clarifying questions unless authentication is mentioned but credentials are missing.
 
-Always use `agent-browser` directly -- never `npx agent-browser`. The direct binary uses the fast Rust client. `npx` routes through Node.js and is significantly slower.
+Always use `agent-browser` directly -- prefer the fast Rust binary. `npx agent-browser` routes through Node.js and is significantly slower; use it only as a fallback when the binary is not installed.
 
 ## Workflow
 
