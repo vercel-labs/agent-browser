@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
@@ -6662,6 +6663,8 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
 
     let baseline = cmd.get("baseline").and_then(|v| v.as_str());
 
+    // Only a file baseline needs an owned allocation; the inline text and the
+    // stored last snapshot can be borrowed since diff_snapshots takes &str.
     let baseline_text = match baseline {
         Some(b) if std::path::Path::new(b).exists() => {
             let mut contents = std::fs::read_to_string(b)
@@ -6673,15 +6676,15 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
                     contents.pop();
                 }
             }
-            contents
+            Cow::Owned(contents)
         }
-        Some(b) => b.to_string(),
+        Some(b) => Cow::Borrowed(b),
         // Without --baseline the documented behavior is to compare against
         // the last snapshot taken in this session. Comparing against an
         // empty baseline instead would report every line as an addition.
-        None => state.last_snapshot.clone().ok_or_else(|| {
+        None => Cow::Borrowed(state.last_snapshot.as_deref().ok_or_else(|| {
             "No snapshot has been taken in this session yet. Run `snapshot` first, or pass --baseline with a saved snapshot file or text.".to_string()
-        })?,
+        })?),
     };
 
     let result = diff::diff_snapshots(&baseline_text, &current);
