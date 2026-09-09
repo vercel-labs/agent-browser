@@ -2,6 +2,8 @@
 
 Compact element references that reduce context usage dramatically for AI agents.
 
+Existing elements keep their refs across snapshots. Take a fresh snapshot after navigation. JSON `removedRefs` lists refs no longer in the snapshot.
+
 **Related**: [commands.md](commands.md) for full command reference, [SKILL.md](../SKILL.md) for quick start.
 
 ## Contents

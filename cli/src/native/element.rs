@@ -15,8 +15,11 @@ pub struct RefEntry {
     pub frame_id: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct RefMap {
     map: HashMap<String, RefEntry>,
+    durable_refs: HashMap<(String, Option<String>, i64), String>,
+    scope: String,
     next_ref: usize,
 }
 
@@ -24,6 +27,8 @@ impl RefMap {
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
+            durable_refs: HashMap::new(),
+            scope: String::new(),
             next_ref: 1,
         }
     }
@@ -103,13 +108,62 @@ impl RefMap {
         entries
     }
 
+    pub fn ref_ids(&self) -> std::collections::HashSet<String> {
+        self.map.keys().cloned().collect()
+    }
+
     pub fn remove(&mut self, ref_id: &str) {
         self.map.remove(ref_id);
     }
 
     pub fn clear(&mut self) {
         self.map.clear();
-        self.next_ref = 1;
+    }
+
+    /// Select the active top-level document namespace. Frame IDs are added to
+    /// this scope when durable DOM-backed refs are resolved.
+    pub fn set_scope(&mut self, scope: &str) {
+        self.scope = scope.to_string();
+    }
+
+    pub fn durable_ref(&self, backend_node_id: i64, frame_id: Option<&str>) -> Option<&str> {
+        self.durable_refs
+            .get(&(
+                self.scope.clone(),
+                frame_id.map(ToString::to_string),
+                backend_node_id,
+            ))
+            .map(String::as_str)
+    }
+
+    pub fn remember_durable_ref(
+        &mut self,
+        backend_node_id: i64,
+        frame_id: Option<&str>,
+        ref_id: &str,
+    ) {
+        self.durable_refs.insert(
+            (
+                self.scope.clone(),
+                frame_id.map(ToString::to_string),
+                backend_node_id,
+            ),
+            ref_id.to_string(),
+        );
+    }
+
+    /// Invalidate refs for a replaced document without recycling their IDs.
+    pub fn invalidate_current_document(&mut self) {
+        let scope = &self.scope;
+        self.durable_refs
+            .retain(|(entry_scope, _, _), _| entry_scope != scope);
+        self.map.clear();
+    }
+
+    /// Drop all document identities while preserving the monotonic ref counter.
+    pub fn invalidate_all_documents(&mut self) {
+        self.durable_refs.clear();
+        self.map.clear();
     }
 
     pub fn next_ref_num(&self) -> usize {
@@ -1377,7 +1431,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ref_map_clear_resets_ref_numbering() {
+    fn test_ref_map_clear_preserves_monotonic_numbering() {
         let mut map = RefMap::new();
         map.add("e1".to_string(), Some(42), "button", "Submit", None);
         map.set_next_ref_num(2);
@@ -1385,6 +1439,23 @@ mod tests {
         map.clear();
 
         assert!(map.get("e1").is_none());
+        assert_eq!(map.next_ref_num(), 2);
+    }
+
+    #[test]
+    fn test_durable_refs_are_scoped_by_document_and_frame() {
+        let mut map = RefMap::new();
+        map.set_scope("page-a");
+        map.remember_durable_ref(42, None, "e1");
+        map.remember_durable_ref(42, Some("frame-a"), "e2");
+        assert_eq!(map.durable_ref(42, None), Some("e1"));
+        assert_eq!(map.durable_ref(42, Some("frame-a")), Some("e2"));
+
+        map.set_scope("page-b");
+        assert_eq!(map.durable_ref(42, None), None);
+        map.set_scope("page-a");
+        map.invalidate_current_document();
+        assert_eq!(map.durable_ref(42, None), None);
         assert_eq!(map.next_ref_num(), 1);
     }
 

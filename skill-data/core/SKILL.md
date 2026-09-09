@@ -86,6 +86,8 @@ agent-browser snapshot -s "#main"         # scope to a CSS selector
 agent-browser snapshot -i --json          # machine-readable output
 ```
 
+Existing elements keep their refs across snapshots. Take a fresh snapshot after navigation.
+
 Snapshot output looks like:
 
 ```

@@ -401,8 +401,20 @@ pub async fn take_snapshot(
             None
         };
 
-        let ref_id = format!("e{}", next_ref);
-        next_ref += 1;
+        let ref_id = if let Some(backend_node_id) = tree_nodes[*idx].backend_node_id {
+            if let Some(existing) = ref_map.durable_ref(backend_node_id, frame_id) {
+                existing.to_string()
+            } else {
+                let allocated = format!("e{}", next_ref);
+                next_ref += 1;
+                ref_map.remember_durable_ref(backend_node_id, frame_id, &allocated);
+                allocated
+            }
+        } else {
+            let allocated = format!("e{}", next_ref);
+            next_ref += 1;
+            allocated
+        };
 
         ref_map.add_with_frame(
             ref_id.clone(),

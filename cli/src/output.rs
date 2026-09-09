@@ -2126,7 +2126,7 @@ Usage: agent-browser snapshot [options]
 
 Returns an accessibility tree representation of the page with element
 references (like @e1, @e2) that can be used in subsequent commands.
-Designed for AI agents to understand page structure.
+Existing elements keep their refs across snapshots. Refresh after navigation.
 
 Options:
   -i, --interactive    Only include interactive elements

@@ -1087,6 +1087,77 @@ async fn e2e_snapshot_and_click_ref() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_refs_survive_dom_updates_and_never_recycle() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": "about:blank" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "setcontent", "html": "<button id='a'>Alpha</button><button id='b'>Beta</button>" }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let first = execute_command(&json!({ "id": "4", "action": "snapshot" }), &mut state).await;
+    assert_success(&first);
+    let alpha_ref = get_data(&first)["refs"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, node)| node["name"] == "Alpha")
+        .map(|(ref_id, _)| ref_id.clone())
+        .unwrap();
+
+    assert_success(
+        &execute_command(
+            &json!({ "id": "5", "action": "evaluate", "script": "document.body.prepend(document.getElementById('a')); document.getElementById('b').remove()" }),
+            &mut state,
+        )
+        .await,
+    );
+    let second = execute_command(&json!({ "id": "6", "action": "snapshot" }), &mut state).await;
+    assert_success(&second);
+    assert_eq!(get_data(&second)["refs"][&alpha_ref]["name"], "Alpha");
+    assert_eq!(
+        get_data(&second)["removedRefs"].as_array().unwrap().len(),
+        1
+    );
+
+    assert_success(
+        &execute_command(
+            &json!({ "id": "7", "action": "navigate", "url": "about:blank?new-document" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "8", "action": "setcontent", "html": "<button>Alpha</button>" }),
+            &mut state,
+        )
+        .await,
+    );
+    let third = execute_command(&json!({ "id": "9", "action": "snapshot" }), &mut state).await;
+    assert_success(&third);
+    assert!(get_data(&third)["refs"].get(&alpha_ref).is_none());
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
 // ---------------------------------------------------------------------------
 // Screenshot
 // ---------------------------------------------------------------------------
@@ -3861,7 +3932,7 @@ async fn e2e_diff_snapshot() {
     .await;
     assert_success(&resp);
 
-    // Repeated diffs must each begin a fresh ref-numbering epoch.
+    // Repeated diffs preserve document refs and report no content changes.
     for id in ["6", "7"] {
         let resp = execute_command(
             &json!({ "id": id, "action": "diff_snapshot", "baseline": baseline_path }),
@@ -3995,11 +4066,34 @@ async fn e2e_diff_url_aligns_refs_after_snapshot() {
     assert_eq!(data["diff"]["changed"], false);
     assert_eq!(data["diff"]["additions"], 0);
     assert_eq!(data["diff"]["removals"], 0);
-    assert_eq!(data["snapshot1"], data["snapshot2"]);
-    assert!(data["snapshot1"]
-        .as_str()
+    assert_ne!(
+        data["snapshot1"], data["snapshot2"],
+        "Replaced documents must not recycle actionable IDs"
+    );
+    assert_eq!(
+        super::diff::snapshot_comparison_text(data["snapshot1"].as_str().unwrap()),
+        super::diff::snapshot_comparison_text(data["snapshot2"].as_str().unwrap())
+    );
+    let primary_ref = state
+        .ref_map
+        .entries_sorted()
+        .into_iter()
+        .find(|(_, entry)| entry.name == "Primary action")
         .unwrap()
-        .starts_with("- button \"Primary action\" [ref=e1]"));
+        .0;
+    let next = execute_command(&json!({"id": "9", "action": "snapshot"}), &mut state).await;
+    assert_success(&next);
+    assert_eq!(
+        get_data(&next)["refs"][&primary_ref]["name"],
+        "Primary action"
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id": "10", "action": "click", "selector": primary_ref}),
+            &mut state,
+        )
+        .await,
+    );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
