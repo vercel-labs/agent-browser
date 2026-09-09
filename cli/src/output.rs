@@ -2816,6 +2816,8 @@ ffmpeg, or apt install ffmpeg). Run `agent-browser doctor` to check.
 Recording captures 30 fps, which keeps scrolls and CSS transitions smooth.
 Raise it to 60 for short, motion-heavy takes (drag interactions, animation
 work); lower it for long sessions where file size matters more than motion.
+A stop before the first frame is written fails with "No frames captured"
+and leaves no file behind.
 
 Operations:
   start <path> [url]     Start recording the active page (navigates first if url given)
