@@ -143,6 +143,10 @@ agent-browser webmcp list                     # List experimental page tools
 agent-browser webmcp invoke <tool> --params @input.json
 agent-browser stream status           # Show runtime streaming state and bound port
 agent-browser stream disable          # Stop runtime WebSocket streaming
+agent-browser codegen start [--title <title>]  # Capture a reusable test flow
+agent-browser codegen stop [path] [--format json|playwright]
+agent-browser codegen status           # Show capture or recovery state
+agent-browser codegen discard          # Remove an unfinished or damaged flow
 agent-browser close                   # Close browser (aliases: quit, exit)
 agent-browser close --all             # Close all active sessions
 agent-browser chat "<instruction>"    # AI chat: natural language browser control (single-shot)
@@ -186,6 +190,22 @@ agent-browser get count <sel>         # Count matching elements
 agent-browser get box <sel>           # Get bounding box
 agent-browser get styles <sel>        # Get computed styles
 ```
+
+### Generate a reusable test flow
+
+`codegen` records supported successful agent-browser actions as a Chrome DevTools Recorder JSON flow. Use `--format playwright` to emit an `@playwright/test` spec instead. This is distinct from `record`, which creates a video.
+
+```bash
+agent-browser codegen start --title "login flow"
+agent-browser open https://example.com/login
+agent-browser fill "#email" "a@example.com"
+agent-browser click "#submit"
+agent-browser codegen stop ./login.flow.json
+```
+
+Codegen records direct CSS selectors, `xpath=` selectors, snapshot refs with an accessible name, and uniquely probed test IDs. It omits an action when it cannot produce a safe target. It also reports successful mutating or wait actions that it does not support. Direct `text=` selectors, bare XPath, semantic locator marker actions, and most wait variants are not recorded. Recorded values, including password values and upload paths, are written verbatim. An in-progress flow survives a daemon restart through an owner-only append-only journal in the socket directory. Use `codegen status` to inspect recovery state, capture and security warnings, and projected Recorder and Playwright counts. Use `codegen discard` to remove an unfinished, damaged, or cleanup-pending flow. A successful stop removes the journal. Review all warnings and generated files before you use or commit them.
+
+Recorder JSON and Playwright have different support limits. Recorder JSON omits sequential typing, multi-value select, upload, key chords, and explicit page creation. It converts back, forward, and reload to navigation to the observed final URL. Playwright keeps these actions, page identity, page scope, viewport context options, and file lists. `codegen stop` reports captured actions, internal steps, emitted steps, omitted steps, lossy steps, and capture, security, and cleanup warning counts. Grouped format warnings include stable codes and affected action IDs. Two Recorder pages with the same URL are ambiguous and produce a warning.
 
 ### Read Agent-Friendly Text
 

@@ -191,6 +191,12 @@ impl Drop for PendingGuard {
 }
 
 impl CdpClient {
+    /// Return the number of CDP commands allocated by this client.
+    /// Tests use this monotonic counter to measure capture overhead.
+    pub fn command_count(&self) -> u64 {
+        self.next_id.load(Ordering::Relaxed).saturating_sub(1)
+    }
+
     pub async fn connect(url: &str) -> Result<Self, String> {
         Self::connect_with_headers(url, None).await
     }

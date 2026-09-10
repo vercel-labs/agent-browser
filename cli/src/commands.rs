@@ -148,6 +148,7 @@ pub fn is_top_level_command(value: &str) -> bool {
             | "trace"
             | "profiler"
             | "record"
+            | "codegen"
             | "console"
             | "errors"
             | "highlight"
@@ -1713,6 +1714,100 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 None => Err(ParseError::MissingArguments {
                     context: "record".to_string(),
                     usage: "record <start|stop|restart> [path] [url] [--fps <n>]",
+                }),
+            }
+        }
+
+        // === Codegen (Chrome DevTools Recorder / Playwright flows) ===
+        "codegen" => {
+            const VALID: &[&str] = &["start", "stop", "status", "discard"];
+            match rest.first().copied() {
+                Some("start") => {
+                    let mut title = None;
+                    let mut index = 1;
+                    while index < rest.len() {
+                        match rest[index] {
+                            "--title" => {
+                                let value = rest.get(index + 1).ok_or_else(|| {
+                                    ParseError::MissingArguments {
+                                        context: "codegen start --title".to_string(),
+                                        usage: "codegen start [--title <title>]",
+                                    }
+                                })?;
+                                title = Some(*value);
+                                index += 2;
+                            }
+                            value => {
+                                return Err(ParseError::InvalidValue {
+                                    message: format!("Unknown codegen start option: {value}"),
+                                    usage: "codegen start [--title <title>]",
+                                })
+                            }
+                        }
+                    }
+                    let mut cmd = json!({ "id": id, "action": "codegen_start" });
+                    if let Some(title) = title {
+                        cmd["title"] = json!(title);
+                    }
+                    Ok(cmd)
+                }
+                Some("stop") => {
+                    let mut path = None;
+                    let mut format = "json";
+                    let mut index = 1;
+                    while index < rest.len() {
+                        if rest[index] == "--format" {
+                            format = *rest.get(index + 1).ok_or_else(|| {
+                                ParseError::MissingArguments {
+                                    context: "codegen stop --format".to_string(),
+                                    usage: "codegen stop [path] [--format <json|playwright>]",
+                                }
+                            })?;
+                            if !matches!(format, "json" | "playwright") {
+                                return Err(ParseError::InvalidValue {
+                                    message: format!(
+                                        "Invalid codegen format: {format}. Use json or playwright."
+                                    ),
+                                    usage: "codegen stop [path] [--format <json|playwright>]",
+                                });
+                            }
+                            index += 2;
+                        } else if path.is_none() {
+                            path = Some(rest[index]);
+                            index += 1;
+                        } else {
+                            return Err(ParseError::InvalidValue {
+                                message: format!(
+                                    "Unexpected codegen stop argument: {}",
+                                    rest[index]
+                                ),
+                                usage: "codegen stop [path] [--format <json|playwright>]",
+                            });
+                        }
+                    }
+                    let mut cmd = json!({ "id": id, "action": "codegen_stop", "format": format });
+                    if let Some(path) = path {
+                        cmd["path"] = json!(path);
+                    }
+                    Ok(cmd)
+                }
+                Some("status") if rest.len() == 1 => {
+                    Ok(json!({ "id": id, "action": "codegen_status" }))
+                }
+                Some("discard") if rest.len() == 1 => {
+                    Ok(json!({ "id": id, "action": "codegen_discard" }))
+                }
+                Some("status") | Some("discard") => Err(ParseError::InvalidValue {
+                    message: format!("Unexpected codegen argument: {}", rest[1]),
+                    usage: "codegen <status|discard>",
+                }),
+                Some(sub) => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: VALID,
+                }),
+                None => Err(ParseError::MissingArguments {
+                    context: "codegen".to_string(),
+                    usage: "codegen <start|stop|status|discard>",
                 }),
             }
         }
@@ -5149,6 +5244,50 @@ mod tests {
         assert!(matches!(
             result.unwrap_err(),
             ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_codegen_commands() {
+        let bare_start = parse_command(&args("codegen start"), &default_flags()).unwrap();
+        assert_eq!(bare_start["action"], "codegen_start");
+        assert!(bare_start.get("title").is_none());
+        let start =
+            parse_command(&args("codegen start --title checkout"), &default_flags()).unwrap();
+        assert_eq!(start["action"], "codegen_start");
+        assert_eq!(start["title"], "checkout");
+
+        let stop = parse_command(
+            &args("codegen stop flow.json --format playwright"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(stop["action"], "codegen_stop");
+        assert_eq!(stop["path"], "flow.json");
+        assert_eq!(stop["format"], "playwright");
+
+        let json_stop =
+            parse_command(&args("codegen stop --format json"), &default_flags()).unwrap();
+        assert_eq!(json_stop["action"], "codegen_stop");
+        assert_eq!(json_stop["format"], "json");
+
+        let status = parse_command(&args("codegen status"), &default_flags()).unwrap();
+        assert_eq!(status["action"], "codegen_status");
+        let discard = parse_command(&args("codegen discard"), &default_flags()).unwrap();
+        assert_eq!(discard["action"], "codegen_discard");
+        for input in ["codegen status extra", "codegen discard extra"] {
+            assert!(matches!(
+                parse_command(&args(input), &default_flags()),
+                Err(ParseError::InvalidValue { .. })
+            ));
+        }
+        assert!(matches!(
+            parse_command(&args("codegen stop --format nope"), &default_flags()),
+            Err(ParseError::InvalidValue { .. })
+        ));
+        assert!(matches!(
+            parse_command(&args("codegen nope"), &default_flags()),
+            Err(ParseError::UnknownSubcommand { .. })
         ));
     }
 

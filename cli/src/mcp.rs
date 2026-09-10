@@ -111,6 +111,10 @@ const TOOL_PROFILER_STOP: &str = "agent_browser_profiler_stop";
 const TOOL_RECORD_START: &str = "agent_browser_record_start";
 const TOOL_RECORD_STOP: &str = "agent_browser_record_stop";
 const TOOL_RECORD_RESTART: &str = "agent_browser_record_restart";
+const TOOL_CODEGEN_START: &str = "agent_browser_codegen_start";
+const TOOL_CODEGEN_STOP: &str = "agent_browser_codegen_stop";
+const TOOL_CODEGEN_STATUS: &str = "agent_browser_codegen_status";
+const TOOL_CODEGEN_DISCARD: &str = "agent_browser_codegen_discard";
 const TOOL_CONSOLE: &str = "agent_browser_console";
 const TOOL_ERRORS: &str = "agent_browser_errors";
 const TOOL_HIGHLIGHT: &str = "agent_browser_highlight";
@@ -429,6 +433,10 @@ const DEBUG_PROFILE_TOOLS: &[&str] = &[
     TOOL_RECORD_START,
     TOOL_RECORD_STOP,
     TOOL_RECORD_RESTART,
+    TOOL_CODEGEN_START,
+    TOOL_CODEGEN_STOP,
+    TOOL_CODEGEN_STATUS,
+    TOOL_CODEGEN_DISCARD,
     TOOL_A11Y,
     TOOL_CONSOLE,
     TOOL_ERRORS,
@@ -1413,6 +1421,34 @@ fn parity_tools() -> Vec<Value> {
             &["path"],
         ),
         tool(
+            TOOL_CODEGEN_START,
+            "Codegen start",
+            "Start capturing supported successful browser actions. Unsafe targets and unsupported actions become warnings.",
+            json!({ "title": { "type": "string" } }),
+            &[],
+        ),
+        tool(
+            TOOL_CODEGEN_STOP,
+            "Codegen stop",
+            "Stop capture and emit a Chrome Recorder JSON flow or Playwright spec with capture warnings.",
+            json!({ "path": { "type": "string" }, "format": { "type": "string", "enum": ["json", "playwright"] } }),
+            &[],
+        ),
+        tool(
+            TOOL_CODEGEN_STATUS,
+            "Codegen status",
+            "Show codegen recovery state, capture counts, warnings, and cleanup status.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            TOOL_CODEGEN_DISCARD,
+            "Codegen discard",
+            "Discard an active, restored, damaged, or cleanup-pending codegen recording.",
+            json!({}),
+            &[],
+        ),
+        tool(
             TOOL_CONSOLE,
             "Console logs",
             "Read console logs.",
@@ -2299,6 +2335,10 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_RECORD_START => call_record_start(arguments, "start"),
         TOOL_RECORD_STOP => call_literal(arguments, &["record", "stop"]),
         TOOL_RECORD_RESTART => call_record_start(arguments, "restart"),
+        TOOL_CODEGEN_START => call_codegen_start(arguments),
+        TOOL_CODEGEN_STOP => call_codegen_stop(arguments),
+        TOOL_CODEGEN_STATUS => call_literal(arguments, &["codegen", "status"]),
+        TOOL_CODEGEN_DISCARD => call_literal(arguments, &["codegen", "discard"]),
         TOOL_CONSOLE => call_clearable(arguments, "console"),
         TOOL_ERRORS => call_clearable(arguments, "errors"),
         TOOL_HIGHLIGHT => call_simple_selector(arguments, "highlight"),
@@ -3109,6 +3149,35 @@ fn record_command_args(arguments: &Value, action: &str) -> Result<Vec<String>, P
 fn call_record_start(arguments: &Value, action: &str) -> Result<Value, ProtocolError> {
     let args = record_command_args(arguments, action)?;
     call_cli_tool(arguments, args, None)
+}
+
+fn call_codegen_start(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, codegen_start_args(arguments)?, None)
+}
+
+fn codegen_start_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec!["codegen".to_string(), "start".to_string()];
+    if let Some(title) = optional_string(arguments, "title")? {
+        args.push("--title".to_string());
+        args.push(title);
+    }
+    Ok(args)
+}
+
+fn call_codegen_stop(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, codegen_stop_args(arguments)?, None)
+}
+
+fn codegen_stop_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec!["codegen".to_string(), "stop".to_string()];
+    if let Some(path) = optional_string(arguments, "path")? {
+        args.push(path);
+    }
+    if let Some(format) = optional_string(arguments, "format")? {
+        args.push("--format".to_string());
+        args.push(format);
+    }
+    Ok(args)
 }
 
 fn call_clearable(arguments: &Value, command: &str) -> Result<Value, ProtocolError> {
@@ -4620,6 +4689,60 @@ mod tests {
             open["inputSchema"]["properties"]["idleTimeout"]["type"],
             "string"
         );
+    }
+
+    #[test]
+    fn codegen_stop_schema_exposes_cli_formats() {
+        let tools = tools();
+        let codegen_stop = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some(TOOL_CODEGEN_STOP))
+            .unwrap();
+        assert_eq!(
+            codegen_stop["inputSchema"]["properties"]["format"]["enum"],
+            json!(["json", "playwright"])
+        );
+    }
+
+    #[test]
+    fn codegen_start_mcp_arguments_use_the_cli_parser_shape() {
+        let arguments = json!({ "title": "checkout" });
+        let mcp_args = codegen_start_args(&arguments).unwrap();
+        let flags = crate::flags::parse_flags(&mcp_args);
+        let parsed = crate::commands::parse_command(&mcp_args, &flags).unwrap();
+
+        assert_eq!(parsed["action"], "codegen_start");
+        assert_eq!(parsed["title"], "checkout");
+    }
+
+    #[test]
+    fn codegen_stop_mcp_arguments_use_the_cli_parser_shape() {
+        let arguments = json!({
+            "path": "flow.spec.ts",
+            "format": "playwright"
+        });
+        let mcp_args = codegen_stop_args(&arguments).unwrap();
+        let flags = crate::flags::parse_flags(&mcp_args);
+        let parsed = crate::commands::parse_command(&mcp_args, &flags).unwrap();
+
+        assert_eq!(parsed["action"], "codegen_stop");
+        assert_eq!(parsed["path"], "flow.spec.ts");
+        assert_eq!(parsed["format"], "playwright");
+    }
+
+    #[test]
+    fn codegen_discard_mcp_tool_is_available() {
+        let available_tools = tools();
+        let tool = available_tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some(TOOL_CODEGEN_DISCARD))
+            .unwrap();
+
+        assert_eq!(tool["title"], "Codegen discard");
+        assert!(tool["description"]
+            .as_str()
+            .unwrap()
+            .contains("cleanup-pending"));
     }
 
     #[test]

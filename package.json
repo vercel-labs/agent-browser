@@ -31,7 +31,8 @@
     "release": "npm run version:sync && npm run build:all-platforms && npm publish",
     "postinstall": "node scripts/postinstall.js",
     "test:launcher": "node --test test/launcher.test.mjs",
-    "build:dashboard": "cd packages/dashboard && pnpm build"
+    "build:dashboard": "cd packages/dashboard && pnpm build",
+    "test:codegen-formats": "pnpm --dir tests test"
   },
   "keywords": [
     "browser",

@@ -148,6 +148,173 @@ fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> 
     }
 }
 
+pub(crate) fn format_codegen_status_text(data: &serde_json::Value) -> Option<String> {
+    let state = data
+        .get("state")
+        .and_then(|value| value.as_str())
+        .unwrap_or_else(|| {
+            if data
+                .get("active")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                "active"
+            } else {
+                "inactive"
+            }
+        });
+    let title = data
+        .get("title")
+        .and_then(|value| value.as_str())
+        .unwrap_or("agent-browser flow");
+    let steps = data
+        .get("steps")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let actions = data
+        .get("capturedActions")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let capture_warnings = data
+        .get("captureWarningCount")
+        .or_else(|| data.get("warningCount"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let security_warnings = data
+        .get("securityWarningCount")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let format_projection = |name: &str, label: &str| {
+        let projection = data.get("projectedFormats")?.get(name)?;
+        Some(format!(
+            "{label} projection: {} emitted, {} omitted, {} lossy",
+            projection
+                .get("emitted")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+            projection
+                .get("omitted")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+            projection
+                .get("lossy")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0),
+        ))
+    };
+    Some(match state {
+        "inactive" => "Codegen inactive".to_string(),
+        _ => {
+            let mut lines = vec![
+                format!("Codegen {state}: {title}"),
+                format!("Captured actions: {actions}"),
+                format!("Internal steps: {steps}"),
+                format!("Capture warnings: {capture_warnings}"),
+                format!("Security warnings: {security_warnings}"),
+            ];
+            if let Some(line) = format_projection("json", "Recorder") {
+                lines.push(line);
+            }
+            if let Some(line) = format_projection("playwright", "Playwright") {
+                lines.push(line);
+            }
+            if let Some(path) = data.get("journalPath").and_then(|value| value.as_str()) {
+                lines.push(format!("Journal: {path}"));
+            }
+            if let Some(warnings) = data.get("captureErrors").and_then(|value| value.as_array()) {
+                for warning in warnings.iter().filter_map(|value| value.as_str()) {
+                    let label = if is_codegen_security_warning(warning) {
+                        "Security warning"
+                    } else {
+                        "Capture warning"
+                    };
+                    lines.push(format!("{label}: {warning}"));
+                }
+            }
+            let cleanup_paths = data
+                .get("cleanupPaths")
+                .and_then(|value| value.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|value| value.as_str());
+            for path in cleanup_paths {
+                lines.push(format!("Cleanup required: {path}"));
+            }
+            lines.join("\n")
+        }
+    })
+}
+
+fn is_codegen_security_warning(warning: &str) -> bool {
+    warning.starts_with("typed-values-stored:") || warning.starts_with("password-value-stored:")
+}
+
+fn format_codegen_stop_summary(data: &serde_json::Value) -> Option<String> {
+    let number = |key: &str| data.get(key).and_then(|value| value.as_u64()).unwrap_or(0);
+    Some(format!(
+        "Captured actions: {}\nInternal steps: {}\nEmitted steps: {}\nOmitted steps: {}\nLossy steps: {}\nWarnings: {} capture, {} security, {} cleanup",
+        number("capturedActions"),
+        number("internalSteps"),
+        number("emittedSteps"),
+        number("omittedSteps"),
+        number("lossySteps"),
+        number("captureWarningCount"),
+        number("securityWarningCount"),
+        number("cleanupWarningCount"),
+    ))
+}
+
+fn format_codegen_warning(warning: &serde_json::Value) -> Option<String> {
+    let code = warning.get("code")?.as_str()?;
+    let message = warning.get("message")?.as_str()?;
+    let count = warning
+        .get("count")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(1);
+    let action_ids = warning
+        .get("affectedActionIds")
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_u64().map(|value| value.to_string()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|value| !value.is_empty());
+    Some(match action_ids {
+        Some(action_ids) => {
+            format!("{code} ({count}; action IDs: {action_ids}): {message}")
+        }
+        None => format!("{code} ({count}): {message}"),
+    })
+}
+
+fn print_codegen_stop_report(data: &serde_json::Value) {
+    if let Some(summary) = format_codegen_stop_summary(data) {
+        eprintln!("{summary}");
+    }
+    if let Some(warnings) = data.get("warnings").and_then(|value| value.as_array()) {
+        for warning in warnings {
+            if let Some(output) = format_codegen_warning(warning) {
+                eprintln!("{} {output}", color::warning_indicator());
+            }
+        }
+    }
+    if let Some(warnings) = data.get("captureErrors").and_then(|value| value.as_array()) {
+        for warning in warnings
+            .iter()
+            .filter_map(|value| value.as_str())
+            .filter(|warning| !is_codegen_security_warning(warning))
+        {
+            eprintln!("{} {warning}", color::warning_indicator());
+        }
+    }
+    if let Some(warning) = data.get("warning").and_then(|value| value.as_str()) {
+        eprintln!("{} {warning}", color::warning_indicator());
+    }
+}
+
 fn format_webmcp_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
     match action {
         Some("webmcp_list") => {
@@ -527,6 +694,30 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
         if let Some(output) = format_stream_status_text(action, data) {
             println!("{}", output);
             return;
+        }
+        if action == Some("codegen_status") {
+            if let Some(output) = format_codegen_status_text(data) {
+                println!("{}", output);
+                return;
+            }
+        }
+        if action == Some("codegen_stop") && data.get("path").is_none() {
+            if let Some(output) = data.get("output").and_then(|value| value.as_str()) {
+                print_codegen_stop_report(data);
+                println!("{output}");
+                return;
+            }
+        }
+        if action == Some("codegen_stop") {
+            if let Some(path) = data.get("path").and_then(|value| value.as_str()) {
+                println!(
+                    "{} Codegen flow saved to {}",
+                    color::success_indicator(),
+                    path
+                );
+                print_codegen_stop_report(data);
+                return;
+            }
         }
         if action == Some("webmcp_list") {
             let Some(tools) = data.get("tools").and_then(|tools| tools.as_array()) else {
@@ -2857,6 +3048,35 @@ Examples:
 "##
         }
 
+        "codegen" => {
+            r##"
+agent-browser codegen - Generate reusable browser test flows
+
+Usage: agent-browser codegen start [--title <title>]
+       agent-browser codegen stop [path] [--format <json|playwright>]
+       agent-browser codegen status
+       agent-browser codegen discard
+
+Capture supported successful actions as Chrome DevTools Recorder JSON. Unsafe
+targets and unsupported actions are omitted and reported as warnings. Use
+--format playwright to emit an @playwright/test spec. Unlike `record`, which
+creates a video, codegen creates a replayable test artifact. Recorded values
+and upload paths are stored verbatim. Review warnings before sharing a flow.
+
+Use `codegen status` to inspect recovery state and format projections. Use
+`codegen discard` to remove an unfinished or damaged journal.
+
+Examples:
+  agent-browser codegen start --title "login flow"
+  agent-browser open https://example.com/login
+  agent-browser fill "#email" "a@example.com"
+  agent-browser click "#submit"
+  agent-browser codegen stop ./login.flow.json
+  agent-browser codegen stop ./login.spec.ts --format playwright
+  agent-browser codegen discard
+"##
+        }
+
         // === Console/Errors ===
         "console" => {
             r##"
@@ -3756,6 +3976,7 @@ Debug:
   profiler start|stop [path] Record Chrome DevTools profile
   record start <path> [url]  Start video recording (.webm/.mp4; --fps 1-60; needs ffmpeg)
   record stop                Stop and save video
+  codegen <operation>        Capture actions as Recorder JSON or Playwright
   console [--clear]          View console logs
   errors [--clear]           View page errors
   highlight <sel>            Highlight element
@@ -4198,6 +4419,85 @@ mod tests {
         let rendered = super::format_stream_status_text(Some("stream_status"), &data).unwrap();
 
         assert_eq!(rendered, "Streaming disabled");
+    }
+
+    #[test]
+    fn test_format_codegen_status_text() {
+        assert_eq!(
+            super::format_codegen_status_text(
+                &json!({
+                    "state": "active",
+                    "active": true,
+                    "title": "checkout",
+                    "capturedActions": 2,
+                    "steps": 3,
+                    "captureWarningCount": 1,
+                    "securityWarningCount": 2,
+                    "journalPath": "/tmp/session.codegen.jsonl",
+                    "captureErrors": [
+                        "selector-probe-failed: Codegen could not inspect the target.",
+                        "typed-values-stored: Generated files contain typed values."
+                    ],
+                    "projectedFormats": {
+                        "json": { "emitted": 2, "omitted": 1, "lossy": 0 },
+                        "playwright": { "emitted": 3, "omitted": 0, "lossy": 0 }
+                    }
+                })
+            ),
+            Some(
+                "Codegen active: checkout\nCaptured actions: 2\nInternal steps: 3\nCapture warnings: 1\nSecurity warnings: 2\nRecorder projection: 2 emitted, 1 omitted, 0 lossy\nPlaywright projection: 3 emitted, 0 omitted, 0 lossy\nJournal: /tmp/session.codegen.jsonl\nCapture warning: selector-probe-failed: Codegen could not inspect the target.\nSecurity warning: typed-values-stored: Generated files contain typed values."
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            super::format_codegen_status_text(&json!({ "active": false })),
+            Some("Codegen inactive".to_string())
+        );
+        for state in ["restored", "degraded", "recovery-error", "cleanup-pending"] {
+            assert_eq!(
+                super::format_codegen_status_text(
+                    &json!({ "state": state, "title": "flow", "capturedActions": 1, "steps": 2, "warningCount": 3 })
+                ),
+                Some(format!(
+                    "Codegen {state}: flow\nCaptured actions: 1\nInternal steps: 2\nCapture warnings: 3\nSecurity warnings: 0"
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn test_format_codegen_stop_summary_and_warning() {
+        let data = json!({
+            "capturedActions": 4,
+            "internalSteps": 5,
+            "emittedSteps": 3,
+            "omittedSteps": 1,
+            "lossySteps": 1,
+            "captureWarningCount": 2,
+            "securityWarningCount": 1,
+            "cleanupWarningCount": 0
+        });
+        assert_eq!(
+            super::format_codegen_stop_summary(&data),
+            Some(
+                "Captured actions: 4\nInternal steps: 5\nEmitted steps: 3\nOmitted steps: 1\nLossy steps: 1\nWarnings: 2 capture, 1 security, 0 cleanup"
+                    .to_string()
+            )
+        );
+
+        let warning = json!({
+            "code": "recorder-type-omitted",
+            "message": "Recorder cannot keep sequential typing intent.",
+            "count": 2,
+            "affectedActionIds": [3, 7]
+        });
+        assert_eq!(
+            super::format_codegen_warning(&warning),
+            Some(
+                "recorder-type-omitted (2; action IDs: 3, 7): Recorder cannot keep sequential typing intent."
+                    .to_string()
+            )
+        );
     }
 
     #[test]

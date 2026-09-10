@@ -1,0 +1,68 @@
+# Codegen
+
+Use `codegen` to turn supported successful agent-browser actions into reusable test artifacts. The default format is Chrome DevTools Recorder JSON for the Recorder panel and `@puppeteer/replay`. Use Playwright output when you want a runnable `@playwright/test` spec.
+
+## Workflow
+
+```bash
+agent-browser codegen start --title "login flow"
+agent-browser open https://example.com/login
+agent-browser fill "#email" "a@example.com"
+agent-browser click "#submit"
+agent-browser isvisible "#welcome"
+agent-browser codegen stop ./login.flow.json
+```
+
+To emit Playwright instead:
+
+```bash
+agent-browser codegen stop ./login.spec.ts --format playwright
+```
+
+## Commands
+
+<table>
+  <thead>
+    <tr><th>Command</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>codegen start [--title &lt;title&gt;]</code></td><td>Start capturing supported successful actions</td></tr>
+    <tr><td><code>codegen stop [path] [--format json|playwright]</code></td><td>Print or write the generated flow</td></tr>
+    <tr><td><code>codegen status</code></td><td>Show recovery state, warnings, and projected format counts</td></tr>
+    <tr><td><code>codegen discard</code></td><td>Remove an unfinished, damaged, or cleanup-pending recording</td></tr>
+  </tbody>
+</table>
+
+`codegen` is not [Video Recording](/recording). `record` saves a WebM while `codegen` writes a replayable browser-test artifact.
+
+Direct CSS selectors, <code>xpath=</code> selectors, snapshot refs with accessible names, and uniquely probed test IDs can become safe targets. Codegen omits an action when it cannot produce a safe target. Direct <code>text=</code> selectors, bare XPath, semantic locator marker actions, most wait variants, <code>evaluate</code>, and <code>webmcp invoke</code> are not recorded. <code>webmcp list</code> and <code>webmcp result</code> are observations and record nothing. Other successful mutating or wait commands produce omission warnings. Read all warnings before you use the artifact.
+
+## Page moves that codegen does not record
+
+`record start --url` navigates the active page, so codegen records that move as a normal navigation step. `record start` without a URL and `record stop` change no page and record nothing.
+
+A command that codegen cannot record can still move a page. `evaluate` and `webmcp invoke` run page script with an unknown effect. Codegen then reports an `unrecorded-navigation` warning that names the command and the page. The flow has no step that reaches the new page, so the next `navigate` on that page always emits a step, even when the URL looks unchanged. Add the missing steps yourself, or capture the flow again without those commands.
+
+A new tab inherits the session setup, which can include init scripts and authentication state. A generated artifact does not contain that setup.
+
+## Security
+
+Typed values are included verbatim for replay fidelity. This includes password values, selected values, and upload paths. The in-progress append-only journal is stored with owner-only permissions in the daemon socket directory, so an unfinished flow survives a daemon restart. Use `codegen status` to inspect recovery state, the journal path, capture and security warnings, and projected Recorder and Playwright counts. Use `codegen discard` to remove the journal. A successful stop removes the journal. Inspect generated artifacts and do not commit credentials.
+
+## Exact action intent
+
+A <code>check</code> or <code>uncheck</code> command that finds the control already in the requested state changes nothing. Codegen records an assertion for that state instead of a click, because a replayed click would clear the control.
+
+A scroll is recorded as the position the page reached, not as the requested distance. Repeated scrolls therefore replay to the same place, and a scroll that the page limited replays to the limit.
+
+## Targets that are not unique
+
+Codegen prefers a target it verified: a unique test ID, a unique probed CSS selector, or the exact role and accessible name from a snapshot. When only the selector you typed is available, and it can match more than one element, the Playwright spec uses <code>.first()</code>, which is what the command itself did. Recorder resolves the same selector to its first match natively. The <code>playwright-target-not-unique</code> and <code>recorder-target-not-unique</code> warnings name every step in that state. A count assertion is not affected, because it addresses every match on purpose.
+
+## Format support
+
+Recorder JSON omits sequential typing, multi-value select, upload, key chords, and explicit page creation because its schema cannot keep the exact action intent. It converts back, forward, and reload to navigation to the observed final URL and reports a lossy warning. Recorder identifies a non-main page by URL, so two pages with the same URL are ambiguous.
+
+Playwright keeps typed selector kinds, multi-value select, upload paths, typing clear mode and delay, modifier chords, pointer input, element and page scroll, logical page identity, scoped close, and initial mobile context options.
+
+`codegen stop` reports captured actions, internal steps, emitted steps, omitted steps, lossy steps, and capture, security, and cleanup warning counts. Its grouped format warnings include a stable code, count, affected action IDs, selected format, and emitted step numbers when applicable.

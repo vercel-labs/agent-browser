@@ -368,6 +368,23 @@ agent-browser record stop
 
 See [references/video-recording.md](references/video-recording.md) for frame rate guidance, codec options, and more.
 
+### Generate a reusable test flow
+
+Use `codegen` to capture supported successful actions as Chrome DevTools Recorder JSON or a Playwright spec. It is separate from `record`, which saves a video. Codegen omits unsafe targets and unsupported actions and reports warnings.
+
+```bash
+agent-browser codegen start --title "checkout"
+agent-browser click @e3
+agent-browser codegen stop ./checkout.json
+agent-browser codegen stop ./checkout.spec.ts --format playwright
+```
+
+Use `agent-browser codegen status` to inspect recovery state, capture and security warnings, and projected Recorder and Playwright counts. Use `agent-browser codegen discard` to remove an unfinished or damaged flow. See [references/codegen.md](references/codegen.md). Recorded values, including passwords and upload paths, are stored verbatim, and unfinished flows survive daemon restarts through an owner-only append-only journal.
+
+Recorder JSON has a smaller action set than Playwright. Read the captured, internal, emitted, omitted, and lossy counts and grouped format warnings from `codegen stop`. Use Playwright when the flow needs sequential typing, multi-select, upload, exact page identity, or explicit page creation.
+
+`record start --url` navigates the active page, so codegen records it as a navigation step. A command that codegen cannot record, such as `evaluate` or `webmcp invoke`, can also move a page. Codegen then reports an `unrecorded-navigation` warning, and the flow has no step that reaches the new page.
+
 ### Iframes
 
 Iframes are auto-inlined in the snapshot — their refs work transparently:

@@ -545,6 +545,22 @@ fn canonical_path(path: PathBuf) -> PathBuf {
     path.canonicalize().unwrap_or(path)
 }
 
+/// The daemon can outlive the client process, so paths for codegen artifacts
+/// must be anchored before the command crosses the daemon boundary.
+fn resolve_codegen_output_path(cmd: &mut serde_json::Value) {
+    if cmd.get("action").and_then(|value| value.as_str()) != Some("codegen_stop") {
+        return;
+    }
+    let Some(path) = cmd.get("path").and_then(|value| value.as_str()) else {
+        return;
+    };
+    let path = PathBuf::from(path);
+    if path.is_relative() {
+        let cwd = canonical_path(env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        cmd["path"] = json!(cwd.join(path));
+    }
+}
+
 fn git_toplevel() -> Option<PathBuf> {
     let output = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
@@ -1550,6 +1566,7 @@ fn main() {
             exit(1);
         }
     };
+    resolve_codegen_output_path(&mut cmd);
 
     // Handle --password-stdin for auth save
     if cmd.get("action").and_then(|v| v.as_str()) == Some("auth_save") {
@@ -2209,6 +2226,7 @@ fn run_batch(
                 continue;
             }
         };
+        resolve_codegen_output_path(&mut parsed);
 
         let action = parsed
             .get("action")
