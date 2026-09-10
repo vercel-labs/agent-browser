@@ -206,7 +206,7 @@ agent-browser state list
 Automatically delete old state files to prevent accumulation:
 
 ```bash
-# Set expiration (default: 30 days)
+# Set expiration (default: 30 days; use 0 to disable automatic expiration)
 export AGENT_BROWSER_STATE_EXPIRE_DAYS=7
 
 # Manually clean old states
@@ -292,6 +292,6 @@ agent-browser set headers '{"X-Custom-Header": "value"}'
     <tr><td><code>AGENT_BROWSER_RESTORE_CHECK_FN</code></td><td>JavaScript expression restored state must satisfy</td></tr>
     <tr><td><code>AGENT_BROWSER_SESSION_NAME</code></td><td>Legacy auto-save/load state persistence name</td></tr>
     <tr><td><code>AGENT_BROWSER_ENCRYPTION_KEY</code></td><td>64-char hex key for AES-256-GCM encryption</td></tr>
-    <tr><td><code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code></td><td>Auto-delete states older than N days (default: 30)</td></tr>
+    <tr><td><code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code></td><td>Auto-delete states older than N days (default: 30; <code>0</code> disables)</td></tr>
   </tbody>
 </table>

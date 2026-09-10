@@ -281,7 +281,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_RESTORE_CHECK_TEXT</code></td><td>Page text restored state must contain.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_RESTORE_CHECK_FN</code></td><td>JavaScript expression restored state must satisfy.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_SESSION_NAME</code></td><td>Legacy auto-save/load state persistence name.</td><td>(none)</td></tr>
-    <tr><td><code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code></td><td>Auto-delete saved session states older than N days.</td><td><code>30</code></td></tr>
+    <tr><td><code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code></td><td>Auto-delete saved session states older than N days. Set to <code>0</code> to disable expiration.</td><td><code>30</code></td></tr>
     <tr><td><code>AGENT_BROWSER_ENCRYPTION_KEY</code></td><td>64-char hex key for AES-256-GCM session encryption.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_EXTENSIONS</code></td><td>Comma-separated browser extension paths. Extensions work in both headed and headless mode.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_INIT_SCRIPTS</code></td><td>Comma-separated paths to page init scripts.</td><td>(none)</td></tr>
