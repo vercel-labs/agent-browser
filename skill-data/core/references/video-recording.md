@@ -127,7 +127,7 @@ agent-browser fill @e2 "password"
 agent-browser wait 500
 
 agent-browser click @e3
-agent-browser wait --load networkidle
+agent-browser wait --url "**/dashboard"
 agent-browser wait 1000  # Show result
 
 agent-browser record stop

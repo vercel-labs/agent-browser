@@ -126,7 +126,8 @@ agent-browser --session secure --restore open https://app.example.com
 ```bash
 # Navigate to login page
 agent-browser open https://app.example.com/login
-agent-browser wait --load networkidle
+agent-browser wait --load domcontentloaded
+agent-browser wait --fn "(() => { const usable = (el) => { const style = getComputedStyle(el); return !el.disabled && !el.readOnly && style.display !== 'none' && style.visibility !== 'hidden' && el.getClientRects().length > 0; }; const username = Array.from(document.querySelectorAll('input[type=email], input[type=text], input[autocomplete=username], input[name*=email i], input[name*=user i], input[name*=login i]')).some(usable); const password = Array.from(document.querySelectorAll('input[type=password]')).some(usable); return username && password; })()"
 
 # Get form elements
 agent-browser snapshot -i
@@ -138,11 +139,13 @@ agent-browser fill @e2 "password123"
 
 # Submit
 agent-browser click @e3
-agent-browser wait --load networkidle
+agent-browser wait --url "**/dashboard"
 
 # Verify login succeeded
 agent-browser get url  # Should be dashboard, not login
 ```
+
+After submitting, wait for the authenticated destination, a success message, or another app-specific condition. Do not use `networkidle` as a generic login wait because long-lived background connections can keep it from resolving.
 
 For a form reached through an in-page click, challenge clearance, consent dismissal, or another stateful step, use the auth vault without discarding the prepared document:
 

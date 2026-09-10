@@ -2050,6 +2050,7 @@ Examples:
   agent-browser wait "#loading-spinner"
   agent-browser wait 2000
   agent-browser wait --url "**/dashboard"
+  # Use networkidle only for pages known to become quiet:
   agent-browser wait --load networkidle
   agent-browser wait --fn "window.appReady === true"
   agent-browser wait --text "Welcome back"

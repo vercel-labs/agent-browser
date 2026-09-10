@@ -101,7 +101,8 @@ Find all messages/threads mentioning specific terms.
    # Identify search input ref from snapshot
    agent-browser fill @e_search_input "your keyword"
    agent-browser press Enter
-   agent-browser wait --load networkidle
+   # Match the submitted query so a repeated search cannot reuse the old route.
+   agent-browser wait --fn "location.pathname.includes('/search') && new URL(location.href).searchParams.get('q') === 'your keyword'"
    ```
 
 3. **Capture results**
@@ -141,7 +142,8 @@ Watch a channel and capture new messages/engagement.
    agent-browser snapshot -i
    # Find channel ref from sidebar
    agent-browser click @e_channel_ref
-   agent-browser wait --load networkidle
+   # Replace `engineering` with the clicked channel's name, or wait for its known URL:
+   agent-browser wait --fn "document.querySelector('[data-qa=\"channel_header\"]')?.innerText.includes('engineering')"
    ```
 
 2. **Check channel info**
@@ -342,7 +344,6 @@ If you can't find an element:
 
 4. **Wait for page to load**
    ```bash
-   agent-browser wait --load networkidle
-   agent-browser wait 1000
+   agent-browser wait --fn "document.querySelector('[role=main]')"
    agent-browser snapshot -i
    ```

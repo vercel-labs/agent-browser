@@ -135,9 +135,13 @@ agent-browser wait @e1                     # Wait for element
 agent-browser wait 2000                    # Wait milliseconds
 agent-browser wait --text "Success"        # Wait for text (or -t)
 agent-browser wait --url "**/dashboard"    # Wait for URL pattern (or -u)
-agent-browser wait --load networkidle      # Wait for network idle (or -l)
+agent-browser wait --load domcontentloaded # Wait for DOMContentLoaded (or -l)
+agent-browser wait --load load             # Wait for the load event
+agent-browser wait --load networkidle      # Wait for network idle on known-quiet pages
 agent-browser wait --fn "window.ready"     # Wait for JS condition (or -f)
 ```
+
+After a page-changing action, prefer the selector, text, URL, or JavaScript condition that represents the result you need. Use a lifecycle wait when the lifecycle event is the milestone. `networkidle` is also supported, but use it only for pages known to become quiet because SSE, WebSockets, polling, and long-polling can keep it from resolving.
 
 ## Mouse Control
 

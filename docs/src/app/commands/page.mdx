@@ -129,12 +129,16 @@ agent-browser wait <selector>         # Wait for element
 agent-browser wait <ms>               # Wait for time
 agent-browser wait --text "Welcome"   # Wait for text (substring match)
 agent-browser wait --url "**/dash"    # Wait for URL pattern
-agent-browser wait --load networkidle # Wait for load state
+agent-browser wait --load domcontentloaded # Wait for DOMContentLoaded
+agent-browser wait --load load        # Wait for the load event
+agent-browser wait --load networkidle # Use only for pages known to become quiet
 agent-browser wait --fn "condition"   # Wait for JS condition
 agent-browser wait --download [path]  # Wait for download
 agent-browser wait --fn "!document.body.innerText.includes('Loading...')"  # Wait for text to disappear
 agent-browser wait "#spinner" --state hidden           # Wait for element to disappear
 ```
+
+After a page change, prefer a selector, text, URL, or JavaScript condition that represents the state you need. Use `networkidle` only when the page is known to become quiet, because SSE, WebSockets, polling, and long-polling can keep it from resolving.
 
 ## Downloads
 
@@ -716,9 +720,9 @@ Tool invocations use the same config files and environment variables as the CLI.
 Chain commands with `&&` in a single shell invocation. The browser persists via a background daemon, so chaining works naturally and is more efficient than separate calls:
 
 ```bash
-agent-browser open example.com && agent-browser wait --load networkidle && agent-browser snapshot -i
+agent-browser open example.com && agent-browser wait --load domcontentloaded && agent-browser snapshot -i
 agent-browser fill @e1 "user@example.com" && agent-browser fill @e2 "pass" && agent-browser click @e3
-agent-browser open example.com && agent-browser wait --load networkidle && agent-browser screenshot page.png
+agent-browser open example.com && agent-browser wait --load load && agent-browser screenshot page.png
 ```
 
 Use `&&` when you don't need to read intermediate output. Run commands separately when you need to parse output first (e.g., snapshot to discover refs, then interact with those refs).

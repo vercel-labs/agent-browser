@@ -50,7 +50,7 @@ agent-browser open https://duckduckgo.com
 agent-browser snapshot -i                      # find the search box ref
 agent-browser fill @e1 "agent-browser cli"
 agent-browser press Enter
-agent-browser wait --load networkidle
+agent-browser wait --text "agent-browser cli"
 agent-browser snapshot -i                      # refs now reflect results
 agent-browser click @e5                        # click a result
 agent-browser screenshot result.png
@@ -175,19 +175,24 @@ Agents fail more often from bad waits than from bad selectors. Pick the right wa
 
 ```bash
 agent-browser wait @e1                     # until an element appears
-agent-browser wait 2000                    # dumb wait, milliseconds (last resort)
 agent-browser wait --text "Success"        # until the text appears on the page
 agent-browser wait --url "**/dashboard"    # until URL matches pattern (glob)
-agent-browser wait --load networkidle      # until network idle (post-navigation)
-agent-browser wait --load domcontentloaded # until DOMContentLoaded
 agent-browser wait --fn "window.myApp.ready === true"  # until JS condition
+agent-browser wait --load domcontentloaded # until DOMContentLoaded
+agent-browser wait --load load             # until the page load event
+# Use networkidle only when the page is known to become quiet:
+agent-browser wait --load networkidle
+agent-browser wait 2000                    # fixed delay, last resort
 ```
 
 After any page-changing action, pick one:
 
 - Wait for a specific element you expect to appear: `wait @ref` or `wait --text "..."`.
 - Wait for URL change: `wait --url "**/new-page"`.
-- Wait for network idle (catch-all for SPA navigation): `wait --load networkidle`.
+- Wait for an application condition: `wait --fn "window.myApp.ready === true"`.
+- Use `wait --load load` or `wait --load domcontentloaded` when the lifecycle event itself is the milestone.
+
+Avoid using `networkidle` as a generic post-navigation or SPA wait. Server-sent events (SSE), WebSockets, polling, and long-polling can keep network activity alive indefinitely, causing the wait to time out even when the UI is ready. Use `networkidle` only for pages that are known to become quiet after navigation.
 
 Avoid bare `wait 2000` except when debugging — it makes scripts slow and flaky. Timeouts default to 25 seconds.
 

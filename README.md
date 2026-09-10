@@ -249,8 +249,12 @@ agent-browser wait <selector>         # Wait for element to be visible
 agent-browser wait <ms>               # Wait for time (milliseconds)
 agent-browser wait --text "Welcome"   # Wait for text to appear (substring match)
 agent-browser wait --url "**/dash"    # Wait for URL pattern
-agent-browser wait --load networkidle # Wait for load state
+agent-browser wait --load domcontentloaded # Wait for the DOM lifecycle event
+agent-browser wait --load load        # Wait for the page load event
 agent-browser wait --fn "window.ready === true"  # Wait for JS condition
+
+# Use networkidle only when the page is known to become quiet
+agent-browser wait --load networkidle
 
 # Wait for text/element to disappear
 agent-browser wait --fn "!document.body.innerText.includes('Loading...')"
@@ -258,6 +262,8 @@ agent-browser wait "#spinner" --state hidden
 ```
 
 **Load states:** `load`, `domcontentloaded`, `networkidle`
+
+After a page change, prefer a selector, text, URL, or JavaScript condition that represents the state you need. Use `load` or `domcontentloaded` when the lifecycle event is the milestone. `networkidle` is supported for pages known to become quiet, but SSE, WebSockets, polling, and long-polling can keep it from resolving.
 
 ### Batch Execution
 
@@ -407,7 +413,7 @@ agent-browser diff screenshot --baseline b.png -o d.png  # Save diff image to cu
 agent-browser diff screenshot --baseline b.png -t 0.2    # Adjust color threshold (0-1)
 agent-browser diff url https://v1.com https://v2.com     # Compare two URLs (snapshot diff)
 agent-browser diff url https://v1.com https://v2.com --screenshot  # Also visual diff
-agent-browser diff url https://v1.com https://v2.com --wait-until networkidle  # Custom wait strategy
+agent-browser diff url https://v1.com https://v2.com --wait-until load  # Custom wait strategy
 agent-browser diff url https://v1.com https://v2.com --selector "#main"  # Scope to element
 ```
 
@@ -1287,13 +1293,13 @@ Commands can be chained with `&&` in a single shell invocation. The browser pers
 
 ```bash
 # Open, wait for load, and snapshot in one call
-agent-browser open example.com && agent-browser wait --load networkidle && agent-browser snapshot -i
+agent-browser open example.com && agent-browser wait --load domcontentloaded && agent-browser snapshot -i
 
 # Chain multiple interactions
 agent-browser fill @e1 "user@example.com" && agent-browser fill @e2 "pass" && agent-browser click @e3
 
 # Navigate and screenshot
-agent-browser open example.com && agent-browser wait --load networkidle && agent-browser screenshot page.png
+agent-browser open example.com && agent-browser wait --load load && agent-browser screenshot page.png
 ```
 
 Use `&&` when you don't need intermediate output. Run commands separately when you need to parse output first (e.g., snapshot to discover refs before interacting).
