@@ -417,6 +417,8 @@ agent-browser diff url https://v1.com https://v2.com --wait-until load  # Custom
 agent-browser diff url https://v1.com https://v2.com --selector "#main"  # Scope to element
 ```
 
+Without `--baseline`, `diff snapshot` compares against the most recent `snapshot` taken in the session. If no snapshot has been taken yet, it fails with guidance instead of reporting the whole page as additions.
+
 ### Debug
 
 ```bash
