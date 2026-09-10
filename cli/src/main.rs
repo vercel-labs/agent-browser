@@ -1105,6 +1105,7 @@ fn run_dashboard_start(port: u16, allowed_origins: Vec<String>, json_mode: bool)
         use std::os::windows::process::CommandExt;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
         const DETACHED_PROCESS: u32 = 0x00000008;
+        connection::prevent_stdio_handle_inheritance();
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
     }
 
