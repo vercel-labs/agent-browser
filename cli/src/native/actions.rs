@@ -1120,6 +1120,7 @@ impl DaemonState {
             client,
             capture_session,
             ffmpeg,
+            self.recording_state.output_path.clone(),
             self.recording_state.fps,
             shared_count.clone(),
             shared_captured.clone(),

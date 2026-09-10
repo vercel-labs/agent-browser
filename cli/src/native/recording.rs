@@ -398,6 +398,7 @@ pub fn spawn_recording_task(
     client: Arc<CdpClient>,
     capture_session: String,
     mut ffmpeg: tokio::process::Child,
+    output_path: String,
     fps: u32,
     shared_count: Arc<AtomicU64>,
     shared_captured: Arc<AtomicU64>,
@@ -471,13 +472,31 @@ pub fn spawn_recording_task(
 
         capture?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("ffmpeg failed: {}", ffmpeg_error_tail(&stderr)));
-        }
-
-        Ok(())
+        teardown_result(&output_path, &output, shared_count.load(Ordering::Relaxed))
     })
+}
+
+/// Decide the capture task's outcome once ffmpeg has exited. A stop that
+/// lands before the first frame leaves ffmpeg reading an empty pipe, and
+/// it exits non-zero ("Output file does not contain any stream") even
+/// though nothing went wrong. That case is the recorder's to report via
+/// `recording_stop` ("No frames captured"), so the task returns Ok and
+/// drops whatever the failed muxer may have left on disk. Only a failure
+/// after frames were written is a real encoder failure.
+fn teardown_result(
+    output_path: &str,
+    output: &std::process::Output,
+    frames_written: u64,
+) -> Result<(), String> {
+    if frames_written == 0 {
+        let _ = std::fs::remove_file(output_path);
+        return Ok(());
+    }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ffmpeg failed: {}", ffmpeg_error_tail(&stderr)));
+    }
+    Ok(())
 }
 
 /// Pump screencast frames into ffmpeg until cancelled, the page goes away, or
@@ -809,6 +828,76 @@ mod tests {
         let result = recording_stop(&mut state).unwrap();
         assert_eq!(result["frames"], 120);
         assert_eq!(result["fps"], 60);
+    }
+
+    #[cfg(unix)]
+    fn fake_output(raw_status: i32, stderr: &str) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(raw_status),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    // ffmpeg exits non-zero on an empty pipe; with no frames written that is
+    // the recorder's "No frames captured" case, not an encoder failure.
+    #[cfg(unix)]
+    #[test]
+    fn test_teardown_zero_frames_ignores_ffmpeg_exit_and_removes_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("take.webm");
+        std::fs::write(&path, b"").unwrap();
+
+        let output = fake_output(0x0100, "Output file does not contain any stream\n");
+        let result = teardown_result(&path.to_string_lossy(), &output, 0);
+
+        assert!(
+            result.is_ok(),
+            "zero frames should not report ffmpeg: {:?}",
+            result
+        );
+        assert!(!path.exists(), "no take should be left on disk");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_teardown_zero_frames_with_successful_exit_still_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("take.webm");
+        std::fs::write(&path, b"").unwrap();
+
+        let output = fake_output(0, "");
+        let result = teardown_result(&path.to_string_lossy(), &output, 0);
+
+        assert!(result.is_ok());
+        assert!(!path.exists(), "an empty take is not a recording");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_teardown_frames_written_reports_ffmpeg_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("take.webm");
+
+        let output = fake_output(0x0100, "Error opening output files: Invalid argument\n");
+        let result = teardown_result(&path.to_string_lossy(), &output, 42);
+
+        let err = result.unwrap_err();
+        assert!(err.contains("ffmpeg failed"), "got: {}", err);
+        assert!(err.contains("Invalid argument"), "got: {}", err);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_teardown_frames_written_with_success_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("take.webm");
+
+        let output = fake_output(0, "");
+        let result = teardown_result(&path.to_string_lossy(), &output, 42);
+
+        assert!(result.is_ok());
     }
 
     #[test]

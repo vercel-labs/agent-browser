@@ -8008,6 +8008,109 @@ async fn e2e_recording_default_records_active_page() {
     assert_success(&resp);
 }
 
+/// A stop issued right after start races the first screencast frame. When
+/// the cancel wins, ffmpeg reads an empty pipe and exits non-zero, and the
+/// recorder must surface its own "No frames captured" error instead of
+/// ffmpeg's stderr; when a frame lands first, the take is valid. Both
+/// outcomes are legal, an ffmpeg failure is not (#1780). The zero-frame
+/// teardown itself is covered deterministically by the teardown_result unit
+/// tests in recording.rs.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_stop_right_after_start() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>Current</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let tmp_dir = std::env::temp_dir();
+    let rec_path = tmp_dir.join(format!("ab-e2e-rec-immediate-{}.webm", std::process::id()));
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // No sleep on purpose: the stop arrives before the first frame reaches
+    // the file, so ffmpeg sees an empty pipe.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    let stopped_with_frames = resp
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if stopped_with_frames {
+        // The frame won the race; the take must be real, and the next
+        // start below still has to work.
+        assert!(
+            get_data(&resp)["frames"].as_u64().unwrap_or(0) > 0,
+            "a take written on immediate stop should have frames"
+        );
+    } else {
+        let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(
+            err, "No frames captured",
+            "immediate stop must report the recorder's own error, got: {}",
+            err
+        );
+        assert!(!rec_path.exists(), "no take should be left behind");
+    }
+
+    // The stopped take must not block the next one.
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "recording_start", "path": rec_path.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(state.recording_state.active);
+
+    // Stop the second take too; the same contract applies.
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    if resp
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        assert!(
+            get_data(&resp)["frames"].as_u64().unwrap_or(0) > 0,
+            "a take written on immediate stop should have frames"
+        );
+    } else {
+        let err = resp.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(
+            err, "No frames captured",
+            "immediate stop must report the recorder's own error, got: {}",
+            err
+        );
+        assert!(!rec_path.exists(), "no take should be left behind");
+    }
+
+    let _ = std::fs::remove_file(&rec_path);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// `recording_start` with a URL navigates the active
 /// tab to that URL before recording. No new tab is created.
 #[tokio::test]
