@@ -12939,6 +12939,51 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn screenshot_alternating_scopes_keep_independent_baselines() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let data =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, png.into_inner());
+        let mut state = DaemonState::new();
+        let scopes = [
+            "selector=#a;fullPage=false",
+            "selector=#b;fullPage=false",
+            "selector=None;fullPage=true",
+        ];
+        for pass in 0..2 {
+            for (index, scope) in scopes.iter().enumerate() {
+                let path = dir.path().join(format!("{pass}-{index}.png"));
+                let options = ScreenshotOptions {
+                    path: Some(path.to_string_lossy().into_owned()),
+                    ..Default::default()
+                };
+                let result = observe_screenshot(
+                    &mut state,
+                    "tab".into(),
+                    scope.to_string(),
+                    &data,
+                    0.0,
+                    &options,
+                )
+                .unwrap();
+                assert_eq!(
+                    result["changed"],
+                    pass == 0,
+                    "scope {scope}, pass {pass}: {result}"
+                );
+                assert_eq!(result["revision"], pass + 1);
+                assert_eq!(
+                    path.exists(),
+                    pass == 0,
+                    "suppressed screenshots must not create a file"
+                );
+            }
+        }
+    }
+
     use super::super::cdp::types::{AXNode, AXValue};
     use super::*;
     use crate::test_utils::EnvGuard;
