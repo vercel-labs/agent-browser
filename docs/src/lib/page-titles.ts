@@ -35,6 +35,7 @@ export const PAGE_TITLES: Record<string, string> = {
   "providers/browserbase": "Browserbase",
   "providers/browserless": "Browserless",
   "providers/kernel": "Kernel",
+  "providers/panerelay": "Panerelay",
   "providers/remote-agent-browser": "Remote Agent Browser",
   changelog: "Changelog",
 };
