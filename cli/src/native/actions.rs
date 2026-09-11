@@ -1089,6 +1089,13 @@ impl DaemonState {
         client: Arc<CdpClient>,
         session_id: String,
     ) -> Result<(), String> {
+        let initial_image = match recording::capture_initial_image(&client, &session_id).await {
+            Ok(image) => image,
+            Err(error) => {
+                self.rollback_failed_recording_start().await;
+                return Err(error);
+            }
+        };
         let capture_session = match recording::attach_capture_session(
             &client,
             &session_id,
@@ -1109,6 +1116,7 @@ impl DaemonState {
         let handle = recording::spawn_recording_task(
             client,
             capture_session,
+            initial_image,
             self.recording_state.output_path.clone(),
             self.recording_state.fps,
             shared_count.clone(),
@@ -2503,8 +2511,10 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
     if let Some(mode @ ("instant" | "smooth" | "human")) =
-        cmd.get("inputMode").and_then(Value::as_str)
+        cmd.get("defaultInputMode").and_then(Value::as_str)
     {
+        // Only an explicit session setting persists. inputMode is an override
+        // for this command, including --human and MCP's human argument.
         state.input_mode = mode.to_string();
     }
     let id = cmd
@@ -12970,6 +12980,39 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn human_command_does_not_change_session_default() {
+        let mut state = super::DaemonState::new();
+        // Even a rejected command must not leak a per-command override.
+        let _ = super::execute_command(
+            &serde_json::json!({
+                "action": "unknown-test-command", "inputMode": "human"
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(state.input_mode, "instant");
+    }
+
+    #[tokio::test]
+    async fn explicit_input_mode_sets_session_default() {
+        let mut state = super::DaemonState::new();
+        let _ = super::execute_command(
+            &serde_json::json!({
+                "action": "unknown-test-command", "defaultInputMode": "smooth", "inputMode": "human"
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(state.input_mode, "smooth");
+        let _ = super::execute_command(
+            &serde_json::json!({"action": "unknown-test-command"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(state.input_mode, "smooth");
+    }
+
     use super::super::cdp::types::{AXNode, AXValue};
     use super::*;
     use crate::test_utils::EnvGuard;

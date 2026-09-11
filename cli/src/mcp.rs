@@ -853,7 +853,7 @@ fn tools() -> Vec<Value> {
             json!({
                 "selector": selector_schema(),
                 "newTab": { "type": "boolean", "default": false, "description": "Open link targets in a new tab after applying session setup." },
-                "human": { "type": "boolean", "default": false, "description": "Approach the target with seeded, curved mouse movement before clicking." }
+                "human": { "type": "boolean", "default": false, "description": "Approach the target with seeded, curved mouse movement." }
             }),
             &["selector"],
         ),
@@ -4086,6 +4086,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn recording_timeline_options_use_cli_parser() {
+        for operation in ["start", "restart"] {
+            for fps in [1, 30, 60] {
+                let args =
+                    record_command_args(&json!({"path": "timeline.webm", "fps": fps}), operation)
+                        .unwrap();
+                let flags = crate::flags::parse_flags(&args);
+                let command = crate::commands::parse_command(&args, &flags).unwrap();
+                assert_eq!(command["action"], format!("recording_{operation}"));
+                assert_eq!(command["fps"], fps);
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -4700,6 +4715,22 @@ mod tests {
                 crate::commands::parse_command(&args, &flags).unwrap()["url"],
                 url
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_human_click_preserves_session_mode() {
+        let mut state = crate::native::actions::DaemonState::new();
+        for human in [true, false] {
+            let args = click_command_args(&json!({"selector": "#target", "human": human})).unwrap();
+            let flags = crate::flags::parse_flags(&args);
+            let mut command = crate::commands::parse_command(&args, &flags).unwrap();
+            assert_eq!(command.get("inputMode"), human.then_some(&json!("human")));
+            assert!(command.get("defaultInputMode").is_none());
+            // Avoid launching Chrome: dispatch still exercises the shared mode handling.
+            command["action"] = json!("unknown-test-command");
+            crate::native::actions::execute_command(&command, &mut state).await;
+            assert_eq!(state.input_mode, "instant");
         }
     }
 

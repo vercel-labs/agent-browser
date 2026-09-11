@@ -7867,8 +7867,8 @@ async fn e2e_recording_honors_requested_fps() {
 
     let frames = data["frames"].as_u64().unwrap();
     assert!(
-        (2..FPS / 4).contains(&frames),
-        "static page should use sparse frames at {FPS} fps, got {frames}"
+        (FPS * 8 / 10..FPS * 15 / 10).contains(&frames),
+        "static page should repeat frames at {FPS} fps, got {frames}"
     );
     let captured = data["capturedFrames"].as_u64().unwrap();
     assert!(captured >= 1, "static page should produce an initial frame");
@@ -7894,7 +7894,11 @@ async fn e2e_recording_honors_requested_fps() {
         .expect("ffprobe duration should be numeric");
     assert!(
         (0.8..1.5).contains(&duration),
-        "sparse recording should retain wall-clock duration, got {duration}"
+        "recording should retain wall-clock duration, got {duration}"
+    );
+    assert!(
+        (duration - frames as f64 / FPS as f64).abs() < 0.03,
+        "{frames} frames at {FPS} fps should match duration {duration}"
     );
 
     let _ = std::fs::remove_file(&rec_path);
