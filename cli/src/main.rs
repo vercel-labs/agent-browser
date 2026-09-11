@@ -652,10 +652,21 @@ fn run_session_id(args: &[String], json_mode: bool) {
     }
 }
 
+fn session_runtime_fields(
+    runtime: Option<Result<Response, String>>,
+) -> (Option<serde_json::Value>, Option<String>) {
+    match runtime {
+        Some(Ok(response)) if response.success => (response.data, None),
+        Some(Ok(response)) => (response.data, response.error),
+        Some(Err(error)) => (None, Some(error)),
+        None => (None, None),
+    }
+}
+
 fn run_session_info(session: &str, json_mode: bool) {
     let inventory = walk_daemons();
     let active = inventory.sessions.iter().find(|s| s.name == session);
-    let runtime = active.and_then(|_| {
+    let runtime = active.map(|_| {
         send_command(
             json!({
                 "id": gen_id(),
@@ -663,17 +674,8 @@ fn run_session_info(session: &str, json_mode: bool) {
             }),
             session,
         )
-        .ok()
     });
-
-    let runtime_data = runtime.as_ref().and_then(|resp| resp.data.clone());
-    let runtime_error = runtime.as_ref().and_then(|resp| {
-        if resp.success {
-            None
-        } else {
-            resp.error.clone()
-        }
-    });
+    let (runtime_data, runtime_error) = session_runtime_fields(runtime);
 
     if json_mode {
         print_json_value(json!({
@@ -717,6 +719,12 @@ fn run_session_info(session: &str, json_mode: bool) {
         }
         if let Some(launched) = data.get("browserLaunched").and_then(|v| v.as_bool()) {
             println!("Browser launched: {}", launched);
+        }
+        if let Some(connected) = data.get("browserConnected").and_then(|v| v.as_bool()) {
+            println!("Browser connected: {}", connected);
+        }
+        if let Some(kind) = data.get("connectionKind").and_then(|v| v.as_str()) {
+            println!("Connection kind: {}", kind);
         }
     } else if let Some(err) = runtime_error {
         println!("Runtime info unavailable: {}", err);
@@ -2293,6 +2301,14 @@ fn run_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_runtime_fields_preserves_transport_errors() {
+        let (data, error) = session_runtime_fields(Some(Err("daemon socket closed".to_string())));
+
+        assert!(data.is_none());
+        assert_eq!(error.as_deref(), Some("daemon socket closed"));
+    }
 
     #[test]
     fn dashboard_config_comparison_rejects_unknown_or_changed_settings() {
