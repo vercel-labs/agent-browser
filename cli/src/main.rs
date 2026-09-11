@@ -1716,6 +1716,7 @@ fn main() {
         auto_connect: flags.auto_connect,
         pin_tab: flags.pin_tab,
         idle_timeout: flags.idle_timeout.as_deref(),
+        max_tabs: flags.max_tabs,
         default_timeout: flags.default_timeout,
         cdp: flags.cdp.as_deref(),
         no_auto_dialog: flags.no_auto_dialog,

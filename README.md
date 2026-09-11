@@ -1050,6 +1050,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--confirm-interactive` | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |
 | `--engine <name>` | Browser engine: `chrome` (default), `lightpanda` (or `AGENT_BROWSER_ENGINE` env) |
 | `--idle-timeout <time>` | Shut down the daemon after inactivity (`10s`, `3m`, `1h`, or raw ms). Defaults to `1h`; use `0` to disable (or `AGENT_BROWSER_IDLE_TIMEOUT_MS` env) |
+| `--max-tabs <n>` | Cap on open tabs per session; tab creation refuses with guidance when hit. Defaults to unlimited; use `0` for unlimited (or `AGENT_BROWSER_MAX_TABS` env) |
 | `--no-auto-dialog` | Disable automatic dismissal of `alert`/`beforeunload` dialogs (or `AGENT_BROWSER_NO_AUTO_DIALOG` env) |
 | `--model <name>` | AI model for chat command (or `AI_GATEWAY_MODEL` env) |
 | `-v`, `--verbose` | Show tool commands and their raw output (chat) |

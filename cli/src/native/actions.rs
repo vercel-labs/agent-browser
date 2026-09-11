@@ -636,6 +636,10 @@ pub struct DaemonState {
     pub pin_tab: bool,
     /// Last binding written to disk, so persistence is write-on-change.
     last_persisted_binding: Option<tab_binding::TabBinding>,
+    /// Optional cap on open tabs (`--max-tabs` / AGENT_BROWSER_MAX_TABS).
+    /// `None` or 0 = unlimited. When the cap is hit, tab creation refuses
+    /// with guidance instead of silently closing pages.
+    pub max_tabs: Option<usize>,
 }
 
 fn default_idle_shutdown_is_blocked(
@@ -735,6 +739,10 @@ impl DaemonState {
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(25_000),
+            max_tabs: env::var("AGENT_BROWSER_MAX_TABS")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|v| *v > 0),
             viewport: None,
             session_setup: SessionSetup::default(),
             plugin_init_scripts: Vec::new(),
@@ -5810,6 +5818,24 @@ async fn handle_type(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     Ok(json!({ "typed": text }))
 }
 
+/// Check the configured tab cap (`--max-tabs` / AGENT_BROWSER_MAX_TABS).
+///
+/// Returns an error when the session is already at the cap. Refusal (with a
+/// pointer to `tab close` / `close`) beats silently killing pages the agent
+/// may still need.
+fn tab_limit_error(state: &DaemonState) -> Option<String> {
+    let max = state.max_tabs?;
+    let mgr = state.browser.as_ref()?;
+    let count = mgr.tab_count();
+    if count >= max {
+        Some(format!(
+            "Tab limit reached: {count} of {max} tabs are open. Close one first with `tab close <id>` (or `close`) before opening another."
+        ))
+    } else {
+        None
+    }
+}
+
 async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -6904,6 +6930,9 @@ async fn handle_tab_list(state: &DaemonState) -> Result<Value, String> {
 }
 
 async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    if let Some(err) = tab_limit_error(state) {
+        return Err(err);
+    }
     let url = cmd.get("url").and_then(|v| v.as_str());
     let label = cmd.get("label").and_then(|v| v.as_str());
     let domain_filter = state.domain_filter.read().await.clone();
@@ -10296,6 +10325,9 @@ async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Valu
 }
 
 async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    if let Some(err) = tab_limit_error(state) {
+        return Err(err);
+    }
     let (tab_id, session_id) = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
 
@@ -16049,6 +16081,32 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[test]
+    fn test_max_tabs_from_env() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_MAX_TABS"]);
+        env.set("AGENT_BROWSER_MAX_TABS", "4");
+        let state = DaemonState::new();
+        assert_eq!(state.max_tabs, Some(4));
+    }
+
+    #[test]
+    fn test_max_tabs_zero_means_unlimited() {
+        let env = EnvGuard::new(&["AGENT_BROWSER_MAX_TABS"]);
+        // 0 disables the cap entirely.
+        env.set("AGENT_BROWSER_MAX_TABS", "0");
+        let state = DaemonState::new();
+        assert_eq!(state.max_tabs, None);
+    }
+
+    #[test]
+    fn test_tab_limit_error_refuses_at_cap() {
+        let mut state = DaemonState::new();
+        state.max_tabs = Some(2);
+        // No browser launched yet: tab_count is 0, so the cap is not hit and
+        // the check passes without touching the browser.
+        assert_eq!(tab_limit_error(&state), None);
+    }
+
+    #[test]
     fn test_default_timeout_ms_fallback() {
         let env = EnvGuard::new(&["AGENT_BROWSER_DEFAULT_TIMEOUT"]);
         // When AGENT_BROWSER_DEFAULT_TIMEOUT is unset, DaemonState uses the
@@ -16059,7 +16117,11 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // single-task test runtime; the lock
+                                         // must span execute_command because the auto-launch path reads
+                                         // process-global env that parallel EnvGuard tests mutate.
     async fn test_execute_unknown_command() {
+        let _env_lock = crate::test_utils::ENV_MUTEX.lock().unwrap();
         let mut state = DaemonState::new();
         let cmd = json!({ "action": "unknown_action_xyz", "id": "test-1" });
         let result = execute_command(&cmd, &mut state).await;

@@ -3523,6 +3523,7 @@ mod tests {
             screenshot_format: None,
             idle_timeout: None,
             default_timeout: None,
+            max_tabs: None,
             no_auto_dialog: false,
             model: None,
             plugins: Vec::new(),

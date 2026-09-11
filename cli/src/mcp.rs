@@ -2020,6 +2020,13 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         }),
     );
     props.insert(
+        "maxTabs".to_string(),
+        json!({
+            "type": "number",
+            "description": "Cap on open tabs for this session (0 = unlimited). When the cap is hit, tab creation refuses with guidance to close a tab instead of silently closing pages."
+        }),
+    );
+    props.insert(
         "extraArgs".to_string(),
         json!({
             "type": "array",
@@ -3747,6 +3754,20 @@ fn append_common_global_args(
         args.push(idle_timeout);
     }
 
+    if let Some(v) = arguments.get("maxTabs") {
+        let text = match v {
+            Value::Number(n) => n.to_string(),
+            Value::String(s) => s.clone(),
+            _ => {
+                return Err(ProtocolError::invalid_params(
+                    "maxTabs must be a number or a numeric string",
+                ))
+            }
+        };
+        args.push("--max-tabs".to_string());
+        args.push(text);
+    }
+
     if let Some(restore) = arguments.get("restore") {
         if let Some(enabled) = restore.as_bool() {
             if enabled {
@@ -4549,6 +4570,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["--idle-timeout", "0"]);
+    }
+
+    #[test]
+    fn common_global_args_include_max_tabs() {
+        let mut args = Vec::new();
+
+        append_common_global_args(
+            &mut args,
+            &json!({
+                "maxTabs": 5
+            }),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(args, vec!["--max-tabs", "5"]);
     }
 
     #[test]

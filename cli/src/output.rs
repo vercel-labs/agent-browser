@@ -3933,6 +3933,8 @@ Options:
   --engine <name>            Browser engine: chrome (default), lightpanda (or AGENT_BROWSER_ENGINE)
   --idle-timeout <time>      Shut down daemon after inactivity: 10s, 3m, 1h, or raw ms
                              (default: 1h; 0 disables; dashboard input resets the timer)
+  --max-tabs <n>             Cap on open tabs per session; tab creation refuses when hit
+                             (or AGENT_BROWSER_MAX_TABS; default: unlimited; 0 = unlimited)
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
   --model <name>             AI model for chat (or AI_GATEWAY_MODEL env)
   -v, --verbose              Show tool commands and their raw output
@@ -4002,6 +4004,7 @@ Environment:
   AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)
   AGENT_BROWSER_DOWNLOAD_PATH    Default download directory for browser downloads
   AGENT_BROWSER_DEFAULT_TIMEOUT  Default action timeout in ms (default: 25000)
+  AGENT_BROWSER_MAX_TABS         Cap on open tabs per session; tab creation refuses when hit (0 = unlimited)
   AGENT_BROWSER_SESSION_NAME     Legacy auto-save/load state persistence name
   AGENT_BROWSER_STATE_EXPIRE_DAYS Auto-delete saved states older than N days (default: 30)
   AGENT_BROWSER_ENCRYPTION_KEY   64-char hex key for AES-256-GCM session encryption

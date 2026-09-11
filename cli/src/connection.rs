@@ -465,6 +465,7 @@ pub struct DaemonOptions<'a> {
     pub auto_connect: bool,
     pub pin_tab: bool,
     pub idle_timeout: Option<&'a str>,
+    pub max_tabs: Option<u64>,
     pub default_timeout: Option<u64>,
     pub cdp: Option<&'a str>,
     pub no_auto_dialog: bool,
@@ -575,6 +576,9 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     if let Some(idle) = opts.idle_timeout {
         cmd.env("AGENT_BROWSER_IDLE_TIMEOUT_MS", idle);
     }
+    if let Some(max_tabs) = opts.max_tabs {
+        cmd.env("AGENT_BROWSER_MAX_TABS", max_tabs.to_string());
+    }
     if let Some(timeout) = opts.default_timeout {
         cmd.env("AGENT_BROWSER_DEFAULT_TIMEOUT", timeout.to_string());
     }
@@ -596,6 +600,7 @@ fn daemon_config_fingerprint(opts: &DaemonOptions) -> String {
     opts.confirm_actions.hash(&mut hasher);
     opts.idle_timeout.hash(&mut hasher);
     opts.default_timeout.hash(&mut hasher);
+    opts.max_tabs.hash(&mut hasher);
     opts.no_auto_dialog.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
@@ -1277,6 +1282,7 @@ mod tests {
             auto_connect: false,
             pin_tab: false,
             idle_timeout,
+            max_tabs: None,
             default_timeout: None,
             cdp: None,
             no_auto_dialog,
