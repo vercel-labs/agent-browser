@@ -48,11 +48,10 @@ mod document_identity_regressions {
         });
         let client = CdpClient::connect(&url).await.unwrap();
         let mut refs = RefMap::new();
-        refs.set_scope("parent-session:parent-loader");
         let mut observations = Vec::new();
         for (loader, session) in documents.iter().zip(sessions) {
             *document.lock().unwrap() = loader.map(str::to_string);
-            refs.clear();
+            refs.begin_snapshot();
             take_snapshot(
                 &client,
                 "parent-session",
@@ -397,6 +396,17 @@ pub async fn take_snapshot(
 
     let (ax_params, effective_session_id) =
         resolve_ax_session(frame_id, session_id, iframe_sessions);
+    // Same-origin children share a CDP session but have separate loaders;
+    // out-of-process children also have their own effective session identity.
+    let frame_tree = client
+        .send_command_no_params("Page.getFrameTree", Some(effective_session_id))
+        .await
+        .ok();
+    let loader = frame_tree
+        .as_ref()
+        .and_then(|tree| frame_loader(&tree["frameTree"], frame_id));
+    let document_is_known =
+        ref_map.observe_document(session_id, frame_id, effective_session_id, loader);
     // Ensure domains are enabled on the iframe session (defensive fallback
     // in case the attach-time enable in execute_command was missed).
     if effective_session_id != session_id {
@@ -498,13 +508,16 @@ pub async fn take_snapshot(
             None
         };
 
-        let ref_id = if let Some(backend_node_id) = tree_nodes[*idx].backend_node_id {
-            if let Some(existing) = ref_map.durable_ref(backend_node_id, frame_id) {
+        let ref_id = if let Some(backend_node_id) = tree_nodes[*idx]
+            .backend_node_id
+            .filter(|_| document_is_known)
+        {
+            if let Some(existing) = ref_map.durable_ref(session_id, frame_id, backend_node_id) {
                 existing.to_string()
             } else {
                 let allocated = format!("e{}", next_ref);
                 next_ref += 1;
-                ref_map.remember_durable_ref(backend_node_id, frame_id, &allocated);
+                ref_map.remember_durable_ref(session_id, frame_id, backend_node_id, &allocated);
                 allocated
             }
         } else {
@@ -697,6 +710,17 @@ pub async fn take_snapshot(
 }
 
 /// Resolve the child frame ID for an iframe element given its backendNodeId.
+fn frame_loader<'a>(tree: &'a Value, frame_id: Option<&str>) -> Option<&'a str> {
+    let frame = &tree["frame"];
+    if frame_id.is_none() || frame["id"].as_str() == frame_id {
+        return frame["loaderId"].as_str().filter(|id| !id.is_empty());
+    }
+    tree["childFrames"]
+        .as_array()?
+        .iter()
+        .find_map(|child| frame_loader(child, frame_id))
+}
+
 async fn resolve_iframe_frame_id(
     client: &CdpClient,
     session_id: &str,

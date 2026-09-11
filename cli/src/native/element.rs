@@ -16,10 +16,16 @@ pub struct RefEntry {
 }
 
 #[derive(Clone)]
+struct DocumentRefs {
+    session: String,
+    loader: String,
+    refs: HashMap<i64, String>,
+}
+
+#[derive(Clone)]
 pub struct RefMap {
     map: HashMap<String, RefEntry>,
-    durable_refs: HashMap<(String, Option<String>, i64), String>,
-    scope: String,
+    documents: HashMap<(String, Option<String>), DocumentRefs>,
     next_ref: usize,
 }
 
@@ -27,8 +33,7 @@ impl RefMap {
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
-            durable_refs: HashMap::new(),
-            scope: String::new(),
+            documents: HashMap::new(),
             next_ref: 1,
         }
     }
@@ -116,53 +121,92 @@ impl RefMap {
         self.map.remove(ref_id);
     }
 
-    pub fn clear(&mut self) {
+    pub fn begin_snapshot(&mut self) {
         self.map.clear();
     }
 
-    /// Select the active top-level document namespace. Frame IDs are added to
-    /// this scope when durable DOM-backed refs are resolved.
-    pub fn set_scope(&mut self, scope: &str) {
-        self.scope = scope.to_string();
+    /// Observe the document behind a page/frame pair. Unknown documents never
+    /// retain refs, while a changed session or loader replaces the prior bucket.
+    pub fn observe_document(
+        &mut self,
+        page_session: &str,
+        frame: Option<&str>,
+        session: &str,
+        loader: Option<&str>,
+    ) -> bool {
+        let key = (page_session.to_string(), frame.map(str::to_string));
+        let Some(loader) = loader.filter(|id| !id.is_empty()) else {
+            self.invalidate_frame(page_session, frame);
+            return false;
+        };
+        let changed = self
+            .documents
+            .get(&key)
+            .is_none_or(|document| document.session != session || document.loader != loader);
+        if changed {
+            if frame.is_none() {
+                self.documents
+                    .retain(|(entry_page, _), _| entry_page != page_session);
+            }
+            self.documents.insert(
+                key,
+                DocumentRefs {
+                    session: session.to_string(),
+                    loader: loader.to_string(),
+                    refs: HashMap::new(),
+                },
+            );
+        }
+        true
     }
 
-    pub fn durable_ref(&self, backend_node_id: i64, frame_id: Option<&str>) -> Option<&str> {
-        self.durable_refs
-            .get(&(
-                self.scope.clone(),
-                frame_id.map(ToString::to_string),
-                backend_node_id,
-            ))
+    fn invalidate_frame(&mut self, page_session: &str, frame: Option<&str>) {
+        if frame.is_none() {
+            self.documents
+                .retain(|(entry_page, _), _| entry_page != page_session);
+        } else {
+            self.documents
+                .remove(&(page_session.to_string(), frame.map(str::to_string)));
+        }
+    }
+
+    pub fn durable_ref(
+        &self,
+        page_session: &str,
+        frame: Option<&str>,
+        backend_node_id: i64,
+    ) -> Option<&str> {
+        self.documents
+            .get(&(page_session.to_string(), frame.map(str::to_string)))?
+            .refs
+            .get(&backend_node_id)
             .map(String::as_str)
     }
 
     pub fn remember_durable_ref(
         &mut self,
+        page_session: &str,
+        frame: Option<&str>,
         backend_node_id: i64,
-        frame_id: Option<&str>,
         ref_id: &str,
     ) {
-        self.durable_refs.insert(
-            (
-                self.scope.clone(),
-                frame_id.map(ToString::to_string),
-                backend_node_id,
-            ),
-            ref_id.to_string(),
-        );
+        if let Some(document) = self
+            .documents
+            .get_mut(&(page_session.to_string(), frame.map(str::to_string)))
+        {
+            document.refs.insert(backend_node_id, ref_id.to_string());
+        }
     }
 
-    /// Invalidate refs for a replaced document without recycling their IDs.
-    pub fn invalidate_current_document(&mut self) {
-        let scope = &self.scope;
-        self.durable_refs
-            .retain(|(entry_scope, _, _), _| entry_scope != scope);
+    pub fn invalidate_page(&mut self, page_session: &str) {
+        self.documents
+            .retain(|(entry_page, _), _| entry_page != page_session);
         self.map.clear();
     }
 
     /// Drop all document identities while preserving the monotonic ref counter.
     pub fn invalidate_all_documents(&mut self) {
-        self.durable_refs.clear();
+        self.documents.clear();
         self.map.clear();
     }
 
@@ -1436,7 +1480,7 @@ mod tests {
         map.add("e1".to_string(), Some(42), "button", "Submit", None);
         map.set_next_ref_num(2);
 
-        map.clear();
+        map.begin_snapshot();
 
         assert!(map.get("e1").is_none());
         assert_eq!(map.next_ref_num(), 2);
@@ -1445,18 +1489,36 @@ mod tests {
     #[test]
     fn test_durable_refs_are_scoped_by_document_and_frame() {
         let mut map = RefMap::new();
-        map.set_scope("page-a");
-        map.remember_durable_ref(42, None, "e1");
-        map.remember_durable_ref(42, Some("frame-a"), "e2");
-        assert_eq!(map.durable_ref(42, None), Some("e1"));
-        assert_eq!(map.durable_ref(42, Some("frame-a")), Some("e2"));
+        assert!(map.observe_document("page-a", None, "session-a", Some("loader-a")));
+        assert!(map.observe_document(
+            "page-a",
+            Some("frame-a"),
+            "frame-session",
+            Some("frame-loader")
+        ));
+        map.remember_durable_ref("page-a", None, 42, "e1");
+        map.remember_durable_ref("page-a", Some("frame-a"), 42, "e2");
+        assert_eq!(map.durable_ref("page-a", None, 42), Some("e1"));
+        assert_eq!(map.durable_ref("page-a", Some("frame-a"), 42), Some("e2"));
+        assert_eq!(map.durable_ref("page-b", None, 42), None);
 
-        map.set_scope("page-b");
-        assert_eq!(map.durable_ref(42, None), None);
-        map.set_scope("page-a");
-        map.invalidate_current_document();
-        assert_eq!(map.durable_ref(42, None), None);
+        map.invalidate_page("page-a");
+        assert_eq!(map.durable_ref("page-a", None, 42), None);
         assert_eq!(map.next_ref_num(), 1);
+    }
+
+    #[test]
+    fn invalidating_one_page_preserves_other_page_documents() {
+        let mut map = RefMap::new();
+        assert!(map.observe_document("page-a", None, "session-a", Some("loader-a")));
+        map.remember_durable_ref("page-a", None, 42, "e1");
+        assert!(map.observe_document("page-b", None, "session-b", Some("loader-b")));
+        map.remember_durable_ref("page-b", None, 42, "e2");
+
+        map.invalidate_page("page-b");
+
+        assert_eq!(map.durable_ref("page-a", None, 42), Some("e1"));
+        assert_eq!(map.durable_ref("page-b", None, 42), None);
     }
 
     #[test]

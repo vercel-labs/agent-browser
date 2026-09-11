@@ -1158,6 +1158,47 @@ async fn e2e_snapshot_refs_survive_dom_updates_and_never_recycle() {
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_refs_invalidate_iframe_navigation() {
+    let mut state = DaemonState::new();
+    for command in [
+        json!({"action": "launch", "headless": true}),
+        json!({"action": "navigate", "url": "about:blank"}),
+        json!({"action": "setcontent", "html": "<button>Parent</button><iframe id='child'></iframe>"}),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+    let replace = json!({"action": "evaluate", "script": "new Promise(resolve => { const f = document.getElementById('child'); f.onload = () => resolve(true); f.srcdoc = '<button>Child</button>'; })"});
+    assert_success(&execute_command(&replace, &mut state).await);
+    let first = execute_command(&json!({"action": "snapshot"}), &mut state).await;
+    assert_success(&first);
+    let find_ref = |snapshot: &Value, name: &str| {
+        get_data(snapshot)["refs"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(_, node)| node["name"] == name)
+            .unwrap()
+            .0
+            .clone()
+    };
+    let parent = find_ref(&first, "Parent");
+    let child = find_ref(&first, "Child");
+    let unchanged = execute_command(&json!({"action": "snapshot"}), &mut state).await;
+    assert_eq!(find_ref(&unchanged, "Child"), child);
+    assert_success(&execute_command(&replace, &mut state).await);
+    let replaced = execute_command(&json!({"action": "snapshot"}), &mut state).await;
+    assert_success(&replaced);
+    assert_eq!(find_ref(&replaced, "Parent"), parent);
+    assert_ne!(find_ref(&replaced, "Child"), child);
+    assert!(get_data(&replaced)["removedRefs"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(format!("@{child}"))));
+    assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
+}
+
 // ---------------------------------------------------------------------------
 // Screenshot
 // ---------------------------------------------------------------------------
