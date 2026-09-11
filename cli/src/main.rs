@@ -1,5 +1,6 @@
 mod ca_bundle;
 mod chat;
+mod chrome_status;
 mod color;
 mod commands;
 mod connection;
@@ -1393,6 +1394,25 @@ fn main() {
     if clean.is_empty() {
         print_help();
         return;
+    }
+
+    // Read-only readiness probe for attaching to the user's existing Chrome.
+    // It deliberately runs without a daemon or CDP connection.
+    if clean.first().map(|s| s.as_str()) == Some("chrome") {
+        if clean.get(1).map(|s| s.as_str()) != Some("status") || clean.len() != 2 {
+            let message = "Usage: agent-browser chrome status [--json]";
+            if flags.json {
+                print_json_error(message);
+            } else {
+                eprintln!("{} {}", color::error_indicator(), message);
+            }
+            exit(1);
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime");
+        exit(rt.block_on(chrome_status::run(flags.json)));
     }
 
     // Handle install separately
