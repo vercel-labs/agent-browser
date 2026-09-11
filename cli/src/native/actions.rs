@@ -2501,8 +2501,10 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
     if let Some(mode @ ("instant" | "smooth" | "human")) =
-        cmd.get("inputMode").and_then(Value::as_str)
+        cmd.get("defaultInputMode").and_then(Value::as_str)
     {
+        // Only an explicit session setting persists. inputMode is an override
+        // for this command, including --human and MCP's human argument.
         state.input_mode = mode.to_string();
     }
     let id = cmd
