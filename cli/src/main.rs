@@ -1865,6 +1865,36 @@ fn main() {
             launch_cmd["downloadPath"] = json!(dp);
         }
 
+        
+        if let Some(ref headers_json) = flags.cdp_headers {
+            match serde_json::from_str::<serde_json::Value>(headers_json) {
+                Ok(headers) if headers.is_object() => {
+                    launch_cmd["cdpHeaders"] = headers;
+                }
+                Ok(_) => {
+                    let msg = format!(
+                        "Invalid JSON object for --cdp-headers: {}",
+                        headers_json
+                    );
+                    if flags.json {
+                        print_json_error(&msg);
+                    } else {
+                        eprintln!("{} {}", color::error_indicator(), msg);
+                    }
+                    exit(1);
+                }
+                Err(_) => {
+                    let msg = format!("Invalid JSON for --cdp-headers: {}", headers_json);
+                    if flags.json {
+                        print_json_error(&msg);
+                    } else {
+                        eprintln!("{} {}", color::error_indicator(), msg);
+                    }
+                    exit(1);
+                }
+            }
+        }
+
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
             Ok(resp) => Some(
