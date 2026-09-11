@@ -543,7 +543,7 @@ pub struct DaemonState {
     pub ref_map: RefMap,
     /// Last delta snapshot per page session. Bounded to the currently tracked tabs.
     snapshot_revisions: HashMap<String, SnapshotRevision>,
-    screenshot_observations: HashMap<String, ScreenshotObservation>,
+    screenshot_observations: HashMap<(String, String), ScreenshotObservation>,
     pub domain_filter: Arc<RwLock<Option<DomainFilter>>>,
     pub event_tracker: EventTracker,
     pub session_name: Option<String>,
@@ -5742,6 +5742,9 @@ fn observe_screenshot(
     options: &ScreenshotOptions,
 ) -> Result<Value, String> {
     let (width, height, rgba, decoded_hash) = decode_screenshot_pixels(base64_data)?;
+    // Retain an independent baseline and revision when alternating capture
+    // scopes in one tab. The shared cap also bounds retained pixel buffers.
+    let key = (key, signature.clone());
     // Evict stale tab history before admitting another capture scope so decoded
     // image buffers remain bounded even during long multi-tab sessions.
     if !state.screenshot_observations.contains_key(&key)
