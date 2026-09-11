@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "agent-browser": {
+      "comment": "macOS: ~/Library/Application Support/Claude/claude_desktop_config.json",
+      "comment2": "Windows: %APPDATA%\\Claude\\claude_desktop_config.json",
+      "comment3": "Recommended: Use npx (no installation needed)",
+      "command": "npx",
+      "args": ["-y", "@agent-browser/mcp-server"]
+    }
+  }
+}
