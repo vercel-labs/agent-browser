@@ -1619,6 +1619,11 @@ impl DaemonState {
                                         self.webmcp.clear_page_tools(&session_id);
                                     }
                                 }
+                                if let Some(session) = self.browser.as_ref().and_then(|browser| {
+                                    browser.session_id_for_target(&te.target_id)
+                                }) {
+                                    self.webmcp.observations.remove(session);
+                                }
                                 destroyed_targets.push(te.target_id);
                             }
                             continue;
@@ -2941,7 +2946,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "stream_enable" => handle_stream_enable(cmd, state).await,
         "stream_disable" => handle_stream_disable(state).await,
         "stream_status" => handle_stream_status(state).await,
-        "webmcp_list" => handle_webmcp_list(state).await,
+        "webmcp_list" => handle_webmcp_list(cmd, state).await,
         "webmcp_invoke" => handle_webmcp_invoke(cmd, state).await,
         "webmcp_result" => handle_webmcp_result(cmd, state).await,
         "webmcp_cancel" => handle_webmcp_cancel(cmd, state).await,
@@ -8738,6 +8743,8 @@ async fn collect_webmcp_tools(state: &mut DaemonState) -> Result<Vec<webmcp::Too
         .await
         .map_err(|error| webmcp::unsupported_error(&error))?;
 
+    state.webmcp.observations.insert(session_id.clone(), Ok(()));
+
     let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_millis(webmcp::DISCOVERY_WINDOW_MS);
     loop {
@@ -8775,21 +8782,64 @@ async fn collect_webmcp_tools(state: &mut DaemonState) -> Result<Vec<webmcp::Too
     Ok(tools)
 }
 
-async fn enable_webmcp_events(state: &DaemonState) -> Result<(), String> {
-    let (client, session_id, _) = webmcp_page_context(state).await?;
-    client
-        .send_command_no_params("WebMCP.enable", Some(&session_id))
-        .await
-        .map(|_| ())
-        .map_err(|error| webmcp::unsupported_error(&error))
+/// Subscribe once per CDP page session. Ordinary actions then read the event
+/// cache without renderer evaluation, repeated CDP requests, or discovery waits.
+async fn enable_webmcp_events(state: &mut DaemonState) -> Result<(), String> {
+    if !state.webmcp_enabled
+        || state.engine != "chrome"
+        || matches!(state.backend_type, BackendType::WebDriver)
+    {
+        return Err("WebMCP observation disabled".to_string());
+    }
+    let browser = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = browser.active_session_id()?.to_string();
+    if let Some(result) = state.webmcp.observations.get(&session_id) {
+        return result.clone();
+    }
+    let client = browser.client.clone();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        let tree = client
+            .send_command_no_params("Page.getFrameTree", Some(&session_id))
+            .await?;
+        client
+            .send_command_no_params("WebMCP.enable", Some(&session_id))
+            .await?;
+        fn update_origins(state: &mut webmcp::RuntimeState, session: &str, tree: &Value) {
+            if let (Some(id), Some(origin)) = (
+                tree["frame"]["id"].as_str(),
+                webmcp::frame_origin(&tree["frame"]),
+            ) {
+                state.update_frame_origin(session, id, &origin);
+            }
+            if let Some(children) = tree["childFrames"].as_array() {
+                for child in children {
+                    update_origins(state, session, child);
+                }
+            }
+        }
+        update_origins(&mut state.webmcp, &session_id, &tree["frameTree"]);
+        Ok::<(), String>(())
+    })
+    .await
+    .unwrap_or_else(|_| Err("WebMCP observation timed out".to_string()));
+    // Unsupported sessions are not probed again on every action. An explicit
+    // list request can retry setup; fresh browser sessions start with no cache.
+    state.webmcp.observations.insert(session_id, result.clone());
+    result
 }
 
-async fn handle_webmcp_list(state: &mut DaemonState) -> Result<Value, String> {
-    let tools = collect_webmcp_tools(state).await?;
-    Ok(json!({
-        "experimental": true,
-        "tools": tools,
-    }))
+async fn handle_webmcp_list(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let mut tools = collect_webmcp_tools(state).await?;
+    if let Some(name) = cmd.get("tool").and_then(Value::as_str) {
+        tools =
+            vec![
+                webmcp::resolve_tool(&tools, name, cmd.get("frameId").and_then(Value::as_str))?
+                    .clone(),
+            ];
+    } else if let Some(frame) = cmd.get("frameId").and_then(Value::as_str) {
+        tools.retain(|tool| tool.frame_id == frame);
+    }
+    Ok(json!({"experimental": true, "untrusted": true, "tools": tools}))
 }
 
 async fn wait_for_webmcp_invocation(
@@ -12456,55 +12506,60 @@ fn success_response(id: &str, data: Value) -> Value {
     })
 }
 
+/// Enrich ordinary browser results so discovery does not depend on the agent
+/// remembering to call `webmcp list`. Administrative commands stay page-free.
+fn includes_webmcp_context(action: &str) -> bool {
+    action != "webmcp_list"
+        && (!skip_launch_action(action)
+            || matches!(action, "launch" | "webmcp_result" | "webmcp_cancel"))
+}
+
 async fn attach_webmcp_availability(resp: &mut Value, action: &str, state: &mut DaemonState) {
-    if action != "navigate"
-        || resp.get("success").and_then(Value::as_bool) != Some(true)
+    if !includes_webmcp_context(action)
         || matches!(state.backend_type, BackendType::WebDriver)
         || state.engine != "chrome"
         || !state.webmcp_enabled
+        || state.browser.is_none()
     {
         return;
     }
-    let Ok(tools) = wait_for_navigation_webmcp_tools(state).await else {
-        return;
-    };
-    let domain_filter = state.domain_filter.read().await;
-    attach_webmcp_availability_from_tools(resp, action, &tools, domain_filter.as_ref());
-}
-
-async fn wait_for_navigation_webmcp_tools(
-    state: &mut DaemonState,
-) -> Result<Vec<webmcp::ToolRecord>, String> {
-    let session_id = state
+    // The first subscription is bounded. Once installed, observation is passive
+    // and the dispatcher already drains CDP events after every browser action.
+    let initializing = state
         .browser
         .as_ref()
-        .ok_or("Browser not launched")?
-        .active_session_id()?
-        .to_string();
-    let deadline =
-        tokio::time::Instant::now() + std::time::Duration::from_millis(webmcp::DISCOVERY_WINDOW_MS);
-    loop {
-        state.drain_cdp_events_background().await?;
-        let tools = state.webmcp.tools(&session_id)?;
-        let domain_filter = state.domain_filter.read().await;
-        let has_allowed_tool = webmcp_tool_count(&tools, domain_filter.as_ref()) > 0;
-        drop(domain_filter);
-        if has_allowed_tool {
-            return Ok(tools);
+        .and_then(|b| b.active_session_id().ok())
+        .is_some_and(|session| !state.webmcp.observations.contains_key(session));
+    let observed = enable_webmcp_events(state).await;
+    let drained = if initializing {
+        state.drain_cdp_events_background().await
+    } else {
+        Ok(())
+    };
+    let session = state
+        .browser
+        .as_ref()
+        .and_then(|b| b.active_session_id().ok())
+        .map(str::to_string);
+    if let Some(session) = session {
+        if observed.is_ok() && drained.is_ok() {
+            if let Ok(tools) = state.webmcp.tools(&session) {
+                let filter = state.domain_filter.read().await;
+                attach_webmcp_availability_from_tools(
+                    resp,
+                    action,
+                    &tools,
+                    filter.as_ref(),
+                    &mut state.webmcp,
+                    &session,
+                );
+                return;
+            }
         }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return Ok(tools);
-        }
-        tokio::time::sleep(remaining.min(std::time::Duration::from_millis(10))).await;
     }
-}
-
-fn webmcp_tool_count(tools: &[webmcp::ToolRecord], domain_filter: Option<&DomainFilter>) -> usize {
-    tools
-        .iter()
-        .filter(|tool| domain_filter.is_none_or(|filter| filter.check_url(&tool.origin).is_ok()))
-        .count()
+    if let Some(context) = state.webmcp.context_unavailable() {
+        insert_webmcp_context(resp, context);
+    }
 }
 
 fn attach_webmcp_availability_from_tools(
@@ -12512,25 +12567,30 @@ fn attach_webmcp_availability_from_tools(
     action: &str,
     tools: &[webmcp::ToolRecord],
     domain_filter: Option<&DomainFilter>,
+    runtime: &mut webmcp::RuntimeState,
+    session: &str,
 ) {
-    if action != "navigate" || resp.get("success").and_then(Value::as_bool) != Some(true) {
+    if !includes_webmcp_context(action) {
         return;
     }
-    let tool_count = webmcp_tool_count(tools, domain_filter);
-    if tool_count == 0 {
-        return;
+    let allowed: Vec<_> = tools
+        .iter()
+        .filter(|tool| domain_filter.is_none_or(|filter| filter.check_url(&tool.origin).is_ok()))
+        .cloned()
+        .collect();
+    if let Some(context) = runtime.context_update(session, &allowed) {
+        insert_webmcp_context(resp, context);
     }
-    let Some(data) = resp.get_mut("data").and_then(Value::as_object_mut) else {
+}
+
+fn insert_webmcp_context(resp: &mut Value, context: Value) {
+    let Some(response) = resp.as_object_mut() else {
         return;
     };
-    data.insert(
-        "webmcp".to_string(),
-        json!({
-            "experimental": true,
-            "available": true,
-            "toolCount": tool_count,
-        }),
-    );
+    let data = response.entry("data").or_insert_with(|| json!({}));
+    if let Some(data) = data.as_object_mut() {
+        data.insert("webmcp".to_string(), context);
+    }
 }
 
 fn inject_lifecycle(
@@ -14446,61 +14506,118 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[test]
-    fn test_navigation_advertises_cached_webmcp_tools() {
-        let mut resp = success_response(
-            "cmd-webmcp",
-            json!({"url": "https://example.com", "title": "Example"}),
-        );
-        let tools = vec![
-            webmcp_tool("search", "https://example.com"),
-            webmcp_tool("checkout", "https://example.com"),
-        ];
-
-        attach_webmcp_availability_from_tools(&mut resp, "navigate", &tools, None);
-
-        assert_eq!(
-            resp["data"]["webmcp"],
-            json!({
-                "experimental": true,
-                "available": true,
-                "toolCount": 2,
-            })
-        );
-    }
-
-    #[test]
-    fn test_navigation_without_cached_webmcp_tools_is_unchanged() {
-        let mut resp = success_response("cmd-webmcp", json!({"url": "https://example.com"}));
-        let expected = resp.clone();
-
-        attach_webmcp_availability_from_tools(&mut resp, "navigate", &[], None);
-
-        assert_eq!(resp, expected);
-    }
-
-    #[test]
-    fn test_non_navigation_response_does_not_advertise_webmcp_tools() {
-        let mut resp = success_response("cmd-webmcp", json!({"url": "https://example.com"}));
-        let expected = resp.clone();
+    fn test_browser_responses_include_current_webmcp_tools() {
         let tools = vec![webmcp_tool("search", "https://example.com")];
-
-        attach_webmcp_availability_from_tools(&mut resp, "launch", &tools, None);
-
-        assert_eq!(resp, expected);
+        for action in [
+            "launch",
+            "navigate",
+            "click",
+            "fill",
+            "snapshot",
+            "evaluate",
+            "wait",
+            "back",
+            "reload",
+            "tab_new",
+            "tab_switch",
+            "webmcp_invoke",
+            "webmcp_result",
+        ] {
+            let mut resp = success_response("cmd", json!({"text": "unchanged"}));
+            attach_webmcp_availability_from_tools(
+                &mut resp,
+                action,
+                &tools,
+                None,
+                &mut webmcp::RuntimeState::default(),
+                "session",
+            );
+            assert_eq!(resp["data"]["webmcp"]["toolCount"], 1, "{action}");
+            assert_eq!(
+                resp["data"]["webmcp"]["tools"][0]["name"], "search",
+                "{action}"
+            );
+            assert!(resp["data"]["webmcp"]["tools"][0]
+                .get("inputSchema")
+                .is_none());
+            assert_eq!(resp["data"]["text"], "unchanged");
+        }
     }
 
     #[test]
-    fn test_navigation_does_not_count_disallowed_webmcp_origins() {
-        let mut resp = success_response("cmd-webmcp", json!({"url": "https://allowed.example"}));
+    fn test_empty_catalog_replaces_stale_tools_even_after_action_error() {
+        let mut resp = error_response("cmd", "click failed");
+        let mut runtime = webmcp::RuntimeState::default();
+        runtime.context_update("session", &[webmcp_tool("search", "https://example.com")]);
+        attach_webmcp_availability_from_tools(
+            &mut resp,
+            "click",
+            &[],
+            None,
+            &mut runtime,
+            "session",
+        );
+        let mut subsequent = error_response("cmd", "click failed");
+        let original = subsequent.clone();
+        attach_webmcp_availability_from_tools(
+            &mut subsequent,
+            "click",
+            &[],
+            None,
+            &mut runtime,
+            "session",
+        );
+        assert_eq!(subsequent, original);
+        assert_eq!(resp["success"], false);
+        assert_eq!(resp["error"], "click failed");
+        assert_eq!(resp["data"]["webmcp"]["status"], "ready");
+        assert_eq!(resp["data"]["webmcp"]["available"], false);
+        assert_eq!(resp["data"]["webmcp"]["tools"], json!([]));
+    }
+
+    #[test]
+    fn test_administrative_responses_do_not_discover_page_tools() {
+        for action in [
+            "close",
+            "auth_list",
+            "state_show",
+            "read",
+            "session_info",
+            "webmcp_list",
+            "deny",
+        ] {
+            let mut resp = success_response("cmd", json!({}));
+            let expected = resp.clone();
+            attach_webmcp_availability_from_tools(
+                &mut resp,
+                action,
+                &[],
+                None,
+                &mut webmcp::RuntimeState::default(),
+                "session",
+            );
+            assert_eq!(resp, expected, "{action}");
+        }
+    }
+
+    #[test]
+    fn test_proactive_catalog_excludes_disallowed_origins() {
+        let mut resp = success_response("cmd", json!({}));
         let tools = vec![
             webmcp_tool("search", "https://allowed.example"),
-            webmcp_tool("checkout", "https://blocked.example"),
+            webmcp_tool("secret", "https://blocked.example"),
         ];
-        let domain_filter = DomainFilter::new("allowed.example");
-
-        attach_webmcp_availability_from_tools(&mut resp, "navigate", &tools, Some(&domain_filter));
-
+        attach_webmcp_availability_from_tools(
+            &mut resp,
+            "snapshot",
+            &tools,
+            Some(&DomainFilter::new("allowed.example")),
+            &mut webmcp::RuntimeState::default(),
+            "session",
+        );
         assert_eq!(resp["data"]["webmcp"]["toolCount"], 1);
+        assert!(!resp.to_string().contains("secret"));
+        assert!(!resp.to_string().contains("blocked.example"));
     }
 
     #[tokio::test]
