@@ -949,7 +949,7 @@ Do not put vault tokens or passwords in plugin command args. Use the vault vendo
 
 ## Snapshot Options
 
-Existing elements keep their refs across snapshots. Take a fresh snapshot after navigation.
+Surviving DOM elements keep their refs across snapshots. Take a fresh snapshot after page or iframe navigation.
 
 Use filters to reduce snapshot output:
 

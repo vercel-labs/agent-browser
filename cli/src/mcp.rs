@@ -836,7 +836,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_SNAPSHOT,
             "Snapshot page",
-            "Return an accessibility-tree snapshot with stable element refs. Refresh after navigation.",
+            "Return an accessibility-tree snapshot with reusable element refs.",
             json!({
                 "interactive": { "type": "boolean", "default": true, "description": "Only include interactive elements." },
                 "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements." },
@@ -2597,6 +2597,10 @@ fn call_read(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_snapshot(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, snapshot_command_args(arguments)?, None)
+}
+
+fn snapshot_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = vec!["snapshot".to_string()];
     if optional_bool(arguments, "interactive")?.unwrap_or(true) {
         args.push("-i".to_string());
@@ -2622,7 +2626,7 @@ fn call_snapshot(arguments: &Value) -> Result<Value, ProtocolError> {
         args.push("--full".to_string());
     }
 
-    call_cli_tool(arguments, args, None)
+    Ok(args)
 }
 
 fn call_simple_selector(arguments: &Value, command: &str) -> Result<Value, ProtocolError> {
@@ -4040,6 +4044,24 @@ fn write_json_line(stdout: &mut io::Stdout, value: &Value) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn snapshot_observations_use_canonical_cli_command() {
+        for arguments in [
+            json!({}),
+            json!({"interactive": false, "selector": "#content"}),
+        ] {
+            let args = snapshot_command_args(&arguments).unwrap();
+            let flags = crate::flags::parse_flags(&args);
+            let command = crate::commands::parse_command(&args, &flags).unwrap();
+            assert_eq!(command["action"], "snapshot");
+            assert_eq!(command.get("selector"), arguments.get("selector"));
+            assert_eq!(
+                command["interactive"].as_bool().unwrap_or(false),
+                arguments["interactive"].as_bool().unwrap_or(true)
+            );
+        }
+    }
+
     use super::*;
 
     #[test]
