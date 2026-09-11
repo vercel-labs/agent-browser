@@ -136,3 +136,17 @@ skill-loading
 ```
 
 JSON mode (`--json`) outputs structured results for programmatic consumption.
+
+## Live WebMCP context eval
+
+`webmcp-context.py` runs a real Codex agent against a local shop with the thin agent-browser skill installed in an isolated workspace. It uses the existing Codex login and configuration, without rewriting the user's configuration or requiring AI Gateway credentials. Build the native CLI first, then run:
+
+```bash
+python3 evals/webmcp-context.py --binary cli/target/debug/agent-browser --chrome /path/to/chrome --results /tmp/webmcp-eval --runs 3
+```
+
+The task prompt asks the agent to find an in-stock blue backpack under $80 and save the cheapest match to its wishlist. It does not mention WebMCP. The shop initially registers `search_products`; searching registers `save_wishlist`, and saving removes it. The DOM offers working search and save controls as an alternative path.
+
+The grader records actual CLI calls and page events, checks the catalog on the first successful page load, requires both relevant WebMCP invocations without an explicit `webmcp list`, and independently reads the resulting wishlist. The read happens before browser close when the agent performs cleanup. A fresh session uses default browser launch behavior with no WebMCP feature flags. Results include the exact prompt, command outputs, agent transcript, native browser support, tool calls, and the verified wishlist. These are smoke evaluations, not a claim of reliability across models or sites.
+
+Use `--binary` and `--skills-dir /path/to/baseline/skill-data` to compare a baseline build with the changed build, keeping the CLI-served skill matched to each binary. An unchanged baseline is expected to fail the proactive-discovery criterion even if it completes the shopping task through explicit discovery or DOM interactions. `--codex` selects the Codex executable. `--prompt` can vary the wording, but the default grader still expects the same backpack task and result.

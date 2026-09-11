@@ -76,6 +76,7 @@ fn native_test_fixture_html(name: &str) -> &'static str {
         "webmcp_delayed_probe" => include_str!("test_fixtures/webmcp_delayed_probe.html"),
         "webmcp_frame_probe" => include_str!("test_fixtures/webmcp_frame_probe.html"),
         "webmcp_probe" => include_str!("test_fixtures/webmcp_probe.html"),
+        "webmcp_context_probe" => include_str!("test_fixtures/webmcp_context_probe.html"),
         _ => panic!("Unknown native test fixture: {}", name),
     }
 }
@@ -483,6 +484,79 @@ async fn e2e_webmcp_navigation_waits_for_delayed_initial_registration() {
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
     fixture_server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_webmcp_context_follows_actions_without_explicit_discovery() {
+    let (url, server) = start_webmcp_server().await;
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({"id": "launch", "action": "launch", "headless": true}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let commands = [
+        (
+            json!({"action": "navigate", "url": format!("{url}/context.html")}),
+            0,
+        ),
+        (json!({"action": "click", "selector": "#register"}), 1),
+        (json!({"action": "snapshot"}), 1),
+        (
+            json!({"action": "fill", "selector": "#description", "value": "Updated description"}),
+            1,
+        ),
+        (
+            json!({"action": "webmcp_invoke", "tool": "set_message", "params": {"message": "Hello from discovered tool"}}),
+            1,
+        ),
+        (json!({"action": "gettext", "selector": "#result"}), 1),
+        (
+            json!({"action": "evaluate", "script": "history.pushState({}, '', '#route')"}),
+            1,
+        ),
+        (
+            json!({"action": "tab_new", "url": format!("{url}/empty.html")}),
+            0,
+        ),
+        (json!({"action": "tab_switch", "tabId": "t1"}), 1),
+        (json!({"action": "tab_close", "tabId": "t2"}), 1),
+        (json!({"action": "click", "selector": "#remove"}), 0),
+        (json!({"action": "wait", "timeout": 50}), 0),
+        (json!({"action": "click", "selector": "#register"}), 1),
+        (
+            json!({"action": "navigate", "url": format!("{url}/empty.html")}),
+            0,
+        ),
+    ];
+    for (mut cmd, count) in commands {
+        cmd["id"] = json!("context");
+        let resp = execute_command(&cmd, &mut state).await;
+        assert_success(&resp);
+        let context = &get_data(&resp)["webmcp"];
+        assert_eq!(context["status"], "ready", "{cmd}: {resp}");
+        assert_eq!(context["toolCount"], count, "{cmd}: {resp}");
+        assert_eq!(context["available"], count > 0);
+        if count > 0 {
+            let tool = &context["tools"][0];
+            assert_eq!(tool["name"], "set_message");
+            assert_eq!(tool["inputSchema"]["required"], json!(["message"]));
+            assert!(tool["frameId"].as_str().is_some_and(|id| !id.is_empty()));
+            assert_eq!(tool["origin"], url);
+            if cmd["action"] == "fill" {
+                assert_eq!(tool["description"], "Updated description");
+            }
+        }
+        if cmd["action"] == "gettext" {
+            assert_eq!(get_data(&resp)["text"], "Hello from discovered tool");
+        }
+    }
+    let resp = execute_command(&json!({"id": "close", "action": "close"}), &mut state).await;
+    assert_success(&resp);
+    assert!(get_data(&resp).get("webmcp").is_none());
+    server.abort();
 }
 
 #[tokio::test]
@@ -5398,6 +5472,10 @@ async fn start_webmcp_server() -> (String, tokio::task::JoinHandle<()>) {
                 let body = if request.starts_with("GET /frame.html ") {
                     native_test_fixture_html("webmcp_frame_probe")
                         .replace("__PORT__", &port.to_string())
+                } else if request.starts_with("GET /context.html ") {
+                    native_test_fixture_html("webmcp_context_probe").to_string()
+                } else if request.starts_with("GET /empty.html ") {
+                    "<!doctype html><title>No page tools</title>".to_string()
                 } else if request.starts_with("GET /delayed.html ") {
                     native_test_fixture_html("webmcp_delayed_probe").to_string()
                 } else {

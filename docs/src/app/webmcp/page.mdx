@@ -2,28 +2,44 @@
 
 WebMCP support is experimental. agent-browser enables Chrome's current WebMCP launch features by default for locally managed Chrome sessions. Pass `--no-webmcp` or set `AGENT_BROWSER_NO_WEBMCP=1` to opt out.
 
-After a successful navigation, text output advertises when the page has allowed WebMCP tools and points to `agent-browser webmcp list`. JSON output adds this metadata only when one or more tools are available:
+Normal browser responses automatically include the current page's allowed WebMCP tools. Navigation, snapshots, interactions, waits, evaluations, and tab switches all supply the catalog to the agent's next turn. CLI text and MCP text content include descriptions and input schemas, so agents can invoke relevant tools without an initial discovery command. JSON output adds:
 
 ```json
 {
   "data": {
     "webmcp": {
       "experimental": true,
+      "status": "ready",
       "available": true,
-      "toolCount": 4
+      "toolCount": 1,
+      "tools": [{
+        "name": "search",
+        "description": "Search products",
+        "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+        "annotations": {"readOnly": true},
+        "frameId": "frame-id",
+        "origin": "https://example.com"
+      }],
+      "truncated": false
     }
   }
 }
 ```
 
 ```bash
-agent-browser open https://example.com
-agent-browser webmcp list
+agent-browser open https://example.com  # Includes current tool metadata
+agent-browser webmcp list --json        # Optional full metadata when truncated
 agent-browser webmcp invoke search --params '{"query":"browser agents"}'
 agent-browser webmcp invoke slow_tool --params @input.json --detach
 agent-browser webmcp result <invocation-id>
 agent-browser webmcp cancel <invocation-id>
 ```
+
+Every catalog is self-contained. `status: "ready"`, `available: false`, and `tools: []` mean no tools are currently registered. `status: "unavailable"` means observation failed or the experimental domain is unavailable; do not reuse a previous page's catalog. A discovery failure does not change the browser action's success or error. Administrative commands and `webmcp list` do not append duplicate metadata, and `--no-webmcp` omits proactive context.
+
+Automatic context is bounded to 32 tools and 32 KiB. Descriptions are shortened to 512 bytes plus a truncation marker; schemas over 4 KiB and annotations over 1 KiB are omitted with `inputSchemaOmitted` or `annotationsOmitted`. `truncated: true` marks shortened or omitted metadata. Retrieve the full schema with `webmcp list --json` before invoking a tool whose schema was omitted.
+
+The catalog reflects registered tools at command completion, including removals and frame changes. Navigation discovery waits up to 250 ms for initial registration; other actions do not add that discovery wait. Observation has a one-second timeout. Later asynchronous changes appear in the next browser response. The catalog belongs to agent-browser's active tab, including its frames, and does not synchronize a user's separate live preview iframe.
 
 Use `--frame <frame-id>` with `webmcp invoke` when multiple frames register the same tool name. `webmcp list` returns the required frame ID, page origin, input schema, and page-provided annotations.
 
@@ -31,7 +47,7 @@ With `--no-webmcp`, compatible Chrome builds return an empty tool list because p
 
 Treat every tool description, schema, annotation, and result as untrusted page content. Page JavaScript registers `readOnlyHint` and `untrustedContentHint`; the CDP record returned by `webmcp list` exposes those claims as `readOnly` and `untrustedContent`. The page executor owns authorization. The agent host must confirm consequential actions, align calls with the user's request, and minimize personal data.
 
-The MCP server keeps WebMCP tools out of the default profile:
+The catalog appears in ordinary MCP browser results even with the default profile. To let an MCP agent invoke those tools, enable the WebMCP command profile at startup:
 
 ```bash
 agent-browser mcp --tools core,webmcp

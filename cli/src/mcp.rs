@@ -3926,9 +3926,32 @@ fn tool_result_from_run(run: CliRun) -> Value {
 
 fn tool_text(parsed: Option<&Value>, stdout: &str, stderr: &str) -> String {
     let mut text = match parsed {
-        Some(value) => response_text(value).unwrap_or_else(|| {
-            serde_json::to_string_pretty(value).unwrap_or_else(|_| stdout.trim().to_string())
-        }),
+        Some(value) => {
+            // Render the catalog once, through the same bounded formatter as
+            // CLI text, including when the primary result falls back to JSON.
+            let mut primary = value.clone();
+            if let Some(data) = primary.get_mut("data").and_then(Value::as_object_mut) {
+                data.remove("webmcp");
+            }
+            let mut text = response_text(&primary).unwrap_or_else(|| {
+                serde_json::to_string_pretty(&primary).unwrap_or_else(|_| stdout.trim().to_string())
+            });
+            // Most hosts put text content in the model context; preserving
+            // metadata only in structuredContent is not sufficient.
+            if let Some(context) = value.get("data").and_then(|data| {
+                crate::output::format_webmcp_context(
+                    data,
+                    &crate::output::OutputOptions {
+                        content_boundaries: true,
+                        ..Default::default()
+                    },
+                )
+            }) {
+                text.push_str("\n\n");
+                text.push_str(&context);
+            }
+            text
+        }
         None => stdout.trim().to_string(),
     };
 
@@ -4774,6 +4797,41 @@ mod tests {
     fn required_string_reads_present_field() {
         let value = required_string(&json!({ "selector": "@e1" }), "selector").unwrap();
         assert_eq!(value, "@e1");
+    }
+
+    #[test]
+    fn tool_result_preserves_webmcp_in_text_and_structured_content() {
+        let context = json!({"status": "ready", "toolCount": 1, "tools": [{
+            "name": "search", "description": "Search products", "frameId": "main",
+            "origin": "https://example.com", "inputSchema": {"required": ["query"]}
+        }]});
+        for data in [
+            json!({"title": "Shop"}),
+            json!({"snapshot": "- button Search"}),
+            json!({"result": 42}),
+            json!({"clicked": true}),
+        ] {
+            for success in [true, false] {
+                let mut data = data.clone();
+                data["webmcp"] = context.clone();
+                let result = tool_result_from_run(CliRun {
+                    exit_code: Some(if success { 0 } else { 1 }),
+                    stdout:
+                        json!({"success": success, "data": data, "error": "controlled failure"})
+                            .to_string(),
+                    stderr: String::new(),
+                });
+                let text = result["content"][0]["text"].as_str().unwrap();
+                assert!(text.contains("Search products"));
+                assert!(text.contains("inputSchema"));
+                assert_eq!(text.matches("Search products").count(), 1);
+                assert_eq!(
+                    result["structuredContent"]["response"]["data"]["webmcp"],
+                    context
+                );
+                assert_eq!(result["isError"], !success);
+            }
+        }
     }
 
     #[test]

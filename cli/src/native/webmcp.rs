@@ -49,6 +49,61 @@ pub struct ToolRecord {
     pub backend_node_id: Option<i64>,
 }
 
+// Proactive context has a smaller budget than the explicit discovery command.
+pub const MAX_CONTEXT_BYTES: usize = 32 * 1024;
+pub const MAX_CONTEXT_TOOLS: usize = 32;
+const MAX_CONTEXT_DESCRIPTION_BYTES: usize = 512;
+const MAX_CONTEXT_SCHEMA_BYTES: usize = 4096;
+
+/// A self-contained catalog for the next agent turn. Never truncate a schema
+/// into invalid JSON or silently imply that a partial catalog is complete.
+pub fn context_from_tools(tools: &[ToolRecord]) -> Value {
+    let mut ordered: Vec<_> = tools.iter().collect();
+    ordered.sort_by(|a, b| (&a.name, &a.frame_id).cmp(&(&b.name, &b.frame_id)));
+    let mut catalog = Vec::new();
+    let mut bytes = 256; // Envelope and array delimiters.
+    let mut truncated = false;
+    for tool in ordered {
+        if catalog.len() == MAX_CONTEXT_TOOLS {
+            break;
+        }
+        let mut entry = json!({
+            "name": tool.name,
+            "description": bounded_string(&tool.description, MAX_CONTEXT_DESCRIPTION_BYTES),
+            "origin": tool.origin,
+            "frameId": tool.frame_id,
+        });
+        truncated |= tool.description.len() > MAX_CONTEXT_DESCRIPTION_BYTES;
+        for (key, value, cap) in [
+            ("inputSchema", &tool.input_schema, MAX_CONTEXT_SCHEMA_BYTES),
+            ("annotations", &tool.annotations, 1024),
+        ] {
+            if value.to_string().len() <= cap {
+                entry[key] = value.clone();
+            } else {
+                entry[format!("{key}Omitted")] = json!(true);
+                truncated = true;
+            }
+        }
+        let entry_bytes = entry.to_string().len() + 1;
+        if bytes + entry_bytes > MAX_CONTEXT_BYTES {
+            truncated = true;
+            continue;
+        }
+        bytes += entry_bytes;
+        catalog.push(entry);
+    }
+    truncated |= catalog.len() < tools.len();
+    json!({
+        "experimental": true,
+        "status": "ready",
+        "available": !tools.is_empty(),
+        "toolCount": tools.len(),
+        "tools": catalog,
+        "truncated": truncated,
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct InvocationRecord {
     pub invocation_id: String,
@@ -605,6 +660,52 @@ fn bounded_value(value: &Value, cap: usize) -> (Value, bool, usize) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn proactive_catalog_is_bounded_and_marks_omitted_schemas() {
+        let tools: Vec<_> = (0..100)
+            .rev()
+            .map(|i| super::ToolRecord {
+                name: format!("tool-{i:03}"),
+                description: "検索".repeat(1000),
+                input_schema: serde_json::json!({"description": "large".repeat(2000)}),
+                annotations: serde_json::json!({}),
+                origin: "https://example.com".to_string(),
+                frame_id: "frame".to_string(),
+                backend_node_id: None,
+            })
+            .collect();
+        let context = super::context_from_tools(&tools);
+        assert!(context.to_string().len() <= super::MAX_CONTEXT_BYTES);
+        assert!(context["tools"].as_array().unwrap().len() <= super::MAX_CONTEXT_TOOLS);
+        assert_eq!(context["toolCount"], 100);
+        assert_eq!(context["truncated"], true);
+        assert_eq!(context["tools"][0]["name"], "tool-000");
+        assert_eq!(context["tools"][0]["inputSchemaOmitted"], true);
+        assert!(context["tools"][0].get("inputSchema").is_none());
+    }
+
+    #[test]
+    fn proactive_catalog_preserves_schemas_and_bounds_json_escaping() {
+        let mut tool = super::ToolRecord {
+            name: "search".to_string(),
+            description: "Find a product".to_string(),
+            input_schema: serde_json::json!({"type": "object", "required": ["query"]}),
+            annotations: serde_json::json!({"readOnly": true}),
+            origin: "https://example.com".to_string(),
+            frame_id: "frame".to_string(),
+            backend_node_id: None,
+        };
+        let context = super::context_from_tools(&[tool.clone()]);
+        assert_eq!(context["tools"][0]["inputSchema"], tool.input_schema);
+        assert_eq!(context["truncated"], false);
+        tool.name = "\0".repeat(super::MAX_CONTEXT_BYTES);
+        let context = super::context_from_tools(&[tool]);
+        assert!(context.to_string().len() <= super::MAX_CONTEXT_BYTES);
+        assert_eq!(context["available"], true);
+        assert_eq!(context["truncated"], true);
+        assert_eq!(context["tools"], serde_json::json!([]));
+    }
+
     use super::*;
 
     #[test]

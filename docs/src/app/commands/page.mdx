@@ -42,7 +42,7 @@ agent-browser close --all             # Close all active sessions
 agent-browser mcp                     # Start an MCP stdio server
 ```
 
-Successful `open <url>` and `navigate` commands advertise when WebMCP tools are available. With `--json`, the navigation response includes `data.webmcp.toolCount`.
+Normal browser commands, including `open`, `snapshot`, `click`, `fill`, `wait`, and tab switches, include the current WebMCP catalog with descriptions and input schemas. JSON exposes it as `data.webmcp`; CLI and MCP text content include it automatically. Invoke relevant tools directly, and use `webmcp list --json` when metadata is truncated. See [WebMCP](/webmcp) for context limits and refresh behavior.
 
 Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, take a fresh snapshot, then retry the original action.
 

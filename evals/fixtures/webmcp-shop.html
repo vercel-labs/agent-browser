@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Trail Supply</title></head>
+<body>
+<h1>Trail Supply</h1>
+<form id="search">
+  <label>Color <select id="color"><option>blue</option><option>red</option></select></label>
+  <label>Maximum price <input id="price" type="number" value="80"></label>
+  <button>Search backpacks</button>
+</form>
+<div id="products"></div>
+<h2>Wishlist</h2><output id="wishlist">Empty</output>
+<script>
+const inventory = [
+  {id: 'p1', name: 'Trail Lite Blue', color: 'blue', price: 59, inStock: true},
+  {id: 'p2', name: 'Summit Blue', color: 'blue', price: 75, inStock: true},
+  {id: 'p3', name: 'Budget Blue', color: 'blue', price: 35, inStock: false},
+  {id: 'p4', name: 'Alpine Blue', color: 'blue', price: 99, inStock: true},
+  {id: 'p5', name: 'Trail Lite Red', color: 'red', price: 49, inStock: true},
+];
+const audit = (event) => fetch('/audit', {method: 'POST', body: JSON.stringify(event)});
+let saveController;
+function searchProducts({color, maxPrice, inStockOnly = true}, source) {
+  const items = inventory.filter(p => p.color === color && p.price <= maxPrice && (!inStockOnly || p.inStock));
+  document.querySelector('#products').replaceChildren(...items.map(p => {
+    const row = document.createElement('p');
+    row.textContent = `${p.name}: $${p.price}, ${p.inStock ? 'in stock' : 'out of stock'} `;
+    const button = document.createElement('button');
+    button.textContent = `Save ${p.name}`;
+    button.onclick = () => saveWishlist({productId: p.id}, 'ui');
+    row.append(button);
+    return row;
+  }));
+  audit({type: 'search', source, color, maxPrice, inStockOnly});
+  saveController?.abort();
+  saveController = new AbortController();
+  document.modelContext.registerTool({
+    name: 'save_wishlist', description: 'Save an in-stock search result to the wishlist. This does not purchase anything.',
+    inputSchema: {type: 'object', properties: {productId: {type: 'string', enum: items.filter(p => p.inStock).map(p => p.id)}}, required: ['productId'], additionalProperties: false},
+    execute: async (args) => saveWishlist(args, 'webmcp'),
+  }, {signal: saveController.signal});
+  return {items};
+}
+function saveWishlist({productId}, source) {
+  const product = inventory.find(p => p.id === productId && p.inStock);
+  if (!product) throw new Error('Product unavailable');
+  document.querySelector('#wishlist').textContent = `${product.name}: $${product.price}`;
+  audit({type: 'save', source, productId});
+  saveController?.abort();
+  return {saved: true, product};
+}
+document.querySelector('#search').onsubmit = event => {
+  event.preventDefault();
+  searchProducts({color: document.querySelector('#color').value, maxPrice: Number(document.querySelector('#price').value), inStockOnly: true}, 'ui');
+};
+document.modelContext.registerTool({
+  name: 'search_products', description: 'Search backpacks by color, maximum price and availability. Results include product IDs and prices.',
+  inputSchema: {type: 'object', properties: {color: {type: 'string', enum: ['blue', 'red']}, maxPrice: {type: 'number'}, inStockOnly: {type: 'boolean'}}, required: ['color', 'maxPrice'], additionalProperties: false},
+  annotations: {readOnlyHint: true},
+  execute: async (args) => searchProducts(args, 'webmcp'),
+});
+audit({type: 'boot', nativeModelContext: !!document.modelContext, userAgent: navigator.userAgent});
+</script>
+</body>
+</html>

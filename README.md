@@ -151,11 +151,14 @@ agent-browser chat                    # AI chat: interactive REPL mode
 
 ### WebMCP (experimental)
 
-WebMCP tools are ready by default in agent-browser-managed Chrome. Use `--no-webmcp` to disable the launch features. After a successful navigation, text output advertises when tools are available. JSON output includes `data.webmcp` with `experimental`, `available`, and `toolCount`.
+WebMCP tools are ready by default in agent-browser-managed Chrome. Normal browser responses, including navigation, snapshots, clicks, typing, waits, and tab switches, automatically include the current page's tool names, descriptions, input schemas, frame IDs, and origins. Agents can invoke a relevant tool directly from that context without first deciding to discover WebMCP. Use `--no-webmcp` to disable this behavior and the launch features.
+
+JSON responses expose the catalog in `data.webmcp` with `experimental`, `status`, `available`, `toolCount`, `tools`, and `truncated`. CLI text and MCP text content include the same catalog. Each response is a fresh, self-contained observation; an empty `tools` array with `status: "ready"` clears earlier availability, while `status: "unavailable"` means discovery could not complete. Administrative commands and the explicit `webmcp list` response do not add a duplicate catalog.
+
+Automatic context is limited to 32 tools and 32 KiB, with descriptions shortened to 512 bytes plus a truncation marker, schemas capped at 4 KiB, and annotations capped at 1 KiB. Oversized schemas or annotations are omitted with an explicit marker; `truncated: true` signals any shortened metadata or omitted tools. Use `agent-browser webmcp list --json` for full metadata when needed. Registration changes are observed at command completion, with up to 250 ms for initial navigation discovery; later asynchronous changes appear on the next browser response. This describes the agent-browser session's page, which may differ from a user's separately opened preview iframe.
 
 ```bash
-agent-browser open https://example.com
-agent-browser webmcp list
+agent-browser open https://example.com  # Returns available tools and schemas
 agent-browser webmcp invoke search --params '{"query":"browser agents"}'
 agent-browser webmcp invoke slow_tool --params @input.json --detach
 agent-browser webmcp result <invocation-id>
