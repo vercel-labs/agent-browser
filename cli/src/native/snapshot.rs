@@ -27,7 +27,16 @@ const INTERACTIVE_ROLES: &[&str] = &[
     "tab",
     "treeitem",
     "Iframe",
+    // Chrome reports <iframe role="presentation"> as IframePresentational.
+    // Hosted payment fields (Stripe Elements among them) mark their frames
+    // that way, so the frame needs a ref and a child snapshot like any other.
+    "IframePresentational",
 ];
+
+/// Both accessibility roles Chrome uses for an <iframe> element.
+fn is_iframe_role(role: &str) -> bool {
+    role == "Iframe" || role == "IframePresentational"
+}
 
 const CONTENT_ROLES: &[&str] = &[
     "heading",
@@ -518,7 +527,7 @@ pub async fn take_snapshot(
     if frame_id.is_none() {
         let mut iframe_snapshots: Vec<(String, String)> = Vec::new(); // (ref_id, child_snapshot)
         for node in tree_nodes.iter() {
-            if node.role != "Iframe" || !node.has_ref {
+            if !is_iframe_role(&node.role) || !node.has_ref {
                 continue;
             }
             let Some(bid) = node.backend_node_id else {
@@ -1108,7 +1117,9 @@ fn render_tree(
         }
     }
 
-    let role = &node.role;
+    // Agents read one role for every frame; the presentational variant is
+    // still an iframe to them.
+    let role = if node.role == "IframePresentational" { "Iframe" } else { node.role.as_str() };
 
     // Skip root WebArea wrapper
     if role == "RootWebArea" || role == "WebArea" {
@@ -1384,6 +1395,14 @@ mod tests {
         assert!(INTERACTIVE_ROLES.contains(&"button"));
         assert!(INTERACTIVE_ROLES.contains(&"textbox"));
         assert!(!INTERACTIVE_ROLES.contains(&"heading"));
+    }
+
+    #[test]
+    fn test_presentational_iframes_are_iframes() {
+        assert!(INTERACTIVE_ROLES.contains(&"IframePresentational"));
+        assert!(is_iframe_role("Iframe"));
+        assert!(is_iframe_role("IframePresentational"));
+        assert!(!is_iframe_role("generic"));
     }
 
     #[test]
