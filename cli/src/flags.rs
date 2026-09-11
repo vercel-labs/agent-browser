@@ -347,17 +347,64 @@ pub fn load_config(args: &[String]) -> Result<Config, String> {
             .ok_or_else(|| format!("failed to load config from {}", path_str));
     }
 
-    let user_config = dirs::home_dir()
-        .map(|d| d.join(CONFIG_DIR).join(CONFIG_FILENAME))
-        .and_then(|p| read_config_file(&p))
-        .unwrap_or_default();
+    let user_path = dirs::home_dir().map(|d| d.join(CONFIG_DIR).join(CONFIG_FILENAME));
+    let project_path = PathBuf::from(PROJECT_CONFIG_FILENAME);
+    Ok(load_discovered_configs(
+        user_path.as_deref(),
+        Some(&project_path),
+    ))
+}
 
-    let project_config = read_config_file(&PathBuf::from(PROJECT_CONFIG_FILENAME));
+/// Merge auto-discovered user + project config files.
+///
+/// Project `executablePath` and `plugins` spawn local processes. Those fields are
+/// ignored from auto-discovered `./agent-browser.json` so a repository cannot
+/// inject a browser binary or `launch.mutate` plugin. User-level config,
+/// `--config` / `AGENT_BROWSER_CONFIG`, environment variables, and CLI flags
+/// remain allowed.
+fn load_discovered_configs(user_path: Option<&Path>, project_path: Option<&Path>) -> Config {
+    let user = user_path.and_then(read_config_file).unwrap_or_default();
+    let project = project_path.and_then(read_config_file);
+    apply_autodiscovered_project(user, project)
+}
 
-    Ok(match project_config {
-        Some(project) => user_config.merge(project),
-        None => user_config,
-    })
+fn apply_autodiscovered_project(user: Config, project: Option<Config>) -> Config {
+    match project {
+        Some(project) => user.merge(sanitize_autodiscovered_project_config(project)),
+        None => user,
+    }
+}
+
+/// Drop fields that would spawn a local process from auto-discovered project config.
+///
+/// `./agent-browser.json` is loaded without a workspace-trust prompt. A repo can
+/// therefore set `executablePath` or a plugin `command` (including
+/// `launch.mutate`) that `Command::new` would run. User-level config and
+/// explicit `--config` / `AGENT_BROWSER_CONFIG` are not sanitized here.
+fn sanitize_autodiscovered_project_config(mut project: Config) -> Config {
+    let ignored_executable = project.executable_path.take();
+    let ignored_plugins = project.plugins.take();
+    let mut ignored = Vec::new();
+    if ignored_executable.is_some() {
+        ignored.push("executablePath");
+    }
+    if ignored_plugins
+        .as_ref()
+        .is_some_and(|plugins| !plugins.is_empty())
+    {
+        ignored.push("plugins");
+    }
+    if !ignored.is_empty() {
+        eprintln!(
+            "{} ignoring {} from ./{} (auto-discovered project config cannot spawn local processes). Set these in ~/.{}/{}, or pass --config / AGENT_BROWSER_CONFIG, environment variables, or CLI flags.",
+            color::warning_indicator(),
+            ignored.join(" and "),
+            PROJECT_CONFIG_FILENAME,
+            CONFIG_DIR,
+            CONFIG_FILENAME
+        );
+    }
+    project
 }
 
 pub struct Flags {
@@ -1814,6 +1861,225 @@ mod tests {
 
         let _ = fs::remove_file(&config_path);
         let _ = fs::remove_dir(&dir);
+    }
+
+    const UNTRUSTED_DUMMY_CHROME: &str = "/tmp/agent-browser-untrusted-dummy-chrome";
+    const UNTRUSTED_DUMMY_PLUGIN: &str = "/tmp/agent-browser-untrusted-dummy-plugin";
+
+    fn dummy_launch_mutate_plugin() -> PluginConfig {
+        PluginConfig {
+            name: "marker".to_string(),
+            command: UNTRUSTED_DUMMY_PLUGIN.to_string(),
+            args: vec![],
+            capabilities: vec!["launch.mutate".to_string()],
+            source: None,
+        }
+    }
+
+    fn write_temp_config(dir: &tempfile::TempDir, name: &str, body: &str) -> PathBuf {
+        let path = dir.path().join(name);
+        fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// Fields forwarded from parsed flags into Chrome `Command::new` and plugin spawn.
+    fn launch_process_inputs(flags: &Flags) -> (Option<&str>, Vec<&str>) {
+        (
+            flags.executable_path.as_deref(),
+            flags.plugins.iter().map(|p| p.command.as_str()).collect(),
+        )
+    }
+
+    #[test]
+    fn test_autodiscovered_project_config_does_not_override_executable_path() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_temp_config(
+            &home,
+            "user.json",
+            r#"{"executablePath":"/usr/bin/chromium","headed":true}"#,
+        );
+        write_temp_config(
+            &project,
+            PROJECT_CONFIG_FILENAME,
+            &format!(
+                r#"{{"executablePath":"{}","headed":false}}"#,
+                UNTRUSTED_DUMMY_CHROME
+            ),
+        );
+
+        let user_path = home.path().join("user.json");
+        let project_path = project.path().join(PROJECT_CONFIG_FILENAME);
+        let config = load_discovered_configs(Some(&user_path), Some(&project_path));
+
+        assert_eq!(config.executable_path.as_deref(), Some("/usr/bin/chromium"));
+        assert_eq!(config.headed, Some(false));
+    }
+
+    #[test]
+    fn test_autodiscovered_project_config_does_not_inject_launch_mutate_plugin() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_temp_config(
+            &home,
+            "user.json",
+            r#"{"plugins":[{"name":"vault","command":"agent-browser-plugin-vault","capabilities":["credential.read"]}]}"#,
+        );
+        write_temp_config(
+            &project,
+            PROJECT_CONFIG_FILENAME,
+            &format!(
+                r#"{{"proxy":"http://project-proxy:9090","plugins":[{{"name":"marker","command":"{}","capabilities":["launch.mutate"]}}]}}"#,
+                UNTRUSTED_DUMMY_PLUGIN
+            ),
+        );
+
+        let user_path = home.path().join("user.json");
+        let project_path = project.path().join(PROJECT_CONFIG_FILENAME);
+        let config = load_discovered_configs(Some(&user_path), Some(&project_path));
+
+        assert_eq!(config.proxy.as_deref(), Some("http://project-proxy:9090"));
+        let plugins = config.plugins.unwrap_or_default();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].name, "vault");
+        assert!(!plugins.iter().any(|p| p.command == UNTRUSTED_DUMMY_PLUGIN
+            || p.capabilities.iter().any(|c| c == "launch.mutate")));
+    }
+
+    #[test]
+    fn test_autodiscovered_project_only_executable_path_is_dropped() {
+        let project = tempfile::tempdir().unwrap();
+        write_temp_config(
+            &project,
+            PROJECT_CONFIG_FILENAME,
+            &format!(
+                r#"{{"executablePath":"{}","plugins":[{{"name":"marker","command":"{}","capabilities":["launch.mutate"]}}]}}"#,
+                UNTRUSTED_DUMMY_CHROME, UNTRUSTED_DUMMY_PLUGIN
+            ),
+        );
+
+        let project_path = project.path().join(PROJECT_CONFIG_FILENAME);
+        let config = load_discovered_configs(None, Some(&project_path));
+
+        assert!(config.executable_path.is_none());
+        assert!(config
+            .plugins
+            .as_ref()
+            .map(|p| p.is_empty())
+            .unwrap_or(true));
+    }
+
+    #[test]
+    fn test_user_config_executable_path_and_plugins_remain_allowed() {
+        let home = tempfile::tempdir().unwrap();
+        write_temp_config(
+            &home,
+            "user.json",
+            &format!(
+                r#"{{"executablePath":"/usr/bin/chromium","plugins":[{{"name":"vault","command":"agent-browser-plugin-vault","capabilities":["credential.read"]}}]}}"#
+            ),
+        );
+
+        let user_path = home.path().join("user.json");
+        let config = load_discovered_configs(Some(&user_path), None);
+
+        assert_eq!(config.executable_path.as_deref(), Some("/usr/bin/chromium"));
+        let plugin = &config.plugins.as_ref().unwrap()[0];
+        assert_eq!(plugin.name, "vault");
+        assert_eq!(plugin.command, "agent-browser-plugin-vault");
+    }
+
+    #[test]
+    fn test_apply_autodiscovered_project_refuses_spawn_fields() {
+        let user = Config {
+            executable_path: Some("/usr/bin/chromium".to_string()),
+            plugins: Some(vec![PluginConfig {
+                name: "vault".to_string(),
+                command: "agent-browser-plugin-vault".to_string(),
+                args: vec![],
+                capabilities: vec!["credential.read".to_string()],
+                source: None,
+            }]),
+            headed: Some(true),
+            ..Config::default()
+        };
+        let project = Config {
+            executable_path: Some(UNTRUSTED_DUMMY_CHROME.to_string()),
+            plugins: Some(vec![dummy_launch_mutate_plugin()]),
+            proxy: Some("http://project-proxy:9090".to_string()),
+            ..Config::default()
+        };
+
+        let merged = apply_autodiscovered_project(user, Some(project));
+        assert_eq!(merged.executable_path.as_deref(), Some("/usr/bin/chromium"));
+        assert_eq!(merged.proxy.as_deref(), Some("http://project-proxy:9090"));
+        assert_eq!(merged.headed, Some(true));
+        let plugins = merged.plugins.unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].command, "agent-browser-plugin-vault");
+    }
+
+    #[test]
+    fn test_parse_flags_launch_path_ignores_autodiscovered_project_spawn_fields() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        write_temp_config(
+            &project,
+            PROJECT_CONFIG_FILENAME,
+            &format!(
+                r#"{{"executablePath":"{}","plugins":[{{"name":"marker","command":"{}","capabilities":["launch.mutate"]}}]}}"#,
+                UNTRUSTED_DUMMY_CHROME, UNTRUSTED_DUMMY_PLUGIN
+            ),
+        );
+
+        let user_path = home.path().join(CONFIG_DIR).join(CONFIG_FILENAME);
+        let project_path = project.path().join(PROJECT_CONFIG_FILENAME);
+        let config = load_discovered_configs(Some(&user_path), Some(&project_path));
+
+        // parse_flags copies these onto DaemonOptions / launch command JSON.
+        assert!(
+            config.executable_path.is_none(),
+            "project executablePath must not reach Chrome Command::new"
+        );
+        assert!(
+            config
+                .plugins
+                .as_ref()
+                .map(|p| p.is_empty())
+                .unwrap_or(true),
+            "project plugin commands must not reach plugin spawn"
+        );
+    }
+
+    #[test]
+    fn test_parse_flags_explicit_config_allows_executable_path_and_plugins() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = write_temp_config(
+            &dir,
+            "trusted.json",
+            &format!(
+                r#"{{"executablePath":"/usr/bin/chromium","plugins":[{{"name":"marker","command":"{}","capabilities":["launch.mutate"]}}]}}"#,
+                UNTRUSTED_DUMMY_PLUGIN
+            ),
+        );
+
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_CONFIG",
+            "AGENT_BROWSER_EXECUTABLE_PATH",
+            "AGENT_BROWSER_PLUGINS",
+        ]);
+        guard.remove("AGENT_BROWSER_CONFIG");
+        guard.remove("AGENT_BROWSER_EXECUTABLE_PATH");
+        guard.remove("AGENT_BROWSER_PLUGINS");
+
+        let flags = parse_flags(&[
+            "--config".to_string(),
+            config_path.to_string_lossy().to_string(),
+            "open".to_string(),
+        ]);
+        let (executable_path, plugin_commands) = launch_process_inputs(&flags);
+        assert_eq!(executable_path, Some("/usr/bin/chromium"));
+        assert_eq!(plugin_commands, vec![UNTRUSTED_DUMMY_PLUGIN]);
     }
 
     // === Boolean flag value tests ===
