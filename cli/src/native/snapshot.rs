@@ -8,6 +8,103 @@ use super::cdp::types::{
 };
 use super::element::{resolve_ax_session, RefMap};
 
+#[cfg(test)]
+mod document_identity_regressions {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    async fn observe_documents(documents: &[Option<&str>], sessions: &[&str]) -> Vec<String> {
+        let document = Arc::new(Mutex::new(None::<String>));
+        let server_document = document.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                let Ok(text) = message.to_text() else {
+                    continue;
+                };
+                let request: Value = serde_json::from_str(text).unwrap();
+                let result = match request["method"].as_str().unwrap() {
+                    "Page.getFrameTree" => json!({"frameTree": {"frame": {
+                        "id": "child", "loaderId": server_document.lock().unwrap().clone()
+                    }}}),
+                    "Accessibility.getFullAXTree" => json!({"nodes": [{
+                        "nodeId": "1", "role": {"type": "role", "value": "button"},
+                        "name": {"type": "string", "value": "Buy"}, "backendDOMNodeId": 42
+                    }]}),
+                    "Runtime.evaluate" => json!({"result": {"type": "object", "value": []}}),
+                    _ => json!({}),
+                };
+                ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                    json!({"id": request["id"], "result": result}).to_string(),
+                ))
+                .await
+                .unwrap();
+            }
+        });
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut refs = RefMap::new();
+        refs.set_scope("parent-session:parent-loader");
+        let mut observations = Vec::new();
+        for (loader, session) in documents.iter().zip(sessions) {
+            *document.lock().unwrap() = loader.map(str::to_string);
+            refs.clear();
+            take_snapshot(
+                &client,
+                "parent-session",
+                &SnapshotOptions::default(),
+                &mut refs,
+                Some("child"),
+                &HashMap::from([("child".into(), session.to_string())]),
+            )
+            .await
+            .unwrap();
+            observations.push(refs.entries_sorted()[0].0.clone());
+        }
+        server.abort();
+        observations
+    }
+
+    #[tokio::test]
+    async fn durable_refs_invalidate_replaced_iframe_document() {
+        let refs =
+            observe_documents(&[Some("a"), Some("a"), Some("b")], &["child-session"; 3]).await;
+        assert_eq!(refs[0], refs[1], "same document should preserve refs");
+        assert_ne!(
+            refs[1], refs[2],
+            "replacement document must not reuse a ref for backend ID 42"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_refs_invalidate_replaced_iframe_session() {
+        let refs = observe_documents(&[Some("a"); 2], &["session-a", "session-b"]).await;
+        assert_ne!(
+            refs[0], refs[1],
+            "backend IDs belong to their effective CDP session"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_refs_do_not_share_unknown_document() {
+        let refs = observe_documents(
+            &[None, None, Some("a"), None, Some("a")],
+            &["child-session"; 5],
+        )
+        .await;
+        let unique: std::collections::HashSet<_> = refs.iter().collect();
+        assert_eq!(
+            unique.len(),
+            refs.len(),
+            "unknown identity must break continuity: {refs:?}"
+        );
+    }
+}
+
 const INTERACTIVE_ROLES: &[&str] = &[
     "button",
     "link",
