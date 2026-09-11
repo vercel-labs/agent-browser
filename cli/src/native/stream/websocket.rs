@@ -629,6 +629,7 @@ async fn dispatch_input(
                         "x": parsed.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
                         "y": parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
                         "button": parsed.get("button").and_then(|v| v.as_str()).unwrap_or("none"),
+                        "buttons": mouse_buttons_param(parsed),
                         "clickCount": parsed.get("clickCount").and_then(|v| v.as_i64()).unwrap_or(0),
                         "deltaX": parsed.get("deltaX").and_then(|v| v.as_f64()).unwrap_or(0.0),
                         "deltaY": parsed.get("deltaY").and_then(|v| v.as_f64()).unwrap_or(0.0),
@@ -662,6 +663,29 @@ async fn dispatch_input(
         }
         "status" => {}
         _ => {}
+    }
+}
+
+/// CDP `buttons` bitmask for a dashboard `input_mouse` message. Current
+/// dashboards send `MouseEvent.buttons` directly; when absent, derive the
+/// bit from `button` on press/release so drag state still works with
+/// clients that predate the field.
+fn mouse_buttons_param(parsed: &Value) -> i64 {
+    if let Some(buttons) = parsed.get("buttons").and_then(|v| v.as_i64()) {
+        return buttons;
+    }
+    let event_type = parsed
+        .get("eventType")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !matches!(event_type, "mousePressed" | "mouseReleased") {
+        return 0;
+    }
+    match parsed.get("button").and_then(|v| v.as_str()) {
+        Some("left") => 1,
+        Some("right") => 2,
+        Some("middle") => 4,
+        _ => 0,
     }
 }
 
@@ -940,5 +964,33 @@ mod tests {
             deadline_from(Some(now), 10),
             now + Duration::from_millis(100)
         );
+    }
+
+    #[test]
+    fn mouse_buttons_uses_explicit_bitmask() {
+        let msg = json!({ "eventType": "mouseMoved", "buttons": 1 });
+        assert_eq!(mouse_buttons_param(&msg), 1);
+        let msg = json!({ "eventType": "mousePressed", "button": "left", "buttons": 3 });
+        assert_eq!(mouse_buttons_param(&msg), 3);
+    }
+
+    #[test]
+    fn mouse_buttons_falls_back_to_button_on_press_release() {
+        let msg = json!({ "eventType": "mousePressed", "button": "left" });
+        assert_eq!(mouse_buttons_param(&msg), 1);
+        let msg = json!({ "eventType": "mouseReleased", "button": "right" });
+        assert_eq!(mouse_buttons_param(&msg), 2);
+        let msg = json!({ "eventType": "mousePressed", "button": "middle" });
+        assert_eq!(mouse_buttons_param(&msg), 4);
+        let msg = json!({ "eventType": "mousePressed", "button": "none" });
+        assert_eq!(mouse_buttons_param(&msg), 0);
+    }
+
+    #[test]
+    fn mouse_buttons_defaults_to_zero_on_moves() {
+        let msg = json!({ "eventType": "mouseMoved", "button": "none" });
+        assert_eq!(mouse_buttons_param(&msg), 0);
+        let msg = json!({ "eventType": "mouseWheel", "button": "left" });
+        assert_eq!(mouse_buttons_param(&msg), 0);
     }
 }
