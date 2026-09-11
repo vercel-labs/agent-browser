@@ -4032,6 +4032,21 @@ fn write_json_line(stdout: &mut io::Stdout, value: &Value) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recording_timeline_options_use_cli_parser() {
+        for operation in ["start", "restart"] {
+            for fps in [1, 30, 60] {
+                let args =
+                    record_command_args(&json!({"path": "timeline.webm", "fps": fps}), operation)
+                        .unwrap();
+                let flags = crate::flags::parse_flags(&args);
+                let command = crate::commands::parse_command(&args, &flags).unwrap();
+                assert_eq!(command["action"], format!("recording_{operation}"));
+                assert_eq!(command["fps"], fps);
+            }
+        }
+    }
+
     use super::*;
 
     #[test]

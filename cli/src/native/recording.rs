@@ -220,8 +220,6 @@ fn build_ffmpeg_command(output_path: &str, fps: u32) -> tokio::process::Command 
     // -hide_banner keeps the version and build banner out of stderr, so a
     // failure message is the cause rather than the configure line.
     cmd.args(["-y", "-hide_banner", "-loglevel", "error"])
-        .args(["-avioflags", "direct"])
-        .args(["-use_wallclock_as_timestamps", "1"])
         .args([
             "-fpsprobesize",
             "0",
@@ -381,6 +379,7 @@ struct CapturedVideoFrame {
 pub fn spawn_recording_task(
     client: Arc<CdpClient>,
     capture_session: String,
+    initial_image: Vec<u8>,
     output_path: String,
     fps: u32,
     shared_count: Arc<AtomicU64>,
@@ -393,19 +392,32 @@ pub fn spawn_recording_task(
         let (frame_tx, frame_rx) = mpsc::channel(ENCODER_FRAME_BUFFER);
         let encoder = tokio::spawn(encode_stream(output_path, fps, frame_rx));
 
-        let started = client
-            .send_command(
-                "Page.startScreencast",
-                Some(json!({
-                    "format": "png",
-                    // Always 1: Chrome skips frames by count, and a static
-                    // page produces exactly one, which a higher value would
-                    // drop, leaving nothing to record.
-                    "everyNthFrame": 1,
-                })),
-                Some(&capture_session),
-            )
-            .await;
+        // Chrome does not reliably emit an initial PNG screencast frame for a
+        // static page. Seed the stream explicitly before listening for later
+        // repaints so even a completely static take has a first image.
+        let seeded = frame_tx
+            .send(CapturedVideoFrame {
+                image_data: Arc::new(initial_image),
+                captured_at: tokio::time::Instant::now(),
+            })
+            .await
+            .map_err(|_| "Recording encoder stopped unexpectedly".to_string());
+        shared_captured.fetch_add(1, Ordering::Relaxed);
+
+        let started = match seeded {
+            Ok(()) => client
+                .send_command(
+                    "Page.startScreencast",
+                    Some(json!({
+                        "format": "png",
+                        "everyNthFrame": 1,
+                    })),
+                    Some(&capture_session),
+                )
+                .await
+                .map_err(|error| format!("Failed to start screencast: {error}")),
+            Err(error) => Err(error),
+        };
 
         let captured = match started {
             Ok(_) => {
@@ -419,7 +431,7 @@ pub fn spawn_recording_task(
                 )
                 .await
             }
-            Err(e) => Err(format!("Failed to start screencast: {}", e)),
+            Err(error) => Err(error),
         };
 
         client.unsubscribe_session(&capture_session);
@@ -454,6 +466,28 @@ pub fn spawn_recording_task(
     })
 }
 
+fn decode_frame_data(value: &Value) -> Option<Vec<u8>> {
+    value.get("data").and_then(Value::as_str).and_then(|data| {
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data).ok()
+    })
+}
+
+pub async fn capture_initial_image(
+    client: &CdpClient,
+    session_id: &str,
+) -> Result<Vec<u8>, String> {
+    let result = client
+        .send_command(
+            "Page.captureScreenshot",
+            Some(json!({"format": "png", "fromSurface": true})),
+            Some(session_id),
+        )
+        .await
+        .map_err(|error| format!("Failed to capture initial recording frame: {error}"))?;
+    decode_frame_data(&result)
+        .ok_or_else(|| "Initial recording screenshot returned no image data".to_string())
+}
+
 async fn collect_frames(
     client: &CdpClient,
     capture_session: &str,
@@ -479,14 +513,7 @@ async fn collect_frames(
                             )
                             .await;
                     }
-                    let decoded = event
-                        .params
-                        .get("data")
-                        .and_then(Value::as_str)
-                        .and_then(|data| {
-                            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
-                                .ok()
-                        });
+                    let decoded = decode_frame_data(&event.params);
                     if let Some(bytes) = decoded {
                         let frame = CapturedVideoFrame {
                             image_data: Arc::new(bytes),
@@ -535,9 +562,9 @@ async fn encode_stream(
         .take()
         .ok_or_else(|| "Failed to open ffmpeg stdin".to_string())?;
     let mut interval = tokio::time::interval(frame_period(fps));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Catch up after short pipe stalls instead of shortening the video.
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
     let mut latest: Option<CapturedVideoFrame> = None;
-    let mut last_page: Option<Arc<Vec<u8>>> = None;
     let mut written = 0u64;
 
     loop {
@@ -547,18 +574,17 @@ async fn encode_stream(
                 if frame.captured_at.elapsed() > MAX_ENCODER_LAG {
                     return Err("Recording encoder fell more than 500 ms behind capture".to_string());
                 }
+                if latest.is_none() {
+                    interval.reset_at(frame.captured_at);
+                }
                 latest = Some(frame);
             }
-            _ = interval.tick() => {
-                let Some(frame) = latest.as_ref() else { continue };
-                let page_changed = last_page
-                    .as_deref()
-                    .is_none_or(|previous| previous != frame.image_data.as_slice());
-                if !page_changed {
-                    continue;
+            tick = interval.tick() => {
+                if tick.elapsed() > MAX_ENCODER_LAG && latest.is_some() {
+                    return Err("Recording encoder fell more than 500 ms behind capture".to_string());
                 }
+                let Some(frame) = latest.as_ref() else { continue };
                 write_encoder_bytes(&mut stdin, &frame.image_data).await?;
-                last_page = Some(frame.image_data.clone());
                 written += 1;
             }
         }
@@ -567,6 +593,7 @@ async fn encode_stream(
     let Some(frame) = latest.as_ref() else {
         return Err("No frames captured".to_string());
     };
+    // Include the final image even when the take stops before its first tick.
     write_encoder_bytes(&mut stdin, &frame.image_data).await?;
     written += 1;
     drop(stdin);
@@ -617,6 +644,16 @@ pub async fn stop_recording_task(state: &mut RecordingState) -> Result<(), Strin
 mod tests {
     use super::*;
 
+    #[test]
+    fn recording_frame_data_decodes_capture_screenshot_and_screencast_results() {
+        assert_eq!(
+            decode_frame_data(&json!({"data": "AQID"})),
+            Some(vec![1, 2, 3])
+        );
+        assert_eq!(decode_frame_data(&json!({"data": "not-base64"})), None);
+        assert_eq!(decode_frame_data(&json!({})), None);
+    }
+
     /// Requires FFmpeg and ffprobe, but no browser. Check the actual file timeline.
     #[tokio::test]
     #[ignore]
@@ -640,10 +677,7 @@ mod tests {
             }
             drop(tx);
             let count = encoder.await.unwrap().unwrap();
-            assert!(
-                (2..=4).contains(&count),
-                "expected sparse frames, got {count}"
-            );
+            assert!(count >= 24, "expected repeated frames, got {count}");
             let probe = std::process::Command::new("ffprobe")
                 .args([
                     "-v",
@@ -669,7 +703,32 @@ mod tests {
                 .map(|packet| packet["pts_time"].as_str().unwrap().parse().unwrap())
                 .collect();
             assert!(times.len() >= 3, "{extension}: {times:?}");
-            assert!((0.3..0.6).contains(&times[1]), "{extension}: {times:?}");
+            assert_eq!(times.len() as u64, count);
+            assert!(
+                times
+                    .windows(2)
+                    .all(|pair| { ((pair[1] - pair[0]) - 1.0 / 30.0).abs() < 0.002 }),
+                "{extension}: {times:?}"
+            );
+            let decoded = std::process::Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(&path)
+                .args(["-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"])
+                .output()
+                .unwrap();
+            assert!(
+                decoded.status.success(),
+                "{}",
+                String::from_utf8_lossy(&decoded.stderr)
+            );
+            for (at, channel) in [(0.2, 0), (0.6, 2)] {
+                let index = times.iter().position(|time| *time >= at).unwrap();
+                let pixel = &decoded.stdout[index * 64 * 64 * 3..][..3];
+                assert!(
+                    pixel[channel] > 200 && pixel[2 - channel] < 50,
+                    "{extension}: wrong color at {at}s: {pixel:?}"
+                );
+            }
             assert!(
                 (0.7..1.1).contains(times.last().unwrap()),
                 "{extension}: {times:?}"
@@ -930,8 +989,9 @@ mod tests {
         assert!(args_str.contains(&"/tmp/out.webm"));
         assert!(args_str.contains(&"8000k"));
         assert!(args_str.contains(&"18"));
+        assert!(args_str.contains(&"image2pipe"));
         assert!(args_str.contains(&"png"));
-        assert!(args_str.contains(&"-use_wallclock_as_timestamps"));
+        assert!(!args_str.contains(&"-use_wallclock_as_timestamps"));
         assert!(args_str.contains(&"vfr"));
     }
 
@@ -952,12 +1012,8 @@ mod tests {
             .get_args()
             .filter_map(|a| a.to_str().map(String::from))
             .collect();
-        let framerate = args
-            .iter()
-            .position(|a| a == "-framerate")
-            .and_then(|i| args.get(i + 1))
-            .map(String::as_str);
-        assert_eq!(framerate, Some("60"));
+        let framerate = args.windows(2).find(|pair| pair[0] == "-framerate");
+        assert_eq!(framerate.map(|pair| pair[1].as_str()), Some("60"));
         assert!(args.iter().any(|a| a == "8000k"));
         let threads = args
             .iter()

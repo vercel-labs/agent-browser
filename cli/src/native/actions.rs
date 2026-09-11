@@ -1086,6 +1086,13 @@ impl DaemonState {
         client: Arc<CdpClient>,
         session_id: String,
     ) -> Result<(), String> {
+        let initial_image = match recording::capture_initial_image(&client, &session_id).await {
+            Ok(image) => image,
+            Err(error) => {
+                self.rollback_failed_recording_start().await;
+                return Err(error);
+            }
+        };
         let capture_session = match recording::attach_capture_session(
             &client,
             &session_id,
@@ -1105,6 +1112,7 @@ impl DaemonState {
         let handle = recording::spawn_recording_task(
             client,
             capture_session,
+            initial_image,
             self.recording_state.output_path.clone(),
             self.recording_state.fps,
             shared_count.clone(),
