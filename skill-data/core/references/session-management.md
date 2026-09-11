@@ -8,6 +8,7 @@ Multiple isolated browser sessions with state persistence and concurrent browsin
 
 - [Named Sessions](#named-sessions)
 - [Session Isolation Properties](#session-isolation-properties)
+- [Reuse Before Attaching](#reuse-before-attaching)
 - [Tab Pinning in a Shared Browser](#tab-pinning-in-a-shared-browser)
 - [Session State Persistence](#session-state-persistence)
 - [Common Patterns](#common-patterns)
@@ -47,6 +48,32 @@ Each session has independent:
 - Cache
 - Browsing history
 - Open tabs
+
+## Reuse Before Attaching
+
+Use one named session for a linear workflow. Before attaching to an existing Chrome, look for a reusable session and inspect it without starting a new attachment:
+
+```bash
+SESSION="existing-chrome"
+agent-browser session list
+agent-browser --session "$SESSION" session info --json
+```
+
+These are no-launch checks. If runtime and browser status confirm an active attachment, perform the intended browser command without `--auto-connect`.
+
+If runtime or browser status is missing or uncertain, warn the user before the first browser-touching command. Any browser command, including `tab list`, can attempt stale-session recovery. If the daemon was started with `AGENT_BROWSER_AUTO_CONNECT`, that recovery may reconnect and cause Chrome to show an Allow debugging prompt.
+
+Only use an explicit `--auto-connect` when no suitable attached session exists. Before the single attachment attempt, warn the user that Chrome may require approval. Run the command by itself so no dependent navigation or form action can continue while approval is pending:
+
+```bash
+agent-browser --session "$SESSION" --auto-connect --pin-tab tab list
+```
+
+If Chrome requests approval, stop and report `Action required: Allow debugging in Chrome`. Resume only after the user confirms, using the same session without `--auto-connect`. Never silently retry auto-connect, because each new attachment attempt may show another approval prompt.
+
+A closed bound tab is not a lost Chrome connection. When a command returns `tab_gone`, use `tab list`, `tab new <url>`, or tab selection to recover. Create another session only for genuine parallel work or a separate browser identity.
+
+This distinction matters in interactive workflows: repeatedly attaching with new sessions can produce multiple Chrome prompts, while reusing the existing attached session can navigate to another site without prompting again.
 
 ## Tab Pinning in a Shared Browser
 
