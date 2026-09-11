@@ -597,6 +597,32 @@ fn get_screenshot_dir() -> PathBuf {
     }
 }
 
+/// Inject or remove the live-annotation overlay (the same red box + number
+/// labels used for `screenshot --annotate`) on the current page. Used by the
+/// dashboard toggle to show element refs in the live streaming viewport.
+///
+/// Caller is responsible for ensuring `ref_map` is current (typically by
+/// calling `snapshot::take_snapshot` immediately before turning on).
+pub async fn set_live_annotation(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    on: bool,
+) -> Result<usize, String> {
+    if !on {
+        remove_annotation_overlay(client, session_id).await?;
+        return Ok(0);
+    }
+    let raw = collect_annotations(client, session_id, ref_map).await?;
+    let items = filter_annotations(raw, None);
+    if items.is_empty() {
+        let _ = remove_annotation_overlay(client, session_id).await;
+        return Ok(0);
+    }
+    inject_annotation_overlay(client, session_id, &items).await?;
+    Ok(items.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
