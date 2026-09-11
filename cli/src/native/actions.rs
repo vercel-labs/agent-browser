@@ -230,7 +230,7 @@ struct DrainedEvents {
     /// pauses them, even though agent-browser does not track them as tabs.
     attached_other_sessions: Vec<String>,
     /// Session IDs from Target.detachedFromTarget.
-    detached_iframe_sessions: Vec<String>,
+    detached_sessions: Vec<String>,
     /// (request_id, event session_id) pairs from `Network.loadingFinished`
     /// while HAR recording; bodies are fetched for these in
     /// `apply_drained_events` before Chrome evicts them (e.g. on navigation).
@@ -250,7 +250,7 @@ fn is_active_iframe_network_event(
 
 fn active_frame_scope_may_have_changed(drained: &DrainedEvents) -> bool {
     !drained.attached_iframe_sessions.is_empty()
-        || !drained.detached_iframe_sessions.is_empty()
+        || !drained.detached_sessions.is_empty()
         || !drained.attached_page_sessions.is_empty()
         || !drained.new_targets.is_empty()
         || !drained.destroyed_targets.is_empty()
@@ -1361,7 +1361,7 @@ impl DaemonState {
             }
         }
 
-        for sid in &drained.detached_iframe_sessions {
+        for sid in &drained.detached_sessions {
             self.iframe_sessions.retain(|_, v| v != sid);
             self.active_iframe_sessions.remove(sid);
         }
@@ -1540,11 +1540,10 @@ impl DaemonState {
         let mut changed_targets: Vec<TargetInfoChangedEvent> = Vec::new();
         let mut destroyed_targets: Vec<String> = Vec::new();
         let mut attached_page_sessions: Vec<(TargetInfo, String)> = Vec::new();
-        let mut attached_page_target_ids: HashSet<String> = HashSet::new();
         let mut attached_iframe_sessions: Vec<(String, String)> = Vec::new();
         let mut attached_worker_sessions: Vec<(TargetInfo, String)> = Vec::new();
         let mut attached_other_sessions: Vec<String> = Vec::new();
-        let mut detached_iframe_sessions: Vec<String> = Vec::new();
+        let mut detached_sessions: Vec<String> = Vec::new();
         let mut har_finished_requests: Vec<(String, Option<String>)> = Vec::new();
 
         loop {
@@ -1647,8 +1646,6 @@ impl DaemonState {
                                             .push((target_info.target_id, sid.to_string()));
                                     }
                                     Ok(target_info) if should_track_target(&target_info) => {
-                                        attached_page_target_ids
-                                            .insert(target_info.target_id.clone());
                                         attached_page_sessions.push((target_info, sid.to_string()));
                                     }
                                     Ok(target_info) if target_is_worker_like(&target_info) => {
@@ -1679,7 +1676,7 @@ impl DaemonState {
                                         }
                                     }
                                 }
-                                detached_iframe_sessions.push(sid.to_string());
+                                detached_sessions.push(sid.to_string());
                             }
                             continue;
                         }
@@ -2084,8 +2081,33 @@ impl DaemonState {
             }
         }
 
+        // The background fetch handler can configure and resume a worker while a command
+        // is still navigating. By the time this queue is drained, that session may already
+        // have detached. Do not replay its old attachment after its invalidation: a second
+        // Fetch.enable on that dead session would fail and close the healthy browser.
+        if !detached_sessions.is_empty() || !destroyed_targets.is_empty() {
+            let detached: HashSet<&str> = detached_sessions.iter().map(String::as_str).collect();
+            let destroyed: HashSet<&str> = destroyed_targets.iter().map(String::as_str).collect();
+            attached_page_sessions.retain(|(target, sid)| {
+                !detached.contains(sid.as_str()) && !destroyed.contains(target.target_id.as_str())
+            });
+            attached_worker_sessions.retain(|(target, sid)| {
+                !detached.contains(sid.as_str()) && !destroyed.contains(target.target_id.as_str())
+            });
+            attached_iframe_sessions.retain(|(target, sid)| {
+                !detached.contains(sid.as_str()) && !destroyed.contains(target.as_str())
+            });
+            attached_other_sessions.retain(|sid| !detached.contains(sid.as_str()));
+            new_targets.retain(|event| !destroyed.contains(event.target_info.target_id.as_str()));
+        }
+
+        let attached_page_target_ids: HashSet<&str> = attached_page_sessions
+            .iter()
+            .map(|(target, _)| target.target_id.as_str())
+            .collect();
         if !attached_page_target_ids.is_empty() {
-            new_targets.retain(|te| !attached_page_target_ids.contains(&te.target_info.target_id));
+            new_targets
+                .retain(|te| !attached_page_target_ids.contains(te.target_info.target_id.as_str()));
         }
 
         DrainedEvents {
@@ -2097,7 +2119,7 @@ impl DaemonState {
             attached_iframe_sessions,
             attached_worker_sessions,
             attached_other_sessions,
-            detached_iframe_sessions,
+            detached_sessions,
             har_finished_requests,
         }
     }
@@ -12627,6 +12649,224 @@ mod tests {
     use std::fs;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    async fn detached_session_browser(
+        reject_live_worker: bool,
+    ) -> (
+        BrowserManager,
+        Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "ws://{}/devtools/browser/test",
+            listener.local_addr().unwrap()
+        );
+        let commands = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let recorded = commands.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let method = command["method"].as_str().unwrap();
+                let session = command["sessionId"].as_str().unwrap_or("");
+                recorded
+                    .lock()
+                    .await
+                    .push((method.to_string(), session.to_string()));
+                let invalid_session = session == "detached";
+                let destroyed_target = command["params"]["targetId"] == "destroyed";
+                let reject_controls =
+                    reject_live_worker && session == "live-worker" && method == "Fetch.enable";
+                let response = if invalid_session || destroyed_target || reject_controls {
+                    json!({
+                        "id": command["id"],
+                        "error": {
+                            "code": -32001,
+                            "message": if reject_controls { "Fetch controls rejected" }
+                                else { "Session with given id not found." }
+                        }
+                    })
+                } else {
+                    let result = match method {
+                        "Target.getTargets" => json!({ "targetInfos": [{
+                            "targetId": "page", "type": "page", "title": "fixture",
+                            "url": "https://allowed.test/", "attached": false
+                        }] }),
+                        "Target.attachToTarget" => json!({ "sessionId": "page-session" }),
+                        "Runtime.evaluate" => json!({
+                            "result": { "type": "string", "value": "https://allowed.test/" }
+                        }),
+                        _ => json!({}),
+                    };
+                    json!({ "id": command["id"], "result": result })
+                };
+                if ws.send(Message::Text(response.to_string())).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let browser = BrowserManager::connect_cdp(&url).await.unwrap();
+        (browser, commands, server)
+    }
+
+    fn queued_target_event(method: &str, params: Value) -> CdpEvent {
+        CdpEvent {
+            method: method.to_string(),
+            params,
+            session_id: Some("page-session".to_string()),
+        }
+    }
+
+    fn queued_attachment(session: &str, target: &str, kind: &str) -> CdpEvent {
+        queued_target_event(
+            "Target.attachedToTarget",
+            json!({
+                "sessionId": session,
+                "targetInfo": {
+                    "targetId": target, "type": kind, "title": "",
+                    "url": "https://allowed.test/", "attached": true
+                },
+                "waitingForDebugger": true
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn detached_sessions_do_not_break_the_next_command_or_discard_a_new_session() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let directory = tempfile::tempdir().unwrap();
+        guard.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            directory.path().to_str().unwrap(),
+        );
+        guard.remove("XDG_RUNTIME_DIR");
+
+        for kind in ["service_worker", "page", "iframe", "other"] {
+            let (browser, commands, server) = detached_session_browser(false).await;
+            let mut state = DaemonState::new();
+            state.browser = Some(browser);
+            *state.domain_filter.write().await = Some(DomainFilter::new("allowed.test"));
+            let (events, receiver) = broadcast::channel(16);
+            state.event_rx = Some(receiver);
+            events
+                .send(queued_attachment("detached", "same-target", kind))
+                .unwrap();
+            events
+                .send(queued_target_event(
+                    "Target.detachedFromTarget",
+                    json!({
+                        "sessionId": "detached", "targetId": "same-target"
+                    }),
+                ))
+                .unwrap();
+            // Detaching one session does not destroy the target. Its replacement must still
+            // receive network controls before it is resumed.
+            events
+                .send(queued_attachment(
+                    "live-worker",
+                    "same-target",
+                    "service_worker",
+                ))
+                .unwrap();
+
+            let response =
+                execute_command(&json!({ "id": "next", "action": "url" }), &mut state).await;
+            assert_eq!(response["success"], true, "{kind}: {response}");
+            assert_eq!(response["data"]["url"], "https://allowed.test/");
+            let recorded = commands.lock().await;
+            assert!(
+                !recorded.iter().any(|(_, session)| session == "detached"),
+                "{kind}"
+            );
+            let fetch = recorded
+                .iter()
+                .position(|(method, session)| method == "Fetch.enable" && session == "live-worker")
+                .expect("live worker controls");
+            let resume = recorded
+                .iter()
+                .position(|(method, session)| {
+                    method == "Runtime.runIfWaitingForDebugger" && session == "live-worker"
+                })
+                .expect("live worker resumed");
+            assert!(fetch < resume);
+            drop(recorded);
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn destroyed_targets_are_not_attached_by_the_next_command() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let directory = tempfile::tempdir().unwrap();
+        guard.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            directory.path().to_str().unwrap(),
+        );
+        guard.remove("XDG_RUNTIME_DIR");
+        let (browser, _, server) = detached_session_browser(false).await;
+        let mut state = DaemonState::new();
+        state.browser = Some(browser);
+        *state.domain_filter.write().await = Some(DomainFilter::new("allowed.test"));
+        let (events, receiver) = broadcast::channel(16);
+        state.event_rx = Some(receiver);
+        events
+            .send(queued_target_event(
+                "Target.targetCreated",
+                json!({ "targetInfo": {
+            "targetId": "destroyed", "type": "page", "title": "",
+            "url": "https://allowed.test/", "attached": false
+        } }),
+            ))
+            .unwrap();
+        events
+            .send(queued_target_event(
+                "Target.targetDestroyed",
+                json!({
+                    "targetId": "destroyed"
+                }),
+            ))
+            .unwrap();
+        let response = execute_command(&json!({ "id": "next", "action": "url" }), &mut state).await;
+        assert_eq!(response["success"], true, "{response}");
+        assert_eq!(response["data"]["url"], "https://allowed.test/");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn live_worker_network_control_failures_still_fail_closed() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        let directory = tempfile::tempdir().unwrap();
+        guard.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            directory.path().to_str().unwrap(),
+        );
+        guard.remove("XDG_RUNTIME_DIR");
+        let (browser, commands, server) = detached_session_browser(true).await;
+        let mut state = DaemonState::new();
+        state.browser = Some(browser);
+        *state.domain_filter.write().await = Some(DomainFilter::new("allowed.test"));
+        let (events, receiver) = broadcast::channel(16);
+        state.event_rx = Some(receiver);
+        events
+            .send(queued_attachment("live-worker", "worker", "service_worker"))
+            .unwrap();
+        let response = execute_command(&json!({ "id": "next", "action": "url" }), &mut state).await;
+        assert_eq!(response["success"], false);
+        assert!(response["error"]
+            .as_str()
+            .unwrap()
+            .contains("Fetch controls rejected"));
+        assert!(state.browser.is_none());
+        assert!(!commands.lock().await.iter().any(|(method, session)| method
+            == "Runtime.runIfWaitingForDebugger"
+            && session == "live-worker"));
+        server.abort();
+    }
 
     /// A binding-recovery failure must tear the connection down: the attach
     /// paths set `state.browser` before calling this, so returning the error
