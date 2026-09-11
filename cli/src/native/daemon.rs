@@ -816,6 +816,17 @@ mod tests {
         assert!(close_completed_response("confirm", &confirmed));
     }
 
+    #[test]
+    fn test_no_process_exit_zero_in_daemon_production_code() {
+        let source = include_str!("daemon.rs");
+        let production_code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert!(
+            !production_code.contains("process::exit(0)"),
+            "daemon.rs production code must not hard-exit with status 0. \
+             Graceful shutdown is required so session metadata files are cleaned up."
+        );
+    }
+
     /// Guard against re-introducing `waitpid(-1)` in daemon code.
     ///
     /// Issue #1035: a SIGCHLD handler that called `waitpid(-1, WNOHANG)` was
