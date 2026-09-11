@@ -47,14 +47,16 @@ Compiles from source (~2-3 min). Requires Node.js 24+, pnpm 11+, and the Rust to
 
 ## From source
 
+Requires Node.js 24+, pnpm 11+, and Rust. Build the dashboard before the native binary so the CLI includes the dashboard assets.
+
 ```bash
 git clone https://github.com/vercel-labs/agent-browser
 cd agent-browser
 pnpm install
-pnpm build
+pnpm build:dashboard
 pnpm build:native
-./bin/agent-browser install
-pnpm link --global
+pnpm add --global .
+agent-browser install
 ```
 
 ## Windows browser sessions
