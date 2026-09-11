@@ -45,6 +45,9 @@ import { activeSessionNameAtom, activePortAtom } from "@/store/sessions";
 
 const SCREENCAST_ENGINES = new Set(["chrome"]);
 
+// Minimum interval between forwarded mouseMoved events (~25/s).
+const MOUSEMOVE_INTERVAL_MS = 40;
+
 function cdpModifiers(e: React.MouseEvent | React.WheelEvent): number {
   let m = 0;
   if (e.altKey) m |= 1;
@@ -68,7 +71,53 @@ const KEY_INFO: Record<string, { text?: string; keyCode: number }> = {
   End: { keyCode: 35 },
   PageUp: { keyCode: 33 },
   PageDown: { keyCode: 34 },
+  Shift: { keyCode: 16 },
+  Control: { keyCode: 17 },
+  Alt: { keyCode: 18 },
+  Meta: { keyCode: 91 },
+  CapsLock: { keyCode: 20 },
+  " ": { text: " ", keyCode: 32 },
 };
+
+// Windows virtual-key codes for punctuation, keyed by the layout-independent
+// KeyboardEvent.code (US OEM table, same as Puppeteer).
+const CODE_KEY_INFO: Record<string, number> = {
+  Minus: 189,
+  Equal: 187,
+  BracketLeft: 219,
+  BracketRight: 221,
+  Backslash: 220,
+  Semicolon: 186,
+  Quote: 222,
+  Comma: 188,
+  Period: 190,
+  Slash: 191,
+  Backquote: 192,
+  NumpadAdd: 107,
+  NumpadSubtract: 109,
+  NumpadMultiply: 106,
+  NumpadDivide: 111,
+  NumpadDecimal: 110,
+};
+
+/**
+ * Windows virtual-key code for a keyboard event. Chrome matches editing
+ * shortcuts against this code, and letter VKs are uppercase ASCII:
+ * `key.charCodeAt(0)` on a lowercase letter yields a numpad VK instead,
+ * which silently breaks every Ctrl+letter shortcut.
+ */
+function vkCodeForEvent(e: KeyboardEvent): number {
+  const code = e.code;
+  if (/^Key[A-Z]$/.test(code)) return code.charCodeAt(3);
+  if (/^Digit[0-9]$/.test(code)) return 48 + Number(code[5]);
+  if (/^Numpad[0-9]$/.test(code)) return 96 + Number(code[6]);
+  if (/^F([1-9]|1[0-2])$/.test(code)) return 111 + Number(code.slice(1));
+  const fromCode = CODE_KEY_INFO[code];
+  if (fromCode !== undefined) return fromCode;
+  const info = KEY_INFO[e.key];
+  if (info) return info.keyCode;
+  return e.key.length === 1 ? e.key.toUpperCase().charCodeAt(0) : 0;
+}
 
 function cdpButton(btn: number): string {
   switch (btn) {
@@ -338,6 +387,61 @@ export function Viewport() {
     [toViewport, sendInput],
   );
 
+  // Coalesce mouseMoved events: a sweep fires 60-125 events/s and Chrome
+  // needs ~a frame tick per event, so an unthrottled flood builds a backlog
+  // that a following click waits behind. Only the latest position matters.
+  const moveThrottleRef = useRef<{
+    last: number;
+    timer: ReturnType<typeof setTimeout> | null;
+    pending: { x: number; y: number; modifiers: number } | null;
+  }>({ last: 0, timer: null, pending: null });
+
+  useEffect(() => {
+    const state = moveThrottleRef.current;
+    return () => {
+      if (state.timer) clearTimeout(state.timer);
+    };
+  }, []);
+
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent) => {
+      const pos = toViewport(e);
+      if (!pos) return;
+      const modifiers = cdpModifiers(e);
+      const state = moveThrottleRef.current;
+      const send = (p: { x: number; y: number; modifiers: number }) =>
+        sendInput({
+          type: "input_mouse",
+          eventType: "mouseMoved",
+          x: p.x,
+          y: p.y,
+          button: "none",
+          clickCount: 0,
+          modifiers: p.modifiers,
+        });
+      const now = performance.now();
+      const elapsed = now - state.last;
+      if (elapsed >= MOUSEMOVE_INTERVAL_MS) {
+        state.last = now;
+        send({ ...pos, modifiers });
+      } else {
+        state.pending = { ...pos, modifiers };
+        if (!state.timer) {
+          state.timer = setTimeout(() => {
+            state.timer = null;
+            const pending = state.pending;
+            state.pending = null;
+            if (pending) {
+              state.last = performance.now();
+              send(pending);
+            }
+          }, MOUSEMOVE_INTERVAL_MS - elapsed);
+        }
+      }
+    },
+    [toViewport, sendInput],
+  );
+
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
       const pos = toViewport(e);
@@ -360,10 +464,14 @@ export function Viewport() {
   const dispatchKey = useCallback(
     (e: KeyboardEvent, eventType: string) => {
       const info = KEY_INFO[e.key];
-      const text = eventType === "keyDown"
-        ? (info?.text ?? (e.key.length === 1 ? e.key : undefined))
-        : undefined;
-      const keyCode = info?.keyCode ?? (e.key.length === 1 ? e.key.charCodeAt(0) : 0);
+      const hasShortcutModifier = e.ctrlKey || e.metaKey || e.altKey;
+      // Shortcut combos go out as rawKeyDown with no text, or Chrome treats
+      // them as text input instead of an editing command.
+      const text =
+        eventType === "keyDown" && !hasShortcutModifier
+          ? (info?.text ?? (e.key.length === 1 ? e.key : undefined))
+          : undefined;
+      const keyCode = vkCodeForEvent(e);
       let m = 0;
       if (e.altKey) m |= 1;
       if (e.ctrlKey) m |= 2;
@@ -371,7 +479,8 @@ export function Viewport() {
       if (e.shiftKey) m |= 8;
       sendInput({
         type: "input_keyboard",
-        eventType,
+        eventType:
+          eventType === "keyDown" && text === undefined ? "rawKeyDown" : eventType,
         key: e.key,
         code: e.code,
         text,
@@ -383,10 +492,52 @@ export function Viewport() {
   );
 
   useEffect(() => {
+    const forwardCopyShortcut = (e: KeyboardEvent) => {
+      // Copy remotely with the corrected key event, then mirror the remote
+      // clipboard back into the local one.
+      dispatchKey(e, "rawKeyDown");
+      window.setTimeout(() => {
+        sendInput({ type: "input_read_clipboard" });
+      }, 150);
+    };
+
+    const forwardPasteShortcut = (e: KeyboardEvent) => {
+      // The remote clipboard has no access to the local one, so read the
+      // local clipboard and insert its text directly. navigator.clipboard is
+      // undefined in insecure contexts (and readText in some browsers), so
+      // fall back to forwarding the raw paste keystroke.
+      const readText = navigator.clipboard?.readText?.bind(navigator.clipboard);
+      if (!readText) {
+        dispatchKey(e, "rawKeyDown");
+        return;
+      }
+      readText()
+        .then((text) => {
+          if (text) {
+            sendInput({ type: "input_insert_text", text });
+          } else {
+            dispatchKey(e, "rawKeyDown");
+          }
+        })
+        .catch(() => dispatchKey(e, "rawKeyDown"));
+    };
+
     const handler = (e: KeyboardEvent) => {
       if (document.activeElement !== canvasRef.current) return;
       e.preventDefault();
       e.stopPropagation();
+      const isShortcut = (e.ctrlKey || e.metaKey) && !e.altKey && e.key.length === 1;
+      if (e.type === "keydown" && isShortcut) {
+        const key = e.key.toLowerCase();
+        if (key === "v") {
+          forwardPasteShortcut(e);
+          return;
+        }
+        if (key === "c" || key === "x") {
+          forwardCopyShortcut(e);
+          return;
+        }
+      }
       dispatchKey(e, e.type === "keydown" ? "keyDown" : "keyUp");
     };
     window.addEventListener("keydown", handler, true);
@@ -395,7 +546,7 @@ export function Viewport() {
       window.removeEventListener("keydown", handler, true);
       window.removeEventListener("keyup", handler, true);
     };
-  }, [dispatchKey]);
+  }, [dispatchKey, sendInput]);
 
   return (
     <div ref={containerRef} className="flex h-full flex-col">
@@ -514,7 +665,7 @@ export function Viewport() {
             ref={canvasRef}
             tabIndex={0}
             className="max-h-full max-w-full object-contain outline-none"
-            onMouseMove={(e) => handleMouseEvent(e, "mouseMoved")}
+            onMouseMove={handleMouseMove}
             onMouseDown={(e) => {
               canvasRef.current?.focus();
               handleMouseEvent(e, "mousePressed");
