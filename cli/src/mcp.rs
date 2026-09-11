@@ -4073,6 +4073,19 @@ fn write_json_line(stdout: &mut io::Stdout, value: &Value) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recording_cursor_uses_cli_parser() {
+        for operation in ["start", "restart"] {
+            let args =
+                record_command_args(&json!({"path": "cursor.webm", "cursor": true}), operation)
+                    .unwrap();
+            let flags = crate::flags::parse_flags(&args);
+            let command = crate::commands::parse_command(&args, &flags).unwrap();
+            assert_eq!(command["cursor"], true);
+            assert_eq!(command["action"], format!("recording_{operation}"));
+        }
+    }
+
     use super::*;
 
     #[test]
