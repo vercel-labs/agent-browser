@@ -12840,6 +12840,39 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn human_command_does_not_change_session_default() {
+        let mut state = super::DaemonState::new();
+        // Even a rejected command must not leak a per-command override.
+        let _ = super::execute_command(
+            &serde_json::json!({
+                "action": "unknown-test-command", "inputMode": "human"
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(state.input_mode, "instant");
+    }
+
+    #[tokio::test]
+    async fn explicit_input_mode_sets_session_default() {
+        let mut state = super::DaemonState::new();
+        let _ = super::execute_command(
+            &serde_json::json!({
+                "action": "unknown-test-command", "defaultInputMode": "smooth", "inputMode": "human"
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(state.input_mode, "smooth");
+        let _ = super::execute_command(
+            &serde_json::json!({"action": "unknown-test-command"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(state.input_mode, "smooth");
+    }
+
     use super::super::cdp::types::{AXNode, AXValue};
     use super::*;
     use crate::test_utils::EnvGuard;
