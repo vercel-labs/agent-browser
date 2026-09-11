@@ -617,6 +617,66 @@ pub async fn stop_recording_task(state: &mut RecordingState) -> Result<(), Strin
 mod tests {
     use super::*;
 
+    /// Requires FFmpeg and ffprobe, but no browser. Check the actual file timeline.
+    #[tokio::test]
+    #[ignore]
+    async fn recording_sparse_frames_preserve_timestamps() {
+        for extension in ["webm", "mp4"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("sparse.{extension}"));
+            let (tx, rx) = mpsc::channel(4);
+            let encoder = tokio::spawn(encode_stream(path.to_string_lossy().into_owned(), 30, rx));
+            for color in [[255, 0, 0], [0, 0, 255]] {
+                let image = image::RgbImage::from_pixel(64, 64, image::Rgb(color));
+                let mut png = std::io::Cursor::new(Vec::new());
+                image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+                tx.send(CapturedVideoFrame {
+                    image_data: Arc::new(png.into_inner()),
+                    captured_at: tokio::time::Instant::now(),
+                })
+                .await
+                .unwrap();
+                tokio::time::sleep(Duration::from_millis(400)).await;
+            }
+            drop(tx);
+            let count = encoder.await.unwrap().unwrap();
+            assert!(
+                (2..=4).contains(&count),
+                "expected sparse frames, got {count}"
+            );
+            let probe = std::process::Command::new("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "packet=pts_time",
+                    "-of",
+                    "json",
+                ])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(
+                probe.status.success(),
+                "{}",
+                String::from_utf8_lossy(&probe.stderr)
+            );
+            let data: Value = serde_json::from_slice(&probe.stdout).unwrap();
+            let times: Vec<f64> = data["packets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|packet| packet["pts_time"].as_str().unwrap().parse().unwrap())
+                .collect();
+            assert!(times.len() >= 3, "{extension}: {times:?}");
+            assert!((0.3..0.6).contains(&times[1]), "{extension}: {times:?}");
+            assert!(
+                (0.7..1.1).contains(times.last().unwrap()),
+                "{extension}: {times:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_recording_state_new() {
         let state = RecordingState::new();
