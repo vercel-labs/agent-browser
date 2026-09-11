@@ -2036,13 +2036,27 @@ fn parse_webmcp(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     })?;
     match *subcommand {
         "list" => {
-            if let Some(argument) = rest.get(1) {
-                return Err(ParseError::InvalidValue {
-                    message: format!("Unexpected argument for webmcp list: {}", argument),
-                    usage: "webmcp list",
-                });
+            let mut command = json!({"id": id, "action": "webmcp_list"});
+            let mut i = 1;
+            while i < rest.len() {
+                match rest[i] {
+                    "--frame" if rest.get(i + 1).is_some_and(|v| !v.starts_with("--")) => {
+                        command["frameId"] = json!(rest[i + 1]);
+                        i += 2;
+                    }
+                    name if !name.starts_with("--") && command.get("tool").is_none() => {
+                        command["tool"] = json!(name);
+                        i += 1;
+                    }
+                    argument => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unexpected argument for webmcp list: {}", argument),
+                            usage: "webmcp list [tool] [--frame <frame-id>]",
+                        })
+                    }
+                }
             }
-            Ok(json!({ "id": id, "action": "webmcp_list" }))
+            Ok(command)
         }
         "invoke" => {
             let tool = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -5765,7 +5779,8 @@ mod tests {
     #[test]
     fn test_webmcp_rejects_unexpected_arguments() {
         for command in [
-            "webmcp list extra",
+            "webmcp list search extra",
+            "webmcp list --frame",
             "webmcp result invocation-1 extra",
             "webmcp cancel invocation-1 extra",
         ] {

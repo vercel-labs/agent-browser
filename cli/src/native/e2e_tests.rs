@@ -457,7 +457,7 @@ async fn e2e_webmcp_discovery_invocation_and_cancellation() {
 
 #[tokio::test]
 #[ignore]
-async fn e2e_webmcp_navigation_waits_for_delayed_initial_registration() {
+async fn e2e_webmcp_delayed_registration_appears_on_next_action() {
     let (fixture_url, fixture_server) = start_webmcp_server().await;
     let mut state = DaemonState::new();
     let resp = execute_command(
@@ -477,9 +477,18 @@ async fn e2e_webmcp_navigation_waits_for_delayed_initial_registration() {
     )
     .await;
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["webmcp"]["experimental"], true);
-    assert_eq!(get_data(&resp)["webmcp"]["available"], true);
-    assert_eq!(get_data(&resp)["webmcp"]["toolCount"], 1);
+    let already_observed = get_data(&resp).get("webmcp").is_some();
+    let resp = execute_command(
+        &json!({"id": "wait", "action": "wait", "timeout": 150}),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    if !already_observed {
+        assert_eq!(get_data(&resp)["webmcp"]["experimental"], true);
+        assert_eq!(get_data(&resp)["webmcp"]["available"], true);
+        assert_eq!(get_data(&resp)["webmcp"]["toolCount"], 1);
+    }
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
@@ -500,54 +509,79 @@ async fn e2e_webmcp_context_follows_actions_without_explicit_discovery() {
     let commands = [
         (
             json!({"action": "navigate", "url": format!("{url}/context.html")}),
-            0,
+            -1,
         ),
         (json!({"action": "click", "selector": "#register"}), 1),
-        (json!({"action": "snapshot"}), 1),
+        (json!({"action": "snapshot"}), -1),
+        (json!({"action": "webmcp_list", "tool": "set_message"}), -1),
         (
             json!({"action": "fill", "selector": "#description", "value": "Updated description"}),
             1,
         ),
         (
             json!({"action": "webmcp_invoke", "tool": "set_message", "params": {"message": "Hello from discovered tool"}}),
-            1,
+            -1,
         ),
-        (json!({"action": "gettext", "selector": "#result"}), 1),
+        (json!({"action": "gettext", "selector": "#result"}), -1),
         (
             json!({"action": "evaluate", "script": "history.pushState({}, '', '#route')"}),
-            1,
+            -1,
         ),
         (
             json!({"action": "tab_new", "url": format!("{url}/empty.html")}),
             0,
         ),
         (json!({"action": "tab_switch", "tabId": "t1"}), 1),
-        (json!({"action": "tab_close", "tabId": "t2"}), 1),
+        (json!({"action": "tab_close", "tabId": "t2"}), -1),
         (json!({"action": "click", "selector": "#remove"}), 0),
-        (json!({"action": "wait", "timeout": 50}), 0),
+        (json!({"action": "wait", "timeout": 50}), -1),
         (json!({"action": "click", "selector": "#register"}), 1),
         (
             json!({"action": "navigate", "url": format!("{url}/empty.html")}),
             0,
         ),
     ];
-    for (mut cmd, count) in commands {
+    let mut pending_removal = false;
+    for (mut cmd, mut count) in commands {
         cmd["id"] = json!("context");
         let resp = execute_command(&cmd, &mut state).await;
         assert_success(&resp);
         let context = &get_data(&resp)["webmcp"];
-        assert_eq!(context["status"], "ready", "{cmd}: {resp}");
-        assert_eq!(context["toolCount"], count, "{cmd}: {resp}");
-        assert_eq!(context["available"], count > 0);
+        // Chrome may deliver toolsRemoved after Input.dispatchMouseEvent's
+        // reply. Passive observation reports it on the next normal action.
+        if cmd["selector"] == "#remove" && context.is_null() {
+            pending_removal = true;
+            count = -1;
+        } else if cmd["action"] == "wait" && pending_removal {
+            count = 0;
+            pending_removal = false;
+        }
+        if count == -1 {
+            assert!(
+                context.is_null(),
+                "Unchanged or empty page must stay quiet: {cmd}: {resp}"
+            );
+        } else {
+            assert_eq!(context["status"], "ready", "{cmd}: {resp}");
+            assert_eq!(context["toolCount"], count, "{cmd}: {resp}");
+            assert_eq!(context["available"], count > 0);
+        }
         if count > 0 {
             let tool = &context["tools"][0];
             assert_eq!(tool["name"], "set_message");
-            assert_eq!(tool["inputSchema"]["required"], json!(["message"]));
+            assert!(tool.get("inputSchema").is_none());
             assert!(tool["frameId"].as_str().is_some_and(|id| !id.is_empty()));
             assert_eq!(tool["origin"], url);
             if cmd["action"] == "fill" {
                 assert_eq!(tool["description"], "Updated description");
             }
+        }
+        if cmd["action"] == "webmcp_list" {
+            assert_eq!(get_data(&resp)["tools"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                get_data(&resp)["tools"][0]["inputSchema"]["required"],
+                json!(["message"])
+            );
         }
         if cmd["action"] == "gettext" {
             assert_eq!(get_data(&resp)["text"], "Hello from discovered tool");
@@ -556,6 +590,47 @@ async fn e2e_webmcp_context_follows_actions_without_explicit_discovery() {
     let resp = execute_command(&json!({"id": "close", "action": "close"}), &mut state).await;
     assert_success(&resp);
     assert!(get_data(&resp).get("webmcp").is_none());
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_webmcp_ordinary_page_stays_quiet_without_reprobing() {
+    let (url, server) = start_webmcp_server().await;
+    let mut state = DaemonState::new();
+    for (index, mut cmd) in [
+        json!({"action": "launch", "headless": true}),
+        json!({"action": "navigate", "url": format!("{url}/empty.html")}),
+        json!({"action": "snapshot"}),
+        json!({"action": "title"}),
+        json!({"action": "evaluate", "script": "document.title"}),
+        json!({"action": "wait", "timeout": 1}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        cmd["id"] = json!(index.to_string());
+        let resp = execute_command(&cmd, &mut state).await;
+        assert_success(&resp);
+        assert!(get_data(&resp).get("webmcp").is_none(), "{cmd}: {resp}");
+    }
+    // Disable browser-side events behind the daemon. If ordinary commands
+    // re-enable discovery, the registration below would incorrectly appear.
+    let browser = state.browser.as_ref().unwrap();
+    let session = browser.active_session_id().unwrap().to_string();
+    browser
+        .client
+        .send_command_no_params("WebMCP.disable", Some(&session))
+        .await
+        .unwrap();
+    let resp = execute_command(&json!({"id": "register", "action": "evaluate", "script": "document.modelContext.registerTool({name: 'probe', description: 'probe', inputSchema: {type: 'object'}, execute: async () => ({ok: true})}); true"}), &mut state).await;
+    assert_success(&resp);
+    assert!(get_data(&resp).get("webmcp").is_none());
+    assert_eq!(state.webmcp.observations.len(), 1);
+    let resp = execute_command(&json!({"id": "snapshot", "action": "snapshot"}), &mut state).await;
+    assert_success(&resp);
+    assert!(get_data(&resp).get("webmcp").is_none());
+    execute_command(&json!({"id": "close", "action": "close"}), &mut state).await;
     server.abort();
 }
 

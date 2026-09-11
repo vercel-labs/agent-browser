@@ -33,7 +33,7 @@ fn is_tool_bound_error(error: &str) -> bool {
     ))
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolRecord {
     pub name: String,
@@ -50,13 +50,12 @@ pub struct ToolRecord {
 }
 
 // Proactive context has a smaller budget than the explicit discovery command.
-pub const MAX_CONTEXT_BYTES: usize = 32 * 1024;
-pub const MAX_CONTEXT_TOOLS: usize = 32;
-const MAX_CONTEXT_DESCRIPTION_BYTES: usize = 512;
-const MAX_CONTEXT_SCHEMA_BYTES: usize = 4096;
+pub const MAX_CONTEXT_BYTES: usize = 4 * 1024;
+pub const MAX_CONTEXT_TOOLS: usize = 16;
+const MAX_CONTEXT_DESCRIPTION_BYTES: usize = 160;
 
-/// A self-contained catalog for the next agent turn. Never truncate a schema
-/// into invalid JSON or silently imply that a partial catalog is complete.
+/// A bounded discovery summary, without schemas or page-provided safety claims.
+/// Full metadata is retrieved explicitly after the agent chooses a relevant tool.
 pub fn context_from_tools(tools: &[ToolRecord]) -> Value {
     let mut ordered: Vec<_> = tools.iter().collect();
     ordered.sort_by(|a, b| (&a.name, &a.frame_id).cmp(&(&b.name, &b.frame_id)));
@@ -67,24 +66,13 @@ pub fn context_from_tools(tools: &[ToolRecord]) -> Value {
         if catalog.len() == MAX_CONTEXT_TOOLS {
             break;
         }
-        let mut entry = json!({
+        let entry = json!({
             "name": tool.name,
             "description": bounded_string(&tool.description, MAX_CONTEXT_DESCRIPTION_BYTES),
             "origin": tool.origin,
             "frameId": tool.frame_id,
         });
         truncated |= tool.description.len() > MAX_CONTEXT_DESCRIPTION_BYTES;
-        for (key, value, cap) in [
-            ("inputSchema", &tool.input_schema, MAX_CONTEXT_SCHEMA_BYTES),
-            ("annotations", &tool.annotations, 1024),
-        ] {
-            if value.to_string().len() <= cap {
-                entry[key] = value.clone();
-            } else {
-                entry[format!("{key}Omitted")] = json!(true);
-                truncated = true;
-            }
-        }
         let entry_bytes = entry.to_string().len() + 1;
         if bytes + entry_bytes > MAX_CONTEXT_BYTES {
             truncated = true;
@@ -96,6 +84,7 @@ pub fn context_from_tools(tools: &[ToolRecord]) -> Value {
     truncated |= catalog.len() < tools.len();
     json!({
         "experimental": true,
+        "untrusted": true,
         "status": "ready",
         "available": !tools.is_empty(),
         "toolCount": tools.len(),
@@ -264,9 +253,36 @@ pub struct RuntimeState {
     tools: HashMap<String, HashMap<(String, String), ToolRecord>>,
     frame_origins: HashMap<String, HashMap<String, String>>,
     tool_errors: HashMap<String, String>,
+    // Subscription survives document navigation, but not CDP session disposal.
+    pub observations: HashMap<String, Result<(), String>>,
+    advertised: Option<(String, Vec<ToolRecord>)>,
 }
 
 impl RuntimeState {
+    /// Omission means no update. Only a transition from advertised tools to an
+    /// empty/unknown catalog invalidates previous context; ordinary pages stay quiet.
+    /// Compare full records so schema-only changes still request fresh metadata.
+    pub fn context_update(&mut self, session: &str, tools: &[ToolRecord]) -> Option<Value> {
+        if tools.is_empty() {
+            return self.advertised.take().map(|_| context_from_tools(&[]));
+        }
+        if self
+            .advertised
+            .as_ref()
+            .is_some_and(|(previous, records)| previous == session && records == tools)
+        {
+            return None;
+        }
+        self.advertised = Some((session.to_string(), tools.to_vec()));
+        Some(context_from_tools(tools))
+    }
+
+    pub fn context_unavailable(&mut self) -> Option<Value> {
+        self.advertised
+            .take()
+            .map(|_| json!({"experimental": true, "untrusted": true, "status": "unavailable"}))
+    }
+
     pub fn ensure_capacity(&mut self) -> Result<(), String> {
         while self.invocations.len() >= MAX_INVOCATION_HISTORY {
             let terminal = self.order.iter().find_map(|id| {
@@ -458,6 +474,11 @@ impl RuntimeState {
     }
 
     pub fn clear_page_tools(&mut self, session_id: &str) {
+        if let Some((previous, _)) = self.advertised.as_mut() {
+            if previous == session_id {
+                previous.clear(); // Reannounce identical tools in a new document.
+            }
+        }
         self.tools.remove(session_id);
         self.frame_origins.remove(session_id);
         self.tool_errors.remove(session_id);
@@ -486,6 +507,8 @@ impl RuntimeState {
         self.tools.clear();
         self.frame_origins.clear();
         self.tool_errors.clear();
+        self.observations.clear();
+        self.advertised = None;
     }
 }
 
@@ -661,7 +684,47 @@ fn bounded_value(value: &Value, cap: usize) -> (Value, bool, usize) {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn proactive_catalog_is_bounded_and_marks_omitted_schemas() {
+    fn summaries_only_emit_changes_and_clear_stale_context_once() {
+        let mut state = RuntimeState::default();
+        assert!(state.context_update("tab-a", &[]).is_none());
+        assert!(state.context_unavailable().is_none());
+        let mut tools = vec![normalize_tool(
+            &json!({"name": "search", "frameId": "main", "inputSchema": {"type": "object"}}),
+            "https://a.test",
+        )
+        .unwrap()];
+        assert!(state.context_update("tab-a", &tools).is_some());
+        assert!(state.context_update("tab-a", &tools).is_none());
+        tools[0].input_schema = json!({"required": ["query"]});
+        assert!(
+            state.context_update("tab-a", &tools).is_some(),
+            "schema-only changes must invalidate fetched metadata"
+        );
+        assert!(state.context_update("tab-b", &tools).is_some());
+        state.observations.insert("tab-b".into(), Ok(()));
+        state.clear_page_tools("tab-b");
+        assert!(
+            state.observations.contains_key("tab-b"),
+            "navigation retains its subscription"
+        );
+        assert!(
+            state.context_update("tab-b", &tools).is_some(),
+            "new documents reannounce identical tools"
+        );
+        assert_eq!(state.context_update("tab-c", &[]).unwrap()["toolCount"], 0);
+        assert!(state.context_update("tab-c", &[]).is_none());
+        state.context_update("tab-b", &tools);
+        assert_eq!(
+            state.context_unavailable().unwrap()["status"],
+            "unavailable"
+        );
+        assert!(state.context_unavailable().is_none());
+        state.clear_all();
+        assert!(state.observations.is_empty());
+    }
+
+    #[test]
+    fn proactive_catalog_is_bounded_and_omits_schemas() {
         let tools: Vec<_> = (0..100)
             .rev()
             .map(|i| super::ToolRecord {
@@ -680,12 +743,12 @@ mod tests {
         assert_eq!(context["toolCount"], 100);
         assert_eq!(context["truncated"], true);
         assert_eq!(context["tools"][0]["name"], "tool-000");
-        assert_eq!(context["tools"][0]["inputSchemaOmitted"], true);
+        assert_eq!(context["untrusted"], true);
         assert!(context["tools"][0].get("inputSchema").is_none());
     }
 
     #[test]
-    fn proactive_catalog_preserves_schemas_and_bounds_json_escaping() {
+    fn proactive_catalog_omits_schemas_and_bounds_json_escaping() {
         let mut tool = super::ToolRecord {
             name: "search".to_string(),
             description: "Find a product".to_string(),
@@ -696,7 +759,8 @@ mod tests {
             backend_node_id: None,
         };
         let context = super::context_from_tools(&[tool.clone()]);
-        assert_eq!(context["tools"][0]["inputSchema"], tool.input_schema);
+        assert!(context["tools"][0].get("inputSchema").is_none());
+        assert!(context["tools"][0].get("annotations").is_none());
         assert_eq!(context["truncated"], false);
         tool.name = "\0".repeat(super::MAX_CONTEXT_BYTES);
         let context = super::context_from_tools(&[tool]);
