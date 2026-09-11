@@ -258,7 +258,7 @@ pub async fn type_text_into_active_context(
                         text: text_str.clone(),
                         unmodified_text: text_str,
                         windows_virtual_key_code: Some(key_code),
-                        native_virtual_key_code: Some(key_code),
+                        native_virtual_key_code: None,
                         modifiers: None,
                     },
                     Some(session_id),
@@ -275,7 +275,7 @@ pub async fn type_text_into_active_context(
                         text: None,
                         unmodified_text: None,
                         windows_virtual_key_code: Some(key_code),
-                        native_virtual_key_code: Some(key_code),
+                        native_virtual_key_code: None,
                         modifiers: None,
                     },
                     Some(session_id),
@@ -313,6 +313,12 @@ pub async fn press_key(client: &CdpClient, session_id: &str, key: &str) -> Resul
 /// Modifier values follow the CDP `Input.dispatchKeyEvent` spec:
 /// 1 = Alt, 2 = Control, 4 = Meta (Cmd), 8 = Shift.
 ///
+/// `nativeVirtualKeyCode` must stay unset. Sending it alongside
+/// `windowsVirtualKeyCode` makes headless Chrome enter an endless synthetic
+/// keydown loop (~8000 events/sec, code "Quote" / VK 222) that only stops on
+/// navigation; see issue #1775. Playwright likewise sends only
+/// `windowsVirtualKeyCode`.
+///
 /// Callers that need a platform-appropriate modifier (e.g. Cmd on macOS,
 /// Ctrl elsewhere) must choose the value themselves -- see `cfg!(target_os)`.
 pub async fn press_key_with_modifiers(
@@ -342,7 +348,7 @@ pub async fn press_key_with_modifiers(
                 text: text.clone(),
                 unmodified_text: text.clone(),
                 windows_virtual_key_code: Some(key_code),
-                native_virtual_key_code: Some(key_code),
+                native_virtual_key_code: None,
                 modifiers,
             },
             Some(session_id),
@@ -359,7 +365,7 @@ pub async fn press_key_with_modifiers(
                 text: None,
                 unmodified_text: None,
                 windows_virtual_key_code: Some(key_code),
-                native_virtual_key_code: Some(key_code),
+                native_virtual_key_code: None,
                 modifiers,
             },
             Some(session_id),
