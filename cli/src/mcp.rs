@@ -842,7 +842,9 @@ fn tools() -> Vec<Value> {
                 "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements." },
                 "depth": { "type": "integer", "minimum": 0, "description": "Limit tree depth." },
                 "selector": { "type": "string", "description": "Scope the snapshot to a CSS selector." },
-                "includeUrls": { "type": "boolean", "default": false, "description": "Include href URLs on links." }
+                "includeUrls": { "type": "boolean", "default": false, "description": "Include href URLs on links." },
+                "delta": { "type": "boolean", "default": false, "description": "Return full state once, then unchanged or bounded structural deltas. Apply changes to refs and treeChange (zero-based startLine, deleteCount, lines) to the previous tree." },
+                "full": { "type": "boolean", "default": false, "description": "Force full state while updating the delta baseline." }
             }),
             &[],
         ),
@@ -2616,6 +2618,12 @@ fn snapshot_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError
     if let Some(selector) = optional_string(arguments, "selector")? {
         args.push("-s".to_string());
         args.push(selector);
+    }
+    if optional_bool(arguments, "delta")?.unwrap_or(false) {
+        args.push("--delta".to_string());
+    }
+    if optional_bool(arguments, "full")?.unwrap_or(false) {
+        args.push("--full".to_string());
     }
 
     Ok(args)
@@ -4855,5 +4863,29 @@ mod tests {
     fn initialize_defaults_to_latest_protocol_version() {
         let result = initialize_result(None, &McpConfig::default());
         assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
+    }
+}
+
+#[cfg(test)]
+mod snapshot_delta_schema_tests {
+    use super::*;
+    #[test]
+    fn delta_schema_explains_lossless_tree_patch() {
+        let snapshot = tools()
+            .into_iter()
+            .find(|tool| tool["name"] == TOOL_SNAPSHOT)
+            .unwrap();
+        assert!(
+            snapshot["inputSchema"]["properties"]["delta"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("treeChange")
+        );
+        let args = vec!["snapshot".to_string(), "--delta".to_string()];
+        let flags = crate::flags::parse_flags(&args);
+        assert_eq!(
+            crate::commands::parse_command(&args, &flags).unwrap()["delta"],
+            true
+        );
     }
 }
