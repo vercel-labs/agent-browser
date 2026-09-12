@@ -4579,7 +4579,7 @@ async fn load_storage_state(state: &mut DaemonState, path: &Option<String>) -> R
 
 async fn rollback_failed_launch(state: &mut DaemonState) -> Result<(), String> {
     let close_result = close_current_browser(state).await;
-    state.ref_map.clear();
+    state.ref_map.invalidate_all_documents();
     close_result
 }
 
@@ -4841,7 +4841,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.effective_ca_cert = effective_ca_cert;
         return Ok(json!({ "launched": true, "reused": true, "relaunchedBrowser": false }));
     }
-    state.ref_map.clear();
+    state.ref_map.invalidate_all_documents();
     state.session_setup = SessionSetup::default();
 
     let has_cdp = cdp_url.is_some() || cdp_port.is_some();
@@ -5162,7 +5162,7 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     if let Some(ref wb) = state.webdriver_backend {
         if state.browser.is_none() {
             state.webmcp.clear_invocations();
-            state.ref_map.clear();
+            state.ref_map.invalidate_all_documents();
             wb.navigate(url).await?;
             let new_url = wb.get_url().await.unwrap_or_else(|_| url.to_string());
             let title = wb.get_title().await.unwrap_or_default();
@@ -5232,13 +5232,13 @@ async fn navigate_active_page(
     url: &str,
     wait_until: WaitUntil,
 ) -> Result<Value, String> {
-    if let Some(session_id) = state
+    let page_session = state
         .browser
         .as_ref()
         .and_then(|browser| browser.active_session_id().ok())
-        .map(ToString::to_string)
-    {
-        state.webmcp.clear_page_scope(&session_id);
+        .map(ToString::to_string);
+    if let Some(session_id) = page_session.as_deref() {
+        state.webmcp.clear_page_scope(session_id);
     } else {
         state.webmcp.clear_invocations();
     }
@@ -5255,7 +5255,11 @@ async fn navigate_active_page(
         state.iframe_sessions.clear();
     }
 
-    state.ref_map.clear();
+    if let Some(session_id) = page_session.as_deref() {
+        state.ref_map.invalidate_page(session_id);
+    } else {
+        state.ref_map.begin_snapshot();
+    }
     state.active_iframe_sessions.clear();
     state.active_frame_id = None;
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
@@ -5431,7 +5435,7 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
         server.shutdown();
     }
 
-    state.ref_map.clear();
+    state.ref_map.invalidate_all_documents();
     match save_result {
         Ok(Some(path)) => Ok(json!({
             "closed": true,
@@ -5481,7 +5485,8 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         urls: cmd.get("urls").and_then(|v| v.as_bool()).unwrap_or(false),
     };
 
-    state.ref_map.clear();
+    let previous_refs = state.ref_map.ref_ids();
+    state.ref_map.begin_snapshot();
     let tree = snapshot::take_snapshot(
         &mgr.client,
         &session_id,
@@ -5506,7 +5511,19 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         })
         .collect();
 
-    Ok(json!({ "snapshot": tree, "origin": url, "refs": refs }))
+    let current_refs = state.ref_map.ref_ids();
+    let mut removed_refs = previous_refs
+        .difference(&current_refs)
+        .map(|ref_id| format!("@{}", ref_id))
+        .collect::<Vec<_>>();
+    removed_refs.sort_by_key(|ref_id| {
+        ref_id
+            .trim_start_matches("@e")
+            .parse::<usize>()
+            .unwrap_or(usize::MAX)
+    });
+
+    Ok(json!({ "snapshot": tree, "origin": url, "refs": refs, "removedRefs": removed_refs }))
 }
 
 async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -5584,7 +5601,7 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     };
 
     if annotate {
-        state.ref_map.clear();
+        state.ref_map.begin_snapshot();
         let _ = snapshot::take_snapshot(
             &mgr.client,
             &session_id,
@@ -5681,7 +5698,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         // `tab new`, so it must use the same pre-navigation setup path.
         let defer_url = defer_url_until_controls || session_setup_pending(state).await;
 
-        state.ref_map.clear();
+        state.ref_map.begin_snapshot();
         state.active_iframe_sessions.clear();
         state.active_frame_id = None;
         state.webmcp.clear_invocations();
@@ -6163,15 +6180,16 @@ async fn handle_back(state: &mut DaemonState) -> Result<Value, String> {
             wb.back().await?;
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             let url = wb.get_url().await.unwrap_or_default();
-            state.ref_map.clear();
+            state.ref_map.invalidate_all_documents();
             return Ok(json!({ "url": url }));
         }
     }
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
     mgr.evaluate("history.back()", None).await?;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     let url = mgr.get_url().await.unwrap_or_default();
-    state.ref_map.clear();
+    state.ref_map.invalidate_page(&session_id);
     Ok(json!({ "url": url }))
 }
 
@@ -6181,15 +6199,16 @@ async fn handle_forward(state: &mut DaemonState) -> Result<Value, String> {
             wb.forward().await?;
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             let url = wb.get_url().await.unwrap_or_default();
-            state.ref_map.clear();
+            state.ref_map.invalidate_all_documents();
             return Ok(json!({ "url": url }));
         }
     }
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
     mgr.evaluate("history.forward()", None).await?;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     let url = mgr.get_url().await.unwrap_or_default();
-    state.ref_map.clear();
+    state.ref_map.invalidate_page(&session_id);
     Ok(json!({ "url": url }))
 }
 
@@ -6199,7 +6218,7 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
             wb.reload().await?;
             tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
             let url = wb.get_url().await.unwrap_or_default();
-            state.ref_map.clear();
+            state.ref_map.invalidate_all_documents();
             return Ok(json!({ "url": url }));
         }
     }
@@ -6229,7 +6248,7 @@ async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
     .await;
 
     let url = mgr.get_url().await.unwrap_or_default();
-    state.ref_map.clear();
+    state.ref_map.invalidate_page(&session_id);
     Ok(json!({ "url": url }))
 }
 
@@ -6657,9 +6676,10 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         selector,
         ..SnapshotOptions::default()
     };
-    // Start from the same ref base as a normal baseline snapshot so unchanged lines align.
+    // Reuse the current document identities without committing a failed capture.
     // Build the replacement separately so a failed diff leaves the existing refs usable.
-    let mut current_ref_map = RefMap::new();
+    let mut current_ref_map = state.ref_map.clone();
+    current_ref_map.begin_snapshot();
     let current = snapshot::take_snapshot(
         &mgr.client,
         &session_id,
@@ -6689,7 +6709,10 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         None => String::new(),
     };
 
-    let result = diff::diff_snapshots(&baseline_text, &current);
+    let result = diff::diff_snapshots(
+        &diff::snapshot_comparison_text(&baseline_text),
+        &diff::snapshot_comparison_text(&current),
+    );
     state.ref_map = current_ref_map;
     Ok(json!({
         "diff": result.diff,
@@ -6719,16 +6742,17 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .unwrap_or(WaitUntil::Load);
 
     // Each navigation can replace the document, so invalidate refs before it starts.
-    state.ref_map.clear();
+    let first_session_id = mgr.active_session_id()?.to_string();
+    state.ref_map.invalidate_page(&first_session_id);
 
     // Navigate to URL1 and snapshot
     mgr.navigate(url1, wait_until).await?;
-    let session_id = mgr.active_session_id()?.to_string();
+    let first_session_id = mgr.active_session_id()?.to_string();
     let options = SnapshotOptions::default();
-    let mut snap1_ref_map = RefMap::new();
+    let mut snap1_ref_map = state.ref_map.clone();
     let snap1 = snapshot::take_snapshot(
         &mgr.client,
-        &session_id,
+        &first_session_id,
         &options,
         &mut snap1_ref_map,
         None,
@@ -6737,12 +6761,13 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     .await?;
 
     // Navigate to URL2 and snapshot
-    state.ref_map.clear();
+    snap1_ref_map.invalidate_page(&first_session_id);
     mgr.navigate(url2, wait_until).await?;
-    let mut snap2_ref_map = RefMap::new();
+    let second_session_id = mgr.active_session_id()?.to_string();
+    let mut snap2_ref_map = snap1_ref_map;
     let snap2 = snapshot::take_snapshot(
         &mgr.client,
-        &session_id,
+        &second_session_id,
         &options,
         &mut snap2_ref_map,
         None,
@@ -6750,7 +6775,10 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     )
     .await?;
 
-    let result = diff::diff_text(&snap1, &snap2);
+    let result = diff::diff_text(
+        &diff::snapshot_comparison_text(&snap1),
+        &diff::snapshot_comparison_text(&snap2),
+    );
     state.ref_map = snap2_ref_map;
     Ok(json!({
         "diff": result,
@@ -6916,7 +6944,7 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     let defer_url =
         defer_url_until_controls || (url.is_some() && session_setup_pending(state).await);
 
-    state.ref_map.clear();
+    state.ref_map.begin_snapshot();
     state.active_iframe_sessions.clear();
     state.active_frame_id = None;
     state.webmcp.clear_invocations();
@@ -6975,7 +7003,7 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
     };
     // Clear only after the switch commits, so a failed switch does not strand
     // the user on the old tab with dead refs and frame scope.
-    state.ref_map.clear();
+    state.ref_map.begin_snapshot();
     state.active_iframe_sessions.clear();
     state.active_frame_id = None;
     state.webmcp.clear_invocations();
@@ -7033,7 +7061,7 @@ async fn handle_tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     };
     // Clear only after the close commits; a rejected close (last tab, bad
     // index) must not wipe the caller's refs and frame scope.
-    state.ref_map.clear();
+    state.ref_map.begin_snapshot();
     state.active_iframe_sessions.clear();
     state.webmcp.clear_invocations();
     state.active_frame_id = None;
@@ -10374,7 +10402,7 @@ async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .as_ref()
         .ok_or("Browser not launched")?
         .page_count();
-    state.ref_map.clear();
+    state.ref_map.begin_snapshot();
 
     Ok(json!({
         "tabId": super::browser::format_tab_id(tab_id),
