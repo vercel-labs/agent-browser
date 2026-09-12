@@ -8380,6 +8380,94 @@ async fn e2e_recording_rejects_invalid_fps() {
     assert_success(&resp);
 }
 
+/// Verify changed-frame contact-sheet export through the full daemon pipeline.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_contact_sheet() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"data:text/html,<style>body{margin:0;background:%23f3f4f6;font-family:sans-serif}.card{margin:80px;padding:48px;background:white;border-radius:24px}button{padding:18px 28px;background:%232563eb;color:white;border:0;border-radius:12px}</style><div class=card><h1>Contact sheet demo</h1><p>Review important visual changes at a glance.</p><button>Continue</button></div>"#;
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let rec_path = std::env::temp_dir().join(format!(
+        "ab-e2e-rec-contact-sheet-{}.webm",
+        std::process::id()
+    ));
+    let sheet_path = rec_path.with_file_name(format!(
+        "{}.contact-sheet.png",
+        rec_path.file_stem().unwrap().to_string_lossy()
+    ));
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "recording_start",
+            "path": rec_path.to_string_lossy(),
+            "contactSheet": true,
+            "contactSheetThreshold": 0.01
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["contactSheet"], true);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "document.querySelector('.card').style.background='#dbeafe'; document.querySelector('h1').textContent='Ready to continue'; true" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(tokio::time::Duration::from_millis(350)).await;
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "evaluate", "script": "document.querySelector('.card').style.background='#dcfce7'; document.querySelector('p').textContent='The important region is highlighted.'; true" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    tokio::time::sleep(tokio::time::Duration::from_millis(350)).await;
+
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "recording_stop" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(
+        data["contactSheetPath"],
+        sheet_path.to_string_lossy().as_ref()
+    );
+    assert!(data["contactSheetFrames"].as_u64().unwrap_or(0) >= 2);
+    assert!(std::fs::metadata(&rec_path).unwrap().len() > 0);
+    let sheet = image::open(&sheet_path).expect("contact sheet should be a valid PNG");
+    assert!(sheet.width() >= 320);
+    assert!(sheet.height() >= 150);
+    if let Some(example_path) = std::env::var_os("AGENT_BROWSER_CONTACT_SHEET_EXAMPLE_PATH") {
+        let example_path = std::path::PathBuf::from(example_path);
+        if let Some(parent) = example_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::copy(&sheet_path, example_path).unwrap();
+    }
+
+    let _ = std::fs::remove_file(&rec_path);
+    let _ = std::fs::remove_file(&sheet_path);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // tab new: session setup inheritance
 // ---------------------------------------------------------------------------

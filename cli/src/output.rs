@@ -1090,6 +1090,20 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                         path,
                         recording_fps_suffix(data)
                     );
+                    if let Some(contact_sheet) =
+                        data.get("contactSheetPath").and_then(|v| v.as_str())
+                    {
+                        let frames = data
+                            .get("contactSheetFrames")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        println!(
+                            "{} Contact sheet saved to {} ({} frames)",
+                            color::success_indicator(),
+                            contact_sheet,
+                            frames
+                        );
+                    }
                 }
             } else {
                 println!("{} Recording stopped", color::success_indicator());
@@ -2799,9 +2813,9 @@ The output file can be viewed in:
             r##"
 agent-browser record - Record browser session to video
 
-Usage: agent-browser record start <path.webm|path.mp4> [url] [--fps <n>]
+Usage: agent-browser record start <path.webm|path.mp4> [url] [--fps <n>] [--contact-sheet]
        agent-browser record stop
-       agent-browser record restart <path.webm|path.mp4> [url] [--fps <n>]
+       agent-browser record restart <path.webm|path.mp4> [url] [--fps <n>] [--contact-sheet]
 
 Record the browser to a video file. Supported formats are .webm (VP8 via
 libvpx) and .mp4 (H.264 via libx264); any other extension is handed to
@@ -2825,7 +2839,9 @@ Operations:
   restart <path> [url]   Stop current recording (if any) and start a new one
 
 Options:
-  --fps <n>            Capture rate, 1-60 (default: 30)
+  --fps <n>                       Capture rate, 1-60 (default: 30)
+  --contact-sheet                 Save distinct visual changes as a timestamped PNG
+  --contact-sheet-threshold <n>   Changed-pixel ratio, 0-1 (default: 0.05)
 
 Global Options:
   --json               Output as JSON
@@ -2851,6 +2867,9 @@ Examples:
 
   # 10 fps for a long session where size matters more than motion
   agent-browser record start ./soak.webm --fps 10
+
+  # Export a visual summary beside the video
+  agent-browser record start ./demo.webm --contact-sheet
 
   # Restart recording with a new file (stops previous, starts new)
   agent-browser record restart ./take2.webm
@@ -3754,7 +3773,7 @@ Debug:
   trace start                Start Chrome DevTools trace
   trace stop [path]          Stop and save Chrome DevTools trace
   profiler start|stop [path] Record Chrome DevTools profile
-  record start <path> [url]  Start video recording (.webm/.mp4; --fps 1-60; needs ffmpeg)
+  record start <path> [url]  Start video recording (.webm/.mp4; supports contact sheets)
   record stop                Stop and save video
   console [--clear]          View console logs
   errors [--clear]           View page errors

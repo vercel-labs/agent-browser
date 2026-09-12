@@ -10,6 +10,7 @@ Capture browser automation as video for debugging, documentation, or verificatio
 - [Basic Recording](#basic-recording)
 - [Recording Commands](#recording-commands)
 - [Frame Rate](#frame-rate)
+- [Contact Sheets](#contact-sheets)
 - [Use Cases](#use-cases)
 - [Best Practices](#best-practices)
 - [Output Format](#output-format)
@@ -87,6 +88,19 @@ agent-browser record start ./soak.webm --fps 5
 ```
 
 The video uses the requested frame rate and holds the latest Chrome frame between repaints. `record stop --json` reports `frames` (written) and `capturedFrames` (distinct frames from Chrome).
+
+## Contact Sheets
+
+Pass `--contact-sheet` to create a timestamped summary with highlighted changes.
+
+```bash
+agent-browser record start ./checkout.webm --contact-sheet
+
+# Select frames when at least 2% of the image changes
+agent-browser record start ./checkout.webm --contact-sheet-threshold 0.02
+```
+
+The threshold accepts values from `0` to `1` and defaults to `0.05`. Passing `--contact-sheet-threshold` implies `--contact-sheet`. At most 100 frames are included.
 
 ## Use Cases
 
@@ -209,6 +223,7 @@ agent-browser record stop
 
 - Format follows the extension: `.webm` (VP8 via libvpx) or `.mp4` (H.264 via libx264); other extensions get H.264 in that container
 - Default frame rate: 30 fps (`--fps` accepts 1 to 60)
+- Optional contact sheet: timestamped PNG with changed-region highlights
 - Compatible with all modern browsers and video players
 - Compressed but high quality
 

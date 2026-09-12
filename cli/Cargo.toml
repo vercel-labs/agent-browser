@@ -61,3 +61,10 @@ strip = true
 inherits = "release"
 lto = "thin"
 codegen-units = 16
+
+# Keep image processing real-time while application code remains debuggable.
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.png]
+opt-level = 3

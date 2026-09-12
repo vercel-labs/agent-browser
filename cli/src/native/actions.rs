@@ -1108,6 +1108,7 @@ impl DaemonState {
         };
         let shared_count = Arc::new(AtomicU64::new(0));
         let shared_captured = Arc::new(AtomicU64::new(0));
+        let shared_contact_sheet_count = Arc::new(AtomicU64::new(0));
         let (cancel_tx, cancel_rx) = oneshot::channel();
         let handle = recording::spawn_recording_task(
             client,
@@ -1117,11 +1118,15 @@ impl DaemonState {
             self.recording_state.fps,
             shared_count.clone(),
             shared_captured.clone(),
+            self.recording_state.contact_sheet_path.clone(),
+            self.recording_state.contact_sheet_threshold,
+            shared_contact_sheet_count.clone(),
             cancel_rx,
         );
         self.recording_state.capture_task = Some(handle);
         self.recording_state.shared_frame_count = Some(shared_count);
         self.recording_state.shared_captured_count = Some(shared_captured);
+        self.recording_state.shared_contact_sheet_count = Some(shared_contact_sheet_count);
         self.recording_state.cancel_tx = Some(cancel_tx);
         Ok(())
     }
@@ -7313,6 +7318,25 @@ fn recording_fps_from_command(cmd: &Value) -> Result<Option<u32>, String> {
     }
 }
 
+fn recording_options_from_command(cmd: &Value) -> Result<recording::RecordingOptions, String> {
+    let contact_sheet_threshold = match cmd.get("contactSheetThreshold") {
+        Some(value) => value
+            .as_f64()
+            .ok_or_else(|| format!("Invalid contact sheet threshold: {} is not a number", value))?,
+        None => recording::DEFAULT_CONTACT_SHEET_THRESHOLD,
+    };
+    recording::validate_contact_sheet_threshold(contact_sheet_threshold)?;
+    Ok(recording::RecordingOptions {
+        fps: recording_fps_from_command(cmd)?,
+        contact_sheet: cmd
+            .get("contactSheet")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || cmd.get("contactSheetThreshold").is_some(),
+        contact_sheet_threshold,
+    })
+}
+
 /// Start recording the current active page. The recorder attaches to the
 /// active session as-is: no new browser context, no new tab, and no
 /// navigation unless a URL is given (in which case the active tab navigates
@@ -7337,7 +7361,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
 
     // Validate the rate and output path before any browser work so a bad value
     // costs nothing.
-    let fps = recording_fps_from_command(cmd)?;
+    let options = recording_options_from_command(cmd)?;
     recording::validate_output_path(path)?;
 
     {
@@ -7366,7 +7390,7 @@ async fn handle_recording_start(cmd: &Value, state: &mut DaemonState) -> Result<
         (mgr.client.clone(), mgr.active_session_id()?.to_string())
     };
 
-    let result = recording::recording_start(&mut state.recording_state, path, fps)?;
+    let result = recording::recording_start(&mut state.recording_state, path, options)?;
     state.start_recording_task(client, session_id).await?;
 
     if let Some(ref server) = state.stream_server {
@@ -7403,7 +7427,7 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
 
     // Validate the path and rate before stopping the in-flight take.
     recording::validate_output_path(path)?;
-    let fps = recording_fps_from_command(cmd)?;
+    let options = recording_options_from_command(cmd)?;
 
     {
         let domain_filter = state.domain_filter.read().await;
@@ -7440,7 +7464,7 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         None
     };
 
-    recording::recording_start(&mut state.recording_state, path, fps)?;
+    recording::recording_start(&mut state.recording_state, path, options)?;
 
     if let Some((client, session_id)) = recording_target {
         state.start_recording_task(client, session_id).await?;
@@ -7451,6 +7475,8 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         "previousPath": previous_path,
         "path": path,
         "fps": state.recording_state.fps,
+        "contactSheet": state.recording_state.contact_sheet,
+        "contactSheetPath": state.recording_state.contact_sheet_path,
     }))
 }
 
@@ -10462,7 +10488,14 @@ async fn handle_video_start(cmd: &Value, state: &mut DaemonState) -> Result<Valu
     let session_id = mgr.active_session_id()?.to_string();
 
     recording::check_ffmpeg_available().await?;
-    recording::recording_start(&mut state.recording_state, path, fps)?;
+    recording::recording_start(
+        &mut state.recording_state,
+        path,
+        recording::RecordingOptions {
+            fps,
+            ..recording::RecordingOptions::default()
+        },
+    )?;
     state
         .start_recording_task(mgr.client.clone(), session_id)
         .await?;
@@ -13825,7 +13858,7 @@ mod tests {
         recording::recording_start(
             &mut state.recording_state,
             output_path.to_str().unwrap(),
-            None,
+            recording::RecordingOptions::default(),
         )
         .unwrap();
         let client = state.browser.as_ref().unwrap().client.clone();
