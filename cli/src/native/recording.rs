@@ -1450,6 +1450,26 @@ pub async fn capture_initial_image(
     client: &CdpClient,
     session_id: &str,
 ) -> Result<InitialRecordingFrame, String> {
+    let viewport = client
+        .send_command(
+            "Runtime.evaluate",
+            Some(json!({
+                "expression": "[window.innerWidth, window.innerHeight]",
+                "returnByValue": true,
+            })),
+            Some(session_id),
+        )
+        .await
+        .map_err(|error| format!("Failed to read initial recording viewport: {error}"))?;
+    let dimensions = viewport
+        .pointer("/result/value")
+        .and_then(Value::as_array)
+        .filter(|dimensions| dimensions.len() == 2)
+        .and_then(|dimensions| Some((dimensions[0].as_f64()?, dimensions[1].as_f64()?)))
+        .filter(|(width, height)| {
+            width.is_finite() && *width > 0.0 && height.is_finite() && *height > 0.0
+        })
+        .ok_or_else(|| "Initial recording viewport returned invalid dimensions".to_string())?;
     let result = client
         .send_command(
             "Page.captureScreenshot",
@@ -1460,14 +1480,10 @@ pub async fn capture_initial_image(
         .map_err(|error| format!("Failed to capture initial recording frame: {error}"))?;
     let image_data = decode_frame_data(&result)
         .ok_or_else(|| "Initial recording screenshot returned no image data".to_string())?;
-    let (width, height) =
-        image::ImageReader::with_format(std::io::Cursor::new(&image_data), image::ImageFormat::Png)
-            .into_dimensions()
-            .map_err(|error| format!("Invalid initial recording screenshot: {error}"))?;
     Ok(InitialRecordingFrame {
         image_data,
-        device_width: f64::from(width),
-        device_height: f64::from(height),
+        device_width: dimensions.0,
+        device_height: dimensions.1,
     })
 }
 
