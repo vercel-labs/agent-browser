@@ -8213,6 +8213,49 @@ async fn e2e_recording_cursor_and_contact_sheet() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_initial_recording_frame_uses_css_viewport_dimensions() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(&json!({ "action": "launch", "headless": true }), &mut state).await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({
+                "action": "viewport",
+                "width": 400,
+                "height": 300,
+                "deviceScaleFactor": 2.0
+            }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let browser = state.browser.as_ref().unwrap();
+    let initial = super::recording::capture_initial_image(
+        &browser.client,
+        browser.active_session_id().unwrap(),
+    )
+    .await
+    .unwrap();
+    let (pixel_width, pixel_height) = image::ImageReader::with_format(
+        std::io::Cursor::new(&initial.image_data),
+        image::ImageFormat::Png,
+    )
+    .into_dimensions()
+    .unwrap();
+
+    assert_eq!((pixel_width, pixel_height), (800, 600));
+    assert_eq!(
+        (initial.device_width, initial.device_height),
+        (400.0, 300.0)
+    );
+
+    assert_success(&execute_command(&json!({ "action": "close" }), &mut state).await);
+}
+
 // ---------------------------------------------------------------------------
 // tab new: session setup inheritance
 // ---------------------------------------------------------------------------

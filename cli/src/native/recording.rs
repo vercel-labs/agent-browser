@@ -1280,12 +1280,18 @@ struct CapturedVideoFrame {
     device_height: f64,
 }
 
+pub struct InitialRecordingFrame {
+    pub image_data: Vec<u8>,
+    pub device_width: f64,
+    pub device_height: f64,
+}
+
 /// Drain Chrome independently from the encoder so FFmpeg cannot stall frame ACKs.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_recording_task(
     client: Arc<CdpClient>,
     capture_session: String,
-    initial_image: Vec<u8>,
+    initial_frame: InitialRecordingFrame,
     output_path: String,
     fps: u32,
     shared_count: Arc<AtomicU64>,
@@ -1329,20 +1335,14 @@ pub fn spawn_recording_task(
         // Chrome does not reliably emit an initial PNG screencast frame for a
         // static page. Seed both outputs explicitly before listening for
         // later repaints.
-        let (width, height) = image::ImageReader::with_format(
-            std::io::Cursor::new(&initial_image),
-            image::ImageFormat::Png,
-        )
-        .into_dimensions()
-        .map_err(|error| format!("Invalid initial recording screenshot: {error}"))?;
         let frame = CapturedVideoFrame {
             sequence: 0,
-            image_data: Arc::new(initial_image),
+            image_data: Arc::new(initial_frame.image_data),
             elapsed: Duration::ZERO,
             captured_at: tokio::time::Instant::now(),
             timestamp: cursor_timestamp(),
-            device_width: f64::from(width),
-            device_height: f64::from(height),
+            device_width: initial_frame.device_width,
+            device_height: initial_frame.device_height,
         };
         let seeded = frame_tx
             .send(frame.clone())
@@ -1449,7 +1449,7 @@ fn decode_frame_data(value: &Value) -> Option<Vec<u8>> {
 pub async fn capture_initial_image(
     client: &CdpClient,
     session_id: &str,
-) -> Result<Vec<u8>, String> {
+) -> Result<InitialRecordingFrame, String> {
     let result = client
         .send_command(
             "Page.captureScreenshot",
@@ -1458,8 +1458,17 @@ pub async fn capture_initial_image(
         )
         .await
         .map_err(|error| format!("Failed to capture initial recording frame: {error}"))?;
-    decode_frame_data(&result)
-        .ok_or_else(|| "Initial recording screenshot returned no image data".to_string())
+    let image_data = decode_frame_data(&result)
+        .ok_or_else(|| "Initial recording screenshot returned no image data".to_string())?;
+    let (width, height) =
+        image::ImageReader::with_format(std::io::Cursor::new(&image_data), image::ImageFormat::Png)
+            .into_dimensions()
+            .map_err(|error| format!("Invalid initial recording screenshot: {error}"))?;
+    Ok(InitialRecordingFrame {
+        image_data,
+        device_width: f64::from(width),
+        device_height: f64::from(height),
+    })
 }
 
 async fn collect_frames(
