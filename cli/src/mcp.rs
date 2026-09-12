@@ -937,7 +937,9 @@ fn tools() -> Vec<Value> {
                 "annotate": { "type": "boolean", "default": false, "description": "Number visible elements in the screenshot." },
                 "format": { "type": "string", "enum": ["png", "jpeg"], "description": "Screenshot format." },
                 "quality": { "type": "integer", "minimum": 0, "maximum": 100, "description": "JPEG quality." },
-                "screenshotDir": { "type": "string", "description": "Default output directory when path is omitted." }
+                "screenshotDir": { "type": "string", "description": "Default output directory when path is omitted." },
+                "ifChanged": { "type": "boolean", "default": false, "description": "Recommended for repeated captures to save tokens: return image content only when pixels changed." },
+                "threshold": { "type": "number", "minimum": 0, "maximum": 1, "description": "Maximum changed-pixel ratio to treat as unchanged. Implies ifChanged." }
             }),
             &[],
         ),
@@ -2753,6 +2755,10 @@ fn call_wait_download(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_screenshot(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, screenshot_command_args(arguments)?, None)
+}
+
+fn screenshot_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = Vec::new();
     if optional_bool(arguments, "annotate")?.unwrap_or(false) {
         args.push("--annotate".to_string());
@@ -2780,7 +2786,14 @@ fn call_screenshot(arguments: &Value) -> Result<Value, ProtocolError> {
     if optional_bool(arguments, "fullPage")?.unwrap_or(false) {
         args.push("--full".to_string());
     }
-    call_cli_tool(arguments, args, None)
+    if optional_bool(arguments, "ifChanged")?.unwrap_or(false) {
+        args.push("--if-changed".to_string());
+    }
+    if let Some(threshold) = optional_number_string(arguments, "threshold")? {
+        args.push("--threshold".to_string());
+        args.push(threshold);
+    }
+    Ok(args)
 }
 
 fn call_get_selector(arguments: &Value, what: &str) -> Result<Value, ProtocolError> {
@@ -4044,6 +4057,28 @@ fn write_json_line(stdout: &mut io::Stdout, value: &Value) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn conditional_screenshot_scope_matches_cli_parser() {
+        for scope in [
+            json!({"selector": "#a"}),
+            json!({"selector": "#b"}),
+            json!({"fullPage": true}),
+        ] {
+            let mut arguments = scope.clone();
+            arguments["ifChanged"] = json!(true);
+            let args = screenshot_command_args(&arguments).unwrap();
+            let flags = crate::flags::parse_flags(&args);
+            let command = crate::commands::parse_command(&args, &flags).unwrap();
+            assert_eq!(command["action"], "screenshot");
+            assert_eq!(command["ifChanged"], true);
+            assert_eq!(command["selector"], scope["selector"]);
+            assert_eq!(
+                command["fullPage"].as_bool().unwrap_or(false),
+                scope["fullPage"].as_bool().unwrap_or(false)
+            );
+        }
+    }
+
     #[test]
     fn snapshot_observations_use_canonical_cli_command() {
         for arguments in [

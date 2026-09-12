@@ -46,7 +46,6 @@ pub struct ScreenshotAnnotation {
 
 #[derive(Debug, Clone)]
 pub struct ScreenshotResult {
-    pub path: String,
     pub base64: String,
     pub annotations: Vec<ScreenshotAnnotation>,
 }
@@ -95,8 +94,7 @@ impl Serialize for ScreenshotAnnotation {
     }
 }
 
-/// Captures a screenshot via CDP and optionally overlays numbered annotations
-/// that mirror the Node.js screenshot `annotate` mode.
+/// Captures screenshot bytes and optional annotations without writing a file.
 pub async fn take_screenshot(
     client: &CdpClient,
     session_id: &str,
@@ -149,20 +147,7 @@ pub async fn take_screenshot(
         Vec::new()
     };
 
-    let ext = if options.format == "jpeg" {
-        "jpg"
-    } else {
-        "png"
-    };
-    let path = save_screenshot(
-        &base64,
-        options.path.as_deref(),
-        ext,
-        options.output_dir.as_deref(),
-    )?;
-
     Ok(ScreenshotResult {
-        path,
         base64,
         annotations,
     })
@@ -551,12 +536,15 @@ fn project_annotations(
         .collect()
 }
 
-fn save_screenshot(
-    base64_data: &str,
-    explicit_path: Option<&str>,
-    ext: &str,
-    output_dir: Option<&str>,
-) -> Result<String, String> {
+/// Writes a captured image only after the caller decides it is needed.
+pub fn save_screenshot(base64_data: &str, options: &ScreenshotOptions) -> Result<String, String> {
+    let ext = if options.format == "jpeg" {
+        "jpg"
+    } else {
+        "png"
+    };
+    let explicit_path = options.path.as_deref();
+    let output_dir = options.output_dir.as_deref();
     let save_path = match explicit_path {
         Some(path) => path.to_string(),
         None => {

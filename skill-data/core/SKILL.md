@@ -302,7 +302,11 @@ agent-browser screenshot                        # temp path, printed on stdout
 agent-browser screenshot page.png               # specific path
 agent-browser screenshot --full full.png        # full scroll height
 agent-browser screenshot --annotate map.png     # numbered labels + legend keyed to snapshot refs
+agent-browser screenshot --if-changed           # recommended: skip unchanged images to save tokens
+agent-browser screenshot --threshold 0.01       # ignore changes affecting at most 1% of pixels
 ```
+
+Prefer `--if-changed` for repeated captures: skipping unchanged images is the most token-efficient option. The first capture returns a path; later unchanged captures omit it. See [conditional screenshot responses](references/commands.md#screenshots-and-pdf) for JSON fields.
 
 Headless Chromium screenshots hide native scrollbars for consistent image output. Pass `--hide-scrollbars false` when launching to keep native scrollbars visible.
 
