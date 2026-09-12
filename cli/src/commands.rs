@@ -60,15 +60,9 @@ impl ParseError {
     }
 }
 
+/// IDs bind confirmations and retries across independent CLI invocations.
 pub fn gen_id() -> String {
-    format!(
-        "r{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros()
-            % 1000000
-    )
+    format!("r{}", uuid::Uuid::new_v4().simple())
 }
 
 /// Normalize browser navigation inputs while preserving schemes Chrome can
@@ -3449,6 +3443,13 @@ pub fn shell_words_split(s: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_generated_request_id_uses_uuid() {
+        let id = gen_id();
+        let uuid = uuid::Uuid::parse_str(id.strip_prefix('r').unwrap()).unwrap();
+        assert_eq!(uuid.get_version_num(), 4);
+    }
 
     fn default_flags() -> Flags {
         Flags {

@@ -43,10 +43,10 @@ agent-browser record start ./demo.webm
 
 ## Frame rate
 
-Recording captures 30 frames per second by default, which is enough for scrolling, hover states, and CSS transitions to read as motion rather than as a slideshow. Use `--fps` to change it:
+`--fps` controls the output playback rate (30 by default, 1 to 60 allowed), not the rate at which Chrome supplies new images. Capture is repaint-driven and may be sparse. Requesting 60 fps cannot prove smoothness or the presence of intermediate states.
 
 ```bash
-# 60 fps for a short, motion-heavy take
+# Request a higher output rate; inspect capture evidence separately
 agent-browser record start ./scroll.webm --fps 60
 
 # 10 fps for a long soak run where file size matters more than motion
@@ -64,9 +64,23 @@ agent-browser record start ./soak.webm --fps 10
   </tbody>
 </table>
 
-Valid rates are 1 to 60. Frames come from Chrome's screencast, so every repaint up to the display rate is captured and a 60 fps take of a scroll holds 60 distinct pictures per second. While the page is static the last frame is held, so the file's duration matches wall clock; a gap longer than five seconds is held for five and the rest left out.
+The recorder repeats the last image through gaps. If the output ticker falls behind, it fills up to five seconds of missed slots plus the current slot and skips the remaining deficit. A late first image can also be repeated over earlier output slots. Playback duration and output FPS therefore do not establish how much motion was captured.
 
-`record stop` reports `frames` (written to the file) and `capturedFrames` (distinct frames the page produced). A static page shows a small `capturedFrames` against a full `frames` count; that is the hold working.
+## Recording receipts
+
+A successful `record start` returns `recordingId` but does not prove a first frame has arrived. `record stop --json` returns a receipt in `data`, including when the outer `success` is `false`:
+
+- `recordingId` and `path` identify the take. `success`/`error` record its terminal outcome; they are `null` while it is still in progress.
+- `capture.startedAt`/`endedAt` are ISO-8601 UTC capture-loop times. `capture.durationMs` is monotonic wall time and stops before CDP teardown and encoder completion.
+- `capture.firstFrameAt`/`lastFrameAt` and `firstFrameAfterMs`/`lastFrameAfterMs` identify the first and last frame received by the capture loop. `timestampSource` is `local-receive`, not browser presentation time. These fields remain `null` until a frame arrives.
+- `capturedFrames` counts base64-decoded screencast events consumed by the loop, including frames later discarded. It does not count pixel-unique images. `capture.averageFps` divides that count by capture wall time; `maxFrameGapMs` includes leading and trailing time without frames.
+- `frames` and `output.frames` count images written to ffmpeg. `output.encodedFrames` comes from ffmpeg's progress stream. `output.fps` is the requested output rate; after encoder success, `output.durationMs` is encoded frames divided by that rate (`durationSource: encoded-frames/fps`). This is separate from capture wall time.
+- `output.heldFrames` counts repeated images, `droppedFrames` counts decoded images discarded by the recorder's queue or left unwritten at stop, and `skippedFrames` counts skipped output slots. They do not measure frames lost before the capture loop received them.
+- `output.encoderSucceeded` reports the encoder exit result. `file.exists`/`sizeBytes` report file evidence separately: a partial or existing file is not a successful encode. Missing encoder measurements remain `null`.
+
+Receipts warn that output FPS does not establish smoothness. Inspect first/last frame timing, gaps, capture rate, and the video itself before claiming motion quality.
+
+After a stop timeout, run `session info --json` without launching or reconnecting a browser. `data.runtime.recording.current` contains the in-progress take and `last` contains the latest terminal receipt, including failures. Match the `recordingId` from start. Exact native transport retries with the same stop command ID replay the original response, even after another take starts; a new `record stop` command stops the current take. `record restart` returns the previous terminal receipt as `previousRecording`, separately from the new recording. Receipts live in daemon memory and do not survive its exit.
 
 ## Commands
 
@@ -129,7 +143,7 @@ Screenshots and videos work well together: screenshots capture precise still sta
   <tbody>
     <tr><td>Container</td><td>WebM (<code>.webm</code>, VP8 via libvpx) or MP4 (<code>.mp4</code>, H.264 via libx264), chosen by the extension; other extensions get H.264 in whatever container ffmpeg maps them to</td></tr>
     <tr><td>Encoder</td><td>ffmpeg on <code>PATH</code></td></tr>
-    <tr><td>Frame rate</td><td>30 fps by default, 1 to 60 with <code>--fps</code></td></tr>
+    <tr><td>Output frame rate</td><td>30 fps by default, 1 to 60 with <code>--fps</code>; observed capture rate is reported separately</td></tr>
     <tr><td>Viewport</td><td>Uses the active browser viewport settings</td></tr>
     <tr><td>State</td><td>Records the active page in place, including its session and in-page state</td></tr>
   </tbody>
@@ -139,6 +153,6 @@ Screenshots and videos work well together: screenshots capture precise still sta
 
 - Recording adds overhead to automation, and higher frame rates add more.
 - Long recordings can use significant disk space; 60 fps roughly doubles the bitrate of 30 fps.
-- Distinct frames per second are bounded by how often the page repaints, so a page that renders below 60 fps records below it too.
+- Capture depends on repaint frequency and recorder throughput. Frame event counts do not prove pixel-unique images or smoothness.
 - Use `record stop` before closing a session if you need the file flushed.
 - Some constrained headless environments may have codec or GPU limitations. An ffmpeg built without libvpx or libx264 cannot write the matching format; `agent-browser doctor` reports which encoders are present.
