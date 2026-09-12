@@ -431,18 +431,22 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         // === Core Actions ===
         "click" => {
             let new_tab = rest.contains(&"--new-tab");
+            let human = rest.contains(&"--human");
             let sel = rest
                 .iter()
-                .find(|arg| **arg != "--new-tab")
+                .find(|arg| **arg != "--new-tab" && **arg != "--human")
                 .ok_or_else(|| ParseError::MissingArguments {
                     context: "click".to_string(),
-                    usage: "click <selector> [--new-tab]",
+                    usage: "click <selector> [--new-tab] [--human]",
                 })?;
+            let mut cmd = json!({ "id": id, "action": "click", "selector": sel });
             if new_tab {
-                Ok(json!({ "id": id, "action": "click", "selector": sel, "newTab": true }))
-            } else {
-                Ok(json!({ "id": id, "action": "click", "selector": sel }))
+                cmd["newTab"] = json!(true);
             }
+            if human {
+                cmd["inputMode"] = json!("human");
+            }
+            Ok(cmd)
         }
         "dblclick" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -554,7 +558,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 context: "drag".to_string(),
                 usage: "drag <source> <target>",
             })?;
-            Ok(json!({ "id": id, "action": "drag", "source": src, "target": tgt }))
+            let mut cmd = json!({ "id": id, "action": "drag", "source": src, "target": tgt });
+            if rest.contains(&"--human") {
+                cmd["inputMode"] = json!("human");
+            }
+            Ok(cmd)
         }
         "upload" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -3120,7 +3128,32 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     context: "mouse move".to_string(),
                     usage: "mouse move <x> <y>",
                 })?;
-            Ok(json!({ "id": id, "action": "mousemove", "x": x, "y": y }))
+            let mut cmd = json!({ "id": id, "action": "mousemove", "x": x, "y": y });
+            let mut i = 3;
+            while i < rest.len() {
+                match rest[i] {
+                    "--duration" | "--steps" | "--seed" => {
+                        let flag = rest[i];
+                        let raw = rest.get(i + 1).ok_or_else(|| ParseError::MissingArguments {
+                            context: format!("mouse move {}", flag),
+                            usage: "mouse move <x> <y> [--duration <ms>] [--steps <n>] [--seed <n>]",
+                        })?;
+                        let value = raw.parse::<u64>().map_err(|_| ParseError::InvalidValue {
+                            message: format!("{} expects a non-negative integer, got '{}'", flag, raw),
+                            usage: "mouse move <x> <y> [--duration <ms>] [--steps <n>] [--seed <n>]",
+                        })?;
+                        let key = match flag { "--duration" => "duration", "--steps" => "steps", _ => "seed" };
+                        cmd[key] = json!(value);
+                        i += 2;
+                    }
+                    "--human" => { cmd["inputMode"] = json!("human"); i += 1; }
+                    other => return Err(ParseError::InvalidValue {
+                        message: format!("unexpected argument '{}'", other),
+                        usage: "mouse move <x> <y> [--duration <ms>] [--steps <n>] [--seed <n>] [--human]",
+                    }),
+                }
+            }
+            Ok(cmd)
         }
         Some("down") => {
             Ok(json!({ "id": id, "action": "mousedown", "button": rest.get(1).unwrap_or(&"left") }))
@@ -3543,6 +3576,7 @@ mod tests {
             cli_no_webmcp: false,
             cli_restore: false,
             cli_pin_tab: false,
+            cli_input_mode: false,
             annotate: false,
             color_scheme: None,
             download_path: None,
@@ -3563,6 +3597,7 @@ mod tests {
             plugins: Vec::new(),
             verbose: false,
             quiet: false,
+            input_mode: "instant".to_string(),
         }
     }
 
@@ -4361,6 +4396,26 @@ mod tests {
         let cmd = parse_command(&args("click #button"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "click");
         assert_eq!(cmd["selector"], "#button");
+    }
+
+    #[test]
+    fn test_click_human() {
+        let cmd = parse_command(&args("click @e1 --human"), &default_flags()).unwrap();
+        assert_eq!(cmd["selector"], "@e1");
+        assert_eq!(cmd["inputMode"], "human");
+    }
+
+    #[test]
+    fn test_mouse_move_interpolation_options() {
+        let cmd = parse_command(
+            &args("mouse move 600 400 --duration 250 --steps 24 --seed 42 --human"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["duration"], 250);
+        assert_eq!(cmd["steps"], 24);
+        assert_eq!(cmd["seed"], 42);
+        assert_eq!(cmd["inputMode"], "human");
     }
 
     #[test]

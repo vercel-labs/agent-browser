@@ -114,6 +114,12 @@ fn attach_pin_tab_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
     }
 }
 
+fn attach_input_mode(cmd: &mut serde_json::Value, flags: &Flags) {
+    if flags.cli_input_mode {
+        cmd["defaultInputMode"] = json!(flags.input_mode);
+    }
+}
+
 fn attach_plugins_to_command(cmd: &mut serde_json::Value, plugins: &[plugins::PluginConfig]) {
     cmd["plugins"] = json!(plugins);
 }
@@ -1550,7 +1556,7 @@ fn main() {
             exit(1);
         }
     };
-
+    attach_input_mode(&mut cmd, &flags);
     // Handle --password-stdin for auth save
     if cmd.get("action").and_then(|v| v.as_str()) == Some("auth_save") {
         if cmd.get("password").is_some() {
@@ -2209,6 +2215,7 @@ fn run_batch(
                 continue;
             }
         };
+        attach_input_mode(&mut parsed, flags);
 
         let action = parsed
             .get("action")
@@ -2292,6 +2299,20 @@ fn run_batch(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn input_mode_session_setting_preserves_command_override() {
+        let args: Vec<String> = ["--input-mode", "smooth", "click", "#button", "--human"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let flags = crate::flags::parse_flags(&args);
+        let mut command =
+            crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+        super::attach_input_mode(&mut command, &flags);
+        assert_eq!(command["defaultInputMode"], "smooth");
+        assert_eq!(command["inputMode"], "human");
+    }
+
     use super::*;
 
     #[test]

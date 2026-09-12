@@ -297,11 +297,15 @@ agent-browser clipboard paste                     # Paste from clipboard (Ctrl+V
 ### Mouse Control
 
 ```bash
-agent-browser mouse move <x> <y>      # Move mouse
+agent-browser mouse move <x> <y>      # Move mouse instantly
+agent-browser mouse move 600 400 --duration 250 --steps 24 # Smooth movement
+agent-browser mouse move 600 400 --human --seed 42 # Reproducible curved movement
 agent-browser mouse down [button]     # Press button (left/right/middle)
 agent-browser mouse up [button]       # Release button
 agent-browser mouse wheel <dy> [dx]   # Scroll wheel
 ```
+
+Add `--human` to `click` or `drag` for curved, eased movement from the current cursor position.
 
 ### Browser Settings
 
@@ -1050,6 +1054,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--confirm-actions <list>` | Action categories requiring confirmation (or `AGENT_BROWSER_CONFIRM_ACTIONS` env) |
 | `--confirm-interactive` | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |
 | `--engine <name>` | Browser engine: `chrome` (default), `lightpanda` (or `AGENT_BROWSER_ENGINE` env) |
+| `--input-mode <mode>` | Session pointer movement: `instant` (default), `smooth`, or `human` |
 | `--idle-timeout <time>` | Shut down the daemon after inactivity (`10s`, `3m`, `1h`, or raw ms). Defaults to `1h`; use `0` to disable (or `AGENT_BROWSER_IDLE_TIMEOUT_MS` env) |
 | `--no-auto-dialog` | Disable automatic dismissal of `alert`/`beforeunload` dialogs (or `AGENT_BROWSER_NO_AUTO_DIALOG` env) |
 | `--model <name>` | AI model for chat command (or `AI_GATEWAY_MODEL` env) |

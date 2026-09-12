@@ -1647,7 +1647,7 @@ Examples:
             r##"
 agent-browser click - Click an element
 
-Usage: agent-browser click <selector> [--new-tab]
+Usage: agent-browser click <selector> [--new-tab] [--human]
 
 Clicks on the specified element. The selector can be a CSS selector,
 XPath, or an element reference from snapshot (e.g., @e1).
@@ -1659,6 +1659,8 @@ Options:
   --new-tab            Open link in a new tab instead of navigating current tab.
                        The new tab inherits session setup before its first load.
                        Only works on elements with an href attribute.
+  --human              Approach along a reproducible eased curve
+                       Starts at the last pointer or element interaction
 
 Global Options:
   --json               Output as JSON
@@ -1670,6 +1672,7 @@ Examples:
   agent-browser click "button.primary"
   agent-browser click "//button[@type='submit']"
   agent-browser click @e3 --new-tab
+  agent-browser click @e3 --human
 "##
         }
         "dblclick" => {
@@ -1824,7 +1827,7 @@ Examples:
             r##"
 agent-browser drag - Drag and drop
 
-Usage: agent-browser drag <source> <target>
+Usage: agent-browser drag <source> <target> [--human]
 
 Drags an element from source to target location.
 
@@ -1835,6 +1838,7 @@ Global Options:
 Examples:
   agent-browser drag "#draggable" "#drop-zone"
   agent-browser drag @e1 @e2
+  agent-browser drag @e1 @e2 --human
 "##
         }
         "upload" => {
@@ -2370,6 +2374,8 @@ Global Options:
 
 Examples:
   agent-browser mouse move 100 200
+  agent-browser mouse move 600 400 --duration 250 --steps 24
+  agent-browser mouse move 600 400 --human --seed 42
   agent-browser mouse down
   agent-browser mouse up
   agent-browser mouse down right
@@ -3931,6 +3937,7 @@ Options:
   --screenshot-dir <path>    Default screenshot output directory (or AGENT_BROWSER_SCREENSHOT_DIR)
   --screenshot-quality <n>   JPEG quality 0-100; ignored for PNG (or AGENT_BROWSER_SCREENSHOT_QUALITY)
   --screenshot-format <fmt>  Screenshot format: png, jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)
+  --input-mode <mode>        Session pointer movement: instant (default), smooth, human
   --headed                   Show browser window (not headless) (or AGENT_BROWSER_HEADED env)
   --webgpu                   Enable WebGPU; uses SwiftShader software Vulkan on Linux, no GPU required (or AGENT_BROWSER_WEBGPU env)
   --no-webmcp                Disable default experimental WebMCP support for locally launched Chrome
