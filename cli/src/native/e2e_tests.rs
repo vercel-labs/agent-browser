@@ -7899,6 +7899,51 @@ async fn e2e_upload_with_css_selector() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_session_info_attached_browser_does_not_invent_local_identity() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "launch", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    let owned = execute_command(
+        &json!({ "id": "owned", "action": "session_info" }),
+        &mut state,
+    )
+    .await;
+    let url = state.browser.as_ref().unwrap().get_cdp_url().to_string();
+    let mut attached = super::browser::BrowserManager::connect_cdp(&url)
+        .await
+        .unwrap();
+    let info = attached.session_info().await;
+    assert_eq!(info["status"], "connected");
+    assert_eq!(info["alive"], true);
+    assert_eq!(info["ownership"], "attached");
+    assert!(info["pid"].is_null());
+    assert!(info["userDataDir"].is_null());
+    assert_eq!(
+        info["tabs"][0]["targetId"],
+        owned["data"]["browser"]["tabs"][0]["targetId"]
+    );
+    attached.close().await.unwrap();
+    assert_eq!(attached.session_info().await["status"], "disconnected");
+    let after = execute_command(
+        &json!({ "id": "after", "action": "session_info" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        after["data"]["browser"]["pid"],
+        owned["data"]["browser"]["pid"]
+    );
+    assert_eq!(after["data"]["browser"]["alive"], true);
+    close_current_browser(&mut state).await.unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Recording: default records the current active page
 // ---------------------------------------------------------------------------
@@ -8169,6 +8214,32 @@ async fn e2e_recording_honors_requested_fps() {
         "static page should yield a few captured frames held across {frames} written, got {captured}"
     );
 
+    assert_eq!(data["output"]["encodedFrames"].as_u64(), Some(frames));
+    assert_eq!(data["output"]["encoderSucceeded"], true);
+    assert_eq!(
+        data["output"]["durationMs"],
+        frames as f64 * 1000.0 / FPS as f64
+    );
+    assert_eq!(
+        data["output"]["heldFrames"].as_u64().unwrap(),
+        frames - captured + data["output"]["droppedFrames"].as_u64().unwrap()
+    );
+    let capture = &data["capture"];
+    assert_eq!(capture["timestampSource"], "local-receive");
+    for key in ["startedAt", "endedAt", "firstFrameAt", "lastFrameAt"] {
+        chrono::DateTime::parse_from_rfc3339(capture[key].as_str().unwrap()).unwrap();
+    }
+    assert!(
+        capture["firstFrameAfterMs"].as_f64().unwrap()
+            <= capture["lastFrameAfterMs"].as_f64().unwrap()
+    );
+    assert!(
+        capture["lastFrameAfterMs"].as_f64().unwrap() <= capture["durationMs"].as_f64().unwrap()
+    );
+    assert!(
+        capture["averageFps"].as_f64().unwrap() < FPS as f64,
+        "a static page is not a 60 fps capture"
+    );
     let size = std::fs::metadata(&rec_path).map(|m| m.len()).unwrap_or(0);
     assert!(size > 0, "recording file should not be empty");
 

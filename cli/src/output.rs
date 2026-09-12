@@ -445,12 +445,11 @@ fn format_a11y_target(target: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// Render a recording's capture rate as a trailing " (30 fps)", or nothing
-/// when the payload predates the field.
+/// The requested output rate is not a measurement of capture quality.
 fn recording_fps_suffix(data: &serde_json::Value) -> String {
     data.get("fps")
         .and_then(|v| v.as_u64())
-        .map(|fps| format!(" ({} fps)", fps))
+        .map(|fps| format!(" ({} output fps)", fps))
         .unwrap_or_default()
 }
 
@@ -1071,29 +1070,41 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
                     rate
                 );
             }
+            if let Some(error) = data["previousRecording"]["error"].as_str() {
+                eprintln!(
+                    "{} Previous recording failed: {}",
+                    color::warning_indicator(),
+                    error
+                );
+            }
             return;
         }
         // Recording stop (has "frames" field - from recording_stop action)
         if data.get("frames").is_some() {
             if let Some(path) = data.get("path").and_then(|v| v.as_str()) {
-                if let Some(error) = data.get("error").and_then(|v| v.as_str()) {
-                    println!(
-                        "{} Recording saved to {} - {}",
-                        color::warning_indicator(),
-                        path,
-                        error
-                    );
-                } else {
-                    println!(
-                        "{} Recording saved to {}{}",
-                        color::success_indicator(),
-                        path,
-                        recording_fps_suffix(data)
-                    );
-                }
+                println!(
+                    "{} Recording saved to {}{}",
+                    color::success_indicator(),
+                    path,
+                    recording_fps_suffix(data)
+                );
             } else {
                 println!("{} Recording stopped", color::success_indicator());
             }
+            if let (Some(count), Some(duration), Some(rate)) = (
+                data["capturedFrames"].as_u64(),
+                data["capture"]["durationMs"].as_f64(),
+                data["capture"]["averageFps"].as_f64(),
+            ) {
+                println!(
+                    "Capture: {} frame events over {:.0} ms ({:.2} frames/s)",
+                    count, duration, rate
+                );
+            }
+            if let Some(duration) = data["output"]["durationMs"].as_f64() {
+                println!("Encoded playback: {:.0} ms", duration);
+            }
+            print_warning(resp);
             return;
         }
         // Download response (has "suggestedFilename" or "filename" field)
@@ -1600,6 +1611,15 @@ text extracted from HTML, and print only the document content by default.
 Use --outline for a compact heading outline of a single page. Use --llms index
 or --llms full for nearest-ancestor llms files; with no URL, --llms and
 --require-md use the active tab URL because they depend on HTTP resources.
+
+Explicit URL reads run HTTP directly, including in batches, without launching
+or reconfiguring a browser. Headers, domain rules, action policy, and standard
+HTTP proxy environment variables apply; browser profiles/cookies do not.
+Ordinary reads need no daemon. If policy requires confirmation, a browserless
+daemon keeps the pending command for `confirm`; an existing daemon is reused
+without reconfiguration. Its read-confirmation protocol support is checked on
+the same connection before sending the read, not inferred from version labels.
+An unsupported daemon is left unchanged and receives no read request.
 
 Options:
   --raw                Print the response body without HTML extraction
@@ -2693,9 +2713,15 @@ Usage:
 
 When --confirm-actions is set, certain action categories return a
 confirmation_required response with a confirmation ID. Use confirm/deny
-to approve or reject the action.
+to approve or reject that exact action. Treat returned IDs as opaque; do not
+construct or truncate them. The ID is required. A missing or stale
+ID fails without browser work, execution, or consuming the current pending action.
+A newer confirmation request replaces the previous pending action.
 
-Pending confirmations auto-deny after 60 seconds.
+Only explicit-URL HTTP read prompts carry data.capabilities.readRequiresConfirmation:
+true. This proves the native runtime checks IDs before acting; bare DOM read
+prompts do not carry this marker. Missing markers are not proof of a read-only
+confirmation on older runtimes.
 
 Examples:
   agent-browser confirm c_8f3a1234
@@ -2815,9 +2841,18 @@ To record in a separate tab, run `tab new [url]` before `record start`.
 Requires ffmpeg on PATH with the libvpx and libx264 encoders (brew install
 ffmpeg, or apt install ffmpeg). Run `agent-browser doctor` to check.
 
-Recording captures 30 fps, which keeps scrolls and CSS transitions smooth.
-Raise it to 60 for short, motion-heavy takes (drag interactions, animation
-work); lower it for long sessions where file size matters more than motion.
+The output rate defaults to 30 fps (1-60 allowed), not the capture rate.
+Chrome supplies images on repaint; held images fill output slots. A high
+output FPS does not prove smoothness or that intermediate states were seen.
+
+`record stop --json` returns a receipt with capture UTC timestamps, monotonic
+wall duration, frame event count/rate, encoder frame count, held/dropped frames,
+and file size. Capture timing excludes encoder completion. Failures retain a
+receipt too, with success:false; file existence alone is not encoder success.
+After a stop timeout, `session info --json` exposes runtime.recording.current
+and runtime.recording.last without browser recovery. Match recordingId from
+start. Receipts last for the daemon's lifetime; a transport retry with the same
+stop id replays its response rather than stopping a newer recording.
 
 Operations:
   start <path> [url]     Start recording the active page (navigates first if url given)
@@ -2825,7 +2860,7 @@ Operations:
   restart <path> [url]   Stop current recording (if any) and start a new one
 
 Options:
-  --fps <n>            Capture rate, 1-60 (default: 30)
+  --fps <n>            Output rate, 1-60 (default: 30; capture rate varies)
 
 Global Options:
   --json               Output as JSON
@@ -3000,12 +3035,23 @@ instance with separate cookies, storage, and state.
 Operations:
   (none)               Show current session name
   id                   Generate stable session id (--scope worktree|cwd|git-root, --prefix)
-  info                 Show daemon, launch, and restore diagnostics
+  info                 Inspect daemon, browser identity, recordings, and restore state
   list                 List all active sessions
 
 Environment:
   AGENT_BROWSER_SESSION    Default session name
   AGENT_BROWSER_NAMESPACE  Namespace for daemon sockets and restore state
+
+`info` never starts, reconfigures, or reconnects a browser. JSON distinguishes
+active/pid (daemon) from runtime.browser (liveness, local Chrome PID, effective
+userDataDir, launched/attached ownership, and current tabs). Unavailable remote
+or attached PID/profile values are null; browser probe errors stay explicit.
+A bare/empty Chrome --user-data-dir override also reports null. Raw Chrome
+profile overrides use --user-data-dir=<path>; tokens after -- are not switches.
+A tab's active flag means this daemon's selected tab, not OS window focus.
+Recording evidence is in runtime.recording.current and runtime.recording.last.
+runtime.capabilities.readRequiresConfirmation advertises the ID-checked HTTP
+read confirmation protocol; version equality alone does not prove support.
 
 Global Options:
   --json               Output as JSON
@@ -4062,7 +4108,7 @@ Examples:
   agent-browser profiles                               # List available Chrome profiles
   SESSION="$(agent-browser session id --scope worktree --prefix myapp)"
   agent-browser --session "$SESSION" --restore open example.com  # Auto-save/restore state
-  agent-browser session info --json                    # Inspect daemon and restore status
+  agent-browser session info --json                    # Inspect daemon/browser identity and recording receipts
   agent-browser chat "open google.com and search for cats"  # AI chat (single-shot)
   agent-browser chat                                        # AI chat (interactive REPL)
   agent-browser -q chat "summarize this page"               # Quiet mode (text only)

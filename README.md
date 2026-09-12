@@ -200,7 +200,11 @@ agent-browser read example.com/article --require-md
 agent-browser read https://example.com/article --json
 ```
 
-`read` fetches a URL without launching Chrome. Omit the URL to read the rendered DOM of the active tab in the current browser session, including browser auth state and client-side updates. Explicit URL reads send `Accept: text/markdown` by default, try the same URL with `.md` appended when the first response is not markdown, walk ancestor paths toward `/` to find the nearest `llms.txt` for a matching docs link, print markdown or plain text when available, and fall back to readable text extracted from HTML. `--llms` and `--require-md` with no URL use the active tab URL because they depend on HTTP resources. `read` does not read `llms-full.txt` unless you ask for it.
+Explicit URL reads run HTTP directly without launching, reconnecting, or reconfiguring a browser, including in batches. Omit the URL to read the rendered DOM of the active tab in the current browser session, including browser auth state and client-side updates. Explicit URL reads send `Accept: text/markdown` by default, try the same URL with `.md` appended when the first response is not markdown, walk ancestor paths toward `/` to find the nearest `llms.txt` for a matching docs link, print markdown or plain text when available, and fall back to readable text extracted from HTML. `--llms` and `--require-md` with no URL use the active tab URL because they depend on HTTP resources. `read` does not read `llms-full.txt` unless you ask for it.
+
+Ordinary URL reads do not need a daemon. They use current CLI/config headers, domain rules, and action policy, plus standard HTTP proxy environment variables, not browser cookies or profile settings. If policy requires a two-call `read` → `confirm` workflow, a browserless daemon holds the pending command; an existing daemon is reused without reconfiguration. Mixed batches only prepare a browser when a browser-dependent row is reached.
+
+The read-confirmation bridge checks `runtime.capabilities.readRequiresConfirmation` on the same connection before queuing a read. Equal version labels are not proof of support; an unsupported daemon receives no read request and remains unchanged. Only explicit-URL HTTP confirmation prompts carry `data.capabilities.readRequiresConfirmation: true`. `confirm` and `deny` require the exact returned confirmation ID; a stale ID cannot execute or discard a newer pending action. Bare DOM read prompts do not carry the HTTP marker.
 
 Options: `--raw` prints the response body without HTML extraction, `--require-md` fails unless the server returns `Content-Type: text/markdown`, `--outline` prints a compact heading outline for one page, `--llms index` prints a compact nearest-ancestor `llms.txt` link list, `--llms full` reads the nearest-ancestor `llms-full.txt`, `--filter <text>` narrows page sections, llms links/sections, or outline headings, and `--timeout <ms>` changes the request timeout. Global safeguards such as `--allowed-domains`, `--content-boundaries`, and `--max-output` also apply to read fetches and output.
 
@@ -424,8 +428,8 @@ agent-browser trace start             # Start recording trace
 agent-browser trace stop [path]       # Stop and save trace
 agent-browser profiler start          # Start Chrome DevTools profiling
 agent-browser profiler stop [path]    # Stop and save profile (.json)
-agent-browser record start ./demo.webm           # Start video recording at 30 fps (.webm or .mp4; needs ffmpeg on PATH)
-agent-browser record start ./demo.webm --fps 60  # 60 fps for motion-heavy takes (1-60 allowed)
+agent-browser record start ./demo.webm           # Start video recording at 30 output fps (.webm or .mp4; needs ffmpeg)
+agent-browser record start ./demo.webm --fps 60  # Request 60 output fps (capture rate varies; 1-60 allowed)
 agent-browser record stop                        # Stop and save the video
 agent-browser record restart ./take2.webm        # Stop the current recording, start a new one
 agent-browser console                 # View console messages (log, error, warn, info)
@@ -444,6 +448,8 @@ agent-browser state clear [name]      # Clear states for session
 agent-browser state clear --all       # Clear all saved states
 agent-browser state clean --older-than <days>  # Delete old states
 ```
+
+Recording is repaint-driven: `--fps` controls output playback, not the rate of new pictures. Held frames can make sparse or final-state-only capture look longer or smoother than the evidence supports. `record stop --json` reports capture timestamps, monotonic wall duration and captured-frame rate separately from written/encoded frames, playback duration, held/dropped frames, and file size. A successful start does not prove the first frame has arrived. Match its `recordingId` against `session info --json` → `data.runtime.recording.last` to recover the terminal receipt after a stop timeout, including encoder failures. Receipts are retained in daemon memory, not across daemon exits. See [recording](docs/src/app/recording/page.mdx) for field definitions.
 
 ### Navigation
 
@@ -718,9 +724,11 @@ agent-browser session
 # Generate a stable worktree-scoped session id
 agent-browser session id --scope worktree --prefix next-dev-loop
 
-# Inspect daemon, launch, and restore status
+# Inspect daemon/browser identity, recordings, and restore status
 agent-browser session info --json
 ```
+
+`session info` never starts or reconnects a browser. `data.active` and `data.pid` describe the daemon, while `data.runtime.browser` reports browser liveness, local Chrome `pid`, effective `userDataDir` (the copied directory for a named profile), native `ownership` (`launched` or `attached`), and current `tabs`. A tab's `active` flag means this daemon's selected tab, not OS focus. Unavailable PID/profile/tab information is `null`, with probe errors kept explicit. Raw Chrome profile overrides use `--user-data-dir=<path>`; a bare or empty switch leaves the effective profile unknown (`null`), and tokens after `--` are not switches. `data.runtime.recording.current` is the in-progress take; `last` is the latest terminal receipt. Application-level ownership is outside this native report.
 
 Each session has its own:
 

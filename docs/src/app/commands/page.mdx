@@ -76,7 +76,9 @@ agent-browser read example.com/article --require-md
 agent-browser read https://example.com/article --json
 ```
 
-`read` fetches a URL without launching Chrome. Omit the URL to read the rendered DOM of the active tab in the current browser session, including browser auth state and client-side updates. Explicit URL reads send `Accept: text/markdown` by default, try the same URL with `.md` appended when the first response is not markdown, walk ancestor paths toward `/` to find the nearest `llms.txt` for a matching docs link, print markdown or plain text when available, and fall back to readable text extracted from HTML. `--llms` and `--require-md` with no URL use the active tab URL because they depend on HTTP resources. `read` does not read `llms-full.txt` unless you ask for it.
+Explicit URL reads run HTTP directly without launching, reconnecting, or reconfiguring a browser, including in batches. Omit the URL to read the rendered DOM of the active tab in the current browser session, including browser auth state and client-side updates. Explicit URL reads send `Accept: text/markdown` by default, try the same URL with `.md` appended when the first response is not markdown, walk ancestor paths toward `/` to find the nearest `llms.txt` for a matching docs link, print markdown or plain text when available, and fall back to readable text extracted from HTML. `--llms` and `--require-md` with no URL use the active tab URL because they depend on HTTP resources. `read` does not read `llms-full.txt` unless you ask for it.
+
+Ordinary URL reads do not need a daemon. They use current CLI/config headers, domain rules, and action policy, plus standard HTTP proxy environment variables, not browser cookies or profile settings. If policy requires a two-call `read` → `confirm` workflow, a browserless daemon holds the pending command; an existing daemon is reused without reconfiguration. Mixed batches only prepare a browser when a browser-dependent row is reached. Before queuing a confirmation-required HTTP read, the CLI checks explicit protocol support on the same connection. An unsupported runtime, even with the same version label, receives no read request and remains unchanged.
 
 Options: `--raw` prints the response body without HTML extraction, `--require-md` fails unless the server returns `Content-Type: text/markdown`, `--outline` prints a compact heading outline for one page, `--llms index` prints a compact nearest-ancestor `llms.txt` link list, `--llms full` reads the nearest-ancestor `llms-full.txt`, `--filter <text>` narrows page sections, llms links/sections, or outline headings, and `--timeout <ms>` changes the request timeout. Global safeguards such as `--allowed-domains`, `--content-boundaries`, and `--max-output` also apply to read fetches and output.
 
@@ -327,8 +329,8 @@ agent-browser trace start             # Start trace
 agent-browser trace stop [path]       # Stop and save trace
 agent-browser profiler start          # Start Chrome DevTools profiling
 agent-browser profiler stop [path]    # Stop and save profile (.json)
-agent-browser record start <path>     # Start video recording (.webm/.mp4, 30 fps; needs ffmpeg)
-agent-browser record start <path> --fps 60  # Record at 60 fps (--fps accepts 1-60)
+agent-browser record start <path>     # Record at 30 output fps (.webm/.mp4; needs ffmpeg)
+agent-browser record start <path> --fps 60  # Request 60 output fps (capture rate varies; 1-60 allowed)
 agent-browser record stop             # Stop and save video
 agent-browser record restart <path>   # Stop current and start new recording
 agent-browser console                 # View console messages
@@ -425,7 +427,9 @@ agent-browser confirm <confirmation-id>  # Approve a pending action
 agent-browser deny <confirmation-id>     # Deny a pending action
 ```
 
-Pending confirmations auto-deny after 60 seconds.
+The ID is required and must match the current pending action. Treat returned IDs as opaque; do not construct or truncate them. Missing or stale IDs fail without browser work, execution, or consuming a newer pending action. A newer confirmation request replaces the previous pending action.
+
+Only explicit-URL HTTP read prompts carry `data.capabilities.readRequiresConfirmation: true`, proving support for ID-checked read confirmations. Bare DOM read prompts do not carry this marker. An unmarked legacy prompt is not proof that a later confirmation is read-only.
 
 ```bash
 agent-browser --confirm-actions eval,download eval "document.title"

@@ -116,17 +116,17 @@ Headless Chromium screenshots hide native scrollbars for consistent image output
 
 ```bash
 agent-browser open https://example.com     # Launch a browser session first
-agent-browser record start ./demo.webm    # Start recording the current page at 30 fps
+agent-browser record start ./demo.webm    # Record the current page at 30 output fps
 agent-browser click @e1                   # Perform actions
 agent-browser record stop                 # Stop and save video
 agent-browser record restart ./take2.webm # Stop current + start new
 
-agent-browser record start ./scroll.webm --fps 60  # 60 fps for motion-heavy takes
+agent-browser record start ./scroll.webm --fps 60  # Request 60 output fps; capture rate varies
 agent-browser record start ./soak.webm --fps 10    # Lower rate for long sessions
 agent-browser tab new https://example.com          # Open a separate tab first if you want the recording there
 ```
 
-Needs `ffmpeg` on PATH; use a `.webm` or `.mp4` path (other extensions go to ffmpeg as-is, an extensionless path is rejected). `--fps` accepts 1 to 60 and defaults to 30. Playback duration always matches the wall clock time recorded, so a slow page holds frames instead of speeding the video up.
+Needs `ffmpeg` on PATH; use a `.webm` or `.mp4` path (other extensions go to ffmpeg as-is, an extensionless path is rejected). `--fps` accepts 1 to 60 and defaults to 30. This is the output rate, not a measured capture rate. Repaint-driven frames may be sparse and held through gaps; late first frames or skipped output slots can make playback differ from capture wall time. `record stop --json` reports capture timing/rate separately from encoded playback and retains terminal receipts in `session info --json` → `data.runtime.recording.last`, including failures. Match `recordingId` after a stop timeout; a high output FPS or existing file does not establish smoothness or encoder success.
 
 ## Wait
 

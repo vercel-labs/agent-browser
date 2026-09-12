@@ -186,6 +186,12 @@ struct LlmsLink {
     url: Url,
 }
 
+/// Explicit URLs use HTTP only; a bare read still needs the active page.
+pub fn is_explicit_url_read(cmd: &Value) -> bool {
+    cmd.get("action").and_then(Value::as_str) == Some("read")
+        && cmd.get("url").and_then(Value::as_str).is_some()
+}
+
 pub async fn run_read(raw_url: &str, options: ReadOptions) -> Result<Value, String> {
     let target = normalize_url(raw_url)?;
     check_allowed_url_for_options(&target, &options)?;

@@ -821,7 +821,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_READ,
             "Read URL",
-            "Fetch a URL as agent-readable text, preferring text/markdown. Omit url to read the active tab.",
+            "Fetch a URL directly over HTTP as agent-readable text, preferring text/markdown, without launching or reconfiguring a browser. Ordinary URL reads need no daemon; confirmation policy may retain a pending command in a browserless daemon. The daemon must explicitly support ID-checked read confirmations; unsupported runtimes receive no read request. Only explicit-URL HTTP confirmation prompts carry data.capabilities.readRequiresConfirmation:true. Current headers, domain/action rules and HTTP proxy environment apply, not browser cookies. Omit url to read the rendered active tab.",
             json!({
                 "url": { "type": "string", "description": "URL to read. Bare hosts are normalized to https. Omit to read the active tab." },
                 "raw": { "type": "boolean", "description": "Return the response body without HTML extraction." },
@@ -1370,7 +1370,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_RECORD_START,
             "Record start",
-            "Start video recording of the current active page. Captures 30 fps by default; pass fps up to 60 for motion-heavy takes. Pass url to navigate the active tab there first. Use agent_browser_tab_new beforehand to record in a separate tab.",
+            "Start video recording of the current active page. Output defaults to 30 fps (up to 60); capture is repaint-driven and may be sparse. A successful start does not prove a frame has arrived yet. Pass url to navigate first, or use agent_browser_tab_new beforehand for a separate tab. Keep recordingId to match the terminal receipt.",
             json!({
                 "path": {
                     "type": "string",
@@ -1381,7 +1381,7 @@ fn parity_tools() -> Vec<Value> {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": crate::native::recording::MAX_FPS,
-                    "description": "Capture rate in frames per second (default 30, max 60).",
+                    "description": "Output frames per second (default 30, max 60). Does not guarantee capture rate or smoothness.",
                 },
             }),
             &["path"],
@@ -1389,14 +1389,14 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_RECORD_STOP,
             "Record stop",
-            "Stop video recording.",
+            "Stop recording and return capture timestamps, wall duration, captured/encoded frame metrics and file evidence. Failed encodes retain success:false receipts. After a timeout, recover runtime.recording.last with agent_browser_session_info and match recordingId; file existence or output FPS alone does not prove success or smoothness.",
             json!({}),
             &[],
         ),
         tool(
             TOOL_RECORD_RESTART,
             "Record restart",
-            "Restart video recording. Captures 30 fps by default; pass fps up to 60 for motion-heavy takes.",
+            "Stop the current recording and start another, with output at 30 fps by default (up to 60). Capture rate is not guaranteed. previousRecording retains the previous terminal receipt, including failures, separately from the new recordingId.",
             json!({
                 "path": {
                     "type": "string",
@@ -1407,7 +1407,7 @@ fn parity_tools() -> Vec<Value> {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": crate::native::recording::MAX_FPS,
-                    "description": "Capture rate in frames per second (default 30, max 60).",
+                    "description": "Output frames per second (default 30, max 60). Does not guarantee capture rate or smoothness.",
                 },
             }),
             &["path"],
@@ -1687,14 +1687,14 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_CONFIRM,
             "Confirm action",
-            "Approve a pending action.",
+            "Approve the exact pending action identified by id. Missing or stale IDs fail without browser work or consuming a newer pending action. A matched action still runs its normal policy and browser checks.",
             json!({ "id": { "type": "string" } }),
             &["id"],
         ),
         tool(
             TOOL_DENY,
             "Deny action",
-            "Deny a pending action.",
+            "Deny the exact pending action identified by id. Missing or stale IDs fail without browser work or consuming a newer pending action.",
             json!({ "id": { "type": "string" } }),
             &["id"],
         ),
@@ -1756,7 +1756,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SESSION_INFO,
             "Session info",
-            "Show session, daemon, launch, and restore diagnostics.",
+            "Inspect without launching, reconfiguring or reconnecting a browser. Distinguishes the daemon PID from runtime.browser liveness, local Chrome PID, effective userDataDir, launched/attached ownership and current tabs. Unavailable attached/remote values and bare/empty Chrome profile overrides are null. Raw Chrome profile values require --user-data-dir=<path>; tokens after -- are not switches. runtime.recording.current and runtime.recording.last expose recording evidence and terminal receipts, including failures. runtime.capabilities.readRequiresConfirmation advertises ID-checked HTTP read confirmations; equal version labels are not proof of support.",
             json!({}),
             &[],
         ),
@@ -4804,6 +4804,25 @@ mod tests {
             result["structuredContent"]["response"]["data"]["lastUrl"],
             "https://example.com/path"
         );
+    }
+
+    #[test]
+    fn tool_result_preserves_failed_recording_receipt() {
+        let receipt = json!({
+            "recordingId": "take-1", "path": "failed.webm", "success": false,
+            "error": "ffmpeg failed", "capturedFrames": 1,
+            "capture": { "durationMs": 1000 },
+            "output": { "encoderSucceeded": false },
+            "file": { "exists": true, "sizeBytes": 16 },
+        });
+        let result = tool_result_from_run(CliRun {
+            exit_code: Some(1),
+            stdout: json!({ "success": false, "error": "ffmpeg failed", "data": receipt })
+                .to_string(),
+            stderr: String::new(),
+        });
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["structuredContent"]["response"]["data"], receipt);
     }
 
     #[test]
