@@ -27,6 +27,7 @@ impl Fixture {
         listener.set_nonblocking(true).unwrap();
         let port = listener.local_addr().unwrap().port();
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let run_dir = dir.path().join("run");
         let received = requests.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
@@ -36,6 +37,7 @@ impl Fixture {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
                             let received = received.clone();
+                            let run_dir = run_dir.clone();
                             // Chrome may preconnect without sending a request yet.
                             scope.spawn(move || {
                         stream.set_nonblocking(false).unwrap();
@@ -51,6 +53,7 @@ impl Fixture {
                         }
                         let path = request.split_whitespace().nth(1).unwrap_or("/");
                         let (content_type, body) = match path {
+                            "/before-browser" => ("text/markdown", if run_dir.exists() { "# Daemon already started" } else { MARKDOWN }),
                             "/page" => ("text/html", "<title>Owned page</title><h1>Rendered page</h1>"),
                             "/confirm" => ("text/html", r#"<title>Confirm</title><button id="apply" onclick="this.dataset.clicked='yes'">Apply</button>"#),
                             "/motion" => ("text/html", "<title>Motion</title><style>@keyframes move{to{transform:translateX(300px)}}div{width:40px;height:40px;background:red;animation:move 0.4s infinite alternate linear}</style><div></div>"),
@@ -156,6 +159,7 @@ impl Fixture {
             self.dir.path().join("unused.json"),
             json!({
                 "profile": profile,
+                "state": self.dir.path().join("missing-state.json"),
                 "executablePath": self.dir.path().join("missing-chrome"),
                 "headed": true,
                 "restore": "unused-restore",
@@ -535,6 +539,111 @@ fn e2e_stale_read_ids_cannot_approve_or_deny_a_newer_dom_action() {
         .unwrap()
         .iter()
         .any(|request| request.split_whitespace().nth(1) == Some("/docs")));
+}
+
+#[test]
+#[ignore = "requires Chrome; uses a generated profile, state file and loopback server"]
+fn e2e_batch_applies_state_once_after_the_http_prefix() {
+    let fixture = Fixture::new();
+    let state_path = fixture.dir.path().join("state.json");
+    let mut saved_state = json!({
+        "cookies": [{
+            "name": "batch_seed", "value": "first", "domain": "127.0.0.1",
+            "path": "/", "expires": -1, "httpOnly": false, "secure": false,
+            "sameSite": "Lax"
+        }],
+        "origins": []
+    });
+    std::fs::write(&state_path, saved_state.to_string()).unwrap();
+    let page = fixture.url("/page");
+    let batch = fixture.run(&[
+        "--state",
+        state_path.to_str().unwrap(),
+        "batch",
+        &format!("read {}", fixture.url("/before-browser")),
+        &format!("open {page}"),
+        "get url",
+        "snapshot",
+    ]);
+    assert_eq!(
+        batch[0]["result"]["content"], MARKDOWN,
+        "HTTP prefix must run before daemon setup"
+    );
+    assert!(
+        fixture.requests.lock().unwrap().iter().any(|request| {
+            request.starts_with("GET /page ") && request.contains("batch_seed=first")
+        }),
+        "state cookie must be present on the first browser navigation"
+    );
+    assert_eq!(batch[1]["result"]["url"], page);
+    assert_eq!(
+        batch[2]["result"]["url"], page,
+        "later batch rows must retain navigation: {batch}"
+    );
+    assert!(batch[3]["result"]["snapshot"]
+        .as_str()
+        .unwrap()
+        .contains("Rendered page"));
+
+    // A separate invocation must still apply the caller's launch flags.
+    saved_state["cookies"][0]["value"] = json!("second");
+    std::fs::write(&state_path, saved_state.to_string()).unwrap();
+    fixture.run(&["--state", state_path.to_str().unwrap(), "open", &page]);
+    assert!(fixture
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|request| request.starts_with("GET /page "))
+        .unwrap()
+        .contains("batch_seed=second"));
+}
+
+#[test]
+#[ignore = "requires Chrome; uses a generated profile, state file and loopback server"]
+fn e2e_mcp_batch_preserves_state_launch_and_navigation() {
+    let fixture = Fixture::new();
+    let state_path = fixture.dir.path().join("state.json");
+    std::fs::write(&state_path, r#"{"cookies":[],"origins":[]}"#).unwrap();
+    let page = fixture.url("/page");
+    let mut child = fixture
+        .command()
+        .args(["mcp", "--tools", "debug"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    writeln!(input, "{}", json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"batch-test","version":"1"}}})).unwrap();
+    writeln!(input, "{}", json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name":"agent_browser_batch", "arguments": {
+            "extraArgs": ["--state", state_path],
+            "commands": [["read", fixture.url("/before-browser")], ["open", page], ["get", "url"], ["snapshot"]]
+        }}
+    })).unwrap();
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let response: Value = serde_json::from_str(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let batch = &response["result"]["structuredContent"]["response"];
+    assert_eq!(batch[0]["result"]["content"], MARKDOWN);
+    assert_eq!(
+        batch[2]["result"]["url"], page,
+        "MCP must use the same one-time batch setup: {batch}"
+    );
+    assert!(batch[3]["result"]["snapshot"]
+        .as_str()
+        .unwrap()
+        .contains("Rendered page"));
 }
 
 #[test]

@@ -3417,6 +3417,9 @@ Usage: agent-browser batch [options] "<cmd1>" "<cmd2>" ...
 Runs multiple commands in sequence. Commands can be passed as quoted
 arguments or piped as JSON via stdin. Results are printed in order,
 separated by blank lines (or as a JSON array with --json).
+Launch flags such as --state apply once before the first browser-dependent
+row, not between rows. Explicit URL reads and bailed local errors do not
+trigger that setup.
 
 Options:
   --bail               Stop on first error (default: continue all commands)

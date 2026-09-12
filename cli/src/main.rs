@@ -1591,8 +1591,8 @@ fn main() {
         }
     };
 
-    // Parse batch rows before any daemon setup. Each row takes the same path
-    // as a standalone command, so a read (or a failed --bail row) stays local.
+    // Parse batch rows before daemon setup so reads and failed --bail rows
+    // stay local. Launch setup is shared only within this batch invocation.
     if cmd.get("action").and_then(|v| v.as_str()) == Some("batch") {
         let bail = cmd.get("bail").and_then(|v| v.as_bool()).unwrap_or(false);
         let arg_commands = cmd.get("commands").and_then(|v| v.as_array()).map(|arr| {
@@ -1609,7 +1609,8 @@ fn main() {
         .get("action")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let result = execute_cli_command(cmd, &mut flags);
+    let mut launch_configured = false;
+    let result = execute_cli_command(cmd, &mut flags, &mut launch_configured);
     let output_opts = OutputOptions::from_flags(&flags);
     match result {
         Ok(mut resp) => {
@@ -1633,7 +1634,11 @@ fn main() {
     }
 }
 
-fn execute_cli_command(mut cmd: serde_json::Value, flags: &mut Flags) -> Result<Response, String> {
+fn execute_cli_command(
+    mut cmd: serde_json::Value,
+    flags: &mut Flags,
+    launch_configured: &mut bool,
+) -> Result<Response, String> {
     if read::is_explicit_url_read(&cmd) {
         return execute_url_read(cmd, flags);
     }
@@ -1798,6 +1803,10 @@ fn execute_cli_command(mut cmd: serde_json::Value, flags: &mut Flags) -> Result<
         no_auto_dialog: flags.no_auto_dialog,
         plugins: Some(plugin_registry_json.as_str()),
     };
+
+    if *launch_configured {
+        return send_command_with_respawn(cmd, &flags.session, &daemon_opts);
+    }
 
     let daemon_result = ensure_daemon(&flags.session, &daemon_opts)?;
     let _daemon_was_already_running = daemon_result.already_running;
@@ -2077,6 +2086,9 @@ fn execute_cli_command(mut cmd: serde_json::Value, flags: &mut Flags) -> Result<
         }
     }
 
+    // Successful setup belongs to the invocation, not each batch row. Replaying
+    // launch flags such as --state would replace the browser between commands.
+    *launch_configured = true;
     let mut resp = send_command_with_respawn(cmd, &flags.session, &daemon_opts)?;
     if daemon_restarted {
         mark_restarted_background(&mut resp);
@@ -2190,6 +2202,7 @@ fn run_batch(flags: &mut Flags, bail: bool, arg_commands: Option<Vec<Vec<String>
 
     let mut results: Vec<serde_json::Value> = Vec::new();
     let mut had_error = false;
+    let mut launch_configured = false;
 
     for (i, cmd_args) in commands.iter().enumerate() {
         if cmd_args.is_empty() {
@@ -2228,7 +2241,7 @@ fn run_batch(flags: &mut Flags, bail: bool, arg_commands: Option<Vec<Vec<String>
             .get("action")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        match execute_cli_command(parsed, flags) {
+        match execute_cli_command(parsed, flags, &mut launch_configured) {
             Ok(resp) => {
                 if flags.json {
                     let mut result = json!({

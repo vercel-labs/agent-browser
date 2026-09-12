@@ -30,6 +30,8 @@ agent-browser connect 9222    # Connect to browser via CDP port
 
 ### Pre-navigation setup (one-turn batch)
 
+Browser launch options, including `--state`, apply once before the first browser-dependent row, not again between rows. Explicit URL reads and bailed local errors do not trigger browser setup.
+
 ```bash
 agent-browser batch \
   '["open"]' \

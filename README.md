@@ -202,7 +202,7 @@ agent-browser read https://example.com/article --json
 
 Explicit URL reads run HTTP directly without launching, reconnecting, or reconfiguring a browser, including in batches. Omit the URL to read the rendered DOM of the active tab in the current browser session, including browser auth state and client-side updates. Explicit URL reads send `Accept: text/markdown` by default, try the same URL with `.md` appended when the first response is not markdown, walk ancestor paths toward `/` to find the nearest `llms.txt` for a matching docs link, print markdown or plain text when available, and fall back to readable text extracted from HTML. `--llms` and `--require-md` with no URL use the active tab URL because they depend on HTTP resources. `read` does not read `llms-full.txt` unless you ask for it.
 
-Ordinary URL reads do not need a daemon. They use current CLI/config headers, domain rules, and action policy, plus standard HTTP proxy environment variables, not browser cookies or profile settings. If policy requires a two-call `read` → `confirm` workflow, a browserless daemon holds the pending command; an existing daemon is reused without reconfiguration. Mixed batches only prepare a browser when a browser-dependent row is reached.
+Ordinary URL reads do not need a daemon. They use current CLI/config headers, domain rules, and action policy, plus standard HTTP proxy environment variables, not browser cookies or profile settings. If policy requires a two-call `read` → `confirm` workflow, a browserless daemon holds the pending command; an existing daemon is reused without reconfiguration. Mixed batches apply browser launch options once, when the first browser-dependent row is reached.
 
 The read-confirmation bridge checks `runtime.capabilities.readRequiresConfirmation` on the same connection before queuing a read. Equal version labels are not proof of support; an unsupported daemon receives no read request and remains unchanged. Only explicit-URL HTTP confirmation prompts carry `data.capabilities.readRequiresConfirmation: true`. `confirm` and `deny` require the exact returned confirmation ID; a stale ID cannot execute or discard a newer pending action. Bare DOM read prompts do not carry the HTTP marker.
 
@@ -271,7 +271,7 @@ After a page change, prefer a selector, text, URL, or JavaScript condition that 
 
 ### Batch Execution
 
-Execute multiple commands in a single invocation. Commands can be passed as quoted arguments or piped as JSON via stdin. This avoids per-command process startup overhead when running multi-step workflows.
+Execute multiple commands in a single invocation. Commands can be passed as quoted arguments or piped as JSON via stdin. This avoids per-command process startup overhead when running multi-step workflows. Browser launch options, including `--state`, apply once before the first browser-dependent row, not again between rows. Explicit URL reads and bailed local errors do not trigger that setup.
 
 ```bash
 # Argument mode: each quoted argument is a full command

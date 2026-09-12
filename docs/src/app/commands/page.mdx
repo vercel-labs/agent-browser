@@ -78,7 +78,7 @@ agent-browser read https://example.com/article --json
 
 Explicit URL reads run HTTP directly without launching, reconnecting, or reconfiguring a browser, including in batches. Omit the URL to read the rendered DOM of the active tab in the current browser session, including browser auth state and client-side updates. Explicit URL reads send `Accept: text/markdown` by default, try the same URL with `.md` appended when the first response is not markdown, walk ancestor paths toward `/` to find the nearest `llms.txt` for a matching docs link, print markdown or plain text when available, and fall back to readable text extracted from HTML. `--llms` and `--require-md` with no URL use the active tab URL because they depend on HTTP resources. `read` does not read `llms-full.txt` unless you ask for it.
 
-Ordinary URL reads do not need a daemon. They use current CLI/config headers, domain rules, and action policy, plus standard HTTP proxy environment variables, not browser cookies or profile settings. If policy requires a two-call `read` → `confirm` workflow, a browserless daemon holds the pending command; an existing daemon is reused without reconfiguration. Mixed batches only prepare a browser when a browser-dependent row is reached. Before queuing a confirmation-required HTTP read, the CLI checks explicit protocol support on the same connection. An unsupported runtime, even with the same version label, receives no read request and remains unchanged.
+Ordinary URL reads do not need a daemon. They use current CLI/config headers, domain rules, and action policy, plus standard HTTP proxy environment variables, not browser cookies or profile settings. If policy requires a two-call `read` → `confirm` workflow, a browserless daemon holds the pending command; an existing daemon is reused without reconfiguration. Mixed batches apply browser launch options once, when the first browser-dependent row is reached. Before queuing a confirmation-required HTTP read, the CLI checks explicit protocol support on the same connection. An unsupported runtime, even with the same version label, receives no read request and remains unchanged.
 
 Options: `--raw` prints the response body without HTML extraction, `--require-md` fails unless the server returns `Content-Type: text/markdown`, `--outline` prints a compact heading outline for one page, `--llms index` prints a compact nearest-ancestor `llms.txt` link list, `--llms full` reads the nearest-ancestor `llms-full.txt`, `--filter <text>` narrows page sections, llms links/sections, or outline headings, and `--timeout <ms>` changes the request timeout. Global safeguards such as `--allowed-domains`, `--content-boundaries`, and `--max-output` also apply to read fetches and output.
 
@@ -634,7 +634,7 @@ See [Configuration](/configuration) for config files and environment variables. 
 
 ## Batch execution
 
-Execute multiple commands in a single invocation. Commands can be passed as quoted arguments or piped as JSON via stdin.
+Execute multiple commands in a single invocation. Commands can be passed as quoted arguments or piped as JSON via stdin. Browser launch options, including `--state`, apply once before the first browser-dependent row, not again between rows. Explicit URL reads and bailed local errors do not trigger that setup.
 
 ```bash
 # Argument mode: each quoted argument is a full command
