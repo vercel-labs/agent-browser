@@ -2420,12 +2420,7 @@ fn parse_record_take(
 
     let mut cmd = json!({ "id": id, "action": action, "path": path });
     if let Some(u) = url {
-        // Add https:// prefix if needed (preserve special schemes)
-        let url_str = if u.starts_with("http") || u.contains("://") {
-            u.to_string()
-        } else {
-            format!("https://{}", u)
-        };
+        let url_str = normalize_navigation_url(u);
         cmd["url"] = json!(url_str);
     }
     if let Some(rate) = fps {

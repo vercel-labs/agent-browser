@@ -86,7 +86,7 @@ agent-browser record stop
 agent-browser record start ./soak.webm --fps 5
 ```
 
-Frames come from Chrome's screencast, so a 60 fps take of a scroll holds 60 distinct pictures per second. While the page is static the last frame is held, so duration matches wall clock; a gap longer than five seconds is held for five and the rest left out. `record stop --json` reports `frames` (written) and `capturedFrames` (distinct frames the page produced). 60 fps roughly doubles the bitrate of 30 fps.
+The video uses the requested frame rate and holds the latest Chrome frame between repaints. `record stop --json` reports `frames` (written) and `capturedFrames` (distinct frames from Chrome).
 
 ## Use Cases
 
@@ -215,6 +215,6 @@ agent-browser record stop
 ## Limitations
 
 - Recording adds slight overhead to automation, and higher frame rates add more
-- Large recordings can consume significant disk space; 60 fps roughly doubles the bitrate of 30 fps
+- Large recordings can consume significant disk space
 - Distinct frames per second are bounded by how often the page repaints, so a page rendering below 60 fps records below it too
 - Some headless environments may have codec limitations; an ffmpeg built without libvpx or libx264 cannot write the matching format

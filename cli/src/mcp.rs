@@ -4032,6 +4032,21 @@ fn write_json_line(stdout: &mut io::Stdout, value: &Value) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recording_timeline_options_use_cli_parser() {
+        for operation in ["start", "restart"] {
+            for fps in [1, 30, 60] {
+                let args =
+                    record_command_args(&json!({"path": "timeline.webm", "fps": fps}), operation)
+                        .unwrap();
+                let flags = crate::flags::parse_flags(&args);
+                let command = crate::commands::parse_command(&args, &flags).unwrap();
+                assert_eq!(command["action"], format!("recording_{operation}"));
+                assert_eq!(command["fps"], fps);
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -4634,6 +4649,19 @@ mod tests {
             .unwrap();
         // Must stay in sync with the CLI parser's accepted --content values.
         assert_eq!(modes, &vec![json!("all"), json!("text"), json!("none")]);
+    }
+
+    #[test]
+    fn record_urls_preserve_navigation_schemes() {
+        for url in ["data:text/html,hello", "about:blank", "https://example.com"] {
+            let args =
+                record_command_args(&json!({"path": "demo.webm", "url": url}), "start").unwrap();
+            let flags = crate::flags::parse_flags(&args);
+            assert_eq!(
+                crate::commands::parse_command(&args, &flags).unwrap()["url"],
+                url
+            );
+        }
     }
 
     #[test]
