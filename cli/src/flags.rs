@@ -528,7 +528,9 @@ pub fn parse_flags(args: &[String]) -> Flags {
     let mut flags = Flags {
         json: env_var_is_truthy("AGENT_BROWSER_JSON") || config.json.unwrap_or(false),
         headed: env_var_is_truthy("AGENT_BROWSER_HEADED") || config.headed.unwrap_or(false),
-        debug: env_var_is_truthy("AGENT_BROWSER_DEBUG") || config.debug.unwrap_or(false),
+        debug: env_var_bool("AGENT_BROWSER_DEBUG")
+            .or(config.debug)
+            .unwrap_or(false),
         session: env::var("AGENT_BROWSER_SESSION")
             .ok()
             .or(config.session)
@@ -1887,6 +1889,44 @@ mod tests {
     fn test_debug_false() {
         let flags = parse_flags(&args("--debug false open example.com"));
         assert!(!flags.debug);
+    }
+
+    #[test]
+    fn test_debug_config_env_cli_precedence() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_DEBUG"]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent-browser.json");
+        let cases = [
+            (None, None, None, false),
+            (Some(true), None, None, true),
+            (Some(true), Some("false"), None, false),
+            (Some(true), Some("0"), None, false),
+            (Some(true), Some("no"), None, false),
+            (Some(false), Some("1"), None, true),
+            (None, Some("1"), Some("false"), false),
+            (Some(true), Some("true"), Some("false"), false),
+            (Some(false), Some("false"), Some("true"), true),
+        ];
+        let mut actual = Vec::new();
+        let mut expected = Vec::new();
+        for (config, env, cli, want) in cases {
+            fs::write(&path, serde_json::json!({ "debug": config }).to_string()).unwrap();
+            match env {
+                Some(value) => guard.set("AGENT_BROWSER_DEBUG", value),
+                None => guard.remove("AGENT_BROWSER_DEBUG"),
+            }
+            let mut argv = vec!["--config".to_string(), path.to_string_lossy().into_owned()];
+            if let Some(value) = cli {
+                argv.extend(["--debug".to_string(), value.to_string()]);
+            }
+            argv.extend(args("open about:blank"));
+            let debug = parse_flags(&argv).debug;
+            println!("config={config:?} env={env:?} cli={cli:?} debug={debug}");
+            actual.push(debug);
+            expected.push(want);
+        }
+        drop(guard);
+        assert_eq!(actual, expected);
     }
 
     #[test]
