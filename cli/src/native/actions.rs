@@ -2889,6 +2889,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "tab_switch" => handle_tab_switch(cmd, state).await,
         "tab_close" => handle_tab_close(cmd, state).await,
         "viewport" => handle_viewport(cmd, state).await,
+        "position" => handle_position(cmd, state).await,
         "useragent" | "user_agent" => handle_user_agent(cmd, state).await,
         "set_media" => handle_set_media(cmd, state).await,
         "download" => handle_download(cmd, state).await,
@@ -7061,6 +7062,22 @@ async fn handle_viewport(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     }
 
     Ok(json!({ "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile }))
+}
+
+async fn handle_position(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let x = cmd
+        .get("x")
+        .and_then(|v| v.as_i64())
+        .ok_or("Missing required field: x")? as i32;
+    let y = cmd
+        .get("y")
+        .and_then(|v| v.as_i64())
+        .ok_or("Missing required field: y")? as i32;
+
+    mgr.set_window_position(x, y).await?;
+
+    Ok(json!({ "x": x, "y": y }))
 }
 
 async fn handle_user_agent(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
