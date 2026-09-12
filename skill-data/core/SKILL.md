@@ -360,13 +360,13 @@ agent-browser network har stop /tmp/trace.har
 
 ```bash
 agent-browser open https://example.com
-agent-browser record start demo.webm --contact-sheet
+agent-browser record start demo.webm --cursor --contact-sheet
 agent-browser snapshot -i
 agent-browser click @e3
 agent-browser record stop
 ```
 
-Recording uses the active tab. Use `--contact-sheet` for a visual summary and `--fps 60` for motion-heavy recordings.
+Recording uses the active tab. Use `--cursor` for an animated pointer, `--contact-sheet` for a visual summary, and `--fps 60` for motion-heavy recordings.
 
 See [references/video-recording.md](references/video-recording.md) for frame rate guidance, codec options, and more.
 

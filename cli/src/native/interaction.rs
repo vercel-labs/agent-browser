@@ -4,7 +4,9 @@ use serde_json::Value;
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
-use super::element::{resolve_element_center, resolve_element_object_id, RefMap};
+use super::element::{
+    resolve_element_center, resolve_element_object_id, session_viewport_offset, RefMap,
+};
 
 /// Outcome of a click. `dialog_opened` is true if a JavaScript dialog opened
 /// mid-sequence (the page is then blocked until `dialog accept`/`dismiss`).
@@ -14,10 +16,13 @@ use super::element::{resolve_element_center, resolve_element_object_id, RefMap};
 /// next click would register as a drag or double-click.
 #[derive(Default)]
 pub struct ClickResult {
-    /// Final dispatched pointer position, including clicks that open a dialog.
+    /// Final pointer position in the top-level page viewport, including dialogs.
     pub position: (f64, f64),
     pub dialog_opened: bool,
     pub pending_release: Option<PendingRelease>,
+    pub x: f64,
+    pub y: f64,
+    pub button_pressed: bool,
 }
 
 pub struct PendingRelease {
@@ -47,7 +52,9 @@ pub async fn click(
     // A click-triggered dialog can fire on the frame's own session (OOPIF) or
     // on the top-level page session; both count as "ours". A dialog on any
     // other session belongs to a background tab and must not abort this click.
-    dispatch_click(
+    let offset =
+        session_viewport_offset(client, session_id, &effective_session_id, iframe_sessions).await?;
+    let mut result = dispatch_click(
         client,
         &effective_session_id,
         &[effective_session_id.as_str(), session_id],
@@ -56,7 +63,11 @@ pub async fn click(
         button,
         click_count,
     )
-    .await
+    .await?;
+    // Compute before dispatch: a click may navigate or open a blocking dialog.
+    result.position = (x + offset.0, y + offset.1);
+    (result.x, result.y) = result.position;
+    Ok(result)
 }
 
 pub async fn dblclick(
@@ -93,6 +104,8 @@ pub async fn hover(
         iframe_sessions,
     )
     .await?;
+    let offset =
+        session_viewport_offset(client, session_id, &effective_session_id, iframe_sessions).await?;
     client
         .send_command_typed::<_, Value>(
             "Input.dispatchMouseEvent",
@@ -110,7 +123,7 @@ pub async fn hover(
             Some(&effective_session_id),
         )
         .await?;
-    Ok((x, y))
+    Ok((x + offset.0, y + offset.1))
 }
 
 pub async fn fill(
@@ -1048,6 +1061,9 @@ async fn dispatch_click(
             position: (x, y),
             dialog_opened: true,
             pending_release: None,
+            x,
+            y,
+            button_pressed: false,
         });
     }
 
@@ -1088,6 +1104,9 @@ async fn dispatch_click(
                 y,
                 button: button.to_string(),
             }),
+            x,
+            y,
+            button_pressed: true,
         });
     }
 
@@ -1114,6 +1133,9 @@ async fn dispatch_click(
         position: (x, y),
         dialog_opened,
         pending_release: None,
+        x,
+        y,
+        button_pressed: true,
     })
 }
 

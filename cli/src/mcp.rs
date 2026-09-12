@@ -1391,6 +1391,7 @@ fn parity_tools() -> Vec<Value> {
                     "maximum": crate::native::recording::MAX_FPS,
                     "description": "Capture rate in frames per second (default 30, max 60).",
                 },
+                "cursor": { "type": "boolean", "description": "Show an animated pointer in the recording." },
                 "contactSheet": { "type": "boolean", "description": "Export first, changed, and final frames as a timestamped PNG beside the video." },
                 "contactSheetThreshold": { "type": "number", "minimum": 0, "maximum": 1, "description": "Changed-pixel ratio required to select a contact-sheet frame (default 0.05). Implies contactSheet." },
             }),
@@ -1419,6 +1420,7 @@ fn parity_tools() -> Vec<Value> {
                     "maximum": crate::native::recording::MAX_FPS,
                     "description": "Capture rate in frames per second (default 30, max 60).",
                 },
+                "cursor": { "type": "boolean", "description": "Show an animated pointer in the recording." },
                 "contactSheet": { "type": "boolean", "description": "Export first, changed, and final frames as a timestamped PNG beside the video." },
                 "contactSheetThreshold": { "type": "number", "minimum": 0, "maximum": 1, "description": "Changed-pixel ratio required to select a contact-sheet frame (default 0.05). Implies contactSheet." },
             }),
@@ -3132,6 +3134,9 @@ fn record_command_args(arguments: &Value, action: &str) -> Result<Vec<String>, P
         args.push("--fps".to_string());
         args.push(fps.to_string());
     }
+    if optional_bool(arguments, "cursor")?.unwrap_or(false) {
+        args.push("--cursor".to_string());
+    }
     if optional_bool(arguments, "contactSheet")?.unwrap_or(false) {
         args.push("--contact-sheet".to_string());
     }
@@ -4069,6 +4074,19 @@ fn write_json_line(stdout: &mut io::Stdout, value: &Value) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn recording_cursor_uses_cli_parser() {
+        for operation in ["start", "restart"] {
+            let args =
+                record_command_args(&json!({"path": "cursor.webm", "cursor": true}), operation)
+                    .unwrap();
+            let flags = crate::flags::parse_flags(&args);
+            let command = crate::commands::parse_command(&args, &flags).unwrap();
+            assert_eq!(command["cursor"], true);
+            assert_eq!(command["action"], format!("recording_{operation}"));
+        }
+    }
+
+    #[test]
     fn recording_timeline_options_use_cli_parser() {
         for operation in ["start", "restart"] {
             for fps in [1, 30, 60] {
@@ -4743,6 +4761,10 @@ mod tests {
                 );
             }
             assert_eq!(
+                tool["inputSchema"]["properties"]["cursor"]["type"],
+                "boolean"
+            );
+            assert_eq!(
                 tool["inputSchema"]["properties"]["contactSheet"]["type"],
                 "boolean"
             );
@@ -4774,6 +4796,10 @@ mod tests {
         assert_eq!(
             record_command_args(&json!({ "path": "demo.webm" }), "start").unwrap(),
             vec!["record", "start", "demo.webm"]
+        );
+        assert_eq!(
+            record_command_args(&json!({ "path": "demo.webm", "cursor": true }), "start").unwrap(),
+            vec!["record", "start", "demo.webm", "--cursor"]
         );
         assert_eq!(
             record_command_args(

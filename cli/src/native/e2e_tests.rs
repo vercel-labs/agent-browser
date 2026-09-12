@@ -8380,10 +8380,11 @@ async fn e2e_recording_rejects_invalid_fps() {
     assert_success(&resp);
 }
 
-/// Verify changed-frame contact-sheet export through the full daemon pipeline.
+/// Verify the composited pointer and changed-frame contact sheet through the
+/// full daemon pipeline.
 #[tokio::test]
 #[ignore]
-async fn e2e_recording_contact_sheet() {
+async fn e2e_recording_cursor_and_contact_sheet() {
     let mut state = DaemonState::new();
     let resp = execute_command(
         &json!({ "id": "1", "action": "launch", "headless": true }),
@@ -8413,6 +8414,7 @@ async fn e2e_recording_contact_sheet() {
             "id": "3",
             "action": "recording_start",
             "path": rec_path.to_string_lossy(),
+            "cursor": true,
             "contactSheet": true,
             "contactSheetThreshold": 0.01
         }),
@@ -8420,9 +8422,32 @@ async fn e2e_recording_contact_sheet() {
     )
     .await;
     assert_success(&resp);
+    assert_eq!(get_data(&resp)["cursor"], true);
     assert_eq!(get_data(&resp)["contactSheet"], true);
 
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "Boolean(document.getElementById('__agent_browser_recording_cursor__'))" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], false);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "mousemove", "x": 360, "y": 260 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let cursor = state
+        .recording_state
+        .shared_cursor
+        .lock()
+        .unwrap()
+        .at(super::recording::cursor_timestamp());
+    assert!(cursor.visible);
+    assert_eq!((cursor.x, cursor.y), (360.0, 260.0));
     let resp = execute_command(
         &json!({ "id": "6", "action": "evaluate", "script": "document.querySelector('.card').style.background='#dbeafe'; document.querySelector('h1').textContent='Ready to continue'; true" }),
         &mut state,
@@ -8462,10 +8487,61 @@ async fn e2e_recording_contact_sheet() {
         std::fs::copy(&sheet_path, example_path).unwrap();
     }
 
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "evaluate", "script": "Boolean(document.getElementById('__agent_browser_recording_cursor__'))" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], false);
+
     let _ = std::fs::remove_file(&rec_path);
     let _ = std::fs::remove_file(&sheet_path);
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_initial_recording_frame_uses_css_viewport_dimensions() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(&json!({ "action": "launch", "headless": true }), &mut state).await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({
+                "action": "viewport",
+                "width": 400,
+                "height": 300,
+                "deviceScaleFactor": 2.0
+            }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let browser = state.browser.as_ref().unwrap();
+    let initial = super::recording::capture_initial_image(
+        &browser.client,
+        browser.active_session_id().unwrap(),
+    )
+    .await
+    .unwrap();
+    let (pixel_width, pixel_height) = image::ImageReader::with_format(
+        std::io::Cursor::new(&initial.image_data),
+        image::ImageFormat::Png,
+    )
+    .into_dimensions()
+    .unwrap();
+
+    assert_eq!((pixel_width, pixel_height), (800, 600));
+    assert_eq!(
+        (initial.device_width, initial.device_height),
+        (400.0, 300.0)
+    );
+
+    assert_success(&execute_command(&json!({ "action": "close" }), &mut state).await);
 }
 
 // ---------------------------------------------------------------------------
@@ -10414,6 +10490,73 @@ async fn start_a11y_frame_server() -> (u16, tokio::task::JoinHandle<()>) {
     });
 
     (port, handle)
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_cursor_uses_page_coordinates_for_oopif() {
+    let (port, server) = start_a11y_frame_server().await;
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(&json!({"action": "launch", "headless": true}), &mut state).await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"action": "navigate", "url": format!("http://localhost:{port}/top")}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(&execute_command(&json!({"action": "evaluate", "script": "document.getElementById('outer').style.cssText = 'position:absolute;left:240px;top:160px;width:400px;height:300px;border:10px solid black'"}), &mut state).await);
+    let child_session = state
+        .iframe_sessions
+        .values()
+        .next()
+        .expect("fixture must use an OOPIF")
+        .clone();
+    state.browser.as_ref().unwrap().client.send_command("Runtime.evaluate", Some(json!({
+        "expression": "document.body.innerHTML = '<button style=\"position:absolute;left:20px;top:30px;width:80px;height:40px\">Cursor target</button>'"
+    })), Some(&child_session)).await.unwrap();
+    let snapshot = execute_command(&json!({"action": "snapshot"}), &mut state).await;
+    assert_success(&snapshot);
+    let reference = get_data(&snapshot)["refs"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, entry)| entry["name"] == "Cursor target")
+        .unwrap()
+        .0
+        .clone();
+    // Initialize cursor history without an encoder; the test inspects the exact
+    // samples consumed by both video and contact-sheet compositing.
+    super::recording::recording_start(
+        &mut state.recording_state,
+        "unused.webm",
+        super::recording::RecordingOptions {
+            cursor: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for action in ["hover", "click", "dblclick"] {
+        assert_success(&execute_command(&json!({"action": action, "selector": format!("@{reference}"), "inputMode": "human"}), &mut state).await);
+        let cursor = state
+            .recording_state
+            .shared_cursor
+            .lock()
+            .unwrap()
+            .at(f64::INFINITY);
+        assert!(cursor.visible);
+        assert!(
+            (cursor.x - 310.0).abs() < 1.0 && (cursor.y - 220.0).abs() < 1.0,
+            "{action}: cursor should be at page (310, 220), got {cursor:?}"
+        );
+        assert!((state.mouse_state.x - cursor.x).abs() < 1.0);
+        assert!((state.mouse_state.y - cursor.y).abs() < 1.0);
+    }
+    state.recording_state.active = false;
+    assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
+    server.abort();
 }
 
 #[tokio::test]

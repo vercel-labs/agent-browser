@@ -395,6 +395,76 @@ pub async fn resolve_element_center(
     Ok((x, y, session_id.to_string()))
 }
 
+/// Origin of a CDP session's viewport in the recorded page's CSS coordinates.
+/// Input sent to an OOPIF is local to that session; cursor history is page-local.
+/// Walk owner sessions for nested OOPIFs. Content quads include iframe borders
+/// and scrolling in the owning viewport.
+pub async fn session_viewport_offset(
+    client: &CdpClient,
+    page_session: &str,
+    target_session: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(f64, f64), String> {
+    let mut current = target_session.to_string();
+    let mut offset = (0.0, 0.0);
+    for _ in 0..=iframe_sessions.len() {
+        if current == page_session {
+            return Ok(offset);
+        }
+        let frame = iframe_sessions
+            .iter()
+            .find(|(_, session)| **session == current)
+            .map(|(frame, _)| frame)
+            .ok_or("Cannot locate recording cursor frame")?;
+        let mut owner = None;
+        for candidate in
+            std::iter::once(page_session).chain(iframe_sessions.values().map(String::as_str))
+        {
+            if candidate == current {
+                continue;
+            }
+            let Ok(node) = client
+                .send_command(
+                    "DOM.getFrameOwner",
+                    Some(serde_json::json!({"frameId": frame})),
+                    Some(candidate),
+                )
+                .await
+            else {
+                continue;
+            };
+            let Some(backend_id) = node["backendNodeId"].as_i64() else {
+                continue;
+            };
+            let model = client
+                .send_command(
+                    "DOM.getBoxModel",
+                    Some(serde_json::json!({"backendNodeId": backend_id})),
+                    Some(candidate),
+                )
+                .await?;
+            let quad = model
+                .pointer("/model/content")
+                .and_then(Value::as_array)
+                .ok_or("Cannot locate recording cursor frame bounds")?;
+            let x = quad
+                .first()
+                .and_then(Value::as_f64)
+                .ok_or("Missing frame content x")?;
+            let y = quad
+                .get(1)
+                .and_then(Value::as_f64)
+                .ok_or("Missing frame content y")?;
+            offset.0 += x;
+            offset.1 += y;
+            owner = Some(candidate.to_string());
+            break;
+        }
+        current = owner.ok_or("Cannot locate recording cursor frame owner")?;
+    }
+    Err("Cyclic recording cursor frame ownership".to_string())
+}
+
 /// Hit-test a ref-resolved node at its computed click point and error if an
 /// unrelated element (overlay, banner, sticky header) would receive the input
 /// instead. Best effort: resolution failures skip the check rather than block
