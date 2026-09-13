@@ -1160,6 +1160,23 @@ impl BrowserManager {
         self.direct_page
     }
 
+    /// True once the CDP WebSocket reader has exited (browser gone or
+    /// connection dropped). Unlike `has_process_exited` this works for
+    /// attached browsers, which have no child process handle.
+    pub fn is_connection_lost(&self) -> bool {
+        self.client.is_closed()
+    }
+
+    /// Host and port of the CDP endpoint this manager is connected to,
+    /// parsed from the resolved WebSocket URL. None when the URL carries
+    /// no usable host/port.
+    pub fn cdp_host_port(&self) -> Option<(String, u16)> {
+        let parsed = url::Url::parse(&self.ws_url).ok()?;
+        let host = parsed.host_str()?.to_string();
+        let port = parsed.port_or_known_default()?;
+        Some((host, port))
+    }
+
     /// Ensures the browser has at least one page. If `pages` is empty, creates a new
     /// about:blank page and attaches to it.
     pub async fn ensure_page(&mut self) -> Result<(), String> {

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
@@ -41,6 +41,10 @@ pub struct CdpClient {
     pending: PendingMap,
     event_tx: broadcast::Sender<CdpEvent>,
     raw_tx: broadcast::Sender<RawCdpMessage>,
+    /// Set once the reader task exits. Sends on a dead socket can still
+    /// succeed at the TCP level, so this flag is the only cheap liveness
+    /// signal for background watchdogs.
+    closed: Arc<AtomicBool>,
     _reader_handle: tokio::task::JoinHandle<()>,
     _keepalive_handle: tokio::task::JoinHandle<()>,
 }
@@ -122,6 +126,9 @@ impl CdpClient {
         // Notify used to stop the keepalive task when the reader loop exits.
         let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
 
+        let closed = Arc::new(AtomicBool::new(false));
+        let closed_clone = closed.clone();
+
         let reader_handle = tokio::spawn(async move {
             while let Some(msg) = ws_rx.next().await {
                 // Accept both Text and Binary frames — remote CDP proxies
@@ -194,6 +201,10 @@ impl CdpClient {
             // instead of waiting for the 30-second timeout.
             pending_clone.lock().await.clear();
 
+            // Mark the connection dead before stopping the keepalive task so
+            // background watchdogs observe the loss without a round trip.
+            closed_clone.store(true, Ordering::SeqCst);
+
             // Stop the keepalive task — the connection is gone.
             let _ = cancel_tx.send(true);
         });
@@ -223,9 +234,15 @@ impl CdpClient {
             pending,
             event_tx,
             raw_tx,
+            closed,
             _reader_handle: reader_handle,
             _keepalive_handle: keepalive_handle,
         })
+    }
+
+    /// True once the reader task has exited, meaning the WebSocket is gone.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
     }
 
     pub async fn send_command(

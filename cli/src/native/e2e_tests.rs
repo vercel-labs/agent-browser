@@ -16,8 +16,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::test_utils::EnvGuard;
 
 use super::actions::{
-    close_current_browser, execute_command, maybe_autosave_restore_state, DaemonState,
+    close_current_browser, execute_command, maybe_autosave_restore_state,
+    maybe_reattach_attached_browser, DaemonState,
 };
+use super::cdp::chrome::find_chrome;
+use super::cdp::discovery::discover_cdp_url;
 
 fn assert_success(resp: &Value) {
     assert_eq!(
@@ -6200,6 +6203,201 @@ async fn e2e_stream_self_closed_tab_resyncs_stream() {
     // Cleanup
     let resp = execute_command(
         &json!({ "id": "4", "action": "stream_disable" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    let _ = std::fs::remove_dir_all(&socket_dir);
+}
+
+// ---------------------------------------------------------------------------
+// Attach: a restarted external browser is re-attached and the dashboard
+// resyncs without any command (issues #1847 / #1272)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_attach_browser_restart_resyncs_tabs_without_command() {
+    let guard = EnvGuard::new(&[
+        "AGENT_BROWSER_SOCKET_DIR",
+        "AGENT_BROWSER_SESSION",
+        "AGENT_BROWSER_AUTO_CONNECT",
+    ]);
+    guard.remove("AGENT_BROWSER_AUTO_CONNECT");
+
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-attach-restart-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket dir should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir.to_str().expect("socket dir should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-attach-restart");
+
+    // Reserve a free port for the "external" browser's debug endpoint. The
+    // restarted browser listens on the same port, like a systemd unit
+    // restarting Chrome with a fixed --remote-debugging-port.
+    let debug_port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("a free debug port should be bindable");
+        listener.local_addr().expect("local addr").port()
+    };
+
+    let chrome = find_chrome().expect("chrome should be installed for e2e tests");
+    let profile_dir = socket_dir.join("external-profile");
+    let launch_external_chrome = |profile: &std::path::Path| -> std::process::Child {
+        std::process::Command::new(&chrome)
+            .args([
+                "--headless",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                &format!("--remote-debugging-port={debug_port}"),
+            ])
+            .arg(format!("--user-data-dir={}", profile.display()))
+            .arg("about:blank")
+            .spawn()
+            .expect("external chrome should spawn")
+    };
+
+    let mut external_chrome = launch_external_chrome(&profile_dir);
+    let wait_for_debug_endpoint = || async {
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
+        while tokio::time::Instant::now() < deadline {
+            if discover_cdp_url("127.0.0.1", debug_port, None)
+                .await
+                .is_ok()
+            {
+                return true;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        }
+        false
+    };
+    assert!(
+        wait_for_debug_endpoint().await,
+        "external chrome debug endpoint should come up"
+    );
+
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "stream_enable", "port": 0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let stream_port = get_data(&resp)["port"]
+        .as_u64()
+        .expect("stream enable should report the bound port");
+
+    // Attach the way an externally managed session does: connect to a CDP
+    // endpoint the daemon did not launch.
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "launch", "cdpUrl": format!("http://127.0.0.1:{debug_port}") }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Give the old browser more tabs than the fresh one will have, so the
+    // assertion can tell ghost tabs from the restarted browser's real tab.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "tab_new", "url": "data:text/html,<h1>ghost-1</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "tab_new", "url": "data:text/html,<h1>ghost-2</h1>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{stream_port}"))
+        .await
+        .expect("websocket client should connect to runtime stream");
+
+    // The external manager kills and restarts the browser; the daemon gets
+    // no command and must notice on its own tick.
+    let _ = external_chrome.kill();
+    let _ = external_chrome.wait();
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    let restart_profile = socket_dir.join("external-profile-restarted");
+    let mut restarted_chrome = launch_external_chrome(&restart_profile);
+    assert!(
+        wait_for_debug_endpoint().await,
+        "restarted chrome debug endpoint should come up"
+    );
+
+    // Simulate the daemon tick: only the periodic re-attach check runs, no
+    // tab/launch command. It must re-discover the new browser (new
+    // webSocketDebuggerUrl UUID) and resync the tracked tab list.
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+    let mut reattached = false;
+    while tokio::time::Instant::now() < deadline {
+        if maybe_reattach_attached_browser(&mut state).await {
+            reattached = true;
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+    assert!(
+        reattached,
+        "daemon should re-attach to the restarted browser without a command"
+    );
+
+    let tabs = {
+        let mgr = state.browser.as_ref().expect("browser should be attached");
+        mgr.tab_list()
+    };
+    assert_eq!(
+        tabs.len(),
+        1,
+        "tracked tabs should reflect only the restarted browser, got: {tabs:?}"
+    );
+
+    // The dashboard must have received the fresh tab list without any command.
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
+    let mut saw_fresh_tabs = false;
+    while tokio::time::Instant::now() < deadline {
+        let msg = tokio::time::timeout(tokio::time::Duration::from_secs(3), ws.next()).await;
+        let Some(Ok(message)) = msg.ok().flatten() else {
+            continue;
+        };
+        if !message.is_text() {
+            continue;
+        }
+        let parsed: Value =
+            serde_json::from_str(message.to_text().expect("text message should be readable"))
+                .expect("stream payload should be valid JSON");
+        if parsed.get("type") == Some(&json!("tabs")) {
+            let tabs = parsed["tabs"].as_array().cloned().unwrap_or_default();
+            if tabs.len() == 1 {
+                saw_fresh_tabs = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_fresh_tabs,
+        "dashboard should receive the restarted browser's tab list without a command"
+    );
+
+    // Cleanup
+    let _ = restarted_chrome.kill();
+    let _ = restarted_chrome.wait();
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "stream_disable" }),
         &mut state,
     )
     .await;

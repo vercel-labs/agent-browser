@@ -13,7 +13,7 @@ use tokio::sync::{Notify, RwLock};
 
 use super::actions::{
     auto_save_restore_state, close_all_browser_backends, close_current_browser, execute_command,
-    maybe_autosave_restore_state, DaemonState,
+    maybe_autosave_restore_state, maybe_reattach_attached_browser, DaemonState,
 };
 use super::cdp::client::CdpClient;
 use super::state;
@@ -286,6 +286,7 @@ async fn run_socket_server(
                 if process_exited {
                     let _ = close_current_browser(&mut s).await;
                 } else if s.browser.is_some() {
+                    maybe_reattach_attached_browser(&mut s).await;
                     if let Err(error) = s.drain_cdp_events_background().await {
                         let _ = writeln!(
                             std::io::stderr(),
@@ -451,6 +452,7 @@ async fn run_socket_server(
                 if process_exited {
                     let _ = close_current_browser(&mut s).await;
                 } else if s.browser.is_some() {
+                    maybe_reattach_attached_browser(&mut s).await;
                     s.drain_cdp_events_background().await;
                     maybe_autosave_restore_state(&mut s, autosave_interval_ms).await;
                 }
