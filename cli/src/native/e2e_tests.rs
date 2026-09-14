@@ -69,6 +69,7 @@ fn assert_error_code(resp: &Value, code: &str) {
 fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
+        "file_gesture_probe" => include_str!("test_fixtures/file_gesture_probe.html"),
         "html5_drag_probe" => include_str!("test_fixtures/html5_drag_probe.html"),
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
         "snapshot_diff_probe" => include_str!("test_fixtures/snapshot_diff_probe.html"),
@@ -7895,6 +7896,123 @@ async fn e2e_upload_with_css_selector() {
     assert_eq!(get_data(&resp)["uploaded"], 1);
 
     let _ = std::fs::remove_file(&tmp);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
+// File drop and image paste (issue #1818)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_drop_and_paste_files() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": native_test_fixture_url("file_gesture_probe") }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let dir = std::env::temp_dir();
+    let png = dir.join(format!("ab-drop-{}.png", std::process::id()));
+    let txt = dir.join(format!("ab-paste-{}.txt", std::process::id()));
+    std::fs::write(&png, b"\x89PNG\r\n\x1a\nfake-image-bytes").unwrap();
+    std::fs::write(&txt, "pasted text payload").unwrap();
+
+    // Drop by CSS selector: the page must see a real File on dataTransfer.files.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "drop", "selector": "#drop-zone", "files": [png.to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["dropped"], 1);
+    assert_eq!(get_data(&resp)["defaultPrevented"], true);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "JSON.stringify(window.__fileGestureProbe.drops)" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let drops: Value = serde_json::from_str(get_data(&resp)["result"].as_str().unwrap()).unwrap();
+    assert_eq!(drops[0]["files"][0]["type"], "image/png");
+    assert_eq!(
+        drops[0]["files"][0]["name"].as_str().unwrap(),
+        png.file_name().unwrap().to_str().unwrap()
+    );
+    assert!(drops[0]["files"][0]["size"].as_u64().unwrap() > 0);
+    assert_eq!(drops[0]["items"][0]["kind"], "file");
+
+    // Drop by @ref resolves through the accessibility tree.
+    let resp = execute_command(&json!({ "id": "5", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    let drop_ref = snapshot
+        .lines()
+        .filter_map(|line| {
+            if line.contains("drop files here") && line.contains("ref=") {
+                let start = line.find("ref=")? + 4;
+                let end = line[start..].find(']')? + start;
+                Some(line[start..end].to_string())
+            } else {
+                None
+            }
+        })
+        .next()
+        .expect("Snapshot should contain the drop zone with a ref");
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "drop", "selector": drop_ref, "files": [png.to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["dropped"], 1);
+
+    // Paste by CSS selector: the handler reads the File off clipboardData items.
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "paste", "selector": "#paste-zone", "file": txt.to_string_lossy() }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["pasted"], 1);
+
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "evaluate", "script": "JSON.stringify(window.__fileGestureProbe.pastes)" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let pastes: Value = serde_json::from_str(get_data(&resp)["result"].as_str().unwrap()).unwrap();
+    assert_eq!(pastes[0]["files"][0]["type"], "text/plain");
+    assert_eq!(
+        pastes[0]["files"][0]["name"].as_str().unwrap(),
+        txt.file_name().unwrap().to_str().unwrap()
+    );
+    assert_eq!(pastes[0]["items"][0]["kind"], "file");
+
+    // Empty file list is rejected before any event is dispatched.
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "drop", "selector": "#drop-zone", "files": [] }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false);
+
+    let _ = std::fs::remove_file(&png);
+    let _ = std::fs::remove_file(&txt);
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
 }

@@ -141,6 +141,8 @@ agent-browser upload @e5 file1.pdf        # upload file(s)
 agent-browser scroll down 500             # scroll page (up/down/left/right)
 agent-browser scrollintoview @e1          # scroll element into view
 agent-browser drag @e1 @e2                # drag and drop
+agent-browser drop @e1 file1.png          # drop file(s) onto an element
+agent-browser paste @e1 --file img.png    # paste a file/image at an element
 ```
 
 ### When refs don't work or you don't want to snapshot

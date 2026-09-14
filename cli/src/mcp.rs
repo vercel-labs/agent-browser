@@ -44,6 +44,8 @@ const TOOL_UNCHECK: &str = "agent_browser_uncheck";
 const TOOL_SELECT: &str = "agent_browser_select";
 const TOOL_DRAG: &str = "agent_browser_drag";
 const TOOL_UPLOAD: &str = "agent_browser_upload";
+const TOOL_DROP: &str = "agent_browser_drop";
+const TOOL_PASTE: &str = "agent_browser_paste";
 const TOOL_DOWNLOAD: &str = "agent_browser_download";
 const TOOL_SCROLL: &str = "agent_browser_scroll";
 const TOOL_SCROLL_INTO_VIEW: &str = "agent_browser_scroll_into_view";
@@ -421,6 +423,8 @@ const DEBUG_PROFILE_TOOLS: &[&str] = &[
     TOOL_WAIT_FOR_DOWNLOAD,
     TOOL_PDF,
     TOOL_UPLOAD,
+    TOOL_DROP,
+    TOOL_PASTE,
     TOOL_DOWNLOAD,
     TOOL_TRACE_START,
     TOOL_TRACE_STOP,
@@ -993,6 +997,20 @@ fn parity_tools() -> Vec<Value> {
             "Upload files through a file input.",
             json!({ "selector": selector_schema(), "files": string_array_schema("File paths to upload.") }),
             &["selector", "files"],
+        ),
+        tool(
+            TOOL_DROP,
+            "Drop files",
+            "Drop one or more files onto an element (drop zones without a file input).",
+            json!({ "selector": selector_schema(), "files": string_array_schema("File paths to drop.") }),
+            &["selector", "files"],
+        ),
+        tool(
+            TOOL_PASTE,
+            "Paste file or image",
+            "Paste a file or image at an element, for handlers reading clipboardData items.",
+            json!({ "selector": selector_schema(), "file": { "type": "string", "description": "Path to the file or image to paste." } }),
+            &["selector", "file"],
         ),
         tool(
             TOOL_DOWNLOAD,
@@ -2212,6 +2230,8 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_SELECT => call_select(arguments),
         TOOL_DRAG => call_drag(arguments),
         TOOL_UPLOAD => call_upload(arguments),
+        TOOL_DROP => call_drop(arguments),
+        TOOL_PASTE => call_paste(arguments),
         TOOL_DOWNLOAD => call_download(arguments),
         TOOL_SCROLL => call_scroll(arguments),
         TOOL_SCROLL_INTO_VIEW => call_simple_selector(arguments, "scrollintoview"),
@@ -2672,6 +2692,24 @@ fn call_upload(arguments: &Value) -> Result<Value, ProtocolError> {
     let mut args = vec!["upload".to_string(), selector];
     args.extend(files);
     call_cli_tool(arguments, args, None)
+}
+
+fn call_drop(arguments: &Value) -> Result<Value, ProtocolError> {
+    let selector = required_string(arguments, "selector")?;
+    let files = required_string_array(arguments, "files")?;
+    let mut args = vec!["drop".to_string(), selector];
+    args.extend(files);
+    call_cli_tool(arguments, args, None)
+}
+
+fn call_paste(arguments: &Value) -> Result<Value, ProtocolError> {
+    let selector = required_string(arguments, "selector")?;
+    let file = required_string(arguments, "file")?;
+    call_cli_tool(
+        arguments,
+        vec!["paste".to_string(), selector, "--file".to_string(), file],
+        None,
+    )
 }
 
 fn call_download(arguments: &Value) -> Result<Value, ProtocolError> {
