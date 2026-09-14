@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent Browser setup</title>
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">Agent Browser</p>
+        <h1>Choose a page to control</h1>
+        <p>Connect a CLI session, select an open page, and authorize it. You can stop control here at any time.</p>
+      </header>
+      <section class="card" aria-labelledby="pair-title">
+        <h2 id="pair-title">Connect a session</h2>
+        <p>Run <code>chrome-extension.setup</code> in the CLI, then paste its pairing code below.</p>
+        <form id="pair-form">
+          <label for="pairing-code">Pairing code</label>
+          <div class="pair-row">
+            <input id="pairing-code" name="pairing-code" type="text" placeholder="port:token" autocomplete="off" autocapitalize="off" spellcheck="false" required maxlength="134" />
+            <button id="pair-button" type="submit">Connect</button>
+          </div>
+        </form>
+        <p class="hint">If Chrome asks, allow this extension to connect to a service on this device.</p>
+        <p id="connection-message" role="status" aria-live="polite"></p>
+      </section>
+      <div class="section-heading">
+        <h2>Sessions</h2>
+        <button id="refresh-button" class="secondary" type="button">Refresh pages</button>
+      </div>
+      <p id="error" role="alert" hidden></p>
+      <div id="sessions"></div>
+      <footer>
+        <p>Authorization follows the selected tab as it navigates. Its pages use your existing Chrome profile and signed-in accounts. Other tabs are not added to the session.</p>
+        <p>Closing or restarting the connection ends authorization. Run setup again to start a new session.</p>
+      </footer>
+    </main>
+    <script type="module" src="./setup/main.ts"></script>
+  </body>
+</html>

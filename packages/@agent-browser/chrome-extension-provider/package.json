@@ -1,0 +1,45 @@
+{
+  "name": "@agent-browser/chrome-extension-provider",
+  "version": "0.1.0",
+  "description": "Connect agent-browser to an explicitly authorized Chrome tab",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "files": [
+    "dist",
+    ".output/chrome-mv3",
+    "README.md"
+  ],
+  "bin": {
+    "agent-browser-plugin-chrome-extension": "./dist/plugin.js"
+  },
+  "scripts": {
+    "build": "pnpm run build:node && pnpm run build:extension",
+    "build:node": "tsc -p tsconfig.json",
+    "build:extension": "pnpm run check:extension && wxt build --browser chrome",
+    "prepack": "pnpm run build",
+    "test": "pnpm run build && node --test test/*.test.mjs",
+    "test:pack": "node test/pack-smoke.mjs",
+    "check:extension": "tsc -p tsconfig.extension.json"
+  },
+  "dependencies": {
+    "ws": "8.21.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.2.9",
+    "@types/node": "^24.0.0",
+    "@types/ws": "8.18.1",
+    "typescript": "5.9.3",
+    "wxt": "0.20.27"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vercel-labs/agent-browser",
+    "directory": "packages/@agent-browser/chrome-extension-provider"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

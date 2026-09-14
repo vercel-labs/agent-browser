@@ -1,0 +1,4 @@
+dist/
+.output/
+.wxt/
+*.tgz
