@@ -363,6 +363,8 @@ pub fn load_config(args: &[String]) -> Result<Config, String> {
 pub struct Flags {
     pub json: bool,
     pub headed: bool,
+    /// Whether configuration or the environment explicitly selected headed mode.
+    pub headed_configured: bool,
     pub debug: bool,
     pub session: String,
     pub restore: Option<String>,
@@ -390,6 +392,8 @@ pub struct Flags {
     pub clear_ca_cert: bool,
     pub allow_file_access: bool,
     pub hide_scrollbars: bool,
+    /// Distinguish a configured process option from Chrome's default.
+    pub hide_scrollbars_configured: bool,
     pub webgpu: bool,
     pub no_webmcp: bool,
     /// Env-only (AGENT_BROWSER_NO_XVFB): disable automatic Xvfb for headed
@@ -528,6 +532,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
     let mut flags = Flags {
         json: env_var_is_truthy("AGENT_BROWSER_JSON") || config.json.unwrap_or(false),
         headed: env_var_is_truthy("AGENT_BROWSER_HEADED") || config.headed.unwrap_or(false),
+        headed_configured: config.headed.is_some() || env::var("AGENT_BROWSER_HEADED").is_ok(),
         debug: env_var_is_truthy("AGENT_BROWSER_DEBUG") || config.debug.unwrap_or(false),
         session: env::var("AGENT_BROWSER_SESSION")
             .ok()
@@ -585,6 +590,8 @@ pub fn parse_flags(args: &[String]) -> Flags {
         clear_ca_cert,
         allow_file_access: env_var_is_truthy("AGENT_BROWSER_ALLOW_FILE_ACCESS")
             || config.allow_file_access.unwrap_or(false),
+        hide_scrollbars_configured: config.hide_scrollbars.is_some()
+            || env::var("AGENT_BROWSER_HIDE_SCROLLBARS").is_ok(),
         hide_scrollbars: env_var_bool("AGENT_BROWSER_HIDE_SCROLLBARS")
             .or(config.hide_scrollbars)
             .unwrap_or(true),

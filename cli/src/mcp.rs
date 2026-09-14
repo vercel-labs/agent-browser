@@ -7,6 +7,8 @@
 //! parser and daemon as direct commands.
 //! Owned Windows Chrome uses the same private headless desktop and Job Object
 //! lifetime through MCP; headed and external-connection semantics are unchanged.
+//! Existing-browser providers use the same CLI parser and core preflight.
+//! Provider management uses the existing plugin_run tool; no separate setup tool is needed.
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
@@ -772,8 +774,8 @@ fn tools() -> Vec<Value> {
             "Open page",
             "Launch the browser and optionally navigate to a URL. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools.",
             json!({
-                "url": { "type": "string", "description": "URL to open. Omit to launch about:blank." },
-                "headed": { "type": "boolean", "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults." },
+                "url": { "type": "string", "description": "URL to open. Omit to launch about:blank, or to connect to the authorized tab when using an existing-browser provider." },
+                "headed": { "type": "boolean", "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults. Existing-browser providers reject false because they cannot make the user browser headless." },
                 "webgpu": { "type": "boolean", "description": "Enable WebGPU (SwiftShader software Vulkan on Linux; no GPU required). Explicit true/false overrides AGENT_BROWSER_WEBGPU and config; omit to use those defaults." }
                 ,"webmcp": { "type": "boolean", "description": "Enable experimental WebMCP support. Defaults to true for locally launched Chrome; set false to pass --no-webmcp." }
             }),
@@ -948,7 +950,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_EVAL,
             "Evaluate JavaScript",
-            "Run JavaScript in the page using stdin to avoid shell escaping.",
+            "Run JavaScript in the selected frame's normal page context using stdin to avoid shell escaping. Switch to the main frame to evaluate in the top-level page.",
             json!({
                 "script": { "type": "string", "description": "JavaScript expression or script to evaluate." }
             }),
@@ -957,7 +959,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_CLOSE,
             "Close browser",
-            "Close the current browser session.",
+            "Close the current browser session. For a provider borrowing an existing browser, release control while leaving Chrome and the authorized tab open.",
             json!({
                 "all": { "type": "boolean", "default": false, "description": "Close all active sessions." }
             }),
@@ -1307,7 +1309,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_FRAME_SWITCH,
             "Frame switch",
-            "Switch frame by selector, ref, or id.",
+            "Switch frame by selector, ref, or id for snapshots, interactions, and JavaScript eval. CSS selectors resolve the selected iframe directly, including frames without a name or id.",
             json!({ "frame": { "type": "string" } }),
             &["frame"],
         ),
@@ -1818,7 +1820,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_PLUGIN_RUN,
             "Plugin run",
-            "Run a command.run or custom plugin request.",
+            "Run a command.run or custom plugin request, including optional browser-provider setup and status commands. Include the provider session in payload when its command requires it; the top-level session is not injected into payload.",
             json!({
                 "name": { "type": "string", "description": "Configured plugin name." },
                 "requestType": { "type": "string", "description": "Namespaced request type to send to the plugin." },
@@ -4056,6 +4058,19 @@ mod tests {
         assert!(names.contains(&TOOL_SESSION_INFO));
         assert!(!names.contains(&"agent_browser_frame_list"));
         assert!(names.iter().all(|name| name.starts_with("agent_browser_")));
+        let eval = tools.iter().find(|tool| tool["name"] == TOOL_EVAL).unwrap();
+        assert!(eval["description"]
+            .as_str()
+            .unwrap()
+            .contains("selected frame's normal page context"));
+        let frame = tools
+            .iter()
+            .find(|tool| tool["name"] == TOOL_FRAME_SWITCH)
+            .unwrap();
+        assert!(frame["description"]
+            .as_str()
+            .unwrap()
+            .contains("JavaScript eval"));
     }
 
     #[test]
@@ -4101,6 +4116,62 @@ mod tests {
             open_args(&json!({ "webmcp": true })).unwrap(),
             vec!["--no-webmcp", "false", "open"]
         );
+    }
+
+    #[test]
+    fn existing_browser_open_uses_identical_cli_provider_envelopes() {
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_HEADED"]);
+        guard.remove("AGENT_BROWSER_HEADED");
+        for headed in [None, Some(false), Some(true)] {
+            let mut arguments = json!({ "extraArgs": ["--provider", "borrowed", "--profile", "private-profile", "--state", "private-state.json", "--pin-tab"] });
+            let mut cli = vec![
+                "--provider",
+                "borrowed",
+                "--profile",
+                "private-profile",
+                "--state",
+                "private-state.json",
+                "--pin-tab",
+                "open",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>();
+            if let Some(headed) = headed {
+                arguments["headed"] = json!(headed);
+                cli.extend(["--headed".to_string(), headed.to_string()]);
+            }
+            let mcp_args = cli_tool_args(&arguments, open_args(&arguments).unwrap(), None).unwrap();
+            let mcp_flags = crate::flags::parse_flags(&mcp_args);
+            let cli_flags = crate::flags::parse_flags(&cli);
+            let mut from_mcp = crate::build_provider_launch_command("borrowed", &mcp_flags);
+            let mut from_cli = crate::build_provider_launch_command("borrowed", &cli_flags);
+            from_mcp.as_object_mut().unwrap().remove("id");
+            from_cli.as_object_mut().unwrap().remove("id");
+            assert_eq!(from_mcp, from_cli);
+            assert_eq!(
+                from_mcp.get("headless").and_then(Value::as_bool),
+                headed.map(|headed| !headed)
+            );
+            assert_eq!(from_mcp["pinTab"], true);
+            assert_eq!(from_mcp["storageState"], "private-state.json");
+        }
+    }
+
+    #[test]
+    fn existing_browser_setup_uses_plugin_run_with_explicit_payload_session() {
+        let args = plugin_run_args(&json!({ "name": "chrome-extension", "requestType": "chrome-extension.setup", "session": "global-session", "payload": { "session": "work" } })).unwrap();
+        assert_eq!(
+            &args[..4],
+            [
+                "plugin",
+                "run",
+                "chrome-extension",
+                "chrome-extension.setup"
+            ]
+        );
+        let payload: Value = serde_json::from_str(args.last().unwrap()).unwrap();
+        assert_eq!(payload, json!({ "session": "work" }));
     }
 
     #[test]

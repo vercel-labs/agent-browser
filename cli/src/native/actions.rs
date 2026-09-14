@@ -213,6 +213,67 @@ pub struct MouseState {
     pub buttons: i32,
 }
 
+#[derive(Debug)]
+struct FrameExecutionContext {
+    session_id: String,
+    context_id: i64,
+}
+
+/// Keep default worlds across tabs so `eval` can run in a selected frame's
+/// own JavaScript realm, including same-process frames with no CDP session.
+fn track_frame_execution_context(
+    contexts: &mut HashMap<String, FrameExecutionContext>,
+    event: &CdpEvent,
+) {
+    if event.method == "Target.detachedFromTarget" {
+        if let Some(session_id) = event.params["sessionId"].as_str() {
+            contexts.retain(|_, context| context.session_id != session_id);
+        }
+        return;
+    }
+    // Direct page WebSockets omit sessionId; CdpClient uses an empty string
+    // for commands sent to those connections.
+    let session_id = event.session_id.as_deref().unwrap_or_default();
+    match event.method.as_str() {
+        "Runtime.executionContextCreated" => {
+            let context = &event.params["context"];
+            if context["auxData"]["isDefault"] != true {
+                return;
+            }
+            if let (Some(frame_id), Some(context_id)) = (
+                context["auxData"]["frameId"].as_str(),
+                context["id"].as_i64(),
+            ) {
+                contexts.insert(
+                    frame_id.to_string(),
+                    FrameExecutionContext {
+                        session_id: session_id.to_string(),
+                        context_id,
+                    },
+                );
+            }
+        }
+        "Runtime.executionContextDestroyed" => contexts.retain(|_, context| {
+            context.session_id != session_id
+                || Some(context.context_id) != event.params["executionContextId"].as_i64()
+        }),
+        "Runtime.executionContextsCleared" => {
+            contexts.retain(|_, context| context.session_id != session_id);
+        }
+        "Page.frameDetached" => {
+            if let Some(frame_id) = event.params["frameId"].as_str() {
+                if contexts
+                    .get(frame_id)
+                    .is_some_and(|context| context.session_id == session_id)
+                {
+                    contexts.remove(frame_id);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 #[derive(Default)]
 struct DrainedEvents {
     pending_acks: Vec<i64>,
@@ -305,6 +366,13 @@ fn launch_hash(
     init_script_paths.hash(&mut h);
     plugin_init_scripts.hash(&mut h);
     h.finish()
+}
+
+fn existing_browser_hash_options(options: &LaunchOptions) -> LaunchOptions {
+    let mut options = options.clone();
+    options.headless = false;
+    options.user_agent = None;
+    options
 }
 
 fn launch_connection_identity(
@@ -564,6 +632,7 @@ pub struct DaemonState {
     pub tracked_requests: Vec<TrackedRequest>,
     pub request_tracking: bool,
     pub active_frame_id: Option<String>,
+    frame_execution_contexts: HashMap<String, FrameExecutionContext>,
     /// Cross-origin iframe frame_id → dedicated CDP session_id.
     /// Populated by Target.attachedToTarget events from Target.setAutoAttach.
     /// Entries are retained across tab changes because Chrome does not emit a
@@ -623,11 +692,14 @@ pub struct DaemonState {
     pub plugin_init_scripts: Vec<String>,
     /// Provider cleanup metadata for the active external browser session.
     active_provider_session: Option<ActiveProviderSession>,
-    /// True when the connected CDP browser is owned by a cloud provider.
+    /// True when the CDP connection came from a browser provider.
     ///
     /// This is tracked separately from cleanup metadata because provider
     /// plugins are allowed to omit a close-session payload.
     active_provider_connection: bool,
+    /// A provider lease borrowing the user's existing browser.
+    active_existing_browser: bool,
+    existing_browser_options: Option<LaunchOptions>,
     /// Actions already approved while replaying a confirmed command.
     confirmed_policy_actions: HashSet<String>,
     /// Strict session-to-tab binding (`--pin-tab` / AGENT_BROWSER_PIN_TAB).
@@ -708,6 +780,7 @@ impl DaemonState {
             tracked_requests: Vec::new(),
             request_tracking: false,
             active_frame_id: None,
+            frame_execution_contexts: HashMap::new(),
             iframe_sessions: HashMap::new(),
             active_iframe_sessions: HashSet::new(),
             origin_headers: Arc::new(RwLock::new(HashMap::new())),
@@ -740,6 +813,8 @@ impl DaemonState {
             plugin_init_scripts: Vec::new(),
             active_provider_session: None,
             active_provider_connection: false,
+            active_existing_browser: false,
+            existing_browser_options: None,
             confirmed_policy_actions: HashSet::new(),
             pin_tab,
             last_persisted_binding: None,
@@ -749,11 +824,12 @@ impl DaemonState {
     /// True when the default idle timeout must not shut down this session.
     /// WebDriver-backed Safari and iOS sessions are always headed, while CDP
     /// sessions delegate the decision to BrowserManager. Provider-owned CDP
-    /// connections remain eligible because the daemon owns their lifecycle.
+    /// connections remain eligible because the daemon owns their lifecycle;
+    /// borrowed existing browsers keep the ordinary attached-CDP exemption.
     pub(crate) fn blocks_default_idle_shutdown(&self) -> bool {
         default_idle_shutdown_is_blocked(
             matches!(self.backend_type, BackendType::WebDriver),
-            self.active_provider_connection,
+            self.active_provider_connection && !self.active_existing_browser,
             self.browser
                 .as_ref()
                 .is_some_and(BrowserManager::blocks_default_idle_shutdown),
@@ -792,8 +868,8 @@ impl DaemonState {
     }
 
     fn subscribe_to_browser_events(&mut self) {
-        if let Some(ref browser) = self.browser {
-            self.event_rx = Some(browser.client.subscribe());
+        if let Some(ref mut browser) = self.browser {
+            self.event_rx = Some(browser.take_event_receiver());
         }
     }
 
@@ -1550,6 +1626,7 @@ impl DaemonState {
         loop {
             match rx.try_recv() {
                 Ok(event) => {
+                    track_frame_execution_context(&mut self.frame_execution_contexts, &event);
                     // Target events are not session-scoped; handle them first
                     match event.method.as_str() {
                         "Target.targetCreated" => {
@@ -2318,8 +2395,10 @@ fn remember_active_provider_session(
     state: &mut DaemonState,
     session: Option<providers::ProviderSession>,
     plugins: &[crate::plugins::PluginConfig],
+    existing_browser: bool,
 ) {
     state.active_provider_connection = true;
+    state.active_existing_browser = existing_browser;
     state.active_provider_session = session.map(|session| ActiveProviderSession {
         session,
         plugins: plugins.to_vec(),
@@ -2331,6 +2410,8 @@ async fn close_active_provider_session(state: &mut DaemonState) {
         providers::close_provider_session_with_plugins(&active.session, &active.plugins).await;
     }
     state.active_provider_connection = false;
+    state.active_existing_browser = false;
+    state.existing_browser_options = None;
 }
 
 pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(), String> {
@@ -2345,6 +2426,7 @@ pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(),
     state.webmcp_enabled = false;
     state.network_auto_attach_installed = false;
     state.iframe_sessions.clear();
+    state.frame_execution_contexts.clear();
     state.active_iframe_sessions.clear();
     state.webmcp.clear_all();
     state.screencasting = false;
@@ -2532,6 +2614,10 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         };
         inject_lifecycle(&mut resp, state, false, false, false);
         return resp;
+    }
+
+    if let Err(error) = validate_active_existing_browser(cmd, state).await {
+        return error_response(&id, &error);
     }
 
     if let Some(ref server) = state.stream_server {
@@ -2733,7 +2819,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 let _ = auto_save_restore_state(state).await;
                 let _ = close_current_browser(state).await;
             }
-            if let Err(e) = auto_launch(state, plugins_from_command_or_env(cmd)).await {
+            if let Err(e) = auto_launch(state, plugins_from_command_or_env(cmd), cmd).await {
                 let context = auto_launch_error_context(env::var("AGENT_BROWSER_CDP").is_ok());
                 return error_response(&id, &format!("{}: {}", context, e));
             }
@@ -3125,6 +3211,9 @@ fn auto_launch_error_context(has_cdp: bool) -> &'static str {
 /// would let a daemon restart drop the binding and, for a pinned session,
 /// the strict isolation boundary with it).
 fn maybe_persist_tab_binding(state: &mut DaemonState) -> Option<String> {
+    if state.active_existing_browser {
+        return None;
+    }
     let mgr = state.browser.as_ref()?;
     let (target_id, url) = mgr.binding_snapshot()?;
     let binding = tab_binding::TabBinding {
@@ -3825,8 +3914,9 @@ async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Resul
 async fn auto_launch(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
+    cmd: &Value,
 ) -> Result<(), String> {
-    let mut options = launch_options_from_env();
+    let mut options = effective_launch_options(&Value::Null);
     let effective_ca_cert = state.effective_ca_cert.clone();
     apply_effective_ca_cert(&mut options, &effective_ca_cert);
     state.plugin_init_scripts.clear();
@@ -3857,7 +3947,7 @@ async fn auto_launch(
 
     // Store proxy credentials for Fetch.authRequired handling
     let has_proxy_auth = options.proxy_username.is_some();
-    if has_proxy_auth {
+    if has_proxy_auth && provider.is_none() {
         let mut creds = state.proxy_credentials.write().await;
         *creds = Some((
             options.proxy_username.clone().unwrap_or_default(),
@@ -3969,11 +4059,33 @@ async fn auto_launch(
         // ios/safari are device providers handled via explicit launch command
         if !p.is_empty() && p != "ios" && p != "safari" {
             let conn = providers::connect_provider_with_plugins(&p, &plugins).await?;
+            if conn.existing_browser {
+                if let Err(error) = validate_existing_browser_options(
+                    cmd,
+                    state,
+                    &options,
+                    engine.as_deref(),
+                    &allowed_domains,
+                ) {
+                    if let Some(session) = &conn.session {
+                        providers::close_provider_session_with_plugins(session, &plugins).await;
+                    }
+                    return Err(error);
+                }
+            }
             if conn.direct_page && !allowed_domains.is_empty() {
                 if let Some(ref ps) = conn.session {
                     providers::close_provider_session_with_plugins(ps, &plugins).await;
                 }
                 return Err(direct_page_allowed_domains_error());
+            }
+            if conn.existing_browser {
+                *state.proxy_credentials.write().await = None;
+            } else if has_proxy_auth {
+                *state.proxy_credentials.write().await = Some((
+                    options.proxy_username.clone().unwrap_or_default(),
+                    options.proxy_password.clone().unwrap_or_default(),
+                ));
             }
             let ws_headers = if p == "agentcore" {
                 providers::take_agentcore_ws_headers()
@@ -3990,7 +4102,11 @@ async fn auto_launch(
             match connect_result {
                 Ok(mgr) => {
                     let hash = launch_hash(
-                        &options,
+                        &if conn.existing_browser {
+                            existing_browser_hash_options(&options)
+                        } else {
+                            options.clone()
+                        },
                         &allowed_domains,
                         &state.plugin_init_scripts,
                         &enable_features,
@@ -4002,11 +4118,17 @@ async fn auto_launch(
                     state.reset_input_state();
                     state.browser = Some(mgr);
                     state.launch_hash = Some(hash);
-                    remember_active_provider_session(state, conn.session.clone(), &plugins);
+                    remember_active_provider_session(
+                        state,
+                        conn.session.clone(),
+                        &plugins,
+                        conn.existing_browser,
+                    );
                     state.subscribe_to_browser_events();
                     state.start_fetch_handler();
                     state.start_dialog_handler();
                     state.update_stream_client().await;
+                    apply_existing_browser_page_options_or_rollback(state, &options).await?;
                     write_provider_file(&state.session_id, &p);
                     install_network_controls_or_close(state, has_proxy_auth).await?;
                     apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
@@ -4284,16 +4406,235 @@ fn launch_options_from_env() -> LaunchOptions {
     }
 }
 
+/// Resolve the same launch settings for implicit, explicit, and MCP launches.
+/// Command fields override daemon defaults; the original command is retained
+/// separately to distinguish an explicit headless request from the default.
+fn effective_launch_options(cmd: &Value) -> LaunchOptions {
+    override_launch_options(launch_options_from_env(), cmd)
+}
+
+fn override_launch_options(mut options: LaunchOptions, cmd: &Value) -> LaunchOptions {
+    macro_rules! string_option {
+        ($key:literal, $field:ident) => {
+            if let Some(value) = cmd.get($key).and_then(Value::as_str) {
+                options.$field = Some(value.to_string());
+            }
+        };
+    }
+    macro_rules! bool_option {
+        ($key:literal, $field:ident) => {
+            if let Some(value) = cmd.get($key).and_then(Value::as_bool) {
+                options.$field = value;
+            }
+        };
+    }
+    string_option!("executablePath", executable_path);
+    string_option!("profile", profile);
+    string_option!("storageState", storage_state);
+    string_option!("userAgent", user_agent);
+    string_option!("colorScheme", color_scheme);
+    string_option!("downloadPath", download_path);
+    bool_option!("headless", headless);
+    bool_option!("allowFileAccess", allow_file_access);
+    bool_option!("ignoreHTTPSErrors", ignore_https_errors);
+    bool_option!("hideScrollbars", hide_scrollbars);
+    bool_option!("webgpu", webgpu);
+    bool_option!("webmcp", webmcp);
+    bool_option!("noXvfb", no_xvfb);
+    if let Some(args) = string_array_from_command(cmd, "args") {
+        options.args = args;
+    }
+    if let Some(extensions) = string_array_from_command(cmd, "extensions") {
+        options.extensions = Some(extensions);
+    }
+    if let Some(proxy) = cmd.get("proxy") {
+        options.proxy = proxy
+            .as_str()
+            .or_else(|| proxy.get("server").and_then(Value::as_str))
+            .map(String::from);
+        for (key, slot) in [
+            ("bypass", &mut options.proxy_bypass),
+            ("username", &mut options.proxy_username),
+            ("password", &mut options.proxy_password),
+        ] {
+            if let Some(value) = proxy.get(key).and_then(Value::as_str) {
+                *slot = Some(value.to_string());
+            }
+        }
+    }
+    options
+}
+
+fn existing_browser_option_error(option: &str) -> String {
+    format!("{} is not supported by a provider borrowing an existing browser. Remove this option, or close this session and launch a separate managed browser.", option)
+}
+
+/// Validate before acquiring CDP access, and before changing an active lease's
+/// configuration. Only option names enter errors; command data stays in core.
+fn validate_existing_browser_options(
+    cmd: &Value,
+    state: &DaemonState,
+    options: &LaunchOptions,
+    engine: Option<&str>,
+    allowed_domains: &[String],
+) -> Result<(), String> {
+    let headless_requested = options.headless
+        && (cmd.get("headless").is_some() || env::var("AGENT_BROWSER_HEADED").is_ok());
+    let restore_requested = state.session_name.is_some()
+        || state.restore_check_url.is_some()
+        || state.restore_check_text.is_some()
+        || state.restore_check_fn.is_some()
+        || [
+            "restoreKey",
+            "restoreSave",
+            "restoreCheckUrl",
+            "restoreCheckText",
+            "restoreCheckFn",
+        ]
+        .iter()
+        .any(|key| cmd.get(key).is_some_and(|value| !value.is_null()));
+    let pin = cmd
+        .get("pinTab")
+        .and_then(Value::as_bool)
+        .unwrap_or(state.pin_tab);
+    let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
+    let conflicts = [
+        (!allowed_domains.is_empty(), "--allowed-domains"),
+        (pin, "--pin-tab"),
+        (restore_requested, "--restore"),
+        (
+            matches!(action, "state_save" | "state_load"),
+            "state save/load",
+        ),
+        (options.storage_state.is_some(), "--state"),
+        (options.profile.is_some(), "--profile"),
+        (
+            options.proxy.is_some()
+                || options.proxy_bypass.is_some()
+                || options.proxy_username.is_some()
+                || options.proxy_password.is_some(),
+            "--proxy",
+        ),
+        (options.executable_path.is_some(), "--executable-path"),
+        (!options.args.is_empty(), "--args"),
+        (
+            options
+                .extensions
+                .as_ref()
+                .is_some_and(|extensions| !extensions.is_empty()),
+            "--extension",
+        ),
+        (headless_requested, "--headed false"),
+        (
+            engine.is_some_and(|engine| !engine.eq_ignore_ascii_case("chrome")),
+            "--engine",
+        ),
+        (options.allow_file_access, "--allow-file-access"),
+        (
+            options.ca_cert.is_some() || cmd.get("caCert").is_some(),
+            "--ca-cert",
+        ),
+        (options.ignore_https_errors, "--ignore-https-errors"),
+        (options.download_path.is_some(), "--download-path"),
+        (
+            cmd.get("hideScrollbars").is_some()
+                || env::var("AGENT_BROWSER_HIDE_SCROLLBARS").is_ok()
+                || !options.hide_scrollbars,
+            "--hide-scrollbars",
+        ),
+        (options.webgpu, "--webgpu"),
+        (options.no_xvfb, "AGENT_BROWSER_NO_XVFB"),
+    ];
+    for (conflicts, option) in conflicts {
+        if conflicts {
+            return Err(existing_browser_option_error(option));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_active_existing_browser(cmd: &Value, state: &DaemonState) -> Result<(), String> {
+    if !state.active_existing_browser {
+        return Ok(());
+    }
+    let launch_cmd = if cmd.get("action").and_then(Value::as_str) == Some("launch") {
+        cmd
+    } else {
+        &Value::Null
+    };
+    let mut options = override_launch_options(
+        state.existing_browser_options.clone().unwrap_or_default(),
+        launch_cmd,
+    );
+    apply_effective_ca_cert(&mut options, &state.effective_ca_cert);
+    let engine = launch_cmd
+        .get("engine")
+        .and_then(Value::as_str)
+        .unwrap_or(&state.engine);
+    let allowed_domains = allowed_domains_from_launch_command(launch_cmd)
+        .unwrap_or(current_allowed_domains(state).await);
+    validate_existing_browser_options(cmd, state, &options, Some(engine), &allowed_domains)
+}
+
+/// Existing browsers need page options applied after attach, with errors
+/// surfaced instead of silently accepting options the provider cannot honor.
+async fn apply_existing_browser_page_options(
+    state: &mut DaemonState,
+    options: &LaunchOptions,
+) -> Result<(), String> {
+    let previous = state.existing_browser_options.as_ref();
+    let user_agent_changed =
+        previous.is_none_or(|previous| previous.user_agent != options.user_agent);
+    let color_scheme_changed =
+        previous.is_none_or(|previous| previous.color_scheme != options.color_scheme);
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?;
+    if let Some(user_agent) = options.user_agent.as_ref().filter(|_| user_agent_changed) {
+        mgr.client
+            .send_command(
+                "Emulation.setUserAgentOverride",
+                Some(json!({ "userAgent": user_agent })),
+                Some(session_id),
+            )
+            .await?;
+        state.session_setup.user_agent = Some(user_agent.clone());
+    }
+    if let Some(color_scheme) = options
+        .color_scheme
+        .as_ref()
+        .filter(|_| color_scheme_changed)
+    {
+        mgr.client.send_command("Emulation.setEmulatedMedia", Some(json!({ "features": [{ "name": "prefers-color-scheme", "value": color_scheme }] })), Some(session_id)).await?;
+        state.session_setup.emulated_media = Some(EmulatedMedia {
+            media: None,
+            features: vec![("prefers-color-scheme".to_string(), color_scheme.clone())],
+        });
+    }
+    // A reused launch preserves page setup changed by later commands. Only a
+    // changed launch option overrides it, just as with a managed browser.
+    let mut borrowed_options = options.clone();
+    borrowed_options.headless = false;
+    state.existing_browser_options = Some(borrowed_options);
+    Ok(())
+}
+
+async fn apply_existing_browser_page_options_or_rollback(
+    state: &mut DaemonState,
+    options: &LaunchOptions,
+) -> Result<(), String> {
+    if state.active_existing_browser {
+        if let Err(error) = apply_existing_browser_page_options(state, options).await {
+            let _ = rollback_failed_launch(state).await;
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 fn hide_scrollbars_from_env() -> bool {
     env::var("AGENT_BROWSER_HIDE_SCROLLBARS")
         .map(|v| !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | ""))
         .unwrap_or(true)
-}
-
-fn hide_scrollbars_from_launch_cmd(cmd: &Value) -> bool {
-    cmd.get("hideScrollbars")
-        .and_then(|v| v.as_bool())
-        .unwrap_or_else(hide_scrollbars_from_env)
 }
 
 fn headed_from_env() -> bool {
@@ -4308,25 +4649,16 @@ fn webgpu_from_env() -> bool {
         .unwrap_or(false)
 }
 
-fn webgpu_from_launch_cmd(cmd: &Value) -> bool {
-    cmd.get("webgpu")
-        .and_then(|v| v.as_bool())
-        .unwrap_or_else(webgpu_from_env)
-}
-
 fn no_xvfb_from_env() -> bool {
     env::var("AGENT_BROWSER_NO_XVFB")
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false)
 }
 
-fn no_xvfb_from_launch_cmd(cmd: &Value) -> bool {
-    cmd.get("noXvfb")
-        .and_then(|v| v.as_bool())
-        .unwrap_or_else(no_xvfb_from_env)
-}
-
 async fn try_auto_restore_state(state: &mut DaemonState) {
+    if state.active_existing_browser {
+        return;
+    }
     let session_name = match state.session_name.as_deref() {
         Some(n) if !n.is_empty() => n.to_string(),
         _ => {
@@ -4474,6 +4806,9 @@ fn autosave_due(state: &DaemonState, interval_ms: u64) -> bool {
 /// page is mid-navigation; the next interval retries, and
 /// `auto_save_restore_state` records the status either way.
 pub(crate) async fn maybe_autosave_restore_state(state: &mut DaemonState, interval_ms: u64) {
+    if state.active_existing_browser {
+        return;
+    }
     if !autosave_due(state, interval_ms) {
         return;
     }
@@ -4492,6 +4827,9 @@ pub(crate) async fn maybe_autosave_restore_state(state: &mut DaemonState, interv
 pub(crate) async fn auto_save_restore_state(
     state: &mut DaemonState,
 ) -> Result<Option<String>, String> {
+    if state.active_existing_browser {
+        return Ok(None);
+    }
     validate_restore_if_pending(state).await;
 
     let Some(session_name) = state.session_name.clone() else {
@@ -4560,6 +4898,9 @@ pub(crate) async fn auto_save_restore_state(
 /// the returned `Result` and keep their previous behavior.
 async fn load_storage_state(state: &mut DaemonState, path: &Option<String>) -> Result<(), String> {
     if let Some(ref path) = path {
+        if state.active_existing_browser {
+            return Err(existing_browser_option_error("--state"));
+        }
         ensure_state_replay_supported_by_active_domain_filter(state, "--state/storageState")
             .await?;
         let mut loaded = false;
@@ -4611,13 +4952,14 @@ async fn try_load_storage_state(state: &mut DaemonState, path: &Option<String>) 
 
 async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let effective_ca_cert = resolve_effective_ca_cert(cmd, state)?;
-    // Absent field falls back to the daemon's spawn-time env (mirrors
-    // hideScrollbars/webgpu), keeping the launch hash stable when follow-up
-    // commands send launch envelopes without an explicit headed choice.
-    let headless = cmd
-        .get("headless")
-        .and_then(|v| v.as_bool())
-        .unwrap_or_else(|| !headed_from_env());
+    validate_active_existing_browser(cmd, state).await?;
+    let mut launch_options = override_launch_options(
+        state
+            .existing_browser_options
+            .clone()
+            .unwrap_or_else(launch_options_from_env),
+        cmd,
+    );
     let cdp_url = cmd.get("cdpUrl").and_then(|v| v.as_str());
     let cdp_port = cmd.get("cdpPort").and_then(|v| v.as_u64());
     let auto_connect = cmd
@@ -4630,24 +4972,13 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     let init_script_paths = string_array_from_command(cmd, "initScripts")
         .unwrap_or_else(launch_init_script_paths_from_env);
 
-    let extensions: Option<Vec<String>> =
-        cmd.get("extensions").and_then(|v| v.as_array()).map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        });
-    let storage_state = cmd.get("storageState").and_then(|v| v.as_str());
-    let storage_state_owned = storage_state.map(|s| s.to_string());
+    let storage_state_owned = launch_options.storage_state.clone();
+    let storage_state = storage_state_owned.as_deref();
     let engine = cmd
         .get("engine")
         .and_then(|v| v.as_str())
         .map(String::from)
         .or_else(|| env::var("AGENT_BROWSER_ENGINE").ok());
-    let profile = cmd
-        .get("profile")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-
     let requested_allowed_domains = allowed_domains_from_launch_command(cmd);
     let previous_domain_filter = state.domain_filter.read().await.clone();
     let existing_allowed_domains = current_allowed_domains(state).await;
@@ -4660,103 +4991,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .and_then(|v| v.as_str())
         .map(String::from)
         .or_else(|| state.session_name.clone());
-    let launch_args: Vec<String> = cmd
-        .get("args")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
-        allowed_domains: &allowed_domains,
-        cdp_url,
-        cdp_port,
-        auto_connect,
-        profile: profile.as_deref(),
-        provider_name,
-        args: &launch_args,
-        restore_key: restore_key.as_deref(),
-        storage_state,
-    })?;
-
-    let mut launch_options = LaunchOptions {
-        headless,
-        executable_path: cmd
-            .get("executablePath")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .or_else(|| env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok()),
-        proxy: cmd.get("proxy").and_then(|v| {
-            v.as_str().map(|s| s.to_string()).or_else(|| {
-                v.get("server")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string())
-            })
-        }),
-        proxy_bypass: cmd
-            .get("proxy")
-            .and_then(|v| v.get("bypass"))
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        proxy_username: cmd
-            .get("proxy")
-            .and_then(|v| v.get("username"))
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .or_else(|| env::var("AGENT_BROWSER_PROXY_USERNAME").ok()),
-        proxy_password: cmd
-            .get("proxy")
-            .and_then(|v| v.get("password"))
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .or_else(|| env::var("AGENT_BROWSER_PROXY_PASSWORD").ok()),
-        profile,
-        allow_file_access: cmd
-            .get("allowFileAccess")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        args: launch_args,
-        extensions,
-        storage_state: storage_state.map(String::from),
-        user_agent: cmd
-            .get("userAgent")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        ignore_https_errors: cmd
-            .get("ignoreHTTPSErrors")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        ca_cert: None,
-        ca_bundle: None,
-        ca_cert_digest: None,
-        prepared_nss_home: None,
-        color_scheme: cmd
-            .get("colorScheme")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        download_path: cmd
-            .get("downloadPath")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        hide_scrollbars: hide_scrollbars_from_launch_cmd(cmd),
-        viewport_size: None,
-        use_real_keychain: false,
-        webgpu: webgpu_from_launch_cmd(cmd),
-        webmcp: cmd
-            .get("webmcp")
-            .and_then(Value::as_bool)
-            .unwrap_or_else(|| {
-                !matches!(
-                    env::var("AGENT_BROWSER_NO_WEBMCP").as_deref(),
-                    Ok("1" | "true" | "yes")
-                )
-            }),
-        no_xvfb: no_xvfb_from_launch_cmd(cmd),
-        restrict_webrtc,
-    };
+    launch_options.restrict_webrtc = restrict_webrtc;
     apply_effective_ca_cert(&mut launch_options, &effective_ca_cert);
 
     let external_launch =
@@ -4795,7 +5030,11 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     let (connection_kind, connection_target) =
         launch_connection_identity(cdp_url, cdp_port, auto_connect, provider_name);
     let new_hash = launch_hash(
-        &launch_options,
+        &if state.active_existing_browser {
+            existing_browser_hash_options(&launch_options)
+        } else {
+            launch_options.clone()
+        },
         &allowed_domains,
         &state.plugin_init_scripts,
         &enable_features,
@@ -4837,6 +5076,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             close_current_browser(state).await?;
         }
     } else {
+        apply_existing_browser_page_options_or_rollback(state, &launch_options).await?;
         load_storage_state(state, &storage_state_owned).await?;
         state.effective_ca_cert = effective_ca_cert;
         return Ok(json!({ "launched": true, "reused": true, "relaunchedBrowser": false }));
@@ -4858,7 +5098,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     // Store proxy credentials before any local or remote CDP branch enables
     // Fetch interception with authentication handling.
     let has_proxy_auth = launch_options.proxy_username.is_some();
-    if has_proxy_auth {
+    if has_proxy_auth && provider_name.is_none() {
         let mut creds = state.proxy_credentials.write().await;
         *creds = Some((
             launch_options.proxy_username.clone().unwrap_or_default(),
@@ -4946,12 +5186,53 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                     Some(provider_plugin_launch_options_from_command(cmd)),
                 )
                 .await?;
+                if conn.existing_browser {
+                    if let Err(error) = validate_existing_browser_options(
+                        cmd,
+                        state,
+                        &launch_options,
+                        engine.as_deref(),
+                        &allowed_domains,
+                    ) {
+                        if let Some(session) = &conn.session {
+                            providers::close_provider_session_with_plugins(
+                                session,
+                                &command_plugins,
+                            )
+                            .await;
+                        }
+                        restore_domain_filter(state, &previous_domain_filter).await;
+                        return Err(error);
+                    }
+                }
                 if conn.direct_page && !allowed_domains.is_empty() {
                     if let Some(ref ps) = conn.session {
                         providers::close_provider_session_with_plugins(ps, &command_plugins).await;
                     }
                     restore_domain_filter(state, &previous_domain_filter).await;
                     return Err(direct_page_allowed_domains_error());
+                }
+                let new_hash = if conn.existing_browser {
+                    launch_hash(
+                        &existing_browser_hash_options(&launch_options),
+                        &allowed_domains,
+                        &state.plugin_init_scripts,
+                        &enable_features,
+                        &init_script_paths,
+                        engine.as_deref(),
+                        connection_kind,
+                        connection_target.as_deref(),
+                    )
+                } else {
+                    new_hash
+                };
+                if conn.existing_browser {
+                    *state.proxy_credentials.write().await = None;
+                } else if has_proxy_auth {
+                    *state.proxy_credentials.write().await = Some((
+                        launch_options.proxy_username.clone().unwrap_or_default(),
+                        launch_options.proxy_password.clone().unwrap_or_default(),
+                    ));
                 }
                 let provider_metadata = conn.metadata.clone();
 
@@ -4977,11 +5258,14 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                             state,
                             conn.session.clone(),
                             &command_plugins,
+                            conn.existing_browser,
                         );
                         state.subscribe_to_browser_events();
                         state.start_fetch_handler();
                         state.start_dialog_handler();
                         state.update_stream_client().await;
+                        apply_existing_browser_page_options_or_rollback(state, &launch_options)
+                            .await?;
                         write_provider_file(&state.session_id, provider);
                         install_network_controls_or_close(state, has_proxy_auth).await?;
                         apply_launch_init_scripts(state, &enable_features, &init_script_paths)
@@ -5408,8 +5692,29 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
         .and_then(|v| v.as_str())
         .ok_or("Missing 'script' parameter")?;
 
-    let result = mgr.evaluate(script, None).await?;
-    let url = mgr.get_url().await.unwrap_or_default();
+    let (session_id, context_id) = if let Some(frame_id) = state.active_frame_id.as_deref() {
+        if let Some(context) = state.frame_execution_contexts.get(frame_id) {
+            (context.session_id.as_str(), Some(context.context_id))
+        } else if let Some(session_id) = state.iframe_sessions.get(frame_id) {
+            (session_id.as_str(), None)
+        } else {
+            return Err("Selected frame's JavaScript context is unavailable; select the frame again after it has loaded".to_string());
+        }
+    } else {
+        (mgr.active_session_id()?, None)
+    };
+    let result = mgr
+        .evaluate_in_context(script, session_id, context_id)
+        .await?;
+    // Content boundaries must identify the realm that produced the result. If
+    // evaluation navigated away, report an unknown origin rather than the parent.
+    let url = mgr
+        .evaluate_in_context("location.href", session_id, context_id)
+        .await
+        .unwrap_or(Value::Null)
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     Ok(json!({ "result": result, "origin": url }))
 }
 
@@ -9185,24 +9490,62 @@ async fn handle_frame(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             return Ok(json!({ "frame": label }));
         }
 
-        // CSS selector path
+        // Resolve the selected DOM owner itself. Frame names are optional and
+        // neither element IDs nor src URLs are reliable frame-tree identities.
         let js = format!(
             r#"(() => {{
                 const el = document.querySelector({});
-                if (!el) return null;
-                if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') {{
-                    return el.name || el.id || el.src || null;
-                }}
-                return null;
+                return el && (el.tagName === 'IFRAME' || el.tagName === 'FRAME') ? el : null;
             }})()"#,
             serde_json::to_string(sel).unwrap_or_default()
         );
-        let result = mgr.evaluate(&js, None).await?;
-        let frame_name = result.as_str().ok_or("Could not find frame for selector")?;
-        if let Some(frame_id) = find_frame(frame_tree, Some(frame_name), None) {
-            state.active_frame_id = Some(frame_id);
-            return Ok(json!({ "frame": frame_name }));
-        }
+        let result = mgr
+            .client
+            .send_command(
+                "Runtime.evaluate",
+                Some(json!({ "expression": js, "returnByValue": false })),
+                Some(&session_id),
+            )
+            .await?;
+        let object_id = result["result"]["objectId"]
+            .as_str()
+            .ok_or("Could not find frame for selector")?;
+        let describe = mgr
+            .client
+            .send_command(
+                "DOM.describeNode",
+                Some(json!({ "objectId": object_id, "depth": 1 })),
+                Some(&session_id),
+            )
+            .await;
+        let _ = mgr
+            .client
+            .send_command(
+                "Runtime.releaseObject",
+                Some(json!({ "objectId": object_id })),
+                Some(&session_id),
+            )
+            .await;
+        let describe = describe?;
+        let node = &describe["node"];
+        let frame_id = node["contentDocument"]["frameId"]
+            .as_str()
+            .or_else(|| node["frameId"].as_str())
+            .ok_or("Could not resolve frame ID for iframe element")?;
+        let label = node["attributes"]
+            .as_array()
+            .and_then(|attributes| {
+                ["name", "id", "src"].iter().find_map(|name| {
+                    attributes
+                        .chunks_exact(2)
+                        .find(|attribute| attribute[0].as_str() == Some(name))
+                        .and_then(|attribute| attribute[1].as_str())
+                        .filter(|value| !value.is_empty())
+                })
+            })
+            .unwrap_or(sel);
+        state.active_frame_id = Some(frame_id.to_string());
+        return Ok(json!({ "frame": label }));
     }
 
     if let Some(frame_id) = find_frame(frame_tree, name, url) {
@@ -14227,7 +14570,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     fn test_provider_ownership_does_not_require_cleanup_metadata() {
         let mut state = DaemonState::new();
 
-        remember_active_provider_session(&mut state, None, &[]);
+        remember_active_provider_session(&mut state, None, &[], false);
 
         assert!(state.active_provider_connection);
         assert!(state.active_provider_session.is_none());
@@ -14753,26 +15096,26 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     fn test_webgpu_from_launch_cmd() {
         let guard = EnvGuard::new(&["AGENT_BROWSER_WEBGPU"]);
         guard.remove("AGENT_BROWSER_WEBGPU");
-        assert!(webgpu_from_launch_cmd(&json!({ "webgpu": true })));
-        assert!(!webgpu_from_launch_cmd(&json!({ "webgpu": false })));
+        assert!(effective_launch_options(&json!({ "webgpu": true })).webgpu);
+        assert!(!effective_launch_options(&json!({ "webgpu": false })).webgpu);
         // Falls back to the env var when the command omits the field.
-        assert!(!webgpu_from_launch_cmd(&json!({})));
+        assert!(!effective_launch_options(&json!({})).webgpu);
         guard.set("AGENT_BROWSER_WEBGPU", "1");
-        assert!(webgpu_from_launch_cmd(&json!({})));
-        assert!(!webgpu_from_launch_cmd(&json!({ "webgpu": false })));
+        assert!(effective_launch_options(&json!({})).webgpu);
+        assert!(!effective_launch_options(&json!({ "webgpu": false })).webgpu);
     }
 
     #[test]
     fn test_no_xvfb_from_launch_cmd() {
         let guard = EnvGuard::new(&["AGENT_BROWSER_NO_XVFB"]);
         guard.remove("AGENT_BROWSER_NO_XVFB");
-        assert!(no_xvfb_from_launch_cmd(&json!({ "noXvfb": true })));
-        assert!(!no_xvfb_from_launch_cmd(&json!({ "noXvfb": false })));
+        assert!(effective_launch_options(&json!({ "noXvfb": true })).no_xvfb);
+        assert!(!effective_launch_options(&json!({ "noXvfb": false })).no_xvfb);
         // Falls back to the daemon env when the command omits the field.
-        assert!(!no_xvfb_from_launch_cmd(&json!({})));
+        assert!(!effective_launch_options(&json!({})).no_xvfb);
         guard.set("AGENT_BROWSER_NO_XVFB", "1");
-        assert!(no_xvfb_from_launch_cmd(&json!({})));
-        assert!(!no_xvfb_from_launch_cmd(&json!({ "noXvfb": false })));
+        assert!(effective_launch_options(&json!({})).no_xvfb);
+        assert!(!effective_launch_options(&json!({ "noXvfb": false })).no_xvfb);
     }
 
     #[test]
@@ -15348,7 +15691,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         guard.remove("AGENT_BROWSER_PROVIDER");
 
         let mut state = DaemonState::new();
-        let error = auto_launch(&mut state, Vec::new()).await.unwrap_err();
+        let error = auto_launch(&mut state, Vec::new(), &Value::Null)
+            .await
+            .unwrap_err();
 
         assert!(error.contains("--profile"), "got: {}", error);
         assert!(
@@ -15387,7 +15732,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         guard.remove("AGENT_BROWSER_PROVIDER");
 
         let mut state = DaemonState::new();
-        let error = auto_launch(&mut state, Vec::new()).await.unwrap_err();
+        let error = auto_launch(&mut state, Vec::new(), &Value::Null)
+            .await
+            .unwrap_err();
 
         assert!(error.contains("--args"), "got: {}", error);
         assert!(error.contains("--user-data-dir"), "got: {}", error);
@@ -15419,7 +15766,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         guard.remove("AGENT_BROWSER_PROVIDER");
 
         let mut state = DaemonState::new();
-        let error = auto_launch(&mut state, Vec::new()).await.unwrap_err();
+        let error = auto_launch(&mut state, Vec::new(), &Value::Null)
+            .await
+            .unwrap_err();
 
         assert!(error.contains("--restore"), "got: {}", error);
         assert!(
@@ -15450,7 +15799,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         guard.remove("AGENT_BROWSER_PROVIDER");
 
         let mut state = DaemonState::new();
-        let error = auto_launch(&mut state, Vec::new()).await.unwrap_err();
+        let error = auto_launch(&mut state, Vec::new(), &Value::Null)
+            .await
+            .unwrap_err();
 
         assert!(error.contains("--state/storageState"), "got: {}", error);
         assert!(
@@ -15706,9 +16057,12 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let guard = EnvGuard::new(&["AGENT_BROWSER_HIDE_SCROLLBARS"]);
         guard.set("AGENT_BROWSER_HIDE_SCROLLBARS", "false");
 
-        assert!(!hide_scrollbars_from_launch_cmd(&json!({
-            "action": "launch"
-        })));
+        assert!(
+            !effective_launch_options(&json!({
+                "action": "launch"
+            }))
+            .hide_scrollbars
+        );
     }
 
     #[test]
@@ -15716,10 +16070,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let guard = EnvGuard::new(&["AGENT_BROWSER_HIDE_SCROLLBARS"]);
         guard.set("AGENT_BROWSER_HIDE_SCROLLBARS", "false");
 
-        assert!(hide_scrollbars_from_launch_cmd(&json!({
-            "action": "launch",
-            "hideScrollbars": true
-        })));
+        assert!(
+            effective_launch_options(&json!({
+                "action": "launch",
+                "hideScrollbars": true
+            }))
+            .hide_scrollbars
+        );
     }
 
     #[test]
@@ -16060,6 +16417,14 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_execute_unknown_command() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_CDP",
+            "AGENT_BROWSER_AUTO_CONNECT",
+            "AGENT_BROWSER_PROVIDER",
+        ]);
+        guard.remove("AGENT_BROWSER_CDP");
+        guard.remove("AGENT_BROWSER_AUTO_CONNECT");
+        guard.remove("AGENT_BROWSER_PROVIDER");
         let mut state = DaemonState::new();
         let cmd = json!({ "action": "unknown_action_xyz", "id": "test-1" });
         let result = execute_command(&cmd, &mut state).await;
@@ -16599,3 +16964,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         }
     }
 }
+
+#[cfg(test)]
+#[path = "existing_browser_tests.rs"]
+mod existing_browser_tests;

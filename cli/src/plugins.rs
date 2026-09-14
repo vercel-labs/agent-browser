@@ -60,6 +60,9 @@ pub struct BrowserProviderResult {
     pub cdp_url: String,
     #[serde(default)]
     pub direct_page: bool,
+    /// The browser is managed by the user; closing the provider only releases control.
+    #[serde(default)]
+    pub existing_browser: bool,
     #[serde(default)]
     pub cleanup: Option<serde_json::Value>,
     #[serde(default)]
@@ -345,7 +348,7 @@ pub async fn connect_browser_provider_with_plugins(
     }
     if !response.success {
         return Err(format!(
-            "Browser provider plugin '{}' could not launch browser",
+            "Browser provider plugin '{}' could not launch browser. Check the provider setup and status instructions",
             provider
         ));
     }
@@ -1222,6 +1225,25 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":false,"error":"secr
         assert!(!err.contains("secret-token-value"));
     }
 
+    #[test]
+    fn browser_provider_existing_browser_is_optional_and_boolean() {
+        let managed: BrowserProviderResult =
+            serde_json::from_value(json!({ "cdpUrl": "ws://localhost" })).unwrap();
+        assert!(!managed.existing_browser);
+        let borrowed: BrowserProviderResult =
+            serde_json::from_value(json!({ "cdpUrl": "ws://localhost", "existingBrowser": true }))
+                .unwrap();
+        assert!(borrowed.existing_browser);
+        assert!(
+            !borrowed.direct_page,
+            "lifecycle ownership is independent of endpoint shape"
+        );
+        assert!(serde_json::from_value::<BrowserProviderResult>(
+            json!({ "cdpUrl": "ws://localhost", "existingBrowser": "true" })
+        )
+        .is_err());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn browser_provider_plugin_returns_cdp_connection() {
@@ -1254,6 +1276,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
         assert_eq!(browser.cdp_url, "ws://127.0.0.1:9222/devtools/browser/test");
         assert!(browser.direct_page);
+        assert!(!browser.existing_browser);
         assert_eq!(browser.metadata.unwrap()["sessionId"], "s1");
         assert_eq!(browser.cleanup.unwrap()["sessionId"], "s1");
     }
