@@ -298,6 +298,8 @@ agent-browser eval -b "<base64>"             # Any JavaScript (base64 encoded)
 agent-browser eval --stdin                   # Read script from stdin
 ```
 
+`eval` runs in the frame selected by `frame`, or in the top-level page when no frame is selected. Use `frame main` to return evaluation to the top-level page.
+
 Use `-b`/`--base64` or `--stdin` for reliable execution. Shell escaping with nested quotes and special characters is error-prone.
 
 ```bash
@@ -340,6 +342,8 @@ Other capabilities use the same protocol:
 - `command.run`: `agent-browser plugin run <name> <type> --payload <json>`
 
 `plugin run` is for `command.run` and custom capabilities. Core capabilities and protocol request types use their dedicated command paths.
+
+The optional `chrome-extension` provider uses `plugin run chrome-extension chrome-extension.setup --payload '{"session":"work"}'` and `chrome-extension.status` for user authorization and readiness. Browser commands use `--provider chrome-extension --session work`; keep the namespace the same. The management payload must contain the session explicitly. See [chrome-extension.md](chrome-extension.md) for installation, supported scope, and the existing MCP tool path.
 
 ## State Management
 
@@ -538,6 +542,6 @@ AGENT_BROWSER_STREAM_PORT="9223"             # Override WebSocket streaming port
 AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS="https://dashboard.example.com" # Trusted HTTPS reverse-proxied dashboard origins
 AGENT_BROWSER_CONFIG="./agent-browser.json"  # Custom config file
 AGENT_BROWSER_CDP="9222"                     # Connect daemon to CDP port or WebSocket URL
-AGENT_BROWSER_ALLOWED_DOMAINS="example.com"  # Restrict network domains; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins
+AGENT_BROWSER_ALLOWED_DOMAINS="example.com"  # Restrict network domains; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page/existing-browser provider plugins
 AGENT_BROWSER_PLUGINS='[{"name":"vault","command":"agent-browser-plugin-vault","capabilities":["credential.read"]},{"name":"stealth","command":"agent-browser-plugin-stealth","capabilities":["launch.mutate"]}]'
 ```

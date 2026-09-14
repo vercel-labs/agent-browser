@@ -8,6 +8,7 @@ Multiple isolated browser sessions with state persistence and concurrent browsin
 
 - [Named Sessions](#named-sessions)
 - [Session Isolation Properties](#session-isolation-properties)
+- [Chrome Extension Sessions](#chrome-extension-sessions)
 - [Tab Pinning in a Shared Browser](#tab-pinning-in-a-shared-browser)
 - [Session State Persistence](#session-state-persistence)
 - [Common Patterns](#common-patterns)
@@ -17,7 +18,7 @@ Multiple isolated browser sessions with state persistence and concurrent browsin
 
 ## Named Sessions
 
-Use `--session` to isolate browser contexts. Agent skills should derive one stable id and reuse it on every command:
+Use `--session` to select a separate daemon session. Sessions that launch their own browser also have separate browser contexts. Agent skills should derive one stable id and reuse it on every command:
 
 ```bash
 SESSION="$(agent-browser session id --scope worktree --prefix my-skill)"
@@ -40,13 +41,21 @@ agent-browser --session public get text body
 
 ## Session Isolation Properties
 
-Each session has independent:
+When each session launches its own browser, it has independent:
 - Cookies
 - LocalStorage / SessionStorage
 - IndexedDB
 - Cache
 - Browsing history
 - Open tabs
+
+## Chrome Extension Sessions
+
+The optional `chrome-extension` provider uses a tab selected by the user in their existing Chrome profile. A session controls only that authorized tab and its frames; cookies and origin storage remain shared with the profile. Session names and namespaces select the authorization record, rather than creating isolated browser storage.
+
+Setup and status require the session in `--payload '{"session":"work"}'`, because `plugin run` does not copy `--session` into the payload. Pass the same `--namespace` or `AGENT_BROWSER_NAMESPACE` for management and browser commands. Each tab can be authorized to only one controlling session at a time.
+
+Use `close` to release control while preserving the tab and unsaved input. Stop, a lost connection, or a closed tab requires fresh user authorization; the provider does not recover by choosing another tab. New tabs, cross-tab switching, `--pin-tab`, and profile/state/restore options are unsupported. The default idle timeout exempts this user-managed browser; an explicit timeout releases control. See [chrome-extension.md](chrome-extension.md) for setup and troubleshooting.
 
 ## Tab Pinning in a Shared Browser
 

@@ -77,7 +77,8 @@ Detects your installation method (npm, Homebrew, or Cargo) and runs the appropri
 ### Requirements
 
 - **Chrome** - Run `agent-browser install` to download Chrome from [Chrome for Testing](https://developer.chrome.com/blog/chrome-for-testing/) (Google's official automation channel). Existing Chrome, Brave, Playwright, and Puppeteer installations are detected automatically. No Playwright or Node.js required for the daemon.
-- **Node.js 24+ and pnpm 11+** - Only needed when building from source.
+- **Node.js 24+** - Needed when building from source or using the optional Chrome extension provider. The native CLI and daemon do not require Node.js.
+- **pnpm 11+** - Needed when building from source.
 - **Rust** - Only needed when building from source (see From Source above).
 
 ## Quick Start
@@ -136,7 +137,7 @@ agent-browser screenshot --screenshot-dir ./shots    # Save to custom directory
 agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
 agent-browser pdf <path>              # Save as PDF
 agent-browser snapshot                # Accessibility tree with refs (best for AI)
-agent-browser eval <js>               # Run JavaScript (-b for base64, --stdin for piped input)
+agent-browser eval <js>               # Run JavaScript in the selected frame (-b for base64, --stdin for piped input)
 agent-browser connect <port>          # Connect to browser via CDP
 agent-browser stream enable [--port <port>]  # Start runtime WebSocket streaming
 agent-browser webmcp list                     # List experimental page tools
@@ -389,6 +390,8 @@ Switching to a tab discarded by Chrome's Memory Saver reactivates it, since a di
 agent-browser frame <sel>             # Switch to iframe
 agent-browser frame main              # Back to main frame
 ```
+
+`eval` runs in the frame selected by `frame`. With no frame selected, or after `frame main`, it runs in the top-level page.
 
 ### Dialogs
 
@@ -848,7 +851,7 @@ agent-browser includes security features for safe AI agent deployments. All feat
 - **Authentication Vault**: Store credentials locally (always encrypted), reference by name. The LLM never sees passwords. `auth login` navigates with `load` and then waits for login form selectors to appear (SPA-friendly, timeout follows the default action timeout). Use `auth login <name> --no-navigate` to preserve an already prepared active page after its origin is checked against the credential URL. A key is auto-generated at `~/.agent-browser/.encryption-key` if `AGENT_BROWSER_ENCRYPTION_KEY` is not set: `echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin` then `agent-browser auth login github`
 - **Plugin System**: Extend agent-browser with external executable plugins. Plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol and declare capabilities such as `credential.read`, `browser.provider`, `launch.mutate`, or `command.run`.
 - **Content Boundary Markers**: Wrap page output in delimiters so LLMs can distinguish tool output from untrusted content: `--content-boundaries`
-- **Domain Allowlist**: Restrict navigation to trusted domains (wildcards like `*.example.com` also match the bare domain): `--allowed-domains "example.com,*.example.com"`. Sub-resource requests (scripts, images, fetch), WebSocket/EventSource connections, and `sendBeacon` calls to non-allowed domains are blocked. WebRTC peer connections are disabled in supported Chromium sessions while the allowlist is active to prevent STUN, TURN, and DNS traffic from bypassing HTTP interception. Dedicated and shared workers are guarded with a bootstrap wrapper; if a page CSP forbids that wrapper, the worker fails closed rather than running without the allowlist guard. Pre-existing CDP sessions, auto-connect, Chrome profiles, direct-page provider plugins, agent-browser restore or state-file replay, raw Chrome args that select profiles, restore sessions, or open startup pages, iOS, and Safari reject this option because agent-browser cannot install equivalent containment before page scripts run. Include any CDN domains your target pages depend on (e.g., `*.cdn.example.com`).
+- **Domain Allowlist**: Restrict navigation to trusted domains (wildcards like `*.example.com` also match the bare domain): `--allowed-domains "example.com,*.example.com"`. Sub-resource requests (scripts, images, fetch), WebSocket/EventSource connections, and `sendBeacon` calls to non-allowed domains are blocked. WebRTC peer connections are disabled in supported Chromium sessions while the allowlist is active to prevent STUN, TURN, and DNS traffic from bypassing HTTP interception. Dedicated and shared workers are guarded with a bootstrap wrapper; if a page CSP forbids that wrapper, the worker fails closed rather than running without the allowlist guard. Pre-existing CDP sessions, auto-connect, Chrome profiles, direct-page or existing-browser provider plugins, agent-browser restore or state-file replay, raw Chrome args that select profiles, restore sessions, or open startup pages, iOS, and Safari reject this option because agent-browser cannot install equivalent containment before page scripts run. Include any CDN domains your target pages depend on (e.g., `*.cdn.example.com`).
 - **Action Policy**: Gate destructive actions with a static policy file: `--action-policy ./policy.json`
 - **Action Confirmation**: Require explicit approval for sensitive action categories: `--confirm-actions eval,download`
 - **Output Length Limits**: Prevent context flooding: `--max-output 50000`
@@ -857,11 +860,12 @@ agent-browser includes security features for safe AI agent deployments. All feat
 | ----------------------------------- | ---------------------------------------- |
 | `AGENT_BROWSER_CONTENT_BOUNDARIES`  | Wrap page output in boundary markers     |
 | `AGENT_BROWSER_MAX_OUTPUT`          | Max characters for page output           |
-| `AGENT_BROWSER_ALLOWED_DOMAINS`     | Comma-separated allowed domain patterns; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins |
+| `AGENT_BROWSER_ALLOWED_DOMAINS`     | Comma-separated allowed domain patterns; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page/existing-browser provider plugins |
 | `AGENT_BROWSER_ACTION_POLICY`       | Path to action policy JSON file          |
 | `AGENT_BROWSER_CONFIRM_ACTIONS`     | Action categories requiring confirmation |
 | `AGENT_BROWSER_CONFIRM_INTERACTIVE` | Enable interactive confirmation prompts  |
 | `AGENT_BROWSER_PLUGINS`             | JSON plugin registry override            |
+| `AGENT_BROWSER_CHROME_EXTENSION_DIR` | Optional Chrome extension provider state directory; absolute path, private to the current user. Defaults to `~/.agent-browser/chrome-extension` |
 
 See [Security documentation](https://agent-browser.dev/security) for details.
 
@@ -953,6 +957,30 @@ agent-browser --confirm-actions plugin:stealth:launch.mutate open https://exampl
 
 Do not put vault tokens or passwords in plugin command args. Use the vault vendor's own login/session mechanism or environment outside agent-browser config.
 
+### Existing Chrome tabs
+
+The optional `@agent-browser/chrome-extension-provider` package lets a user authorize one existing Chrome tab, then use normal agent-browser commands on its signed-in page. The user chooses the tab in the extension and can stop control there at any time. Chrome keeps its existing profile; no debugging port or profile copy is needed.
+
+The provider currently uses a local build and an unpacked extension. Follow the [provider setup guide](packages/@agent-browser/chrome-extension-provider/README.md) to build and register it. This optional package requires Node.js 24+; the extension declares Chrome 125 as its minimum for the child-session debugger API, not as a claim that every Chrome version and platform has been verified.
+
+```bash
+agent-browser plugin run chrome-extension chrome-extension.setup --payload '{"session":"work"}'
+# Load extensionPath, paste pairingCode into the extension, and authorize the exact tab.
+agent-browser --provider chrome-extension --session work snapshot -i
+agent-browser --provider chrome-extension --session work click @e1
+agent-browser --provider chrome-extension --session work close
+```
+
+Pass the session explicitly in the setup/status payload: `plugin run` does not copy the global `--session` into it. Use the same `--namespace` or `AGENT_BROWSER_NAMESPACE` for setup, status, and browser commands. Check readiness with:
+
+```bash
+agent-browser plugin run chrome-extension chrome-extension.status --payload '{"session":"work"}'
+```
+
+`close` releases control and leaves Chrome, the tab, and its unsaved page state open. The extension's **Stop** action or a disconnect ends authorization; run setup and authorize again before continuing. New tabs, switching to other tabs, browser contexts, `--pin-tab`, profile/state/restore options, `--allowed-domains`, and browser launch settings are unsupported. The existing `tab close` rule rejects closing the last controlled tab; close it in Chrome if needed. Authorization limits the controlled target, while cookies and origin storage remain part of the user's Chrome profile.
+
+MCP uses the same browser command path and existing `agent_browser_plugin_run` tool for setup/status; see the [Chrome extension provider docs](https://agent-browser.dev/providers/chrome-extension).
+
 ## Snapshot Options
 
 The `snapshot` command supports filtering to reduce output size:
@@ -1026,7 +1054,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--no-ca-cert` | Clear CA trust retained by the running browser session (or `AGENT_BROWSER_CLEAR_CA_CERT`) |
 | `--allow-file-access` | Allow file:// URLs to access local files (Chromium only) |
 | `--hide-scrollbars <bool>` | Hide native scrollbars in headless Chromium screenshots, enabled by default (or `AGENT_BROWSER_HIDE_SCROLLBARS` env) |
-| `-p, --provider <name>` | Browser provider, including configured `browser.provider` plugins (or `AGENT_BROWSER_PROVIDER` env) |
+| `-p, --provider <name>` | Browser provider, including configured `browser.provider` plugins such as the optional `chrome-extension` provider (or `AGENT_BROWSER_PROVIDER` env) |
 | `--device <name>` | iOS device name, e.g. "iPhone 15 Pro" (or `AGENT_BROWSER_IOS_DEVICE` env) |
 | `--json` | JSON output (for agents) |
 | `--annotate` | Annotated screenshot with numbered element labels (or `AGENT_BROWSER_ANNOTATE` env) |
@@ -1044,7 +1072,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--download-path <path>` | Default download directory (or `AGENT_BROWSER_DOWNLOAD_PATH` env) |
 | `--content-boundaries` | Wrap page output in boundary markers for LLM safety (or `AGENT_BROWSER_CONTENT_BOUNDARIES` env) |
 | `--max-output <chars>` | Truncate page output to N characters (or `AGENT_BROWSER_MAX_OUTPUT` env) |
-| `--allowed-domains <list>` | Comma-separated allowed domain patterns; also disables WebRTC peer connections in supported Chromium sessions and rejects CDP, auto-connect, Chrome profiles, restore/state replay, direct-page provider plugins, unsafe startup `--args`, iOS, and Safari (or `AGENT_BROWSER_ALLOWED_DOMAINS` env) |
+| `--allowed-domains <list>` | Comma-separated allowed domain patterns; also disables WebRTC peer connections in supported Chromium sessions and rejects CDP, auto-connect, Chrome profiles, restore/state replay, direct-page or existing-browser provider plugins, unsafe startup `--args`, iOS, and Safari (or `AGENT_BROWSER_ALLOWED_DOMAINS` env) |
 | `--action-policy <path>` | Path to action policy JSON file (or `AGENT_BROWSER_ACTION_POLICY` env) |
 | `--confirm-actions <list>` | Action categories requiring confirmation (or `AGENT_BROWSER_CONFIRM_ACTIONS` env) |
 | `--confirm-interactive` | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |
