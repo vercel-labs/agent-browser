@@ -1,6 +1,6 @@
 //! Check remote browser providers: API key presence for Browserless,
-//! Browserbase, Browser Use, Kernel, AgentCore (AWS), Appium for iOS, and
-//! the AI Gateway chat key. Info-level unless the provider is selected
+//! Browserbase, Browser Use, Firecrawl, Kernel, AgentCore (AWS), Appium for
+//! iOS, and the AI Gateway chat key. Info-level unless the provider is selected
 //! via `AGENT_BROWSER_PROVIDER`.
 
 use std::env;
@@ -33,6 +33,7 @@ pub(super) fn check(checks: &mut Vec<Check>) {
         ("browserless", &["BROWSERLESS_API_KEY"], "Browserless"),
         ("browserbase", &["BROWSERBASE_API_KEY"], "Browserbase"),
         ("browseruse", &["BROWSER_USE_API_KEY"], "Browser Use"),
+        ("firecrawl", &["FIRECRAWL_API_KEY"], "Firecrawl"),
         ("kernel", &["KERNEL_API_KEY"], "Kernel"),
     ];
 
