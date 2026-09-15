@@ -94,6 +94,10 @@ Use `agent-browser session info --json` for diagnostics:
 agent-browser --session "$SESSION" session info --json
 ```
 
+This preflight never launches, reconfigures, or reconnects a browser. `data.active`/`pid` identify the daemon; `data.runtime.browser` reports browser `alive`/`status`, local Chrome `pid`, effective `userDataDir`, native `ownership` (`launched` or `attached`), and current `tabs`. Named profiles report their actual copied directory. Raw Chrome profile overrides use `--user-data-dir=<path>`; a bare or empty switch leaves the effective profile unknown (`null`), and tokens after `--` are not switches. Attached/remote PID or profile details are `null` when unavailable, and probe errors are explicit. Tab `active` means the daemon's selection, not OS focus. Native ownership does not identify an application or agent owner. `data.runtime.capabilities.readRequiresConfirmation` advertises the ID-checked HTTP read confirmation protocol; version equality alone is insufficient. Unsupported runtimes receive no confirmation-required read and remain unchanged. Only explicit-URL HTTP prompts carry `data.capabilities.readRequiresConfirmation: true`; bare DOM reads do not. Always use the exact returned confirmation ID: stale or missing IDs fail without browser work or consuming a newer pending action.
+
+`data.runtime.recording.current` is the in-progress take; `last` is the latest terminal receipt, including failures. Match `recordingId` from start to recover after a stop timeout. Receipts live in daemon memory and do not survive its exit.
+
 ### Manual State Files
 
 Use `state save`, `state load`, and `--state <path>` when you need an explicit portable JSON file. Do not make agents construct paths under `~/.agent-browser/sessions/`; prefer `--restore` for reusable agent sessions.

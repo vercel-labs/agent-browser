@@ -1,23 +1,20 @@
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::{AttachToTargetParams, AttachToTargetResult};
 
-/// Capture rate used when the caller does not ask for one. 30 fps reads as
-/// smooth motion, so scrolls, hovers, and CSS transitions survive the
-/// recording instead of turning into a slideshow.
+/// Default output frame rate. Chrome supplies frames on repaint, not at this
+/// rate; the encoder holds the last image between captures.
 pub const DEFAULT_FPS: u32 = 30;
 
-/// Highest capture rate the recorder accepts. 60 fps is worth asking for on
-/// short, motion-heavy clips (drag interactions, animation, scroll polish
-/// work) where the extra temporal detail is the point.
+/// Highest output frame rate. Requesting it does not guarantee capture at 60 fps.
 pub const MAX_FPS: u32 = 60;
 
 /// Rate above which the encoder switches to its high-frame-rate profile:
@@ -30,10 +27,9 @@ const HIGH_FPS_THRESHOLD: u32 = 30;
 /// same per-frame quality.
 const WEBM_BITRATE_KBPS_AT_BASE_FPS: u32 = 1000;
 
-/// Longest gap the recorder fills with held frames, in seconds. A page that
-/// produces no frames for longer than this (a hang, or a tab left in the
-/// background) is held for this long and the remainder is dropped from the
-/// timeline, so a stalled page cannot inflate the file.
+/// Maximum output deficit backfilled after a stalled ticker or late first
+/// image, in seconds. A static image can still be held for the whole take
+/// when the ticker runs normally.
 const MAX_BACKFILL_SECS: u64 = 5;
 
 /// Screencast frames buffered ahead of the ticker. Two absorbs the jitter
@@ -148,37 +144,155 @@ impl CaptureSession {
 
 pub type SharedCaptureSession = Arc<Mutex<Option<CaptureSession>>>;
 
+#[derive(Default)]
+pub struct CaptureStats {
+    started: Option<tokio::time::Instant>,
+    started_at: Option<DateTime<Utc>>,
+    ended_at: Option<DateTime<Utc>>,
+    duration: Option<Duration>,
+    first_frame_at: Option<DateTime<Utc>>,
+    last_frame_at: Option<DateTime<Utc>>,
+    first_frame_after: Option<Duration>,
+    last_frame_after: Option<Duration>,
+    max_frame_gap: Duration,
+    captured: u64,
+    written: u64,
+    held: u64,
+    dropped: u64,
+    skipped: u64,
+    encoded: Option<u64>,
+    encoder_succeeded: Option<bool>,
+}
+
+impl CaptureStats {
+    fn start(&mut self) {
+        self.started = Some(tokio::time::Instant::now());
+        self.started_at = Some(Utc::now());
+    }
+
+    fn frame(&mut self, at: DateTime<Utc>, elapsed: Duration) {
+        self.captured += 1;
+        self.first_frame_at.get_or_insert(at);
+        self.first_frame_after.get_or_insert(elapsed);
+        self.max_frame_gap = self
+            .max_frame_gap
+            .max(elapsed.saturating_sub(self.last_frame_after.unwrap_or_default()));
+        self.last_frame_at = Some(at);
+        self.last_frame_after = Some(elapsed);
+    }
+
+    fn finish(&mut self) {
+        self.duration = self.started.map(|started| started.elapsed());
+        self.ended_at = Some(Utc::now());
+        self.max_frame_gap = self.max_frame_gap.max(
+            self.duration
+                .unwrap_or_default()
+                .saturating_sub(self.last_frame_after.unwrap_or_default()),
+        );
+    }
+}
+
 pub struct RecordingState {
     pub active: bool,
+    pub recording_id: String,
     pub output_path: String,
-    /// Capture rate for the active (or most recent) recording.
+    /// Requested output rate, not the observed capture rate.
     pub fps: u32,
-    /// Frames written to the file, including frames held through gaps.
-    pub frame_count: u64,
-    /// Distinct frames received from the screencast.
-    pub captured_count: u64,
+    pub stats: Arc<Mutex<CaptureStats>>,
     pub capture_task: Option<tokio::task::JoinHandle<Result<(), String>>>,
-    pub shared_frame_count: Option<Arc<AtomicU64>>,
-    pub shared_captured_count: Option<Arc<AtomicU64>>,
     pub cancel_tx: Option<oneshot::Sender<()>>,
     /// Shared with the daemon's event handlers.
     pub capture_session: SharedCaptureSession,
+    pub last_receipt: Option<Value>,
+    /// One exact transport retry, retained across a subsequent start.
+    pub last_stop_response: Option<(String, String, Value)>,
 }
 
 impl RecordingState {
     pub fn new() -> Self {
         Self {
             active: false,
+            recording_id: String::new(),
             output_path: String::new(),
             fps: DEFAULT_FPS,
-            frame_count: 0,
-            captured_count: 0,
+            stats: Arc::new(Mutex::new(CaptureStats::default())),
             capture_task: None,
-            shared_frame_count: None,
-            shared_captured_count: None,
             cancel_tx: None,
             capture_session: Arc::new(Mutex::new(None)),
+            last_receipt: None,
+            last_stop_response: None,
         }
+    }
+
+    fn receipt(&self, outcome: Option<&Result<(), String>>) -> Value {
+        let stats = self.stats.lock().unwrap();
+        let duration = stats
+            .duration
+            .or_else(|| stats.started.map(|start| start.elapsed()));
+        let utc = |at: Option<DateTime<Utc>>| {
+            at.map(|at| at.to_rfc3339_opts(SecondsFormat::Millis, true))
+        };
+        let ms = |duration: Duration| duration.as_secs_f64() * 1000.0;
+        let max_gap = stats.max_frame_gap.max(
+            duration
+                .unwrap_or_default()
+                .saturating_sub(stats.last_frame_after.unwrap_or_default()),
+        );
+        let file = std::fs::metadata(&self.output_path).ok();
+        json!({
+            "recordingId": self.recording_id,
+            "path": self.output_path,
+            "success": outcome.map(Result::is_ok),
+            "error": outcome.and_then(|result| result.as_ref().err()),
+            "frames": stats.written,
+            "capturedFrames": stats.captured,
+            "fps": self.fps,
+            "capture": {
+                "startedAt": utc(stats.started_at),
+                "endedAt": utc(stats.ended_at),
+                "durationMs": duration.map(ms),
+                "firstFrameAt": utc(stats.first_frame_at),
+                "lastFrameAt": utc(stats.last_frame_at),
+                "firstFrameAfterMs": stats.first_frame_after.map(ms),
+                "lastFrameAfterMs": stats.last_frame_after.map(ms),
+                "averageFps": duration.filter(|d| !d.is_zero()).map(|d| stats.captured as f64 / d.as_secs_f64()),
+                "maxFrameGapMs": duration.map(|_| ms(max_gap)),
+                "timestampSource": "local-receive",
+            },
+            "output": {
+                "frames": stats.written,
+                "encodedFrames": stats.encoded,
+                "fps": self.fps,
+                "durationMs": if stats.encoder_succeeded == Some(true) {
+                    stats.encoded.map(|frames| frames as f64 * 1000.0 / self.fps as f64)
+                } else { None },
+                "durationSource": "encoded-frames/fps",
+                "heldFrames": stats.held,
+                "droppedFrames": stats.dropped,
+                "skippedFrames": stats.skipped,
+                "encoderSucceeded": stats.encoder_succeeded,
+            },
+            "file": { "exists": file.is_some(), "sizeBytes": file.map(|m| m.len()) },
+            "warning": if stats.captured <= 1 {
+                "Fewer than two screencast frames received; this recording cannot establish motion or smoothness."
+            } else {
+                "Capture is repaint-driven; output FPS includes held frames and does not establish smoothness."
+            },
+        })
+    }
+
+    pub fn info(&self) -> Value {
+        json!({
+            "current": self.active.then(|| self.receipt(None)),
+            "last": self.last_receipt,
+        })
+    }
+
+    pub fn finish(&mut self, outcome: Result<(), String>) -> Value {
+        self.active = false;
+        let receipt = self.receipt(Some(&outcome));
+        self.last_receipt = Some(receipt.clone());
+        receipt
     }
 }
 
@@ -208,31 +322,45 @@ pub fn recording_start(
     let fps = validate_fps(fps.unwrap_or(DEFAULT_FPS))?;
 
     state.active = true;
+    state.recording_id = uuid::Uuid::new_v4().to_string();
     state.output_path = path.to_string();
     state.fps = fps;
-    state.frame_count = 0;
-    state.captured_count = 0;
+    state.stats = Arc::new(Mutex::new(CaptureStats::default()));
 
-    Ok(json!({ "started": true, "path": path, "fps": fps }))
+    Ok(json!({ "started": true, "path": path, "fps": fps, "recordingId": state.recording_id }))
 }
 
-pub fn recording_stop(state: &mut RecordingState) -> Result<Value, String> {
+/// Finish once and retain the full terminal outcome, including failures.
+/// The caller may have disconnected while the encoder was finishing.
+pub async fn recording_stop(state: &mut RecordingState) -> Result<Value, String> {
     if !state.active {
-        return Err("No recording in progress".to_string());
+        return state
+            .last_receipt
+            .clone()
+            .ok_or_else(|| "No recording in progress".to_string());
     }
-
-    state.active = false;
-
-    if state.frame_count == 0 {
-        return Err("No frames captured".to_string());
+    if let Some(tx) = state.cancel_tx.take() {
+        let _ = tx.send(());
     }
-
-    Ok(json!({
-        "path": &state.output_path,
-        "frames": state.frame_count,
-        "capturedFrames": state.captured_count,
-        "fps": state.fps,
-    }))
+    let result = if let Some(handle) = state.capture_task.take() {
+        match handle.await {
+            Ok(result) => result,
+            Err(error) => Err(format!("Recording task panicked: {}", error)),
+        }
+    } else {
+        Ok(())
+    };
+    if let Ok(mut capture) = state.capture_session.lock() {
+        *capture = None;
+    }
+    let result = result.and_then(|()| {
+        if state.stats.lock().unwrap().written == 0 {
+            Err("No frames captured".to_string())
+        } else {
+            Ok(())
+        }
+    });
+    Ok(state.finish(result))
 }
 
 fn build_ffmpeg_command(output_path: &str, fps: u32) -> tokio::process::Command {
@@ -241,7 +369,7 @@ fn build_ffmpeg_command(output_path: &str, fps: u32) -> tokio::process::Command 
 
     // -hide_banner keeps the version and build banner out of stderr, so a
     // failure message is the cause rather than the configure line.
-    cmd.args(["-y", "-hide_banner"])
+    cmd.args(["-y", "-hide_banner", "-nostats", "-progress", "pipe:1"])
         .args(["-avioflags", "direct"])
         .args([
             "-fpsprobesize",
@@ -278,7 +406,7 @@ fn build_ffmpeg_command(output_path: &str, fps: u32) -> tokio::process::Command 
         .args(["-threads", if high_fps { "2" } else { "1" }])
         .arg(output_path)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
@@ -389,21 +517,32 @@ fn spawn_ffmpeg_command(
     command.spawn().map_err(ffmpeg_launch_error)
 }
 
-/// Spawn a background task that screencasts `capture_session` into the
-/// already running `ffmpeg` at `fps`. Chrome pushes a frame on every repaint up to the display rate; a
-/// wall-clock ticker writes one frame per slot, holding the last one through
-/// gaps, so the file's duration matches the automation it recorded.
-#[allow(clippy::too_many_arguments)]
+/// Screencast into the existing fixed-rate encoder. Capture timing ends when
+/// the loop exits, before CDP teardown or encoder completion. The progress
+/// stream supplies the encoder's frame count without retaining per-frame logs.
 pub fn spawn_recording_task(
     client: Arc<CdpClient>,
     capture_session: String,
     mut ffmpeg: tokio::process::Child,
     fps: u32,
-    shared_count: Arc<AtomicU64>,
-    shared_captured: Arc<AtomicU64>,
+    stats: Arc<Mutex<CaptureStats>>,
     cancel_rx: oneshot::Receiver<()>,
 ) -> tokio::task::JoinHandle<Result<(), String>> {
     tokio::spawn(async move {
+        let progress_stats = stats.clone();
+        let progress = ffmpeg.stdout.take().map(|stdout| {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if let Some(frames) = line
+                        .strip_prefix("frame=")
+                        .and_then(|v| v.trim().parse::<u64>().ok())
+                    {
+                        progress_stats.lock().unwrap().encoded = Some(frames);
+                    }
+                }
+            })
+        });
         let fps = validate_fps(fps)?;
         let period = frame_period(fps);
         let max_frames_per_tick = MAX_BACKFILL_SECS * fps as u64 + 1;
@@ -442,8 +581,7 @@ pub fn spawn_recording_task(
                     stdin,
                     period,
                     max_frames_per_tick,
-                    &shared_count,
-                    &shared_captured,
+                    &stats,
                     cancel_rx,
                 )
                 .await
@@ -464,19 +602,18 @@ pub fn spawn_recording_task(
         .await;
         detach_capture_session(&client, &capture_session).await;
 
-        let output = ffmpeg
-            .wait_with_output()
-            .await
-            .map_err(|e| format!("ffmpeg wait failed: {}", e))?;
-
-        capture?;
-
+        let output = ffmpeg.wait_with_output().await;
+        if let Some(progress) = progress {
+            let _ = progress.await;
+        }
+        stats.lock().unwrap().encoder_succeeded =
+            Some(output.as_ref().is_ok_and(|out| out.status.success()));
+        let output = output.map_err(|e| format!("ffmpeg wait failed: {}", e))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("ffmpeg failed: {}", ffmpeg_error_tail(&stderr)));
         }
-
-        Ok(())
+        capture
     })
 }
 
@@ -490,12 +627,15 @@ async fn capture_frames(
     mut stdin: tokio::process::ChildStdin,
     period: Duration,
     max_frames_per_tick: u64,
-    shared_count: &AtomicU64,
-    shared_captured: &AtomicU64,
+    stats: &Mutex<CaptureStats>,
     cancel_rx: oneshot::Receiver<()>,
 ) -> Result<(), String> {
     let mut cancel_rx = std::pin::pin!(cancel_rx);
-    let started = tokio::time::Instant::now();
+    let started = {
+        let mut stats = stats.lock().unwrap();
+        stats.start();
+        stats.started.unwrap()
+    };
     let mut interval = tokio::time::interval(period);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -507,6 +647,7 @@ async fn capture_frames(
     let mut pending: VecDeque<Vec<u8>> = VecDeque::new();
     let mut last: Option<Vec<u8>> = None;
     let mut written: u64 = 0;
+    let mut result = Ok(());
 
     loop {
         tokio::select! {
@@ -514,6 +655,8 @@ async fn capture_frames(
             event = events.recv() => {
                 let Some(event) = event else { break };
                 if event.method == "Page.screencastFrame" {
+                    let received_at = Utc::now();
+                    let received_after = started.elapsed();
                     if let Some(sid) = event.params.get("sessionId").and_then(Value::as_i64) {
                         let _ = client
                             .send_command_no_wait(
@@ -533,13 +676,14 @@ async fn capture_frames(
                         });
                     if let Some(bytes) = decoded {
                         pending.push_back(bytes);
-                        // Only a lower recording rate lets the queue grow (a
-                        // 60 Hz screencast into a 30 fps file); dropping the
-                        // oldest keeps the picture current.
+                        // When arrival outpaces output, drop the oldest
+                        // queued image to keep the picture current.
+                        let mut stats = stats.lock().unwrap();
                         if pending.len() > MAX_PENDING_FRAMES {
                             pending.pop_front();
+                            stats.dropped += 1;
                         }
-                        shared_captured.fetch_add(1, Ordering::Relaxed);
+                        stats.frame(received_at, received_after);
                     }
                 } else if event.method == "Inspector.detached" {
                     // The recorded page was closed; finish the file.
@@ -554,66 +698,46 @@ async fn capture_frames(
                 if due == 0 {
                     continue;
                 }
-                // A gap longer than MAX_BACKFILL_SECS is held for that long
-                // and the rest is dropped, so a hung page does not inflate
-                // the file. Advancing `written` by the full amount is what
-                // stops the excess being paid off on later ticks.
+                // Bound catch-up after a stalled ticker or late first image.
+                // Advancing `written` by the full deficit prevents skipped
+                // slots from being paid off on later ticks.
                 let emit = due.min(max_frames_per_tick);
-                let mut write_failed = false;
                 for _ in 0..emit {
-                    if let Some(next) = pending.pop_front() {
+                    let next = pending.pop_front();
+                    let held = next.is_none();
+                    if let Some(next) = next {
                         last = Some(next);
                     }
                     let Some(frame) = last.as_deref() else { break };
-                    if stdin.write_all(frame).await.is_err() {
-                        write_failed = true;
+                    if let Err(error) = stdin.write_all(frame).await {
+                        if !held {
+                            stats.lock().unwrap().dropped += 1;
+                        }
+                        result = Err(format!("Failed to write recording frame: {}", error));
                         break;
                     }
+                    let mut stats = stats.lock().unwrap();
+                    stats.written += 1;
+                    stats.held += u64::from(held);
                 }
-                if write_failed {
+                if result.is_err() {
                     break;
                 }
                 written += due;
-                shared_count.fetch_add(emit, Ordering::Relaxed);
+                stats.lock().unwrap().skipped += due - emit;
             }
         }
     }
 
+    {
+        let mut stats = stats.lock().unwrap();
+        stats.dropped += pending.len() as u64;
+        stats.finish();
+    }
     drop(stdin);
-    Ok(())
-}
-
-pub async fn stop_recording_task(state: &mut RecordingState) -> Result<(), String> {
-    if let Some(tx) = state.cancel_tx.take() {
-        let _ = tx.send(());
-    }
-
-    let counter = state.shared_frame_count.take();
-    let captured = state.shared_captured_count.take();
-    let handle = state.capture_task.take();
-
-    let result = if let Some(h) = handle {
-        match h.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(e),
-            Err(e) => Err(format!("Recording task panicked: {}", e)),
-        }
-    } else {
-        Ok(())
-    };
-
-    if let Some(c) = counter {
-        state.frame_count = c.load(Ordering::Relaxed);
-    }
-    if let Some(c) = captured {
-        state.captured_count = c.load(Ordering::Relaxed);
-    }
-    if let Ok(mut guard) = state.capture_session.lock() {
-        *guard = None;
-    }
-
     result
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,7 +747,7 @@ mod tests {
         let state = RecordingState::new();
         assert!(!state.active);
         assert!(state.output_path.is_empty());
-        assert_eq!(state.frame_count, 0);
+        assert_eq!(state.stats.lock().unwrap().written, 0);
         assert_eq!(state.fps, DEFAULT_FPS);
     }
 
@@ -634,7 +758,7 @@ mod tests {
         assert!(result.is_ok());
         assert!(state.active);
         assert_eq!(state.output_path, "/tmp/test.mp4");
-        assert_eq!(state.frame_count, 0);
+        assert_eq!(state.stats.lock().unwrap().written, 0);
         assert_eq!(state.fps, 30);
         assert_eq!(result.unwrap()["fps"], 30);
     }
@@ -783,32 +907,94 @@ mod tests {
         assert!(result.unwrap_err().contains("already active"));
     }
 
-    #[test]
-    fn test_recording_stop_not_active() {
+    #[tokio::test]
+    async fn test_recording_stop_not_active() {
         let mut state = RecordingState::new();
-        let result = recording_stop(&mut state);
+        let result = recording_stop(&mut state).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("No recording"));
     }
 
-    #[test]
-    fn test_recording_stop_no_frames() {
+    #[tokio::test]
+    async fn test_recording_stop_no_frames_retains_failed_receipt() {
         let mut state = RecordingState::new();
         recording_start(&mut state, "/tmp/test.mp4", None).unwrap();
-        let result = recording_stop(&mut state);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("No frames"));
+        let receipt = recording_stop(&mut state).await.unwrap();
+        assert_eq!(receipt["success"], false);
+        assert_eq!(receipt["error"], "No frames captured");
+        assert_eq!(receipt["capturedFrames"], 0);
+        assert!(receipt["capture"]["startedAt"].is_null());
+        assert!(receipt["capture"]["firstFrameAt"].is_null());
         assert!(!state.active);
+        assert_eq!(recording_stop(&mut state).await.unwrap(), receipt);
+        assert_eq!(state.info()["last"], receipt);
+        assert!(state.info()["current"].is_null());
     }
 
-    #[test]
-    fn test_recording_stop_reports_fps() {
+    #[tokio::test]
+    async fn test_recording_receipt_separates_capture_from_encoding_wait() {
         let mut state = RecordingState::new();
         recording_start(&mut state, "/tmp/test.webm", Some(60)).unwrap();
-        state.frame_count = 120;
-        let result = recording_stop(&mut state).unwrap();
-        assert_eq!(result["frames"], 120);
-        assert_eq!(result["fps"], 60);
+        {
+            let mut stats = state.stats.lock().unwrap();
+            stats.start();
+            stats.frame(Utc::now(), Duration::ZERO);
+            stats.written = 120;
+            stats.held = 119;
+            stats.finish();
+        }
+        let before = state.info()["current"]["capture"].clone();
+        let stats = state.stats.clone();
+        state.capture_task = Some(tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut stats = stats.lock().unwrap();
+            stats.encoded = Some(120);
+            stats.encoder_succeeded = Some(true);
+            Ok(())
+        }));
+        let receipt = recording_stop(&mut state).await.unwrap();
+        assert_eq!(
+            receipt["capture"], before,
+            "encoder wait must not extend capture"
+        );
+        assert_eq!(receipt["frames"], 120);
+        assert_eq!(receipt["capturedFrames"], 1);
+        assert_eq!(receipt["output"]["encodedFrames"], 120);
+        assert_eq!(receipt["output"]["durationMs"], 2000.0);
+        assert_eq!(receipt["output"]["heldFrames"], 119);
+        assert_eq!(receipt["output"]["encoderSucceeded"], true);
+        assert!(receipt["warning"]
+            .as_str()
+            .unwrap()
+            .contains("cannot establish"));
+    }
+
+    #[tokio::test]
+    async fn test_failed_encoder_receipt_does_not_promote_existing_file_to_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("failed.webm");
+        std::fs::write(&path, b"partial output").unwrap();
+        let mut state = RecordingState::new();
+        recording_start(&mut state, path.to_str().unwrap(), None).unwrap();
+        state.capture_task = Some(tokio::spawn(async {
+            Err("ffmpeg failed: injected".into())
+        }));
+        let receipt = recording_stop(&mut state).await.unwrap();
+        assert_eq!(receipt["success"], false);
+        assert_eq!(receipt["error"], "ffmpeg failed: injected");
+        assert_eq!(receipt["file"]["exists"], true);
+        assert_eq!(receipt["file"]["sizeBytes"], 14);
+        assert!(receipt["output"]["durationMs"].is_null());
+        assert_eq!(recording_stop(&mut state).await.unwrap(), receipt);
+
+        let next = recording_start(&mut state, "/tmp/next.webm", None).unwrap();
+        let info = state.info();
+        assert_eq!(info["last"], receipt);
+        assert_eq!(info["current"]["recordingId"], next["recordingId"]);
+        assert_ne!(next["recordingId"], receipt["recordingId"]);
+        assert_eq!(info["current"]["capturedFrames"], 0);
+        assert!(info["current"]["success"].is_null());
+        assert!(info["current"]["capture"]["startedAt"].is_null());
     }
 
     #[test]

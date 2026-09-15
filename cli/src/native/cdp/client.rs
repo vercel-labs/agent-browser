@@ -527,6 +527,11 @@ impl CdpClient {
         Ok(response.result.unwrap_or(Value::Null))
     }
 
+    /// Whether the existing transport has closed. Never opens a connection.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<CdpEvent> {
         self.event_tx.subscribe()
     }

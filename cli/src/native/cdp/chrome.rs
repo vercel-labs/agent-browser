@@ -13,6 +13,9 @@ use crate::ca_bundle::CaBundle;
 pub struct ChromeProcess {
     child: Child,
     pub ws_url: String,
+    /// Effective profile directory, including named-profile copies; unknown for
+    /// a bare or empty overriding user-data-dir switch.
+    pub user_data_dir: Option<PathBuf>,
     temp_user_data_dir: Option<PathBuf>,
     temp_nss_home: Option<PreparedNssHome>,
     /// On Unix, the process group ID used to kill the entire Chrome process tree.
@@ -423,7 +426,7 @@ impl Default for LaunchOptions {
 
 struct ChromeArgs {
     args: Vec<String>,
-    user_data_dir: PathBuf,
+    user_data_dir: Option<PathBuf>,
     temp_user_data_dir: Option<PathBuf>,
 }
 
@@ -587,9 +590,35 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         args.push("--disable-dev-shm-usage".to_string());
     }
 
+    // Mirror Chromium's switch syntax for this one value without changing argv:
+    // values require '=', bare/empty values are unknown, and '--' ends switches.
+    let mut effective_dir = Some(user_data_dir);
+    for arg in &args {
+        let arg = arg.trim_matches(|c: char| c.is_whitespace() && (cfg!(windows) || c.is_ascii()));
+        if arg == "--" {
+            break;
+        }
+        let switch = arg.strip_prefix("--").or_else(|| arg.strip_prefix('-'));
+        #[cfg(windows)]
+        let switch = switch.or_else(|| arg.strip_prefix('/'));
+        let Some(switch) = switch else { continue };
+        let (key, value) = switch.split_once('=').unwrap_or((switch, ""));
+        #[cfg(windows)]
+        if key == "single-argument" {
+            break;
+        }
+        let profile_switch = if cfg!(windows) {
+            key.eq_ignore_ascii_case("user-data-dir")
+        } else {
+            key == "user-data-dir"
+        };
+        if profile_switch {
+            effective_dir = (!value.is_empty()).then(|| PathBuf::from(value));
+        }
+    }
     Ok(ChromeArgs {
         args,
-        user_data_dir,
+        user_data_dir: effective_dir,
         temp_user_data_dir,
     })
 }
@@ -800,7 +829,9 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
 
     // Mitigate stale DevToolsActivePort risk (e.g., previous crash left it behind).
     // Puppeteer does similar cleanup before spawning.
-    let _ = std::fs::remove_file(user_data_dir.join("DevToolsActivePort"));
+    if let Some(ref dir) = user_data_dir {
+        let _ = std::fs::remove_file(dir.join("DevToolsActivePort"));
+    }
 
     let cleanup_temp_dir = |dir: &Option<PathBuf>| {
         if let Some(ref d) = dir {
@@ -879,7 +910,11 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
     // Primary path: use DevToolsActivePort written into user-data-dir.
     // This is more reliable on Windows than scraping stderr for "DevTools listening on ...",
     // which can be missing/empty depending on how Chrome is launched.
-    let ws_url = match wait_for_devtools_active_port(&mut child, &user_data_dir, deadline) {
+    let port_file = match user_data_dir.as_deref() {
+        Some(dir) => wait_for_devtools_active_port(&mut child, dir, deadline),
+        None => Err("Effective Chrome user-data directory is unknown".to_string()),
+    };
+    let ws_url = match port_file {
         Ok(url) => url,
         Err(primary_err) => {
             // Fallback: scrape stderr (legacy behavior) for better diagnostics.
@@ -914,6 +949,7 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
     Ok(ChromeProcess {
         child,
         ws_url,
+        user_data_dir: user_data_dir.map(|dir| dir.canonicalize().unwrap_or(dir)),
         temp_user_data_dir,
         temp_nss_home,
         #[cfg(unix)]
@@ -956,30 +992,52 @@ fn wait_for_devtools_active_port(
 }
 
 fn wait_for_ws_url_until(
-    reader: impl BufRead,
+    reader: impl BufRead + Send + 'static,
     deadline: std::time::Instant,
 ) -> Result<String, String> {
-    let prefix = "DevTools listening on ";
-    let mut stderr_lines: Vec<String> = Vec::new();
+    use std::sync::mpsc::RecvTimeoutError;
 
-    for line in reader.lines() {
-        if std::time::Instant::now() > deadline {
-            return Err(chrome_launch_error(
-                "Timeout waiting for Chrome DevTools URL",
-                &stderr_lines,
-            ));
+    // Reading a quiet stderr pipe blocks independently of the launch deadline.
+    // Keep that read off the waiter; the existing caller terminates Chrome on
+    // timeout, which also closes its pipe and releases this reader.
+    let prefix = "DevTools listening on ";
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        for line in reader.lines() {
+            let finished = line.as_ref().map_or(true, |line| line.starts_with(prefix));
+            if tx.send(line).is_err() || finished {
+                break;
+            }
         }
-        let line = line.map_err(|e| format!("Failed to read Chrome stderr: {}", e))?;
+    });
+    let mut stderr_lines: Vec<String> = Vec::new();
+    loop {
+        let now = std::time::Instant::now();
+        let received = if now > deadline {
+            Err(RecvTimeoutError::Timeout)
+        } else {
+            rx.recv_timeout(deadline.saturating_duration_since(now))
+        };
+        let line = match received {
+            Ok(line) => line.map_err(|e| format!("Failed to read Chrome stderr: {}", e))?,
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(chrome_launch_error(
+                    "Timeout waiting for Chrome DevTools URL",
+                    &stderr_lines,
+                ))
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(chrome_launch_error(
+                    "Chrome exited before providing DevTools URL",
+                    &stderr_lines,
+                ))
+            }
+        };
         if let Some(url) = line.strip_prefix(prefix) {
             return Ok(url.trim().to_string());
         }
         stderr_lines.push(line);
     }
-
-    Err(chrome_launch_error(
-        "Chrome exited before providing DevTools URL",
-        &stderr_lines,
-    ))
 }
 
 fn chrome_launch_error(message: &str, stderr_lines: &[String]) -> String {
@@ -1959,10 +2017,132 @@ mod tests {
         };
         let result = build_chrome_args(&opts).unwrap();
         assert!(result.temp_user_data_dir.is_none());
+        assert_eq!(result.user_data_dir, Some(PathBuf::from("/tmp/my-profile")));
         assert!(result
             .args
             .iter()
             .any(|a| a == "--user-data-dir=/tmp/my-profile"));
+    }
+
+    #[test]
+    fn test_effective_profile_follows_chromium_switch_syntax() {
+        // Chromium base/command_line.cc: only '=' binds a value, bare switches
+        // have empty values, and '--' ends switch parsing. Never launch these
+        // ambiguous cases: Chrome could otherwise fall back to a real profile.
+        for (args, expected) in [
+            (
+                vec!["--user-data-dir=/tmp/overridden"],
+                serde_json::json!("/tmp/overridden"),
+            ),
+            (
+                vec!["--user-data-dir", "/tmp/not-a-value"],
+                serde_json::Value::Null,
+            ),
+            (vec!["--user-data-dir"], serde_json::Value::Null),
+            (vec!["--user-data-dir="], serde_json::Value::Null),
+            (
+                vec!["--", "--user-data-dir=/tmp/not-a-switch"],
+                serde_json::json!("/tmp/original"),
+            ),
+            (
+                vec!["--user-data-dir=/tmp/overridden", "--", "--user-data-dir="],
+                serde_json::json!("/tmp/overridden"),
+            ),
+            (
+                vec!["-user-data-dir=/tmp/single-dash"],
+                serde_json::json!("/tmp/single-dash"),
+            ),
+            (
+                vec![" \u{000b}--user-data-dir=/tmp/trimmed \t "],
+                serde_json::json!("/tmp/trimmed"),
+            ),
+        ] {
+            let raw: Vec<String> = args.into_iter().map(str::to_string).collect();
+            let built = build_chrome_args(&LaunchOptions {
+                profile: Some("/tmp/original".to_string()),
+                args: raw.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(
+                serde_json::json!(built.user_data_dir),
+                expected,
+                "args: {raw:?}"
+            );
+            assert!(
+                built.args.windows(raw.len()).any(|args| args == raw),
+                "argv must stay unchanged: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_effective_profile_respects_windows_switch_keys() {
+        for (args, expected) in [
+            (vec!["--USER-DATA-DIR=/tmp/Case"], "/tmp/Case"),
+            (vec!["/user-data-dir=/tmp/slash"], "/tmp/slash"),
+            (
+                vec!["\u{00a0}--user-data-dir=/tmp/unicode\u{3000}"],
+                "/tmp/unicode",
+            ),
+            (
+                vec!["--single-argument", "--user-data-dir=/tmp/ignored"],
+                "/tmp/original",
+            ),
+            (
+                vec!["--SINGLE-ARGUMENT", "--user-data-dir=/tmp/accepted"],
+                "/tmp/accepted",
+            ),
+        ] {
+            let built = build_chrome_args(&LaunchOptions {
+                profile: Some("/tmp/original".to_string()),
+                args: args.into_iter().map(str::to_string).collect(),
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(built.user_data_dir, Some(PathBuf::from(expected)));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_ws_url_wait_is_bounded_for_a_quiet_reader() {
+        use std::io::Read;
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let result = wait_for_ws_url_until(
+                BufReader::new(reader),
+                std::time::Instant::now() + Duration::from_millis(20),
+            );
+            let _ = tx.send(result);
+        });
+        let result = rx.recv_timeout(Duration::from_secs(1));
+        // Release the pipe even on the pre-fix failure and verify both reader
+        // threads finish before asserting, so the regression cannot leak them.
+        writer.shutdown(std::net::Shutdown::Write).unwrap();
+        assert_eq!(writer.read(&mut [0]).unwrap(), 0);
+        waiter.join().unwrap();
+        assert!(result
+            .expect("quiet stderr must not defeat the deadline")
+            .unwrap_err()
+            .contains("Timeout"));
+    }
+
+    #[test]
+    fn test_ws_url_wait_reads_the_existing_stderr_endpoint() {
+        let stderr = std::io::Cursor::new(
+            b"startup message\nDevTools listening on ws://127.0.0.1:9222/devtools/browser/owned\n",
+        );
+        assert_eq!(
+            wait_for_ws_url_until(stderr, std::time::Instant::now() + Duration::from_secs(1))
+                .unwrap(),
+            "ws://127.0.0.1:9222/devtools/browser/owned"
+        );
     }
 
     #[test]
@@ -2333,6 +2513,7 @@ mod tests {
             let _process = ChromeProcess {
                 child,
                 ws_url: String::new(),
+                user_data_dir: Some(dir.clone()),
                 temp_user_data_dir: Some(dir.clone()),
                 temp_nss_home: None,
                 #[cfg(unix)]

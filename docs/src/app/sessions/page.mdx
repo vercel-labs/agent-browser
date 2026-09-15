@@ -27,6 +27,12 @@ agent-browser session id --scope worktree --prefix next-dev-loop
 agent-browser session info --json
 ```
 
+## Read-only preflight
+
+`session info` does not start, reconfigure, or reconnect a browser. `data.active` and `data.pid` describe the daemon. `data.runtime.browser` separately reports `status`, `alive`, the local Chrome `pid`, its effective `userDataDir`, native `ownership` (`launched` or `attached`), and current `tabs` with native tab/target IDs, title, URL, and active selection. Named profiles report the actual copied directory. Raw Chrome profile overrides use `--user-data-dir=<path>`; a bare or empty switch leaves the effective profile unknown (`null`), and tokens after `--` are not switches. Attached or remote process/profile details are `null` rather than guesses; unsupported backends and probe failures remain explicit. A tab's `active` flag means this daemon's selection, not OS window focus. Native ownership does not identify an application or agent owner. `data.runtime.capabilities.readRequiresConfirmation` advertises the ID-checked HTTP read confirmation protocol. The CLI checks this explicitly before queuing a read; equal version labels are insufficient. The internal capabilities-only handshake returns static protocol facts without inspecting the browser or exposing session data.
+
+`data.runtime.recording.current` reports an in-progress take, and `last` retains the latest terminal recording receipt, including failures. Match `recordingId` from `record start` when recovering after a timeout. These receipts last for the daemon's lifetime. See [Recording](/recording) for timing and frame definitions.
+
 ## Session isolation
 
 Each session has its own:

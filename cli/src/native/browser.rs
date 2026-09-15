@@ -1372,6 +1372,106 @@ impl BrowserManager {
         }
     }
 
+    /// Inspect only the existing process and CDP connection. Unlike normal
+    /// command recovery, this never attaches, creates a page, or relaunches.
+    pub async fn session_info(&mut self) -> Value {
+        let (pid, profile) = match self.browser_process.as_ref() {
+            Some(BrowserProcess::Chrome(process)) => (
+                Some(process.id()),
+                process
+                    .user_data_dir
+                    .as_ref()
+                    .map(|dir| dir.to_string_lossy().to_string()),
+            ),
+            _ => (None, None),
+        };
+        let local_alive = match self.browser_process.as_mut() {
+            Some(BrowserProcess::Chrome(process)) => Some(!process.has_exited()),
+            _ => None,
+        };
+        let mut info = json!({
+            "status": "disconnected",
+            "alive": local_alive,
+            "pid": pid,
+            "userDataDir": profile,
+            "ownership": if self.browser_process.is_some() { "launched" } else { "attached" },
+            "tabs": null,
+            "error": null,
+        });
+        if local_alive == Some(false) || self.client.is_closed() {
+            info["error"] = json!("Browser process or CDP connection has closed");
+            return info;
+        }
+
+        let tabs =
+            tokio::time::timeout(Duration::from_secs(3), async {
+                if self.direct_page {
+                    let result = self
+                        .client
+                        .send_command(
+                            "Runtime.evaluate",
+                            Some(json!({
+                                "expression": "({url:location.href,title:document.title})",
+                                "returnByValue": true,
+                            })),
+                            None,
+                        )
+                        .await?;
+                    let value = result
+                        .get("result")
+                        .and_then(|v| v.get("value"))
+                        .ok_or("Page identity unavailable")?;
+                    let mut tabs = self.tab_list();
+                    for tab in &mut tabs {
+                        // Direct-page providers do not expose a native target id.
+                        tab["targetId"] = Value::Null;
+                        tab["url"] = value["url"].clone();
+                        tab["title"] = value["title"].clone();
+                    }
+                    return Ok::<_, String>(tabs);
+                }
+
+                let targets: GetTargetsResult = self
+                    .client
+                    .send_command_typed("Target.getTargets", &json!({}), None)
+                    .await?;
+                let known_tabs = self.tab_list();
+                Ok(targets.target_infos.into_iter().filter(should_track_target).map(|target| {
+                let known = known_tabs.iter().find(|tab| tab["targetId"] == target.target_id);
+                json!({
+                    "tabId": known.and_then(|tab| tab.get("tabId")),
+                    "targetId": target.target_id,
+                    "label": known.and_then(|tab| tab.get("label")),
+                    "title": target.title,
+                    "url": target.url,
+                    "type": target.target_type,
+                    "active": known.and_then(|tab| tab["active"].as_bool()).unwrap_or(false),
+                })
+            }).collect())
+            })
+            .await;
+        match tabs {
+            Ok(Ok(tabs)) => {
+                info["status"] = json!("connected");
+                info["alive"] = json!(true);
+                info["tabs"] = json!(tabs);
+            }
+            result => {
+                info["status"] = json!(if self.client.is_closed() {
+                    "disconnected"
+                } else {
+                    "unknown"
+                });
+                info["error"] = json!(match result {
+                    Ok(Err(error)) => error,
+                    Err(_) => "Browser identity probe timed out".to_string(),
+                    Ok(Ok(_)) => unreachable!(),
+                });
+            }
+        }
+        info
+    }
+
     pub fn get_cdp_url(&self) -> &str {
         &self.ws_url
     }
