@@ -1790,6 +1790,8 @@ agent-browser open https://example.com
 
 **Supported devices:** All iOS Simulators available in Xcode (iPhones, iPads), plus real iOS devices.
 
+Simulators marked unavailable by Xcode are excluded from device listing and selection, so a missing runtime cannot be chosen as the default.
+
 **Note:** The iOS provider boots the simulator, starts Appium, and controls Safari. First launch takes ~30-60 seconds; subsequent commands are fast.
 
 #### Real Device Support
