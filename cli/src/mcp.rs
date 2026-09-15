@@ -3924,14 +3924,20 @@ fn tool_result_from_run(run: CliRun) -> Value {
         }
     }
 
+    // `response` is stdout parsed. Repeating the raw text doubles every result
+    // a client forwards to a model, so keep it only when it did not parse.
+    let mut structured = json!({
+        "exitCode": run.exit_code,
+        "stderr": run.stderr,
+    });
+    if parsed.is_none() {
+        structured["stdout"] = Value::String(run.stdout);
+    }
+    structured["response"] = parsed.unwrap_or(Value::Null);
+
     json!({
         "content": content,
-        "structuredContent": {
-            "exitCode": run.exit_code,
-            "stdout": run.stdout,
-            "stderr": run.stderr,
-            "response": parsed,
-        },
+        "structuredContent": structured,
         "isError": !success,
     })
 }
@@ -5022,6 +5028,40 @@ mod tests {
             result["structuredContent"]["response"]["data"]["lastUrl"],
             "https://example.com/path"
         );
+    }
+
+    #[test]
+    fn tool_result_omits_raw_stdout_once_it_parsed() {
+        let run = CliRun {
+            exit_code: Some(0),
+            stdout: json!({
+                "success": true,
+                "data": { "snapshot": "- heading \"Title\" [ref=e1]" }
+            })
+            .to_string(),
+            stderr: String::new(),
+        };
+
+        let result = tool_result_from_run(run);
+        assert_eq!(result["content"][0]["text"], "- heading \"Title\" [ref=e1]");
+        assert_eq!(
+            result["structuredContent"]["response"]["data"]["snapshot"],
+            "- heading \"Title\" [ref=e1]"
+        );
+        assert!(result["structuredContent"].get("stdout").is_none());
+    }
+
+    #[test]
+    fn tool_result_keeps_raw_stdout_when_it_is_not_json() {
+        let run = CliRun {
+            exit_code: Some(0),
+            stdout: "plain output".to_string(),
+            stderr: String::new(),
+        };
+
+        let result = tool_result_from_run(run);
+        assert_eq!(result["structuredContent"]["stdout"], "plain output");
+        assert!(result["structuredContent"]["response"].is_null());
     }
 
     #[test]
