@@ -102,6 +102,7 @@ pub struct Config {
     pub screenshot_quality: Option<u32>,
     pub screenshot_format: Option<String>,
     pub idle_timeout: Option<String>,
+    pub max_tabs: Option<u64>,
     pub no_auto_dialog: Option<bool>,
     pub model: Option<String>,
     pub plugins: Option<Vec<PluginConfig>>,
@@ -185,6 +186,7 @@ impl Config {
             screenshot_quality: other.screenshot_quality.or(self.screenshot_quality),
             screenshot_format: other.screenshot_format.or(self.screenshot_format),
             idle_timeout: other.idle_timeout.or(self.idle_timeout),
+            max_tabs: other.max_tabs.or(self.max_tabs),
             no_auto_dialog: other.no_auto_dialog.or(self.no_auto_dialog),
             model: other.model.or(self.model),
             plugins: match (self.plugins, other.plugins) {
@@ -312,6 +314,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--screenshot-quality",
         "--screenshot-format",
         "--idle-timeout",
+        "--max-tabs",
         "--ca-cert",
         "--model",
     ];
@@ -414,6 +417,7 @@ pub struct Flags {
     pub screenshot_format: Option<String>,
     pub idle_timeout: Option<String>, // Canonical milliseconds string for AGENT_BROWSER_IDLE_TIMEOUT_MS
     pub default_timeout: Option<u64>, // AGENT_BROWSER_DEFAULT_TIMEOUT in ms
+    pub max_tabs: Option<u64>,        // AGENT_BROWSER_MAX_TABS; 0 = unlimited
     pub no_auto_dialog: bool,
     pub model: Option<String>,
     pub plugins: Vec<PluginConfig>,
@@ -646,6 +650,10 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "AGENT_BROWSER_IDLE_TIMEOUT_MS",
         )
         .or(config.idle_timeout),
+        max_tabs: env::var("AGENT_BROWSER_MAX_TABS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .or(config.max_tabs),
         default_timeout: env::var("AGENT_BROWSER_DEFAULT_TIMEOUT")
             .ok()
             .and_then(|s| s.parse::<u64>().ok()),
@@ -736,6 +744,19 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--session" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.session = s.clone();
+                    i += 1;
+                }
+            }
+            "--max-tabs" => {
+                if let Some(s) = args.get(i + 1) {
+                    match s.parse::<u64>() {
+                        Ok(v) => flags.max_tabs = Some(v),
+                        Err(_) => eprintln!(
+                            "{} invalid --max-tabs value `{}`; expected a non-negative integer",
+                            color::warning_indicator(),
+                            s
+                        ),
+                    }
                     i += 1;
                 }
             }
@@ -1180,6 +1201,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--screenshot-quality",
         "--screenshot-format",
         "--idle-timeout",
+        "--max-tabs",
         "--ca-cert",
         "--model",
     ];

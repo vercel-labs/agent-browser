@@ -227,6 +227,8 @@ agent-browser window new                       # New window
 
 Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused within a session, so the same id keeps referring to the same tab across commands. Positional integers are **not** accepted — `tab 2` errors with a teaching message; use `t2`.
 
+A per-session tab cap is available via `--max-tabs <n>` or `AGENT_BROWSER_MAX_TABS` (default: unlimited; `0` = unlimited). When the cap is hit, `tab new` and `window new` refuse with the current count and a pointer to `tab close` / `close` — they never close pages on their own.
+
 User-assigned labels (`docs`, `app`, `admin`) are interchangeable with ids everywhere a tab ref is accepted. Labels are the agent-friendly way to write multi-tab workflows:
 
 ```bash
