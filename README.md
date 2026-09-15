@@ -44,13 +44,15 @@ agent-browser install  # Download Chrome from Chrome for Testing (first time onl
 
 Requires Node.js 24+, pnpm 11+, and Rust.
 
+Build the dashboard before the native binary so the CLI includes the dashboard assets.
+
 ```bash
 git clone https://github.com/vercel-labs/agent-browser
 cd agent-browser
 pnpm install
-pnpm build
+pnpm build:dashboard
 pnpm build:native   # Requires Rust (https://rustup.rs)
-pnpm link --global  # Makes agent-browser available globally
+pnpm add --global . # Makes agent-browser available globally
 agent-browser install
 ```
 
