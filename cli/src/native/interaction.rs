@@ -4,7 +4,8 @@ use serde_json::Value;
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
-use super::element::{resolve_element_center, resolve_element_object_id, RefMap};
+use super::codegen::probe::{capture_resolved_element, ElementCapture};
+use super::element::{resolve_element, resolve_element_object_id, resolve_element_point, RefMap};
 
 /// Outcome of a click. `dialog_opened` is true if a JavaScript dialog opened
 /// mid-sequence (the page is then blocked until `dialog accept`/`dismiss`).
@@ -16,6 +17,7 @@ use super::element::{resolve_element_center, resolve_element_object_id, RefMap};
 pub struct ClickResult {
     pub dialog_opened: bool,
     pub pending_release: Option<PendingRelease>,
+    pub capture: Option<ElementCapture>,
 }
 
 pub struct PendingRelease {
@@ -25,6 +27,51 @@ pub struct PendingRelease {
     pub button: String,
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn click_with_capture(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    button: &str,
+    click_count: i32,
+    iframe_sessions: &HashMap<String, String>,
+    capture: bool,
+) -> Result<ClickResult, String> {
+    let point = resolve_element_point(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+    let mut captured = if capture {
+        Some(capture_resolved_element(client, session_id, &point.element).await)
+    } else {
+        None
+    };
+    if let Some(captured) = captured.as_mut() {
+        captured.position = Some((point.offset_x, point.offset_y));
+    }
+    // A click-triggered dialog can fire on the frame's own session (OOPIF) or
+    // on the top-level page session; both count as "ours". A dialog on any
+    // other session belongs to a background tab and must not abort this click.
+    let mut result = dispatch_click(
+        client,
+        &point.element.session_id,
+        &[point.element.session_id.as_str(), session_id],
+        point.x,
+        point.y,
+        button,
+        click_count,
+    )
+    .await?;
+    result.capture = captured;
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn click(
     client: &CdpClient,
     session_id: &str,
@@ -34,25 +81,15 @@ pub async fn click(
     click_count: i32,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<ClickResult, String> {
-    let (x, y, effective_session_id) = resolve_element_center(
+    click_with_capture(
         client,
         session_id,
         ref_map,
         selector_or_ref,
-        iframe_sessions,
-    )
-    .await?;
-    // A click-triggered dialog can fire on the frame's own session (OOPIF) or
-    // on the top-level page session; both count as "ours". A dialog on any
-    // other session belongs to a background tab and must not abort this click.
-    dispatch_click(
-        client,
-        &effective_session_id,
-        &[effective_session_id.as_str(), session_id],
-        x,
-        y,
         button,
         click_count,
+        iframe_sessions,
+        false,
     )
     .await
 }
@@ -76,14 +113,15 @@ pub async fn dblclick(
     .await
 }
 
-pub async fn hover(
+pub async fn hover_with_capture(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
-    let (x, y, effective_session_id) = resolve_element_center(
+    capture: bool,
+) -> Result<Option<ElementCapture>, String> {
+    let point = resolve_element_point(
         client,
         session_id,
         ref_map,
@@ -91,13 +129,21 @@ pub async fn hover(
         iframe_sessions,
     )
     .await?;
+    let mut captured = if capture {
+        Some(capture_resolved_element(client, session_id, &point.element).await)
+    } else {
+        None
+    };
+    if let Some(captured) = captured.as_mut() {
+        captured.position = Some((point.offset_x, point.offset_y));
+    }
     client
         .send_command_typed::<_, Value>(
             "Input.dispatchMouseEvent",
             &DispatchMouseEventParams {
                 event_type: "mouseMoved".to_string(),
-                x,
-                y,
+                x: point.x,
+                y: point.y,
                 button: None,
                 buttons: None,
                 click_count: None,
@@ -105,21 +151,41 @@ pub async fn hover(
                 delta_y: None,
                 modifiers: None,
             },
-            Some(&effective_session_id),
+            Some(&point.element.session_id),
         )
         .await?;
-    Ok(())
+    Ok(captured)
 }
 
-pub async fn fill(
+pub async fn hover(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(), String> {
+    hover_with_capture(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+        false,
+    )
+    .await
+    .map(|_| ())
+}
+
+pub async fn fill_with_capture(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
     value: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
-    let (object_id, effective_session_id) = resolve_element_object_id(
+    capture: bool,
+) -> Result<Option<ElementCapture>, String> {
+    let resolved = resolve_element(
         client,
         session_id,
         ref_map,
@@ -127,6 +193,13 @@ pub async fn fill(
         iframe_sessions,
     )
     .await?;
+    let captured = if capture {
+        Some(capture_resolved_element(client, session_id, &resolved).await)
+    } else {
+        None
+    };
+    let object_id = resolved.object_id;
+    let effective_session_id = resolved.session_id;
 
     // Focus the element
     client
@@ -174,11 +247,32 @@ pub async fn fill(
         )
         .await?;
 
-    Ok(())
+    Ok(captured)
+}
+
+pub async fn fill(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    value: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(), String> {
+    fill_with_capture(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        value,
+        iframe_sessions,
+        false,
+    )
+    .await
+    .map(|_| ())
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn type_text(
+pub async fn type_text_with_capture(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
@@ -187,8 +281,9 @@ pub async fn type_text(
     clear: bool,
     delay_ms: Option<u64>,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
-    let (object_id, effective_session_id) = resolve_element_object_id(
+    capture: bool,
+) -> Result<Option<ElementCapture>, String> {
+    let resolved = resolve_element(
         client,
         session_id,
         ref_map,
@@ -196,6 +291,13 @@ pub async fn type_text(
         iframe_sessions,
     )
     .await?;
+    let captured = if capture {
+        Some(capture_resolved_element(client, session_id, &resolved).await)
+    } else {
+        None
+    };
+    let object_id = resolved.object_id;
+    let effective_session_id = resolved.session_id;
 
     // Focus
     client
@@ -233,7 +335,34 @@ pub async fn type_text(
             .await?;
     }
 
-    type_text_into_active_context(client, session_id, text, delay_ms).await
+    type_text_into_active_context(client, session_id, text, delay_ms).await?;
+    Ok(captured)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn type_text(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    text: &str,
+    clear: bool,
+    delay_ms: Option<u64>,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(), String> {
+    type_text_with_capture(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        text,
+        clear,
+        delay_ms,
+        iframe_sessions,
+        false,
+    )
+    .await
+    .map(|_| ())
 }
 
 pub async fn type_text_into_active_context(
@@ -369,7 +498,14 @@ pub async fn press_key_with_modifiers(
     Ok(())
 }
 
-pub async fn scroll(
+/// Read the `[x, y]` pair that the scroll expression returned.
+fn scroll_position(result: &Value) -> Option<(f64, f64)> {
+    let value = result.get("result")?.get("value")?.as_array()?;
+    Some((value.first()?.as_f64()?, value.get(1)?.as_f64()?))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn scroll_with_capture(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
@@ -377,17 +513,27 @@ pub async fn scroll(
     delta_x: f64,
     delta_y: f64,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
+    capture: bool,
+) -> Result<Option<ElementCapture>, String> {
+    let mut captured = None;
+    let position;
     if let Some(sel) = selector_or_ref {
-        let (object_id, effective_session_id) =
-            resolve_element_object_id(client, session_id, ref_map, sel, iframe_sessions).await?;
-        let js = "function(dx, dy) { this.scrollBy(dx, dy); }".to_string();
-        client
+        let resolved = resolve_element(client, session_id, ref_map, sel, iframe_sessions).await?;
+        if capture {
+            captured = Some(capture_resolved_element(client, session_id, &resolved).await);
+        }
+        // Return the position the browser actually reached. The browser can
+        // limit the movement, so adding the deltas would be a guess, and this
+        // costs no extra round trip.
+        let js =
+            "function(dx, dy) { this.scrollBy(dx, dy); return [this.scrollLeft, this.scrollTop]; }"
+                .to_string();
+        let result = client
             .send_command_typed::<_, Value>(
                 "Runtime.callFunctionOn",
                 &CallFunctionOnParams {
                     function_declaration: js,
-                    object_id: Some(object_id),
+                    object_id: Some(resolved.object_id),
                     arguments: Some(vec![
                         CallArgument {
                             value: Some(serde_json::json!(delta_x)),
@@ -401,12 +547,15 @@ pub async fn scroll(
                     return_by_value: Some(true),
                     await_promise: Some(false),
                 },
-                Some(&effective_session_id),
+                Some(&resolved.session_id),
             )
             .await?;
+        position = scroll_position(&result);
     } else {
-        let js = format!("window.scrollBy({}, {})", delta_x, delta_y);
-        client
+        let js = format!(
+            "(() => {{ window.scrollBy({delta_x}, {delta_y}); return [window.scrollX, window.scrollY]; }})()"
+        );
+        let result = client
             .send_command_typed::<_, Value>(
                 "Runtime.evaluate",
                 &EvaluateParams {
@@ -417,19 +566,52 @@ pub async fn scroll(
                 Some(session_id),
             )
             .await?;
+        position = scroll_position(&result);
     }
-    Ok(())
+    if capture && captured.is_none() {
+        captured = Some(ElementCapture::default());
+    }
+    if let Some(captured) = captured.as_mut() {
+        captured.scroll_delta = Some((delta_x, delta_y));
+        captured.scroll_position = position;
+    }
+    Ok(captured)
 }
 
-pub async fn select_option(
+#[allow(clippy::too_many_arguments)]
+pub async fn scroll(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: Option<&str>,
+    delta_x: f64,
+    delta_y: f64,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(), String> {
+    scroll_with_capture(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        delta_x,
+        delta_y,
+        iframe_sessions,
+        false,
+    )
+    .await
+    .map(|_| ())
+}
+
+pub async fn select_option_with_capture(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
     values: &[String],
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
-    let (object_id, effective_session_id) = resolve_element_object_id(
+    capture: bool,
+) -> Result<Option<ElementCapture>, String> {
+    let resolved = resolve_element(
         client,
         session_id,
         ref_map,
@@ -437,6 +619,13 @@ pub async fn select_option(
         iframe_sessions,
     )
     .await?;
+    let captured = if capture {
+        Some(capture_resolved_element(client, session_id, &resolved).await)
+    } else {
+        None
+    };
+    let object_id = resolved.object_id;
+    let effective_session_id = resolved.session_id;
 
     // Matching nothing must be an error, not a silent success: an agent that
     // selects a misspelled option otherwise sees "Done", and only discovers
@@ -505,7 +694,28 @@ pub async fn select_option(
         return Err(error.to_string());
     }
 
-    Ok(())
+    Ok(captured)
+}
+
+pub async fn select_option(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    values: &[String],
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(), String> {
+    select_option_with_capture(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        values,
+        iframe_sessions,
+        false,
+    )
+    .await
+    .map(|_| ())
 }
 
 pub async fn check(
@@ -608,6 +818,90 @@ pub async fn uncheck(
         }
     }
     Ok(())
+}
+
+pub async fn set_checked_with_capture(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    checked: bool,
+    iframe_sessions: &HashMap<String, String>,
+    capture: bool,
+) -> Result<Option<ElementCapture>, String> {
+    let resolved = resolve_element(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+    let captured = if capture {
+        Some(capture_resolved_element(client, session_id, &resolved).await)
+    } else {
+        None
+    };
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: r#"function(wanted) {
+                    const checked = (el) => {
+                        const tag = el.tagName && el.tagName.toUpperCase();
+                        if (tag === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) return el.checked;
+                        const role = el.getAttribute && el.getAttribute('role');
+                        if (role && ['checkbox','radio','switch','menuitemcheckbox','menuitemradio','option','treeitem'].includes(role)) return el.getAttribute('aria-checked') === 'true';
+                        const label = tag === 'LABEL' ? el : (el.closest && el.closest('label'));
+                        if (label && label.control) return Boolean(label.control.checked);
+                        const input = el.querySelector && el.querySelector('input[type="checkbox"], input[type="radio"]');
+                        return input ? input.checked : false;
+                    };
+                    let changed = false;
+                    if (checked(this) !== wanted) {
+                        const tag = this.tagName && this.tagName.toUpperCase();
+                        const label = tag === 'LABEL' ? this : (this.closest && this.closest('label'));
+                        const nested = this.querySelector && this.querySelector('input[type="checkbox"], input[type="radio"]');
+                        const target = tag === 'INPUT' ? this : (label && label.control) || nested || this;
+                        target.click();
+                        changed = true;
+                    }
+                    return [changed, checked(this)];
+                }"#
+                .to_string(),
+                object_id: Some(resolved.object_id),
+                arguments: Some(vec![CallArgument {
+                    value: Some(serde_json::json!(checked)),
+                    object_id: None,
+                }]),
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(&resolved.session_id),
+        )
+        .await?;
+    let outcome = result.result.value;
+    let values = outcome.as_ref().and_then(|value| value.as_array());
+    let changed = values
+        .and_then(|values| values.first())
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let actual = values
+        .and_then(|values| values.get(1))
+        .or(outcome.as_ref())
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if actual != checked {
+        return Err(format!(
+            "Element did not become {}",
+            if checked { "checked" } else { "unchecked" }
+        ));
+    }
+    let mut captured = captured;
+    if let Some(captured) = captured.as_mut() {
+        captured.state_changed = Some(changed);
+    }
+    Ok(captured)
 }
 
 /// Fallback for when the coordinate-based CDP click did not toggle the
@@ -915,14 +1209,15 @@ pub async fn highlight(
     Ok(())
 }
 
-pub async fn tap_touch(
+pub async fn tap_touch_with_capture(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
-    let (x, y, effective_session_id) = resolve_element_center(
+    capture: bool,
+) -> Result<Option<ElementCapture>, String> {
+    let point = resolve_element_point(
         client,
         session_id,
         ref_map,
@@ -930,15 +1225,23 @@ pub async fn tap_touch(
         iframe_sessions,
     )
     .await?;
+    let mut captured = if capture {
+        Some(capture_resolved_element(client, session_id, &point.element).await)
+    } else {
+        None
+    };
+    if let Some(captured) = captured.as_mut() {
+        captured.position = Some((point.offset_x, point.offset_y));
+    }
 
     client
         .send_command(
             "Input.dispatchTouchEvent",
             Some(serde_json::json!({
                 "type": "touchStart",
-                "touchPoints": [{ "x": x, "y": y }],
+                "touchPoints": [{ "x": point.x, "y": point.y }],
             })),
-            Some(&effective_session_id),
+            Some(&point.element.session_id),
         )
         .await?;
 
@@ -949,11 +1252,30 @@ pub async fn tap_touch(
                 "type": "touchEnd",
                 "touchPoints": [],
             })),
-            Some(&effective_session_id),
+            Some(&point.element.session_id),
         )
         .await?;
 
-    Ok(())
+    Ok(captured)
+}
+
+pub async fn tap_touch(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(), String> {
+    tap_touch_with_capture(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+        false,
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Dispatches one mouse event and waits for the browser to ack it, but
@@ -1041,6 +1363,7 @@ async fn dispatch_click(
         return Ok(ClickResult {
             dialog_opened: true,
             pending_release: None,
+            capture: None,
         });
     }
 
@@ -1080,6 +1403,7 @@ async fn dispatch_click(
                 y,
                 button: button.to_string(),
             }),
+            capture: None,
         });
     }
 
@@ -1105,6 +1429,7 @@ async fn dispatch_click(
     Ok(ClickResult {
         dialog_opened,
         pending_release: None,
+        capture: None,
     })
 }
 

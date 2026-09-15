@@ -331,6 +331,10 @@ agent-browser record start <path>     # Start video recording (.webm/.mp4, 30 fp
 agent-browser record start <path> --fps 60  # Record at 60 fps (--fps accepts 1-60)
 agent-browser record stop             # Stop and save video
 agent-browser record restart <path>   # Stop current and start new recording
+agent-browser codegen start [--title <title>]  # Capture a reusable test flow
+agent-browser codegen stop [path] [--format json|playwright]
+agent-browser codegen status
+agent-browser codegen discard
 agent-browser console                 # View console messages
 agent-browser console --json          # JSON output with raw CDP args
 agent-browser console --clear         # Clear console log
@@ -340,7 +344,20 @@ agent-browser highlight <sel>         # Highlight element
 agent-browser inspect                 # Open Chrome DevTools for the active page
 ```
 
-Recording requires `ffmpeg` on `PATH`. See [Debugging](/debugging) for console, error, dialog, trace, highlight, and DevTools workflows. See [Video Recording](/recording) for recording requirements and `record` workflows, and [Profiler](/profiler) for performance profiles.
+Recording requires `ffmpeg` on `PATH`. See [Debugging](/debugging) for console, error, dialog, trace, highlight, and DevTools workflows. See [Video Recording](/recording) for recording requirements and `record` workflows, [Codegen](/codegen) for reusable test artifacts, and [Profiler](/profiler) for performance profiles.
+
+## Codegen
+
+`codegen` captures supported successful actions as Chrome DevTools Recorder JSON or an `@playwright/test` spec. It omits unsafe targets and unsupported actions and reports warnings. It is distinct from [Video Recording](/recording), which writes a WebM file.
+
+```bash
+agent-browser codegen start --title "login flow"
+agent-browser click @e1
+agent-browser codegen stop ./login.flow.json
+agent-browser codegen stop ./login.spec.ts --format playwright
+```
+
+`codegen status` reports active, restored, degraded, recovery-error, and cleanup-pending states. It also reports capture and security warning counts and projected Recorder and Playwright counts. `codegen stop` reports selected-format step counts and grouped warning codes. Use `codegen discard` to remove an unfinished or damaged journal.
 
 ## Auth vault
 

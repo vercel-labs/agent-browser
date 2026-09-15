@@ -128,6 +128,17 @@ agent-browser tab new https://example.com          # Open a separate tab first i
 
 Needs `ffmpeg` on PATH; use a `.webm` or `.mp4` path (other extensions go to ffmpeg as-is, an extensionless path is rejected). `--fps` accepts 1 to 60 and defaults to 30. Playback duration always matches the wall clock time recorded, so a slow page holds frames instead of speeding the video up.
 
+## Codegen
+
+```bash
+agent-browser codegen start [--title <title>]
+agent-browser codegen stop [path] [--format json|playwright]
+agent-browser codegen status
+agent-browser codegen discard
+```
+
+Capture supported successful automation actions as a Chrome DevTools Recorder flow. `codegen stop` prints the flow when no path is supplied; `--format playwright` emits an `@playwright/test` spec. Unsafe targets and unsupported actions are omitted and reported as warnings. `codegen status` reports recovery state, warning counts, and projected format counts. `codegen stop` reports selected-format step counts and grouped warning codes. `codegen discard` removes an unfinished or damaged journal. `codegen` is different from `record`, which writes a video. Typed values are retained verbatim, including credentials and upload paths, so review warnings and artifacts before you commit them. See [codegen.md](codegen.md).
+
 ## Wait
 
 ```bash

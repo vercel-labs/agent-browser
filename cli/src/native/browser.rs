@@ -147,6 +147,7 @@ fn update_page_target_info_in_pages(pages: &mut [PageInfo], target: &TargetInfo)
         page.url = target.url.clone();
         page.title = target.title.clone();
         page.target_type = target.target_type.clone();
+        page.opener_id = target.opener_id.clone();
         return true;
     }
     false
@@ -253,6 +254,8 @@ pub struct PageInfo {
     /// workflows.
     pub label: Option<String>,
     pub target_id: String,
+    /// CDP target ID of the page that opened this page, when Chrome reports it.
+    pub opener_id: Option<String>,
     pub session_id: String,
     pub url: String,
     pub title: String,
@@ -653,6 +656,7 @@ impl BrowserManager {
                 tab_id,
                 label: None,
                 target_id: "provider-page".to_string(),
+                opener_id: None,
                 session_id: String::new(),
                 url: String::new(),
                 title: String::new(),
@@ -728,6 +732,7 @@ impl BrowserManager {
                 tab_id,
                 label: None,
                 target_id: result.target_id,
+                opener_id: None,
                 session_id: attach_result.session_id.clone(),
                 url: "about:blank".to_string(),
                 title: String::new(),
@@ -756,6 +761,7 @@ impl BrowserManager {
                     tab_id,
                     label: None,
                     target_id: target.target_id.clone(),
+                    opener_id: target.opener_id.clone(),
                     session_id: attach_result.session_id.clone(),
                     url: target.url.clone(),
                     title: target.title.clone(),
@@ -1456,6 +1462,7 @@ impl BrowserManager {
             tab_id,
             label: None,
             target_id: result.target_id,
+            opener_id: None,
             session_id: attach_result.session_id.clone(),
             url: "about:blank".to_string(),
             title: String::new(),
@@ -1626,6 +1633,7 @@ impl BrowserManager {
             tab_id,
             label: label.clone(),
             target_id: result.target_id,
+            opener_id: None,
             session_id: attach.session_id,
             url: target_url.to_string(),
             title: String::new(),
@@ -1762,6 +1770,8 @@ impl BrowserManager {
             "targetId": closed_target_id,
             "label": closed_label,
             "closed": true,
+            "activeTabId": format_tab_id(self.pages[self.active_page_index].tab_id),
+            "activeUrl": self.pages[self.active_page_index].url,
         });
 
         // With pin-tab, closing the bound tab leaves the session unbound (page
@@ -2152,12 +2162,14 @@ impl BrowserManager {
     pub fn register_discovered_page(
         &mut self,
         target_id: &str,
+        opener_id: Option<String>,
         session_id: &str,
         url: String,
         title: String,
         target_type: String,
     ) -> bool {
         if let Some(p) = self.pages.iter_mut().find(|p| p.target_id == target_id) {
+            p.opener_id = opener_id;
             p.url = url;
             p.title = title;
             p.target_type = target_type;
@@ -2172,6 +2184,7 @@ impl BrowserManager {
                 tab_id,
                 label: None,
                 target_id: target_id.to_string(),
+                opener_id,
                 session_id: session_id.to_string(),
                 url,
                 title,
@@ -2538,6 +2551,7 @@ mod tests {
     fn test_should_track_popup_target_with_empty_url() {
         let target = TargetInfo {
             target_id: "popup-1".to_string(),
+            opener_id: Some("page-1".to_string()),
             target_type: "page".to_string(),
             title: String::new(),
             url: String::new(),
@@ -2552,6 +2566,7 @@ mod tests {
     fn test_should_not_track_internal_chrome_target() {
         let target = TargetInfo {
             target_id: "chrome-tab".to_string(),
+            opener_id: None,
             target_type: "page".to_string(),
             title: "New Tab".to_string(),
             url: "chrome://newtab/".to_string(),
@@ -2568,6 +2583,7 @@ mod tests {
             tab_id: 1,
             label: None,
             target_id: "popup-1".to_string(),
+            opener_id: None,
             session_id: "session-1".to_string(),
             url: String::new(),
             title: String::new(),
@@ -2575,6 +2591,7 @@ mod tests {
         }];
         let target = TargetInfo {
             target_id: "popup-1".to_string(),
+            opener_id: Some("page-1".to_string()),
             target_type: "page".to_string(),
             title: "Popup".to_string(),
             url: "https://example.com/popup".to_string(),
@@ -2585,6 +2602,7 @@ mod tests {
         assert!(update_page_target_info_in_pages(&mut pages, &target));
         assert_eq!(pages[0].url, "https://example.com/popup");
         assert_eq!(pages[0].title, "Popup");
+        assert_eq!(pages[0].opener_id.as_deref(), Some("page-1"));
     }
 
     #[test]
@@ -3027,6 +3045,7 @@ mod tests {
             tab_id,
             label: None,
             target_id: target_id.to_string(),
+            opener_id: None,
             session_id: format!("session-{}", tab_id),
             url: url.to_string(),
             title: String::new(),
@@ -3635,6 +3654,7 @@ mod tests {
 
         let newly_added = mgr.register_discovered_page(
             TARGET_B,
+            None,
             "session-b",
             "https://popup.example".to_string(),
             String::new(),
@@ -3661,6 +3681,7 @@ mod tests {
         );
         let newly_added = mgr.register_discovered_page(
             TARGET_B,
+            None,
             "session-b",
             "https://foreign.example".to_string(),
             String::new(),
@@ -3742,6 +3763,7 @@ mod tests {
         // the session is gone.
         let newly_added = mgr.register_discovered_page(
             TARGET_B,
+            None,
             "session-b",
             "https://foreign.example".to_string(),
             String::new(),
@@ -3778,6 +3800,7 @@ mod tests {
 
         let newly_added = mgr.register_discovered_page(
             TARGET_A,
+            Some("opener-a".to_string()),
             "session-a",
             "https://mine.example/updated".to_string(),
             "Updated Title".to_string(),
@@ -3797,6 +3820,11 @@ mod tests {
             mgr.bound_target_id(),
             Some(TARGET_A),
             "binding must be unaffected by a metadata-only update"
+        );
+        assert_eq!(
+            mgr.pages_list()[0].opener_id.as_deref(),
+            Some("opener-a"),
+            "a metadata update must preserve popup opener identity"
         );
     }
 

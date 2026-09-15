@@ -291,6 +291,12 @@ Pending confirmations auto-deny after 60 seconds.
 
 ## Output Length Limits
 
+## Codegen artifacts
+
+`codegen` captures typed values verbatim so generated Recorder flows and Playwright specs can replay the original interaction. This includes credentials entered into password fields, selected values, and upload paths. Review capture warnings and generated files before you share or commit them. The in-progress append-only journal is stored with owner-only permissions in the daemon socket directory, but another process running as the same local account can still read it. A successful stop removes the journal. Use `codegen discard` to remove an unfinished, damaged, or cleanup-pending journal.
+
+The status and stop responses count typed-value and confirmed-password warnings as security warnings. The stop response always gives a typed-value warning when the flow contains fill, set value, type, select, or upload. It gives a stronger warning when the target is a confirmed password input. These warnings do not include the captured value.
+
 Prevent context flooding by truncating large page outputs:
 
 ```bash

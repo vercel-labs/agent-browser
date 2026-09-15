@@ -110,6 +110,7 @@ pub struct TargetInfo {
     pub url: String,
     pub attached: Option<bool>,
     pub browser_context_id: Option<String>,
+    pub opener_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
