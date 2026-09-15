@@ -149,10 +149,10 @@ pub async fn take_screenshot(
         Vec::new()
     };
 
-    let ext = if options.format == "jpeg" {
-        "jpg"
-    } else {
-        "png"
+    let ext = match options.format.as_str() {
+        "jpeg" => "jpg",
+        "webp" => "webp",
+        _ => "png",
     };
     let path = save_screenshot(
         &base64,
@@ -177,7 +177,7 @@ async fn capture_screenshot_base64(
 ) -> Result<String, String> {
     let mut params = CaptureScreenshotParams {
         format: Some(options.format.clone()),
-        quality: if options.format == "jpeg" {
+        quality: if options.format == "jpeg" || options.format == "webp" {
             options.quality.or(Some(80))
         } else {
             None
