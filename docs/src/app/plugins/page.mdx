@@ -337,6 +337,7 @@ A browser provider plugin receives `browser.launch` and returns a CDP URL:
   "browser": {
     "cdpUrl": "ws://127.0.0.1:9222/devtools/browser/session",
     "directPage": false,
+    "existingBrowser": false,
     "metadata": {
       "sessionId": "provider-session-id"
     },
@@ -354,6 +355,18 @@ agent-browser --provider cloud-browser open https://example.com
 ```
 
 If `cleanup` is returned and connection fails, agent-browser later sends it back as the request body for `browser.close`.
+
+`existingBrowser` is an optional boolean that defaults to `false`. Set it to `true` when the provider borrows a browser managed by the user. agent-browser then rejects profile/state/restore, tab pinning, domain containment, and incompatible launch options, and closing the session releases control while preserving the user's browser. This describes ownership independently of the endpoint shape selected by `directPage`. The provider's `browser.close` handler must release its connection without closing the user's browser.
+
+The optional [Chrome extension provider](/providers/chrome-extension) uses this contract to control one tab explicitly authorized by the user, without a debugging port or profile copy. It currently uses a local build and an unpacked extension. Its setup/status operations use normal plugin commands:
+
+```bash
+agent-browser plugin run chrome-extension chrome-extension.setup --payload '{"session":"work"}'
+agent-browser plugin run chrome-extension chrome-extension.status --payload '{"session":"work"}'
+agent-browser --provider chrome-extension --session work snapshot -i
+```
+
+Management commands must include the session in the payload because `plugin run` does not inject the global `--session`. Use the same namespace for management and browser commands. MCP uses the existing `agent_browser_plugin_run` tool and normal browser tools through the canonical CLI parser, so there are no separate extension-specific MCP tools.
 
 ## Launch mutator plugin
 

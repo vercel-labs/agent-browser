@@ -141,6 +141,57 @@ fn build_provider_launch_command(provider: &str, flags: &Flags) -> serde_json::V
     attach_allowed_domains_to_launch_command(&mut launch_cmd, flags);
     attach_restore_config_to_command(&mut launch_cmd, flags);
     attach_ca_cert_to_launch_command(&mut launch_cmd, flags);
+    attach_pin_tab_to_command(&mut launch_cmd, flags);
+    // Preserve effective options for core preflight. The provider protocol
+    // separately allowlists the small set of non-secret launch hints.
+    if flags.headed || flags.cli_headed || flags.headed_configured {
+        launch_cmd["headless"] = json!(!flags.headed);
+    }
+    for (key, value) in [
+        ("executablePath", &flags.executable_path),
+        ("profile", &flags.profile),
+        ("storageState", &flags.state),
+        ("userAgent", &flags.user_agent),
+        ("downloadPath", &flags.download_path),
+        ("engine", &flags.engine),
+    ] {
+        if let Some(value) = value {
+            launch_cmd[key] = json!(value);
+        }
+    }
+    if let Some(proxy) = &flags.proxy {
+        let parsed = parse_proxy(proxy);
+        launch_cmd["proxy"] = json!({ "server": parsed.server, "username": parsed.username, "password": parsed.password, "bypass": flags.proxy_bypass });
+    } else if let Some(bypass) = &flags.proxy_bypass {
+        launch_cmd["proxy"] = json!({ "bypass": bypass });
+    }
+    if let Some(args) = &flags.args {
+        launch_cmd["args"] = json!(args
+            .split([',', '\n'])
+            .map(str::trim)
+            .filter(|arg| !arg.is_empty())
+            .collect::<Vec<_>>());
+    }
+    if !flags.extensions.is_empty() {
+        launch_cmd["extensions"] = json!(flags.extensions);
+    }
+    if flags.allow_file_access {
+        launch_cmd["allowFileAccess"] = json!(true);
+    }
+    if flags.ignore_https_errors {
+        launch_cmd["ignoreHTTPSErrors"] = json!(true);
+    }
+    if flags.webgpu || flags.cli_webgpu {
+        launch_cmd["webgpu"] = json!(flags.webgpu);
+    }
+    if flags.no_xvfb {
+        launch_cmd["noXvfb"] = json!(true);
+    }
+    apply_hide_scrollbars_launch_option(
+        &mut launch_cmd,
+        flags.cli_hide_scrollbars || flags.hide_scrollbars_configured,
+        flags.hide_scrollbars,
+    );
 
     if let Some(ref cs) = flags.color_scheme {
         launch_cmd["colorScheme"] = json!(cs);
@@ -1585,6 +1636,11 @@ fn main() {
     // Send plugin config with commands so an already-running daemon can use
     // current config without a restart. The daemon strips this from stream
     // broadcasts before observers see the command payload.
+    if cmd.get("action").and_then(serde_json::Value::as_str) == Some("launch") {
+        if let Some(provider) = &flags.provider {
+            cmd = build_provider_launch_command(provider, &flags);
+        }
+    }
     attach_plugins_to_command(&mut cmd, &flags.plugins);
 
     attach_pin_tab_to_command(&mut cmd, &flags);
@@ -1885,7 +1941,12 @@ fn main() {
     }
 
     // Launch with cloud provider if -p flag is set.
-    if let Some(ref provider) = flags.provider {
+    if let Some(provider) = flags.provider.as_ref().filter(|_| {
+        !matches!(
+            cmd.get("action").and_then(serde_json::Value::as_str),
+            Some("launch" | "close")
+        )
+    }) {
         let launch_cmd = build_provider_launch_command(provider, &flags);
 
         let err = match send_command(launch_cmd, &flags.session) {
@@ -2455,6 +2516,7 @@ mod tests {
     fn neutral_launch_config_flags() -> Flags {
         let mut flags = parse_flags(&[]);
         flags.headed = false;
+        flags.headed_configured = false;
         flags.cli_headed = false;
         flags.executable_path = None;
         flags.profile = None;
@@ -2467,6 +2529,7 @@ mod tests {
         flags.clear_ca_cert = false;
         flags.allow_file_access = false;
         flags.hide_scrollbars = true;
+        flags.hide_scrollbars_configured = false;
         flags.cli_hide_scrollbars = false;
         flags.webgpu = false;
         flags.cli_webgpu = false;
@@ -2517,6 +2580,54 @@ mod tests {
         let mut disabled_cmd = json!({ "action": "launch" });
         attach_pin_tab_to_command(&mut disabled_cmd, &flags);
         assert_eq!(disabled_cmd["pinTab"], false);
+    }
+
+    #[test]
+    fn existing_browser_provider_envelope_preserves_core_preflight_options() {
+        let mut flags = neutral_launch_config_flags();
+        flags.profile = Some("private-profile".to_string());
+        flags.state = Some("private-state.json".to_string());
+        flags.proxy = Some("http://user:private-password@localhost:8080".to_string());
+        flags.executable_path = Some("/custom/chrome".to_string());
+        flags.args = Some("--first,--second".to_string());
+        flags.user_agent = Some("fixture-agent".to_string());
+        flags.pin_tab = true;
+        let cmd = build_provider_launch_command("borrowed", &flags);
+        assert_eq!(cmd["provider"], "borrowed");
+        assert_eq!(cmd["profile"], "private-profile");
+        assert_eq!(cmd["storageState"], "private-state.json");
+        assert_eq!(cmd["proxy"]["password"], "private-password");
+        assert_eq!(cmd["args"], json!(["--first", "--second"]));
+        assert_eq!(cmd["executablePath"], "/custom/chrome");
+        assert_eq!(cmd["userAgent"], "fixture-agent");
+        assert_eq!(cmd["pinTab"], true);
+        assert!(cmd.get("headless").is_none());
+        flags.cli_headed = true;
+        assert_eq!(
+            build_provider_launch_command("borrowed", &flags)["headless"],
+            true
+        );
+        flags.headed = true;
+        assert_eq!(
+            build_provider_launch_command("borrowed", &flags)["headless"],
+            false
+        );
+    }
+
+    #[test]
+    fn existing_browser_provider_keeps_explicit_config_headless_choice() {
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_HEADED"]);
+        guard.remove("AGENT_BROWSER_HEADED");
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, r#"{"headed":false}"#).unwrap();
+        let flags = parse_flags(&["--config".to_string(), config.to_string_lossy().to_string()]);
+        assert!(flags.headed_configured);
+        assert!(!flags.headed);
+        assert_eq!(
+            build_provider_launch_command("borrowed", &flags)["headless"],
+            true
+        );
     }
 
     #[test]

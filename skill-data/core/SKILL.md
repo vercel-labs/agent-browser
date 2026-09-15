@@ -131,7 +131,7 @@ agent-browser get count ".item"           # count matching elements
 
 Use `read [url]` when you need to consume documentation or other text pages rather than interact with a rendered UI. Omit the URL to read the rendered DOM of the active tab in the current browser session, including browser auth state and client-side updates. Explicit URL reads send `Accept: text/markdown`, try the same URL with `.md` appended when the first response is not markdown, walk ancestor paths toward `/` to find the nearest `llms.txt` for a matching docs link, print markdown/plain text when available, and fall back to readable text extracted from HTML without launching Chrome. Add `--filter <text>` to narrow a page to matching heading sections, `--outline` for compact headings on one page, `--llms index` for a compact nearest-ancestor `llms.txt` link list, and `--llms full` only when you explicitly need `llms-full.txt`. With `--llms` or `--require-md`, omitting the URL uses the active tab URL because those modes depend on HTTP resources. With `--llms` or `--outline`, `--filter <text>` narrows links, sections, or headings. Add `--require-md` when you specifically want to verify markdown negotiation, `--raw` when you need the response body unchanged, and `--json` when you need metadata such as `source` and `contentType`. Global safeguards such as `--allowed-domains`, `--content-boundaries`, and `--max-output` also apply to read fetches and output.
 
-For sessions that handle sensitive data, use `--allowed-domains` to restrict navigations and page-initiated network traffic. Supported Chromium sessions also disable `RTCPeerConnection` while the allowlist is active so WebRTC STUN, TURN, and related DNS traffic cannot bypass the HTTP filter. Dedicated and shared workers are guarded with a bootstrap wrapper; if a page CSP forbids that wrapper, the worker fails closed rather than running without the allowlist guard. Pre-existing CDP sessions, auto-connect, Chrome profiles, direct-page provider plugins, agent-browser restore or state-file replay, raw Chrome args that select profiles, restore sessions, or open startup pages, iOS, and Safari reject this option because agent-browser cannot install equivalent containment before page scripts run. This is browser-level containment, not an operating-system firewall; see [Trust boundaries](references/trust-boundaries.md) for deployment guidance.
+For sessions that handle sensitive data, use `--allowed-domains` to restrict navigations and page-initiated network traffic. Supported Chromium sessions also disable `RTCPeerConnection` while the allowlist is active so WebRTC STUN, TURN, and related DNS traffic cannot bypass the HTTP filter. Dedicated and shared workers are guarded with a bootstrap wrapper; if a page CSP forbids that wrapper, the worker fails closed rather than running without the allowlist guard. Pre-existing CDP sessions, auto-connect, Chrome profiles, direct-page or existing-browser provider plugins, agent-browser restore or state-file replay, raw Chrome args that select profiles, restore sessions, or open startup pages, iOS, and Safari reject this option because agent-browser cannot install equivalent containment before page scripts run. This is browser-level containment, not an operating-system firewall; see [Trust boundaries](references/trust-boundaries.md) for deployment guidance.
 
 ## Interacting
 
@@ -262,6 +262,22 @@ agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"...","url"
 ```
 
 `plugin run` is for `command.run` and custom capabilities. Core capabilities and protocol request types use their dedicated command paths.
+
+### Use an existing signed-in Chrome tab
+
+With the optional `@agent-browser/chrome-extension-provider` package configured, the user authorizes one exact tab in the extension. Then use the normal snapshot-and-ref loop on that tab:
+
+```bash
+agent-browser plugin run chrome-extension chrome-extension.setup --payload '{"session":"work"}'
+# The user loads extensionPath, pastes pairingCode, and authorizes the tab in Chrome.
+agent-browser --provider chrome-extension --session work snapshot -i
+agent-browser --provider chrome-extension --session work click @e1
+agent-browser --provider chrome-extension --session work close
+```
+
+Setup/status require an explicit `session` payload; `plugin run` does not inject `--session`. Reuse the same namespace for all commands. The extension uses the user's Chrome profile without a debugging port or profile copy. `close` releases control and preserves the tab. After Stop or disconnection, ask the user to authorize again and take a fresh snapshot; never choose a replacement tab automatically.
+
+This provider controls one tab and its frames. It rejects new tabs, cross-tab switching, browser contexts, `--pin-tab`, profile/state/restore options, `--allowed-domains`, and browser launch settings. Cookies and origin storage still belong to the user's shared Chrome profile. For local installation, MCP, and readiness checks, see [references/chrome-extension.md](references/chrome-extension.md).
 
 ### Persist session across runs
 
@@ -402,6 +418,8 @@ agent-browser snapshot -i
 agent-browser frame main     # back to main frame
 ```
 
+`eval` also runs in the selected frame. Use `frame main` to evaluate in the top-level page again; the top-level page is the default when no frame is selected.
+
 ### Dialogs
 
 `alert` and `beforeunload` are auto-accepted so agents never block. For `confirm` and `prompt`:
@@ -474,6 +492,7 @@ EOF
 
 ```bash
 --session <name>        # isolated browser session
+--provider <name>       # built-in provider or configured browser provider plugin
 --json                  # JSON output (for machine parsing)
 --headed                # show the window (default is headless)
 --webgpu                # enable WebGPU (software Vulkan on Linux, no GPU needed)
@@ -560,6 +579,7 @@ That pulls in:
 - `references/authentication.md` — auth vault, credential plugins, credential handling
 - `references/trust-boundaries.md` — safety rules for driving a real browser
 - `references/session-management.md` — persistence, multi-session workflows
+- `references/chrome-extension.md` — authorize and control an existing Chrome tab
 - `references/profiling.md` — Chrome DevTools tracing and profiling
 - `references/video-recording.md` — video capture options
 - `references/streaming.md` covers live viewport streaming, Chrome active main-frame URL updates, remote input, per-client frame rate, and the encoding vars that set bandwidth cost

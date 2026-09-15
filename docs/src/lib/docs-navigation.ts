@@ -60,6 +60,7 @@ export const navigation: NavSection[] = [
       { name: "Browser Use", href: "/providers/browser-use" },
       { name: "Browserbase", href: "/providers/browserbase" },
       { name: "Browserless", href: "/providers/browserless" },
+      { name: "Chrome Extension", href: "/providers/chrome-extension" },
       { name: "Kernel", href: "/providers/kernel" },
       {
         name: "Remote Agent Browser",

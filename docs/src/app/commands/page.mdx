@@ -30,7 +30,7 @@ agent-browser screenshot --screenshot-dir ./shots    # Save to custom directory
 agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
 agent-browser pdf <path>              # Save page as PDF
 agent-browser snapshot                # Accessibility tree with refs
-agent-browser eval <js>               # Run JavaScript
+agent-browser eval <js>               # Run JavaScript in the selected frame
 agent-browser connect <port|url>      # Connect to browser via CDP
 agent-browser stream enable [--port <port>]  # Start runtime WebSocket streaming
 agent-browser webmcp list                     # List experimental page tools
@@ -294,6 +294,8 @@ agent-browser frame main              # Return to main frame
 ```
 
 The `frame` command accepts element refs (`@e3`), CSS selectors (`"#my-iframe"`), or frame name/URL.
+
+`eval` runs in the selected frame. With no frame selected, or after `frame main`, it runs in the top-level page.
 
 ## Dialogs
 

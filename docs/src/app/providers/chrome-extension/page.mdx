@@ -1,0 +1,100 @@
+# Chrome Extension
+
+The user authorizes one existing Chrome tab in the extension, and agent-browser runs normal commands on that signed-in page; the user chooses the tab and can stop control at any time. Chrome keeps its existing profile, with no debugging port or profile copy.
+
+The optional `@agent-browser/chrome-extension-provider` package requires Node.js 24+. The default CLI and daemon remain native Rust. The unpacked extension declares Chrome 125 as its minimum for the child-session debugger API; this is an API requirement, not a claim that every version and platform has been verified.
+
+## Build and register
+
+Until the package is published to npm, build it locally from the agent-browser repository root:
+
+```bash
+pnpm install
+pnpm --filter @agent-browser/chrome-extension-provider build
+```
+
+Use the agent-browser CLI built from the same checkout; see [From source](/installation#from-source). Add the following entry to the `plugins` array in `agent-browser.json`, preserving other plugins and replacing the path with the absolute path to your built plugin:
+
+```json
+{
+  "plugins": [
+    {
+      "name": "chrome-extension",
+      "command": "node",
+      "args": ["/absolute/path/to/agent-browser/packages/@agent-browser/chrome-extension-provider/dist/plugin.js"],
+      "capabilities": ["browser.provider", "command.run"]
+    }
+  ]
+}
+```
+
+## Authorize and use a tab
+
+```bash
+agent-browser plugin run chrome-extension chrome-extension.setup --payload '{"session":"work"}'
+```
+
+Setup returns immediately with `extensionPath`, a one-time `pairingCode`, and its expiration time. In the Chrome profile containing your tab:
+
+1. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select `extensionPath`.
+2. Open the **Agent Browser** extension and paste the complete `pairingCode` into its setup page.
+3. Check the displayed session and select the exact tab to authorize.
+
+Keep the pairing code private. Run setup again if it expires. Once the user authorizes the tab, use the normal snapshot-and-ref workflow:
+
+```bash
+agent-browser --provider chrome-extension --session work snapshot -i
+agent-browser --provider chrome-extension --session work fill @e1 "Draft text"
+agent-browser --provider chrome-extension --session work screenshot page.png
+agent-browser --provider chrome-extension --session work close
+```
+
+Use refs from the latest snapshot. `open <url>` navigates the authorized tab. `close` releases control and leaves Chrome, the tab, and its unsaved page state open. The extension provides **Stop** for the user to end control directly.
+
+Setup/status payloads must contain the session explicitly: `plugin run` does not inject the global `--session`. If using `--namespace` or `AGENT_BROWSER_NAMESPACE`, use the same value for setup, status, and browser commands. For example:
+
+```bash
+export AGENT_BROWSER_NAMESPACE=my-project
+agent-browser plugin run chrome-extension chrome-extension.setup --payload '{"session":"work"}'
+# Authorize the tab in the extension, then:
+agent-browser --provider chrome-extension --session work snapshot -i
+```
+
+## Scope
+
+One session controls one authorized tab and its frames. Other tabs, popups, and windows are not automatically authorized, and only one session can control a tab at a time. Creating tabs or browser contexts and switching to other tabs are unsupported. The core `tab close` rule rejects closing the last controlled tab; close it in Chrome when needed.
+
+Profile/state/restore options, `--pin-tab`, `--allowed-domains`, and launch-only settings such as executable paths, Chrome arguments, extension loading, launch proxies, headless mode, and non-Chrome engines are unsupported. Remove conflicting settings from flags, environment, or config before connecting. The default idle timeout exempts this user-managed browser; an explicit timeout releases control.
+
+Authorization limits debugger targets and cookie requests to the authorized page's scope. The page still uses the original Chrome profile, so it has no separate cookie jar or origin sandbox. Navigation and page scripts retain Chrome's normal storage behavior, including shared storage visible to same-origin pages.
+
+Stop, debugger detachment, a closed tab, or a lost connection ends authorization. Run setup and let the user authorize again before continuing, then take a fresh snapshot. The provider never silently restores control or selects a replacement tab.
+
+## Status and troubleshooting
+
+```bash
+agent-browser plugin run chrome-extension chrome-extension.status --payload '{"session":"work"}'
+```
+
+Status includes the scope, connection state, authorized tab when available, and `nextStep`. `extensionInstalled` means the package contains built extension assets; it does not establish that Chrome has loaded them.
+
+Set `AGENT_BROWSER_CHROME_EXTENSION_DIR` to an absolute path for a separate provider state directory. It defaults to `~/.agent-browser/chrome-extension` and must be private to the current OS user. Use the same value for setup, status, and browser commands.
+
+- **Not connected or not authorized:** Check status, use the same session and namespace as setup, and complete the user authorization step.
+- **Expired pairing code or disconnected session:** Run setup again and authorize the tab in the extension.
+- **Tab busy:** Release the current controlling session before authorizing that tab for another session.
+- **Missing extension assets:** Rebuild the provider package and load the returned `extensionPath`.
+
+If a relay fails its health check while its process is still alive, setup reports `unresponsive` rather than starting a second relay. Stop that relay process before retrying. An interrupted setup may leave `startup.lock`; the error reports its path. Confirm that no setup process is running, remove only that lock file, and retry. Setup does not automatically take over a stale lock.
+
+## MCP
+
+Use the normal MCP server with the `core` and `debug` profiles:
+
+```bash
+agent-browser mcp --tools core,debug
+```
+
+Call `agent_browser_plugin_run` with `name: "chrome-extension"`, `requestType: "chrome-extension.setup"` or `"chrome-extension.status"`, and `payload: { "session": "work" }`. Browser tools use `session: "work"` and `extraArgs: ["--provider", "chrome-extension"]`. Set the same `namespace` on management and browser tools when using one.
+
+These tools delegate through the canonical CLI parser. There are no separate extension-specific MCP tools or server. See [Plugins](/plugins) for the provider protocol.

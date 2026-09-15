@@ -390,7 +390,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             let url = match first_url {
                 Some(u) => *u,
                 None if cmd == "open" => {
-                    return Ok(json!({ "id": id, "action": "launch", "headless": !flags.headed }));
+                    let mut launch = json!({ "id": id, "action": "launch" });
+                    if flags.headed || flags.cli_headed || flags.headed_configured {
+                        launch["headless"] = json!(!flags.headed);
+                    }
+                    return Ok(launch);
                 }
                 None => {
                     return Err(ParseError::MissingArguments {
@@ -3469,6 +3473,7 @@ mod tests {
             session: "test".to_string(),
             json: false,
             headed: false,
+            headed_configured: false,
             debug: false,
             headers: None,
             executable_path: None,
@@ -3488,6 +3493,7 @@ mod tests {
             clear_ca_cert: false,
             allow_file_access: false,
             hide_scrollbars: true,
+            hide_scrollbars_configured: false,
             webgpu: false,
             no_webmcp: false,
             no_xvfb: false,
@@ -4055,7 +4061,7 @@ mod tests {
     fn test_open_without_url_launches() {
         let cmd = parse_command(&args("open"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "launch");
-        assert_eq!(cmd["headless"], true);
+        assert!(cmd.get("headless").is_none());
     }
 
     #[test]

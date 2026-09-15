@@ -393,6 +393,8 @@ impl BrowserProcess {
 
 pub struct BrowserManager {
     pub client: Arc<CdpClient>,
+    /// Keep initialization events until the daemon takes over event handling.
+    bootstrap_events: Option<broadcast::Receiver<CdpEvent>>,
     browser_process: Option<BrowserProcess>,
     ws_url: String,
     pages: Vec<PageInfo>,
@@ -450,6 +452,14 @@ const LIGHTPANDA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 const FAILED_INITIALIZATION_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
 impl BrowserManager {
+    /// Transfer the receiver created before Target discovery and domain setup.
+    /// Auto-attach events may precede the response to the enabling command.
+    pub(crate) fn take_event_receiver(&mut self) -> broadcast::Receiver<CdpEvent> {
+        self.bootstrap_events
+            .take()
+            .unwrap_or_else(|| self.client.subscribe())
+    }
+
     /// True when a *default* idle timeout must not close this browser:
     /// a headed window may be in direct human use outside the daemon's socket
     /// commands and dashboard input, and a user-attached browser
@@ -523,6 +533,7 @@ impl BrowserManager {
         } else {
             let client = Arc::new(CdpClient::connect(&ws_url).await?);
             let mut manager = Self {
+                bootstrap_events: Some(client.subscribe()),
                 client,
                 browser_process: Some(process),
                 ws_url,
@@ -630,6 +641,7 @@ impl BrowserManager {
         let ws_url = resolve_cdp_url(url).await?;
         let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
         let mut manager = Self {
+            bootstrap_events: Some(client.subscribe()),
             client,
             browser_process: None,
             ws_url,
@@ -1225,18 +1237,28 @@ impl BrowserManager {
 
     pub async fn evaluate(&self, script: &str, _args: Option<Value>) -> Result<Value, String> {
         let session_id = self.active_session_id()?.to_string();
+        self.evaluate_in_context(script, &session_id, None).await
+    }
 
+    /// Evaluate in the default world of a page or selected frame. An explicit
+    /// context selects a same-process frame without creating an isolated world.
+    pub(super) async fn evaluate_in_context(
+        &self,
+        script: &str,
+        session_id: &str,
+        context_id: Option<i64>,
+    ) -> Result<Value, String> {
+        let mut params = json!({
+            "expression": script,
+            "returnByValue": true,
+            "awaitPromise": true,
+        });
+        if let Some(context_id) = context_id {
+            params["contextId"] = json!(context_id);
+        }
         let result: EvaluateResult = self
             .client
-            .send_command_typed(
-                "Runtime.evaluate",
-                &EvaluateParams {
-                    expression: script.to_string(),
-                    return_by_value: Some(true),
-                    await_promise: Some(true),
-                },
-                Some(&session_id),
-            )
+            .send_command_typed("Runtime.evaluate", &params, Some(session_id))
             .await?;
 
         if let Some(ref details) = result.exception_details {
@@ -2342,6 +2364,7 @@ async fn initialize_lightpanda_manager(
         };
 
         let mut manager = BrowserManager {
+            bootstrap_events: Some(client.subscribe()),
             client: Arc::new(client),
             browser_process: None,
             ws_url: ws_url.clone(),
@@ -3049,6 +3072,7 @@ mod tests {
         });
         let client = CdpClient::connect(&format!("ws://{}", addr)).await.unwrap();
         BrowserManager {
+            bootstrap_events: Some(client.subscribe()),
             client: Arc::new(client),
             browser_process: None,
             ws_url: format!("ws://{}", addr),
@@ -3102,6 +3126,7 @@ mod tests {
 
         let client = CdpClient::connect(&format!("ws://{}", addr)).await.unwrap();
         let mut manager = BrowserManager {
+            bootstrap_events: Some(client.subscribe()),
             client: Arc::new(client),
             browser_process: None,
             ws_url: format!("ws://{}", addr),
@@ -3154,6 +3179,15 @@ mod tests {
                             methods.push(method.to_string());
                             if ignore_browser_close && method == "Browser.close" {
                                 continue;
+                            }
+                            if method == "Target.setAutoAttach" {
+                                ws.send(Message::Text(json!({
+                                    "method": "Target.attachedToTarget",
+                                    "sessionId": "session-1",
+                                    "params": { "sessionId": "iframe-session", "targetInfo": {
+                                        "targetId": "iframe-target", "type": "iframe", "title": "", "url": "https://frame.example"
+                                    }, "waitingForDebugger": true }
+                                }).to_string())).await.unwrap();
                             }
                             let response = if attempt == 0 && method == fail_method {
                                 json!({"id": command["id"], "error": {
@@ -3400,6 +3434,36 @@ mod tests {
         assert!(!observed[0].iter().any(|method| method == "Browser.close"));
         assert!(observed[1].iter().any(|method| method == "Browser.close"));
         assert_initialization_process_reaped(dir.path());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_owned_engines_preserve_bootstrap_auto_attach_events() {
+        for lightpanda in [false, true] {
+            let (url, server) = initialization_server("", true, 1, false).await;
+            let (dir, options) = initialization_process(&url);
+            let mut manager = if lightpanda {
+                let process = tokio::task::spawn_blocking(move || launch_chrome(&options))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                initialize_lightpanda_manager(url, BrowserProcess::Chrome(process))
+                    .await
+                    .unwrap()
+            } else {
+                BrowserManager::launch(options, None).await.unwrap()
+            };
+            let mut events = manager.take_event_receiver();
+            let mut iframe_seen = false;
+            while let Ok(event) = events.try_recv() {
+                iframe_seen |= event.method == "Target.attachedToTarget"
+                    && event.params["sessionId"] == "iframe-session";
+            }
+            assert!(iframe_seen, "initialization dropped the child target event");
+            manager.close().await.unwrap();
+            server.await.unwrap();
+            assert_initialization_process_reaped(dir.path());
+        }
     }
 
     const TARGET_A: &str = "AAAA0000BBBB1111CCCC2222DDDD3333";

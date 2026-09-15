@@ -19,6 +19,8 @@ pub struct ProviderConnection {
     pub session: Option<ProviderSession>,
     /// If true, the WebSocket IS the page session (no Target.* commands).
     pub direct_page: bool,
+    /// The provider borrows a user-managed browser instead of owning its lifecycle.
+    pub existing_browser: bool,
     pub metadata: Option<Value>,
 }
 
@@ -55,6 +57,7 @@ pub async fn connect_provider_with_plugins_and_options(
                 ws_url: url,
                 session,
                 direct_page: false,
+                existing_browser: false,
                 metadata: None,
             })
         }
@@ -64,6 +67,7 @@ pub async fn connect_provider_with_plugins_and_options(
                 ws_url: url,
                 session,
                 direct_page: false,
+                existing_browser: false,
                 metadata: None,
             })
         }
@@ -73,6 +77,7 @@ pub async fn connect_provider_with_plugins_and_options(
                 ws_url: url,
                 session,
                 direct_page: false,
+                existing_browser: false,
                 metadata: None,
             })
         }
@@ -82,6 +87,7 @@ pub async fn connect_provider_with_plugins_and_options(
                 ws_url: url,
                 session,
                 direct_page: false,
+                existing_browser: false,
                 metadata: None,
             })
         }
@@ -91,6 +97,7 @@ pub async fn connect_provider_with_plugins_and_options(
                 ws_url: url,
                 session,
                 direct_page: false,
+                existing_browser: false,
                 metadata: None,
             })
         }
@@ -216,8 +223,11 @@ pub async fn connect_plugin_provider_with_plugins_and_options(
     );
 
     if let Some(Value::Object(command_options)) = launch_options {
-        for (key, value) in command_options {
-            plugin_launch_options.insert(key, value);
+        // Only these documented, non-secret options cross the plugin boundary.
+        for key in ["headed", "engine", "userAgent", "colorScheme"] {
+            if let Some(value) = command_options.get(key) {
+                plugin_launch_options.insert(key.to_string(), value.clone());
+            }
         }
     }
 
@@ -237,6 +247,7 @@ pub async fn connect_plugin_provider_with_plugins_and_options(
         ws_url: browser.cdp_url,
         session,
         direct_page: browser.direct_page,
+        existing_browser: browser.existing_browser,
         metadata: browser.metadata,
     })
 }
@@ -1085,13 +1096,23 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
                 "colorScheme": "dark",
                 "engine": "lightpanda",
                 "headed": true,
-                "userAgent": "cli-agent"
+                "userAgent": "cli-agent",
+                "proxy": { "password": "private-password" },
+                "storageState": "/private/state.json",
+                "rawCommand": "private-command"
             })),
         ))
         .unwrap();
 
         let request: Value =
             serde_json::from_str(&std::fs::read_to_string(request_path).unwrap()).unwrap();
+        assert!(request["request"]["launchOptions"].get("proxy").is_none());
+        assert!(request["request"]["launchOptions"]
+            .get("storageState")
+            .is_none());
+        assert!(request["request"]["launchOptions"]
+            .get("rawCommand")
+            .is_none());
         assert_eq!(request["request"]["launchOptions"]["colorScheme"], "dark");
         assert_eq!(request["request"]["launchOptions"]["engine"], "lightpanda");
         assert_eq!(request["request"]["launchOptions"]["headed"], true);

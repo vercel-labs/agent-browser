@@ -2193,7 +2193,8 @@ agent-browser eval - Execute JavaScript
 
 Usage: agent-browser eval [options] <script>
 
-Executes JavaScript code in the browser context and returns the result.
+Executes JavaScript in the selected frame's normal page context and returns the
+result. Use `frame main` to return to the top-level page.
 
 Options:
   -b, --base64         Decode script from base64 (avoids shell escaping issues)
@@ -2646,7 +2647,9 @@ agent-browser frame - Switch frame context
 
 Usage: agent-browser frame <selector|main>
 
-Switch to an iframe or back to the main frame.
+CSS selectors identify the iframe element directly, including unnamed frames.
+
+Switch to an iframe or back to the main frame for snapshots, interactions, and eval.
 
 Arguments:
   <selector>           CSS selector for iframe
@@ -3666,6 +3669,11 @@ Core capabilities and protocol request types use dedicated command paths.
 Use auth login for credential.read, --provider for browser.provider, and
 a local launch for launch.mutate.
 
+The optional chrome-extension provider controls one tab chosen in Chrome.
+Providers reporting existingBrowser reject process, profile/state/restore,
+allowed-domains and pin-tab options. close releases control and leaves Chrome
+open. Default idle shutdown is disabled; an explicit idle timeout still applies.
+
 Example config:
   {{
     "plugins": [
@@ -3686,6 +3694,9 @@ Examples:
   agent-browser plugin run captcha captcha.solve --payload '{{"siteKey":"...","url":"https://example.com"}}'
   agent-browser auth login my-app --credential-provider vault --item "My App"
   agent-browser --provider cloud-browser open https://example.com
+  agent-browser plugin run chrome-extension chrome-extension.setup --payload '{{"session":"work"}}'
+  agent-browser plugin run chrome-extension chrome-extension.status --payload '{{"session":"work"}}'
+  agent-browser --provider chrome-extension --session work snapshot -i
 "##
         }
 
@@ -4061,6 +4072,8 @@ Environment:
   AGENT_BROWSER_NO_AUTO_DIALOG   Disable automatic dismissal of alert/beforeunload dialogs
   AGENT_BROWSER_ENGINE           Browser engine: chrome (default), lightpanda
   AGENT_BROWSER_PLUGINS          JSON plugin registry override
+  AGENT_BROWSER_CHROME_EXTENSION_DIR
+                                 Optional Chrome extension provider private state directory (absolute path; default: ~/.agent-browser/chrome-extension)
   HTTP_PROXY / HTTPS_PROXY       Standard proxy env vars (fallback if AGENT_BROWSER_PROXY not set)
   ALL_PROXY                      SOCKS proxy (fallback for proxy)
   NO_PROXY                       Bypass proxy for hosts (fallback for proxy-bypass)
@@ -4090,6 +4103,7 @@ Examples:
   agent-browser --cdp 9222 snapshot      # Connect via CDP port
   agent-browser --cdp 9222 --pin-tab open example.com  # Pin session to its own tab
   agent-browser --auto-connect snapshot  # Auto-discover running Chrome
+  agent-browser --provider chrome-extension --session work snapshot -i  # Optional extension; authorize a tab first
   agent-browser stream enable            # Start runtime streaming on an auto-selected port
   agent-browser stream status            # Inspect runtime streaming state
   agent-browser --color-scheme dark open example.com  # Dark mode

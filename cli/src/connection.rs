@@ -517,10 +517,15 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     if opts.allow_file_access {
         cmd.env("AGENT_BROWSER_ALLOW_FILE_ACCESS", "1");
     }
-    cmd.env(
-        "AGENT_BROWSER_HIDE_SCROLLBARS",
-        if opts.hide_scrollbars { "1" } else { "0" },
-    );
+    // The browser already defaults to hidden scrollbars. Preserve whether
+    // the user selected this process option so borrowed providers can reject
+    // an explicit request without rejecting the implicit Chrome default.
+    if !opts.hide_scrollbars || env::var("AGENT_BROWSER_HIDE_SCROLLBARS").is_ok() {
+        cmd.env(
+            "AGENT_BROWSER_HIDE_SCROLLBARS",
+            if opts.hide_scrollbars { "1" } else { "0" },
+        );
+    }
     if opts.webgpu {
         cmd.env("AGENT_BROWSER_WEBGPU", "1");
     }
@@ -1282,6 +1287,31 @@ mod tests {
             no_auto_dialog,
             plugins: None,
         }
+    }
+
+    #[test]
+    fn existing_browser_daemon_env_preserves_scrollbar_default_provenance() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_HIDE_SCROLLBARS"]);
+        guard.remove("AGENT_BROWSER_HIDE_SCROLLBARS");
+        let mut options = test_daemon_options(None, false, None);
+        let mut command = Command::new("agent-browser");
+        apply_daemon_env(&mut command, "test", &options);
+        assert!(!command
+            .get_envs()
+            .any(|(key, _)| key == "AGENT_BROWSER_HIDE_SCROLLBARS"));
+        options.hide_scrollbars = false;
+        apply_daemon_env(&mut command, "test", &options);
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| key == "AGENT_BROWSER_HIDE_SCROLLBARS"
+                && value == Some(std::ffi::OsStr::new("0"))));
+        guard.set("AGENT_BROWSER_HIDE_SCROLLBARS", "0");
+        options.hide_scrollbars = true;
+        apply_daemon_env(&mut command, "test", &options);
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| key == "AGENT_BROWSER_HIDE_SCROLLBARS"
+                && value == Some(std::ffi::OsStr::new("1"))));
     }
 
     #[test]

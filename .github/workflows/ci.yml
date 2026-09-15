@@ -8,6 +8,35 @@ on:
   workflow_dispatch:
 
 jobs:
+  chrome-extension-provider:
+    name: Chrome Extension Provider (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install provider dependencies
+        run: pnpm install --filter @agent-browser/chrome-extension-provider... --frozen-lockfile
+
+      - name: Build and test provider contracts
+        run: pnpm --filter @agent-browser/chrome-extension-provider test
+
+      - name: Verify standalone packed installation
+        run: pnpm --filter @agent-browser/chrome-extension-provider test:pack
+
   version-sync:
     name: Version Sync Check
     runs-on: ubuntu-latest
