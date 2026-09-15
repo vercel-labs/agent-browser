@@ -75,6 +75,7 @@ const TOOL_MOUSE_DOWN: &str = "agent_browser_mouse_down";
 const TOOL_MOUSE_UP: &str = "agent_browser_mouse_up";
 const TOOL_MOUSE_WHEEL: &str = "agent_browser_mouse_wheel";
 const TOOL_SET_VIEWPORT: &str = "agent_browser_set_viewport";
+const TOOL_SET_POSITION: &str = "agent_browser_set_position";
 const TOOL_SET_DEVICE: &str = "agent_browser_set_device";
 const TOOL_SET_GEO: &str = "agent_browser_set_geo";
 const TOOL_SET_OFFLINE: &str = "agent_browser_set_offline";
@@ -497,6 +498,7 @@ const MOBILE_PROFILE_TOOLS: &[&str] = &[
     TOOL_MOUSE_UP,
     TOOL_MOUSE_WHEEL,
     TOOL_SET_VIEWPORT,
+    TOOL_SET_POSITION,
     TOOL_SET_DEVICE,
     TOOL_SET_GEO,
     TOOL_SET_MEDIA,
@@ -1141,6 +1143,13 @@ fn parity_tools() -> Vec<Value> {
             "Set viewport size.",
             json!({ "width": int_schema(), "height": int_schema(), "scale": number_schema() }),
             &["width", "height"],
+        ),
+        tool(
+            TOOL_SET_POSITION,
+            "Set window position",
+            "Move the browser window to an exact screen position via CDP (Browser.setWindowBounds), bypassing OS-level clamping that affects window.moveTo().",
+            json!({ "x": int_schema(), "y": int_schema() }),
+            &["x", "y"],
         ),
         tool(
             TOOL_SET_DEVICE,
@@ -2251,6 +2260,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_MOUSE_UP => call_mouse_button(arguments, "up"),
         TOOL_MOUSE_WHEEL => call_mouse_wheel(arguments),
         TOOL_SET_VIEWPORT => call_set_viewport(arguments),
+        TOOL_SET_POSITION => call_set_position(arguments),
         TOOL_SET_DEVICE => call_one_string(arguments, "set device", "device"),
         TOOL_SET_GEO => call_set_geo(arguments),
         TOOL_SET_OFFLINE => call_set_bool(arguments, "offline", "enabled"),
@@ -2882,6 +2892,13 @@ fn call_set_viewport(arguments: &Value) -> Result<Value, ProtocolError> {
     if let Some(scale) = optional_number_string(arguments, "scale")? {
         args.push(scale);
     }
+    call_cli_tool(arguments, args, None)
+}
+
+fn call_set_position(arguments: &Value) -> Result<Value, ProtocolError> {
+    let x = required_number_string(arguments, "x")?;
+    let y = required_number_string(arguments, "y")?;
+    let args = vec!["set".to_string(), "position".to_string(), x, y];
     call_cli_tool(arguments, args, None)
 }
 

@@ -2411,6 +2411,7 @@ Configures various browser settings and emulation options.
 
 Settings:
   viewport <w> <h> [scale]   Set viewport size (scale = deviceScaleFactor, e.g. 2 for retina)
+  position <x> <y>           Move window to exact screen position via CDP (bypasses OS clamping)
   device <name>              Emulate device (e.g., "iPhone 12")
   geo <lat> <lng>            Set geolocation
   offline [on|off]           Toggle offline mode; off restores the new-tab default
@@ -2426,6 +2427,7 @@ Global Options:
 Examples:
   agent-browser set viewport 1920 1080
   agent-browser set viewport 1920 1080 2    # 2x retina
+  agent-browser set position 100 100        # Move window via CDP (bypasses OS clamping)
   agent-browser set device "iPhone 12"
   agent-browser set geo 37.7749 -122.4194
   agent-browser set offline on

@@ -1851,6 +1851,46 @@ impl BrowserManager {
         Ok(())
     }
 
+    /// Move the browser window to an exact screen position via CDP.
+    ///
+    /// JS `window.moveTo()` is subject to OS window-manager clamping — on
+    /// macOS, requested coordinates near the menu bar or edge snap zones get
+    /// silently adjusted (e.g. a requested (840, 0) landing at (807, 0)).
+    /// `Browser.setWindowBounds` operates at the browser-process level and
+    /// bypasses that clamping, landing on the exact requested coordinates.
+    pub async fn set_window_position(&self, x: i32, y: i32) -> Result<(), String> {
+        let target_id = self.active_target_id()?;
+        let window_info = self
+            .client
+            .send_command(
+                "Browser.getWindowForTarget",
+                Some(json!({ "targetId": target_id })),
+                None,
+            )
+            .await?;
+
+        let window_id = window_info
+            .get("windowId")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| "Browser.getWindowForTarget did not return a windowId".to_string())?;
+
+        self.client
+            .send_command(
+                "Browser.setWindowBounds",
+                Some(json!({
+                    "windowId": window_id,
+                    "bounds": {
+                        "left": x,
+                        "top": y,
+                    },
+                })),
+                None,
+            )
+            .await?;
+
+        Ok(())
+    }
+
     pub async fn set_user_agent(&self, user_agent: &str) -> Result<(), String> {
         let session_id = self.active_session_id()?;
         self.client

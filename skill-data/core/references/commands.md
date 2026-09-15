@@ -174,6 +174,7 @@ agent-browser find nth 2 "a" hover
 ```bash
 agent-browser set viewport 1920 1080          # Set viewport size
 agent-browser set viewport 1920 1080 2        # 2x retina (same CSS size, higher res screenshots)
+agent-browser set position 100 100            # Move window via CDP (bypasses OS window-manager clamping)
 agent-browser set device "iPhone 14"          # Emulate device
 agent-browser set geo 37.7749 -122.4194       # Set geolocation (alias: geolocation)
 agent-browser set offline on                  # Toggle offline mode
