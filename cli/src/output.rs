@@ -1876,6 +1876,45 @@ Examples:
   agent-browser upload @e3 ./image1.png ./image2.png
 "##
         }
+        "drop" => {
+            r##"
+agent-browser drop - Drop files onto an element
+
+Usage: agent-browser drop <selector> <files...>
+
+Dispatches a drop event carrying the given files at an element, for drop zones
+that have no file input for `upload` to target. The page sees real File objects
+on `event.dataTransfer.files`; the event itself is synthesized, so
+`event.isTrusted` is false.
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser drop "#drop-zone" ./report.pdf
+  agent-browser drop @e4 ./image1.png ./image2.png
+"##
+        }
+        "paste" => {
+            r##"
+agent-browser paste - Paste a file or image at an element
+
+Usage: agent-browser paste <selector> --file <path>
+
+Dispatches a paste event whose clipboard carries the file, so handlers reading
+`event.clipboardData.items[i].getAsFile()` receive it. Pairs with `drop` for the
+image-paste flow; `clipboard paste` remains the plain text path.
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser paste "#editor" --file ./screenshot.png
+  agent-browser paste @e7 --file ./clip.gif
+"##
+        }
         "download" => {
             r##"
 agent-browser download - Download a file by clicking an element
@@ -3733,6 +3772,8 @@ Core Commands:
   uncheck <sel>              Uncheck checkbox
   select <sel> <val...>      Select dropdown by value or visible label
   drag <src> <dst>           Drag and drop
+  drop <sel> <files...>      Drop files onto an element
+  paste <sel> --file <path>  Paste a file or image at an element
   upload <sel> <files...>    Upload files
   download <sel> <path>      Download file by clicking element
   scroll <dir> [px]          Scroll (up/down/left/right)

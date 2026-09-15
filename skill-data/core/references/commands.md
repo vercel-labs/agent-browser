@@ -71,6 +71,8 @@ agent-browser select @e1 "a" "b"  # Select multiple options
 agent-browser scroll down 500     # Scroll page (default: down 300px)
 agent-browser scrollintoview @e1  # Scroll element into view (alias: scrollinto)
 agent-browser drag @e1 @e2        # Drag and drop
+agent-browser drop @e1 file.pdf   # Drop file(s) onto an element (drop zones)
+agent-browser paste @e1 --file img.png  # Paste a file/image at an element
 agent-browser upload @e1 file.pdf # Upload files
 ```
 
