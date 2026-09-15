@@ -480,6 +480,8 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if opts.debug {
         cmd.env("AGENT_BROWSER_DEBUG", "1");
+    } else {
+        cmd.env_remove("AGENT_BROWSER_DEBUG");
     }
     if let Some(path) = opts.executable_path {
         cmd.env("AGENT_BROWSER_EXECUTABLE_PATH", path);
@@ -1285,12 +1287,35 @@ mod tests {
     }
 
     #[test]
+    fn test_debug_daemon_env_matches_resolved_option() {
+        for debug in [false, true] {
+            let mut opts = test_daemon_options(None, false, None);
+            opts.debug = debug;
+            let mut cmd = Command::new("agent-browser");
+            apply_daemon_env(&mut cmd, "debug-env-test", &opts);
+            let override_value = cmd
+                .get_envs()
+                .find(|(key, _)| *key == "AGENT_BROWSER_DEBUG")
+                .map(|(_, value)| value);
+            let expected = debug.then(|| std::ffi::OsStr::new("1"));
+            assert_eq!(override_value, Some(expected));
+        }
+    }
+
+    #[test]
     fn test_daemon_config_fingerprint_tracks_daemon_owned_options() {
         let domains = vec!["example.com".to_string()];
         let base = test_daemon_options(None, false, None);
+        let mut debug_changed = test_daemon_options(None, false, None);
+        debug_changed.debug = true;
         let idle_changed = test_daemon_options(Some("1000"), false, None);
         let dialog_changed = test_daemon_options(None, true, None);
         let domains_changed = test_daemon_options(None, false, Some(&domains));
+
+        assert_ne!(
+            daemon_config_fingerprint(&base),
+            daemon_config_fingerprint(&debug_changed)
+        );
 
         assert_ne!(
             daemon_config_fingerprint(&base),
