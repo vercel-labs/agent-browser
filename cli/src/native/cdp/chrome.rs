@@ -517,6 +517,14 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         // missing or restricted (VMs, containers, some cloud machines)
         // while preserving WebGL support.  Playwright uses the same flag.
         args.push("--enable-unsafe-swiftshader".to_string());
+        // Windows headless mode still creates a real top-level window
+        // (hidden from the window manager, but DWM keeps compositing its
+        // surface), which shows up as a blank, unclosable box at the default
+        // (10,10) position on the user's desktop.  Park the window offscreen
+        // so the ghost can never appear; other platforms have no window in
+        // headless mode and ignore the flag.  User-supplied positioning is
+        // appended later in `args` and wins ("later switches win").
+        args.push("--window-position=-32000,-32000".to_string());
     }
 
     if let Some(ref proxy) = options.proxy {
@@ -1910,6 +1918,12 @@ mod tests {
             .iter()
             .any(|a| a == "--enable-unsafe-swiftshader"));
         assert!(result.args.iter().any(|a| a == "--window-size=1280,720"));
+        // Windows headless still creates an (offscreen-parked) top-level window,
+        // so the offscreen position is part of the default headless arg set.
+        assert!(result
+            .args
+            .iter()
+            .any(|a| a == "--window-position=-32000,-32000"));
         // Temp dir created when no profile
         assert!(result.temp_user_data_dir.is_some());
         let dir = result.temp_user_data_dir.unwrap();
@@ -1931,6 +1945,11 @@ mod tests {
             .iter()
             .any(|a| a == "--enable-unsafe-swiftshader"));
         assert!(!result.args.iter().any(|a| a.starts_with("--window-size=")));
+        // Offscreen parking is headless-only: headed windows must appear normally.
+        assert!(!result
+            .args
+            .iter()
+            .any(|a| a.starts_with("--window-position=")));
         // Temp dir created when no profile
         assert!(result.temp_user_data_dir.is_some());
         let dir = result.temp_user_data_dir.unwrap();
@@ -2007,6 +2026,32 @@ mod tests {
         let result = build_chrome_args(&opts).unwrap();
         assert!(!result.args.iter().any(|a| a == "--window-size=1280,720"));
         assert!(result.args.iter().any(|a| a == "--start-maximized"));
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_user_window_position_appears_after_offscreen_default() {
+        let opts = LaunchOptions {
+            headless: true,
+            args: vec!["--window-position=100,200".to_string()],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        let ours = result
+            .args
+            .iter()
+            .position(|a| a == "--window-position=-32000,-32000");
+        let theirs = result
+            .args
+            .iter()
+            .position(|a| a == "--window-position=100,200");
+        // The default is present but the user switch is appended later, so
+        // Chrome applies the user's position ("later switches win").
+        assert!(ours.is_some());
+        assert!(theirs.is_some());
+        assert!(ours.unwrap() < theirs.unwrap());
         if let Some(ref dir) = result.temp_user_data_dir {
             let _ = std::fs::remove_dir_all(dir);
         }
