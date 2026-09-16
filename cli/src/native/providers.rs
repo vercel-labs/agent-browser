@@ -390,6 +390,14 @@ async fn connect_browser_use() -> Result<(String, Option<ProviderSession>), Stri
     Ok((ws_url, None))
 }
 
+fn kernel_profile_from_env() -> Option<Value> {
+    let profile = env::var("KERNEL_PROFILE_NAME").ok()?;
+    if profile.is_empty() {
+        return None;
+    }
+    Some(json!({ "name": profile, "save_changes": true }))
+}
+
 async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
     let api_key = env::var("KERNEL_API_KEY").ok();
     let endpoint =
@@ -414,12 +422,10 @@ async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
         "timeout_seconds": timeout_seconds,
     });
 
-    if let Ok(profile) = env::var("KERNEL_PROFILE_NAME") {
-        if !profile.is_empty() {
-            body.as_object_mut()
-                .unwrap()
-                .insert("profile".to_string(), json!(profile));
-        }
+    if let Some(profile) = kernel_profile_from_env() {
+        body.as_object_mut()
+            .unwrap()
+            .insert("profile".to_string(), profile);
     }
 
     let client = reqwest::Client::new();
@@ -878,6 +884,27 @@ mod tests {
         let result = rt.block_on(connect_provider("unknown-provider"));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Unknown provider"));
+    }
+
+    #[test]
+    fn test_kernel_profile_from_env_unset_or_empty() {
+        let guard = EnvGuard::new(&["KERNEL_PROFILE_NAME"]);
+        guard.remove("KERNEL_PROFILE_NAME");
+        assert_eq!(kernel_profile_from_env(), None);
+
+        guard.set("KERNEL_PROFILE_NAME", "");
+        assert_eq!(kernel_profile_from_env(), None);
+    }
+
+    #[test]
+    fn test_kernel_profile_from_env_is_object_not_string() {
+        let guard = EnvGuard::new(&["KERNEL_PROFILE_NAME"]);
+        guard.set("KERNEL_PROFILE_NAME", "my-profile");
+
+        assert_eq!(
+            kernel_profile_from_env(),
+            Some(json!({ "name": "my-profile", "save_changes": true })),
+        );
     }
 
     #[test]
