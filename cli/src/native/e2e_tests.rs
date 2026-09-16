@@ -12020,6 +12020,290 @@ async fn e2e_presentational_role_honors_selected_frame() {
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
 }
 
+/// Serve a page embedding a tab widget in three kinds of iframe: same-origin
+/// (`/same`), cross-origin but same-site on another port of localhost, which
+/// Chrome keeps in the parent's process (`/same-site`), and cross-site on
+/// 127.0.0.1, which gets its own out-of-process target (`/cross-site`). The
+/// widget's tabs are divs that are only interactive through cursor:pointer
+/// and click handlers. Returns the parent port and both server tasks.
+async fn start_iframe_widget_servers() -> (u16, [tokio::task::JoinHandle<()>; 2]) {
+    let parent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let child = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let parent_port = parent.local_addr().unwrap().port();
+    let child_port = child.local_addr().unwrap().port();
+
+    fn serve(listener: tokio::net::TcpListener, child_port: u16) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let path = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/");
+                    let frame_src = match path {
+                        "/same" => Some("/tabs".to_string()),
+                        "/same-site" => Some(format!("http://localhost:{child_port}/tabs")),
+                        "/cross-site" => Some(format!("http://127.0.0.1:{child_port}/tabs")),
+                        _ => None,
+                    };
+                    let body = match (path, frame_src) {
+                        (_, Some(src)) => format!(
+                            r#"<!doctype html><body><button>Parent button</button>
+<div style="cursor:pointer" onclick="1">Parent clickable div</div>
+<iframe id="f" src="{src}" width="600" height="200"></iframe></body>"#
+                        ),
+                        ("/tabs", None) => r#"<!doctype html><body style="margin:0">
+<div id="t1" style="cursor:pointer;display:inline-block;padding:8px" onclick="document.getElementById('out').textContent='QR tab'"><span>Scan QR</span></div>
+<div id="t2" style="cursor:pointer;display:inline-block;padding:8px"><span>Bank transfer</span></div>
+<button onclick="document.getElementById('out').textContent='Copied'">Copy</button>
+<p id="out">none</p>
+<script>document.getElementById('t2').addEventListener('click', () => { document.getElementById('out').textContent = 'Bank tab'; });</script>
+</body>"#
+                            .to_string(),
+                        _ => String::new(),
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.flush().await;
+                });
+            }
+        })
+    }
+
+    (
+        parent_port,
+        [serve(parent, child_port), serve(child, child_port)],
+    )
+}
+
+/// The ref on the first snapshot line for `label`, e.g. `generic "Scan QR"`
+/// or `Iframe`. Cursor-interactive entries take their label from the element
+/// text, so this reads the rendered tree rather than the refs map.
+fn snapshot_ref(snapshot: &Value, label: &str) -> Option<String> {
+    let prefix = format!("- {label} [ref=");
+    get_data(snapshot)["snapshot"]
+        .as_str()?
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix(prefix.as_str()))
+        .and_then(|rest| rest.split(']').next())
+        .map(|id| format!("@{id}"))
+}
+
+/// Cursor-interactive elements (cursor:pointer / onclick divs) inside an
+/// iframe must get refs, both in the parent's inline iframe expansion and
+/// after `frame <sel>`, and those refs must click the frame's element. The
+/// scan used to run in the top document only: frame content never got refs,
+/// and an out-of-process frame instead picked up the parent's clickable div.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_refs_cursor_interactive_elements_inside_iframes() {
+    let (port, servers) = start_iframe_widget_servers().await;
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(&json!({ "action": "launch", "headless": true }), &mut state).await,
+    );
+
+    for page in ["same-site", "same", "cross-site"] {
+        let url = format!("http://localhost:{port}/{page}");
+        assert_success(
+            &execute_command(&json!({ "action": "navigate", "url": url }), &mut state).await,
+        );
+
+        let snapshot = execute_command(
+            &json!({ "action": "snapshot", "interactive": true }),
+            &mut state,
+        )
+        .await;
+        assert_success(&snapshot);
+        let text = get_data(&snapshot)["snapshot"].as_str().unwrap_or_default();
+        for name in ["Scan QR", "Bank transfer"] {
+            assert!(
+                snapshot_ref(&snapshot, &format!("generic \"{name}\"")).is_some(),
+                "{page}: no ref for the iframe's clickable {name:?}:\n{text}"
+            );
+        }
+        for name in ["Parent clickable div", "Scan QR"] {
+            assert_eq!(
+                text.matches(name).count(),
+                1,
+                "{page}: {name:?} must be listed exactly once:\n{text}"
+            );
+        }
+
+        let scan_qr = snapshot_ref(&snapshot, "generic \"Scan QR\"").unwrap();
+        assert_success(
+            &execute_command(
+                &json!({ "action": "click", "selector": scan_qr }),
+                &mut state,
+            )
+            .await,
+        );
+
+        let iframe = snapshot_ref(&snapshot, "Iframe").expect("iframe ref");
+        assert_success(
+            &execute_command(
+                &json!({ "action": "frame", "selector": iframe }),
+                &mut state,
+            )
+            .await,
+        );
+        let resp = execute_command(
+            &json!({ "action": "gettext", "selector": "#out" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["text"], "QR tab", "{page}: click by ref");
+
+        let in_frame = execute_command(
+            &json!({ "action": "snapshot", "interactive": true }),
+            &mut state,
+        )
+        .await;
+        assert_success(&in_frame);
+        assert!(
+            snapshot_ref(&in_frame, "generic \"Bank transfer\"").is_some(),
+            "{page}: no ref for Bank transfer after selecting the frame: {}",
+            get_data(&in_frame)["snapshot"]
+        );
+
+        assert_success(&execute_command(&json!({ "action": "mainframe" }), &mut state).await);
+    }
+
+    let _ = execute_command(&json!({ "action": "close" }), &mut state).await;
+    servers.iter().for_each(|server| server.abort());
+}
+
+/// After `frame <sel>` selects a cross-origin frame that shares the page's
+/// process (same site, another port), selectors, counts and text locators
+/// must resolve in that frame. They used to go through the owner iframe's
+/// contentDocument, which is null for any cross-origin frame. Clicking a
+/// button in the frame by ref must also not report the frame's own content
+/// as covering it.
+#[tokio::test]
+#[ignore]
+async fn e2e_selected_same_site_cross_origin_frame_resolves_selectors() {
+    let (port, servers) = start_iframe_widget_servers().await;
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(&json!({ "action": "launch", "headless": true }), &mut state).await,
+    );
+
+    for page in ["same-site", "same", "cross-site"] {
+        let url = format!("http://localhost:{port}/{page}");
+        assert_success(
+            &execute_command(&json!({ "action": "navigate", "url": url }), &mut state).await,
+        );
+        let snapshot = execute_command(&json!({ "action": "snapshot" }), &mut state).await;
+        assert_success(&snapshot);
+        let copy = snapshot_ref(&snapshot, "button \"Copy\"").expect("copy button ref");
+        assert_success(
+            &execute_command(&json!({ "action": "click", "selector": copy }), &mut state).await,
+        );
+
+        // Select by CSS where the frame shares the page's frame tree; an
+        // out-of-process frame is selected by ref.
+        let frame_selector = if page == "cross-site" {
+            snapshot_ref(&snapshot, "Iframe").expect("iframe ref")
+        } else {
+            "#f".to_string()
+        };
+        assert_success(
+            &execute_command(
+                &json!({ "action": "frame", "selector": frame_selector }),
+                &mut state,
+            )
+            .await,
+        );
+
+        let resp = execute_command(
+            &json!({ "action": "gettext", "selector": "#out" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(
+            get_data(&resp)["text"],
+            "Copied",
+            "{page}: click Copy by ref"
+        );
+
+        let resp = execute_command(
+            &json!({ "action": "gettext", "selector": "body" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert!(
+            get_data(&resp)["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Bank transfer")),
+            "{page}: body text of the selected frame: {resp}"
+        );
+
+        let resp =
+            execute_command(&json!({ "action": "count", "selector": "div" }), &mut state).await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["count"], 2, "{page}: count in the frame");
+
+        let resp = execute_command(
+            &json!({ "action": "wait", "selector": "#t2", "state": "visible", "timeout": 5000 }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        assert_success(
+            &execute_command(
+                &json!({ "action": "getbytext", "text": "Bank transfer", "subaction": "click" }),
+                &mut state,
+            )
+            .await,
+        );
+        let resp = execute_command(
+            &json!({ "action": "gettext", "selector": "#out" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(
+            get_data(&resp)["text"],
+            "Bank tab",
+            "{page}: find text click"
+        );
+
+        assert_success(
+            &execute_command(&json!({ "action": "click", "selector": "#t1" }), &mut state).await,
+        );
+        let resp = execute_command(
+            &json!({ "action": "gettext", "selector": "#out" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(
+            get_data(&resp)["text"],
+            "QR tab",
+            "{page}: click by selector"
+        );
+
+        assert_success(&execute_command(&json!({ "action": "mainframe" }), &mut state).await);
+    }
+
+    let _ = execute_command(&json!({ "action": "close" }), &mut state).await;
+    servers.iter().for_each(|server| server.abort());
+}
+
 /// ARIA presentational-roles conflict resolution: role="none" on a focusable
 /// element (or one with global ARIA props) is ignored, so `find role none` must
 /// skip it but still match a truly presentational element. Force-red: drop the

@@ -6709,8 +6709,10 @@ async fn wait_for_function(
 }
 
 /// wait_for_selector inside a same-process iframe selected via `frame <sel>`:
-/// polls through the owner element's contentDocument, which stays correct
-/// even if the frame navigates (the getter re-resolves every poll).
+/// polls through the frame's own document. The document handle dies with its
+/// execution context when the frame navigates, so a failed poll re-resolves
+/// it. Works for cross-origin frames that share the page's process, where the
+/// owner's contentDocument is null.
 async fn wait_for_selector_in_frame(
     client: &super::cdp::client::CdpClient,
     session_id: &str,
@@ -6719,8 +6721,6 @@ async fn wait_for_selector_in_frame(
     state: &str,
     timeout_ms: u64,
 ) -> Result<(), String> {
-    let owner_object_id =
-        super::element::frame_owner_object_id(client, session_id, frame_id).await?;
     let sel = serde_json::to_string(selector).unwrap_or_default();
     let check = match state {
         "attached" => format!("!!doc.querySelector({sel})"),
@@ -6743,22 +6743,34 @@ async fn wait_for_selector_in_frame(
             }})()"#,
         ),
     };
-    let function = format!(
-        "function() {{ const doc = this.contentDocument; if (!doc) return false; return {check}; }}",
-    );
+    let function = format!("function() {{ const doc = this; return {check}; }}");
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+    let mut document: Option<String> = None;
     loop {
-        let result = client
-            .send_command(
-                "Runtime.callFunctionOn",
-                Some(json!({
-                    "objectId": owner_object_id,
-                    "functionDeclaration": function,
-                    "returnByValue": true,
-                })),
-                Some(session_id),
-            )
-            .await?;
+        if document.is_none() {
+            // A navigating frame briefly has no document to resolve; keep polling.
+            document = super::element::frame_document_object_id(client, session_id, frame_id)
+                .await
+                .ok();
+        }
+        let result = match document.as_deref() {
+            Some(object_id) => client
+                .send_command(
+                    "Runtime.callFunctionOn",
+                    Some(json!({
+                        "objectId": object_id,
+                        "functionDeclaration": function,
+                        "returnByValue": true,
+                    })),
+                    Some(session_id),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    document = None;
+                    Value::Null
+                }),
+            None => Value::Null,
+        };
         let satisfied = result
             .get("result")
             .and_then(|r| r.get("value"))
@@ -8201,7 +8213,13 @@ async fn handle_count(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .and_then(|v| v.as_str())
         .ok_or("Missing 'selector' parameter")?;
 
-    let count = super::element::get_element_count(&mgr.client, &session_id, selector).await?;
+    let count = super::element::get_element_count(
+        &mgr.client,
+        &session_id,
+        selector,
+        &state.iframe_sessions,
+    )
+    .await?;
     Ok(json!({ "count": count, "selector": selector }))
 }
 
@@ -9985,29 +10003,14 @@ async fn handle_presentational_getbyrole(
     let selector = "[data-agent-browser-located='true']";
     let action_result = execute_subaction(cmd, state, selector).await;
 
-    // Clean up the marker in whichever document it was set in.
-    if let Some(mgr) = state.browser.as_ref() {
-        if let Ok(top_session) = mgr.active_session_id() {
-            let top_session = top_session.to_string();
-            let _ = eval_body_in_active_frame(
-                mgr,
-                state.active_frame_id.as_deref(),
-                &top_session,
-                &state.iframe_sessions,
-                "(root) => { root.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located'); }",
-            )
-            .await;
-        }
-    }
-
+    clear_located_marker(state).await;
     action_result
 }
 
 /// Evaluate a `(root) => {...}` body against the active frame's document, or the
-/// top document when no frame is selected. Runtime.evaluate cannot target a
-/// same-origin child frame, so that case runs the body against the frame owner's
-/// contentDocument (as element resolution does); an OOPIF has its own session
-/// where `document` is already the frame document.
+/// top document when no frame is selected, and return its value. The body runs
+/// in the frame's own context (see `element::evaluate_in_frame`), so this works
+/// for same-origin, same-site cross-origin and out-of-process frames alike.
 async fn eval_body_in_active_frame(
     mgr: &BrowserManager,
     frame_id: Option<&str>,
@@ -10015,51 +10018,17 @@ async fn eval_body_in_active_frame(
     iframe_sessions: &HashMap<String, String>,
     body: &str,
 ) -> Result<Value, String> {
-    match frame_id {
-        Some(fid) if !iframe_sessions.contains_key(fid) => {
-            let owner =
-                super::element::frame_owner_object_id(&mgr.client, top_session, fid).await?;
-            let func = format!(
-                "function() {{ const d = this.contentDocument; if (!d) return null; return ({body})(d); }}"
-            );
-            let res = mgr
-                .client
-                .send_command(
-                    "Runtime.callFunctionOn",
-                    Some(serde_json::json!({
-                        "objectId": owner,
-                        "functionDeclaration": func,
-                        "returnByValue": true,
-                    })),
-                    Some(top_session),
-                )
-                .await?;
-            Ok(res
-                .get("result")
-                .and_then(|r| r.get("value"))
-                .cloned()
-                .unwrap_or(Value::Null))
-        }
-        _ => {
-            let session = frame_id
-                .and_then(|f| iframe_sessions.get(f))
-                .map(|s| s.as_str())
-                .unwrap_or(top_session);
-            let res: super::cdp::types::EvaluateResult = mgr
-                .client
-                .send_command_typed(
-                    "Runtime.evaluate",
-                    &super::cdp::types::EvaluateParams {
-                        expression: format!("({body})(document)"),
-                        return_by_value: Some(true),
-                        await_promise: Some(false),
-                    },
-                    Some(session),
-                )
-                .await?;
-            Ok(res.result.value.unwrap_or(Value::Null))
-        }
-    }
+    let (result, _) = super::element::evaluate_in_frame(
+        &mgr.client,
+        top_session,
+        frame_id,
+        iframe_sessions,
+        &format!("({body})(document)"),
+        true,
+        None,
+    )
+    .await?;
+    Ok(result.result.value.unwrap_or(Value::Null))
 }
 
 async fn handle_getbyrole(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -10350,18 +10319,17 @@ async fn handle_semantic_locator(
         }
     };
 
-    let result: super::cdp::types::EvaluateResult = mgr
-        .client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &super::cdp::types::EvaluateParams {
-                expression: query,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&session_id),
-        )
-        .await?;
+    // Locate in the selected frame, where execute_subaction resolves the marker.
+    let (result, _) = super::element::evaluate_in_frame(
+        &mgr.client,
+        &session_id,
+        state.active_frame_id.as_deref(),
+        &state.iframe_sessions,
+        &query,
+        true,
+        None,
+    )
+    .await?;
 
     if !result
         .result
@@ -10375,16 +10343,7 @@ async fn handle_semantic_locator(
 
     let selector = "[data-agent-browser-located='true']";
     let action_result = execute_subaction(cmd, state, selector).await;
-
-    if let Some(ref browser) = state.browser {
-        let _ = browser
-            .evaluate(
-                "document.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located')",
-                None,
-            )
-            .await;
-    }
-
+    clear_located_marker(state).await;
     action_result
 }
 
@@ -10436,18 +10395,17 @@ async fn handle_nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
         idx = index,
     );
 
-    let result: super::cdp::types::EvaluateResult = mgr
-        .client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &super::cdp::types::EvaluateParams {
-                expression: js,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&session_id),
-        )
-        .await?;
+    // Locate in the selected frame, where execute_subaction resolves the marker.
+    let (result, _) = super::element::evaluate_in_frame(
+        &mgr.client,
+        &session_id,
+        state.active_frame_id.as_deref(),
+        &state.iframe_sessions,
+        &js,
+        true,
+        None,
+    )
+    .await?;
 
     if !result
         .result
@@ -10464,17 +10422,27 @@ async fn handle_nth(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
 
     let located = "[data-agent-browser-located='true']";
     let action_result = execute_subaction(cmd, state, located).await;
-
-    if let Some(ref browser) = state.browser {
-        let _ = browser
-            .evaluate(
-                "document.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located')",
-                None,
-            )
-            .await;
-    }
-
+    clear_located_marker(state).await;
     action_result
+}
+
+/// Remove the `data-agent-browser-located` marker a locator set, from the same
+/// document it was set in (the selected frame, or the top document).
+async fn clear_located_marker(state: &DaemonState) {
+    let Some(mgr) = state.browser.as_ref() else {
+        return;
+    };
+    let Ok(session_id) = mgr.active_session_id() else {
+        return;
+    };
+    let _ = eval_body_in_active_frame(
+        mgr,
+        state.active_frame_id.as_deref(),
+        session_id,
+        &state.iframe_sessions,
+        "(root) => { root.querySelector('[data-agent-browser-located]')?.removeAttribute('data-agent-browser-located'); }",
+    )
+    .await;
 }
 
 async fn handle_find(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
