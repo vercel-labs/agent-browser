@@ -53,6 +53,10 @@ function getBinaryName() {
     case 'x86_64':
       archKey = 'x64';
       break;
+    case 'ppc64':
+    case 'ppc64le':
+      archKey = 'ppc64';
+      break;
     case 'arm64':
     case 'aarch64':
       archKey = 'arm64';
