@@ -32,6 +32,7 @@ import {
 import { Button } from "@/components/ui/button";
 import {
   currentFrameAtom,
+  currentFrameMetadataAtom,
   viewportWidthAtom,
   viewportHeightAtom,
   browserConnectedAtom,
@@ -123,6 +124,7 @@ function normalizeUrl(input: string): string {
 
 export function Viewport() {
   const frame = useAtomValue(currentFrameAtom);
+  const frameMetadata = useAtomValue(currentFrameMetadataAtom);
   const viewportWidth = useAtomValue(viewportWidthAtom);
   const viewportHeight = useAtomValue(viewportHeightAtom);
   const browserConnected = useAtomValue(browserConnectedAtom);
@@ -307,18 +309,28 @@ export function Viewport() {
   }, [offline, sessionName]);
 
   const toViewport = useCallback(
-    (e: React.MouseEvent): { x: number; y: number } | null => {
+    (e: React.MouseEvent | React.WheelEvent): { x: number; y: number } | null => {
       const canvas = canvasRef.current;
       if (!canvas) return null;
       const rect = canvas.getBoundingClientRect();
+      // CDP `Page.screencastFrame.metadata.offsetTop` is the gap between the
+      // screenshot's top edge and the page viewport's top edge. Subtract it
+      // before scaling so clicks land on the right row instead of one chrome
+      // bar below.
+      const offsetTop = frameMetadata?.offsetTop ?? 0;
+      const pageScale = frameMetadata?.pageScaleFactor || 1;
+      const offsetTopCss = (offsetTop / viewportHeight) * rect.height;
+      const contentHeight = Math.max(rect.height - offsetTopCss, 1);
       const scaleX = viewportWidth / rect.width;
-      const scaleY = viewportHeight / rect.height;
+      const scaleY = viewportHeight / contentHeight;
+      const xCss = e.clientX - rect.left;
+      const yCss = e.clientY - rect.top - offsetTopCss;
       return {
-        x: Math.round((e.clientX - rect.left) * scaleX),
-        y: Math.round((e.clientY - rect.top) * scaleY),
+        x: Math.round((xCss * scaleX) / pageScale),
+        y: Math.round((yCss * scaleY) / pageScale),
       };
     },
-    [viewportWidth, viewportHeight],
+    [viewportWidth, viewportHeight, frameMetadata],
   );
 
   const handleMouseEvent = useCallback(
