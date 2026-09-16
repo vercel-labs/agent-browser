@@ -214,6 +214,13 @@ export function useStreamSync(port: number) {
           );
           break;
 
+        case "clipboard":
+          // Copy bridge: mirror the remote clipboard into the local one.
+          if (msg.text != null) {
+            navigator.clipboard?.writeText(msg.text).catch(() => {});
+          }
+          break;
+
         case "error":
           break;
       }
