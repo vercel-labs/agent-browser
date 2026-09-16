@@ -60,6 +60,8 @@ agent-browser state load ./my-auth.json
 agent-browser open https://app.example.com/dashboard
 ```
 
+If a `localStorage` or `sessionStorage` write fails, state loading stops and returns secret-safe context including the storage type, origin, entry position, and byte lengths. It does not include the stored key or value. Because cookies and earlier storage entries may already be applied, retry from a fresh browser context after correcting the failure.
+
 This works for any site, including those with complex OAuth flows, SSO, or 2FA, as long as Chrome already has valid session cookies.
 
 > **Security note:** State files contain session tokens in plaintext. Add them to `.gitignore`, delete when no longer needed, and set `AGENT_BROWSER_ENCRYPTION_KEY` for encryption at rest. See [Security Best Practices](#security-best-practices).
