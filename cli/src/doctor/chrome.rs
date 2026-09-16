@@ -1,5 +1,5 @@
 //! Check the Chrome install: binary path, version, cache dirs, user-data
-//! dir, and the optional lightpanda engine.
+//! dir, and the optional lightpanda/aginxbrowser engines.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -109,6 +109,29 @@ pub(super) fn check(checks: &mut Vec<Check>) {
                     )
                     .with_fix("install lightpanda or unset AGENT_BROWSER_ENGINE"),
                 );
+            }
+        } else if engine == "aginxbrowser" {
+            // Resolve the binary the same way the launcher does (PATH plus
+            // ~/.local/bin), so doctor reflects what a launch would find.
+            match crate::native::cdp::aginxbrowser::find_aginxbrowser() {
+                Some(path) => checks.push(Check::new(
+                    "chrome.engine_aginxbrowser",
+                    category,
+                    Status::Pass,
+                    format!("AginxBrowser binary at {}", path.display()),
+                )),
+                None => checks.push(
+                    Check::new(
+                        "chrome.engine_aginxbrowser",
+                        category,
+                        Status::Fail,
+                        "AGENT_BROWSER_ENGINE=aginxbrowser but no aginxbrowser binary found",
+                    )
+                    .with_fix(
+                        "install aginxbrowser (https://github.com/yinnho/aginxbrowser) or unset \
+                         AGENT_BROWSER_ENGINE",
+                    ),
+                ),
             }
         }
     }

@@ -1088,6 +1088,159 @@ async fn e2e_lightpanda_auto_launch_can_open_page() {
     assert_eq!(get_data(&resp)["closed"], true);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_aginxbrowser_launch_can_open_page() {
+    let aginxbrowser_bin = match std::env::var("AGINXBROWSER_BIN") {
+        Ok(path) if !path.is_empty() => path,
+        _ => return,
+    };
+
+    let mut state = DaemonState::new();
+
+    let resp = tokio::time::timeout(
+        tokio::time::Duration::from_secs(20),
+        execute_command(
+            &json!({
+                "id": "1",
+                "action": "launch",
+                "headless": true,
+                "engine": "aginxbrowser",
+                "executablePath": aginxbrowser_bin,
+            }),
+            &mut state,
+        ),
+    )
+    .await
+    .expect("AginxBrowser launch should not hang");
+
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["launched"], true);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "https://example.com" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["url"], "https://example.com/");
+    assert_eq!(get_data(&resp)["title"], "Example Domain");
+
+    let resp = execute_command(&json!({ "id": "3", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["closed"], true);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_aginxbrowser_auto_launch_can_open_page() {
+    let aginxbrowser_bin = match std::env::var("AGINXBROWSER_BIN") {
+        Ok(path) if !path.is_empty() => path,
+        _ => return,
+    };
+
+    let prev_engine = std::env::var("AGENT_BROWSER_ENGINE").ok();
+    let prev_path = std::env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok();
+    std::env::set_var("AGENT_BROWSER_ENGINE", "aginxbrowser");
+    std::env::set_var("AGENT_BROWSER_EXECUTABLE_PATH", &aginxbrowser_bin);
+
+    let mut state = DaemonState::new();
+
+    let resp = tokio::time::timeout(
+        tokio::time::Duration::from_secs(20),
+        execute_command(
+            &json!({ "id": "1", "action": "navigate", "url": "https://example.com" }),
+            &mut state,
+        ),
+    )
+    .await
+    .expect("AginxBrowser auto-launch should not hang");
+
+    match prev_engine {
+        Some(value) => std::env::set_var("AGENT_BROWSER_ENGINE", value),
+        None => std::env::remove_var("AGENT_BROWSER_ENGINE"),
+    }
+    match prev_path {
+        Some(value) => std::env::set_var("AGENT_BROWSER_EXECUTABLE_PATH", value),
+        None => std::env::remove_var("AGENT_BROWSER_EXECUTABLE_PATH"),
+    }
+
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["url"], "https://example.com/");
+    assert_eq!(get_data(&resp)["title"], "Example Domain");
+
+    let resp = execute_command(&json!({ "id": "2", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["closed"], true);
+}
+
+/// File access is an AginxBrowser differentiator: the engine accepts a
+/// corresponding `--allow-file-access` launch flag, so a local file page
+/// must be readable when the flag is set.
+#[tokio::test]
+#[ignore]
+async fn e2e_aginxbrowser_file_access_can_read_local_file() {
+    let aginxbrowser_bin = match std::env::var("AGINXBROWSER_BIN") {
+        Ok(path) if !path.is_empty() => path,
+        _ => return,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let page = dir.path().join("local-page.html");
+    std::fs::write(
+        &page,
+        "<html><head><title>Local File</title></head><body><p id=\"marker\">local ok</p></body></html>",
+    )
+    .unwrap();
+
+    let mut state = DaemonState::new();
+
+    let resp = tokio::time::timeout(
+        tokio::time::Duration::from_secs(20),
+        execute_command(
+            &json!({
+                "id": "1",
+                "action": "launch",
+                "headless": true,
+                "engine": "aginxbrowser",
+                "executablePath": aginxbrowser_bin,
+                "allowFileAccess": true,
+            }),
+            &mut state,
+        ),
+    )
+    .await
+    .expect("AginxBrowser launch should not hang");
+
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["launched"], true);
+
+    let file_url = format!("file://{}", page.display());
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": file_url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["title"], "Local File");
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "gettext",
+            "selector": "#marker",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "local ok");
+
+    let resp = execute_command(&json!({ "id": "4", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["closed"], true);
+}
+
 // ---------------------------------------------------------------------------
 // Runtime stream lifecycle
 // ---------------------------------------------------------------------------

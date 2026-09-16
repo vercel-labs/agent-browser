@@ -103,7 +103,7 @@ It checks:
 </thead>
 <tbody>
 <tr><td>Environment</td><td>CLI version, platform, home directory, state and socket dirs, free disk space</td></tr>
-<tr><td>Chrome</td><td>Chrome install path and version, cache dir, Puppeteer fallback, user-data dir and profile count, optional <code>lightpanda</code> engine</td></tr>
+<tr><td>Chrome</td><td>Chrome install path and version, cache dir, Puppeteer fallback, user-data dir and profile count, optional <code>lightpanda</code>/<code>aginxbrowser</code> engines</td></tr>
 <tr><td>Daemons</td><td>Running daemons per session, stale <code>.sock</code> / <code>.pid</code> / <code>.version</code> / <code>.stream</code> files (auto-cleaned), version mismatch with the CLI, dashboard process liveness</td></tr>
 <tr><td>Config</td><td><code>~/.agent-browser/config.json</code>, <code>./agent-browser.json</code>, and any file at <code>AGENT_BROWSER_CONFIG</code> parse as valid JSON</td></tr>
 <tr><td>Security</td><td>Encryption key env var or <code>~/.agent-browser/.encryption-key</code> (with 0600 permissions on unix), state file count and age vs <code>AGENT_BROWSER_STATE_EXPIRE_DAYS</code>, action policy file</td></tr>

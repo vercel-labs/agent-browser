@@ -5,6 +5,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex};
 
+use super::cdp::aginxbrowser::{
+    launch_aginxbrowser, AginxBrowserLaunchOptions, AginxBrowserProcess,
+};
 use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchOptions};
 use super::cdp::client::CdpClient;
 use super::cdp::discovery::discover_cdp_url;
@@ -103,6 +106,41 @@ fn validate_lightpanda_options(options: &LaunchOptions) -> Result<(), String> {
     if !options.args.is_empty() {
         return Err(
             "Custom Chrome arguments (--args) are not supported with Lightpanda".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Validates that Chrome-only options are not used with AginxBrowser.
+/// Unlike Lightpanda, file access is supported: the engine accepts a
+/// corresponding `--allow-file-access` launch flag.
+fn validate_aginxbrowser_options(options: &LaunchOptions) -> Result<(), String> {
+    if options
+        .extensions
+        .as_ref()
+        .map(|e| !e.is_empty())
+        .unwrap_or(false)
+    {
+        return Err("Extensions are not supported with AginxBrowser".to_string());
+    }
+    if options.profile.is_some() {
+        return Err("Profiles are not supported with AginxBrowser".to_string());
+    }
+    if options.storage_state.is_some() {
+        return Err("Storage state is not supported with AginxBrowser".to_string());
+    }
+    if !options.headless {
+        return Err("Headed mode is not supported with AginxBrowser (headless only)".to_string());
+    }
+    if options.webgpu {
+        return Err("WebGPU (--webgpu) is not supported with AginxBrowser".to_string());
+    }
+    if options.ca_cert.is_some() {
+        return Err("--ca-cert is not supported with AginxBrowser (Chromium only)".to_string());
+    }
+    if !options.args.is_empty() {
+        return Err(
+            "Custom Chrome arguments (--args) are not supported with AginxBrowser".to_string(),
         );
     }
     Ok(())
@@ -365,6 +403,7 @@ impl WaitUntil {
 pub enum BrowserProcess {
     Chrome(ChromeProcess),
     Lightpanda(LightpandaProcess),
+    AginxBrowser(AginxBrowserProcess),
 }
 
 impl BrowserProcess {
@@ -372,6 +411,7 @@ impl BrowserProcess {
         match self {
             BrowserProcess::Chrome(p) => p.kill(),
             BrowserProcess::Lightpanda(p) => p.kill(),
+            BrowserProcess::AginxBrowser(p) => p.kill(),
         }
     }
 
@@ -379,6 +419,7 @@ impl BrowserProcess {
         match self {
             BrowserProcess::Chrome(p) => p.wait_or_kill(timeout),
             BrowserProcess::Lightpanda(p) => p.kill(),
+            BrowserProcess::AginxBrowser(p) => p.kill(),
         }
     }
 
@@ -387,6 +428,7 @@ impl BrowserProcess {
         match self {
             BrowserProcess::Chrome(p) => p.has_exited(),
             BrowserProcess::Lightpanda(_) => false,
+            BrowserProcess::AginxBrowser(p) => p.has_exited(),
         }
     }
 }
@@ -484,9 +526,12 @@ impl BrowserManager {
             "lightpanda" => {
                 validate_lightpanda_options(&options)?;
             }
+            "aginxbrowser" => {
+                validate_aginxbrowser_options(&options)?;
+            }
             _ => {
                 return Err(format!(
-                    "Unknown engine '{}'. Supported engines: chrome, lightpanda",
+                    "Unknown engine '{}'. Supported engines: chrome, lightpanda, aginxbrowser",
                     engine
                 ));
             }
@@ -508,6 +553,17 @@ impl BrowserManager {
                 let lp = launch_lightpanda(&lp_options).await?;
                 let url = lp.ws_url.clone();
                 (url, BrowserProcess::Lightpanda(lp))
+            }
+            "aginxbrowser" => {
+                let ab_options = AginxBrowserLaunchOptions {
+                    executable_path: options.executable_path.clone(),
+                    proxy: options.proxy.clone(),
+                    port: None,
+                    allow_file_access: options.allow_file_access,
+                };
+                let ab = launch_aginxbrowser(&ab_options).await?;
+                let url = ab.ws_url.clone();
+                (url, BrowserProcess::AginxBrowser(ab))
             }
             _ => {
                 let chrome = tokio::task::spawn_blocking(move || launch_chrome(&options))
@@ -2867,6 +2923,26 @@ mod tests {
         let err = validate_lightpanda_options(&options).unwrap_err();
         assert!(err.contains("WebGPU"));
         assert!(validate_lightpanda_options(&LaunchOptions::default()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_aginxbrowser_rejects_webgpu() {
+        let options = LaunchOptions {
+            webgpu: true,
+            ..Default::default()
+        };
+        let err = validate_aginxbrowser_options(&options).unwrap_err();
+        assert!(err.contains("WebGPU"));
+        assert!(validate_aginxbrowser_options(&LaunchOptions::default()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_aginxbrowser_allows_file_access() {
+        let options = LaunchOptions {
+            allow_file_access: true,
+            ..Default::default()
+        };
+        assert!(validate_aginxbrowser_options(&options).is_ok());
     }
 
     #[test]

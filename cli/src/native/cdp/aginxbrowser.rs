@@ -3,57 +3,59 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use super::launch_log::{start_log_drainers, wait_for_cdp_ready, LaunchLogBuffer};
+use super::launch_log::{start_log_drainers, wait_for_cdp_ready};
 
-const LIGHTPANDA_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+const AGINXBROWSER_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub struct LightpandaProcess {
+pub struct AginxBrowserProcess {
     child: Child,
     pub ws_url: String,
     _log_drainers: Vec<std::thread::JoinHandle<()>>,
 }
 
-impl LightpandaProcess {
+impl AginxBrowserProcess {
     pub fn kill(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+
+    /// Non-blocking check whether the engine process has exited (crashed or
+    /// terminated), reaping the zombie when it has.
+    pub fn has_exited(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(Some(_)))
+    }
 }
 
-impl Drop for LightpandaProcess {
+impl Drop for AginxBrowserProcess {
     fn drop(&mut self) {
         self.kill();
     }
 }
 
 #[derive(Default)]
-pub struct LightpandaLaunchOptions {
+pub struct AginxBrowserLaunchOptions {
     pub executable_path: Option<String>,
     pub proxy: Option<String>,
     pub port: Option<u16>,
+    pub allow_file_access: bool,
 }
 
-fn build_lightpanda_serve_args(port: u16, proxy: Option<&str>) -> Vec<String> {
-    let mut args = vec![
-        "serve".to_string(),
-        "--host".to_string(),
-        "127.0.0.1".to_string(),
-        "--port".to_string(),
-        port.to_string(),
-    ];
+/// AginxBrowser serves CDP on a loopback port chosen at launch; the proxy is
+/// configured through the `AGINXBROWSER_PROXY` environment variable.
+fn build_aginxbrowser_args(port: u16, allow_file_access: bool) -> Vec<String> {
+    let mut args = vec!["--cdp-port".to_string(), port.to_string()];
 
-    if let Some(proxy) = proxy {
-        args.push("--http_proxy".to_string());
-        args.push(proxy.to_string());
+    if allow_file_access {
+        args.push("--allow-file-access".to_string());
     }
 
     args
 }
 
-pub fn find_lightpanda() -> Option<PathBuf> {
+pub fn find_aginxbrowser() -> Option<PathBuf> {
     #[cfg(unix)]
     {
-        if let Ok(output) = Command::new("which").arg("lightpanda").output() {
+        if let Ok(output) = Command::new("which").arg("aginxbrowser").output() {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !path.is_empty() {
@@ -65,7 +67,7 @@ pub fn find_lightpanda() -> Option<PathBuf> {
 
     #[cfg(windows)]
     {
-        if let Ok(output) = Command::new("where").arg("lightpanda").output() {
+        if let Ok(output) = Command::new("where").arg("aginxbrowser").output() {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout)
                     .lines()
@@ -81,10 +83,7 @@ pub fn find_lightpanda() -> Option<PathBuf> {
     }
 
     if let Some(home) = dirs::home_dir() {
-        let candidates = [
-            home.join(".lightpanda/lightpanda"),
-            home.join(".local/bin/lightpanda"),
-        ];
+        let candidates = [home.join(".local/bin/aginxbrowser")];
         for c in &candidates {
             if c.exists() {
                 return Some(c.clone());
@@ -95,13 +94,13 @@ pub fn find_lightpanda() -> Option<PathBuf> {
     None
 }
 
-pub async fn launch_lightpanda(
-    options: &LightpandaLaunchOptions,
-) -> Result<LightpandaProcess, String> {
+pub async fn launch_aginxbrowser(
+    options: &AginxBrowserLaunchOptions,
+) -> Result<AginxBrowserProcess, String> {
     let binary_path = match &options.executable_path {
         Some(p) => PathBuf::from(p),
-        None => find_lightpanda().ok_or(
-            "Lightpanda not found. Install it from https://lightpanda.io/docs/open-source/installation or use --executable-path.",
+        None => find_aginxbrowser().ok_or(
+            "AginxBrowser not found. Install it from https://github.com/yinnho/aginxbrowser or use --executable-path.",
         )?,
     };
 
@@ -110,53 +109,57 @@ pub async fn launch_lightpanda(
         None => TcpListener::bind("127.0.0.1:0")
             .and_then(|l| l.local_addr())
             .map(|a| a.port())
-            .map_err(|e| format!("Failed to find an available port for Lightpanda: {}", e))?,
+            .map_err(|e| format!("Failed to find an available port for AginxBrowser: {}", e))?,
     };
-    let args = build_lightpanda_serve_args(port, options.proxy.as_deref());
+    let args = build_aginxbrowser_args(port, options.allow_file_access);
 
-    let mut child = Command::new(&binary_path)
+    let mut command = Command::new(&binary_path);
+    command
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(proxy) = &options.proxy {
+        command.env("AGINXBROWSER_PROXY", proxy);
+    }
+
+    let mut child = command
         .spawn()
-        .map_err(|e| format!("Failed to launch Lightpanda at {:?}: {}", binary_path, e))?;
+        .map_err(|e| format!("Failed to launch AginxBrowser at {:?}: {}", binary_path, e))?;
 
-    let (log_buffer, log_drainers) = start_log_drainers(&mut child, "Lightpanda")?;
+    let (log_buffer, log_drainers) = start_log_drainers(&mut child, "AginxBrowser")?;
 
-    let ws_url =
-        match wait_for_lightpanda_ready(&mut child, port, &log_buffer, LIGHTPANDA_STARTUP_TIMEOUT)
-            .await
-        {
-            Ok(url) => url,
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(e);
-            }
-        };
+    let ws_url = match wait_for_cdp_ready(
+        &mut child,
+        port,
+        &log_buffer,
+        AGINXBROWSER_STARTUP_TIMEOUT,
+        "AginxBrowser",
+    )
+    .await
+    {
+        Ok(url) => url,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
+    };
 
-    Ok(LightpandaProcess {
+    Ok(AginxBrowserProcess {
         child,
         ws_url,
         _log_drainers: log_drainers,
     })
 }
 
-async fn wait_for_lightpanda_ready(
-    child: &mut Child,
-    port: u16,
-    logs: &LaunchLogBuffer,
-    startup_timeout: Duration,
-) -> Result<String, String> {
-    wait_for_cdp_ready(child, port, logs, startup_timeout, "Lightpanda").await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Command, Stdio};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener as TokioTcpListener;
+    use tokio::time::Duration;
 
     fn unused_port() -> u16 {
         std::net::TcpListener::bind("127.0.0.1:0")
@@ -198,10 +201,16 @@ mod tests {
             .spawn()
             .unwrap();
 
-        let (logs, _drainers) = start_log_drainers(&mut child, "Lightpanda").unwrap();
-        let ws_url = wait_for_lightpanda_ready(&mut child, port, &logs, LIGHTPANDA_STARTUP_TIMEOUT)
-            .await
-            .unwrap();
+        let (logs, _drainers) = start_log_drainers(&mut child, "AginxBrowser").unwrap();
+        let ws_url = wait_for_cdp_ready(
+            &mut child,
+            port,
+            &logs,
+            AGINXBROWSER_STARTUP_TIMEOUT,
+            "AginxBrowser",
+        )
+        .await
+        .unwrap();
 
         assert_eq!(ws_url, format!("ws://127.0.0.1:{}/", port));
         let _ = child.kill();
@@ -220,12 +229,18 @@ mod tests {
             .spawn()
             .unwrap();
 
-        let (logs, _drainers) = start_log_drainers(&mut child, "Lightpanda").unwrap();
-        let err = wait_for_lightpanda_ready(&mut child, port, &logs, LIGHTPANDA_STARTUP_TIMEOUT)
-            .await
-            .unwrap_err();
+        let (logs, _drainers) = start_log_drainers(&mut child, "AginxBrowser").unwrap();
+        let err = wait_for_cdp_ready(
+            &mut child,
+            port,
+            &logs,
+            AGINXBROWSER_STARTUP_TIMEOUT,
+            "AginxBrowser",
+        )
+        .await
+        .unwrap_err();
 
-        assert!(err.contains("Lightpanda exited before CDP became ready"));
+        assert!(err.contains("AginxBrowser exited before CDP became ready"));
         assert!(err.contains("boom"));
     }
 
@@ -242,16 +257,16 @@ mod tests {
             .unwrap();
 
         let timeout = Duration::from_millis(300);
-        let (logs, _drainers) = start_log_drainers(&mut child, "Lightpanda").unwrap();
+        let (logs, _drainers) = start_log_drainers(&mut child, "AginxBrowser").unwrap();
         let err = tokio::time::timeout(
             Duration::from_secs(2),
-            wait_for_lightpanda_ready(&mut child, port, &logs, timeout),
+            wait_for_cdp_ready(&mut child, port, &logs, timeout, "AginxBrowser"),
         )
         .await
         .expect("ready wait should return before outer timeout")
         .unwrap_err();
 
-        assert!(err.contains("Timed out after 300ms waiting for Lightpanda CDP endpoint"));
+        assert!(err.contains("Timed out after 300ms waiting for AginxBrowser CDP endpoint"));
         assert!(
             err.contains("Failed to connect to CDP") || err.contains("Timeout connecting to CDP")
         );
@@ -261,48 +276,36 @@ mod tests {
     }
 
     #[test]
-    fn test_find_lightpanda_returns_none_when_missing() {
-        let _ = find_lightpanda();
+    fn test_find_aginxbrowser_returns_none_when_missing() {
+        let _ = find_aginxbrowser();
     }
 
     #[test]
     fn test_default_options() {
-        let opts = LightpandaLaunchOptions::default();
+        let opts = AginxBrowserLaunchOptions::default();
         assert!(opts.executable_path.is_none());
         assert!(opts.proxy.is_none());
         assert!(opts.port.is_none());
+        assert!(!opts.allow_file_access);
     }
 
     #[test]
-    fn test_build_lightpanda_serve_args_uses_supported_options() {
-        let args = build_lightpanda_serve_args(9222, None);
+    fn test_build_aginxbrowser_args_uses_supported_options() {
+        let args = build_aginxbrowser_args(9222, false);
+
+        assert_eq!(args, vec!["--cdp-port".to_string(), "9222".to_string(),]);
+    }
+
+    #[test]
+    fn test_build_aginxbrowser_args_with_file_access() {
+        let args = build_aginxbrowser_args(9333, true);
 
         assert_eq!(
             args,
             vec![
-                "serve".to_string(),
-                "--host".to_string(),
-                "127.0.0.1".to_string(),
-                "--port".to_string(),
-                "9222".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_build_lightpanda_serve_args_with_proxy() {
-        let args = build_lightpanda_serve_args(9333, Some("http://127.0.0.1:8080"));
-
-        assert_eq!(
-            args,
-            vec![
-                "serve".to_string(),
-                "--host".to_string(),
-                "127.0.0.1".to_string(),
-                "--port".to_string(),
+                "--cdp-port".to_string(),
                 "9333".to_string(),
-                "--http_proxy".to_string(),
-                "http://127.0.0.1:8080".to_string(),
+                "--allow-file-access".to_string(),
             ]
         );
     }
