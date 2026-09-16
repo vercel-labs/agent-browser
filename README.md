@@ -113,6 +113,7 @@ agent-browser open                    # Launch browser (no navigation); stays on
 agent-browser open <url>              # Launch + navigate to URL (aliases: goto, navigate)
 agent-browser read [url]              # Fetch agent-readable text, or read rendered active-tab DOM
 agent-browser click <sel>             # Click element (--new-tab to open in new tab)
+agent-browser clickjs <sel>           # Click element via JavaScript (bypasses coordinate issues)
 agent-browser dblclick <sel>          # Double-click element
 agent-browser focus <sel>             # Focus element
 agent-browser type <sel> <text>       # Type into element
