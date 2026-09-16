@@ -4292,12 +4292,7 @@ fn launch_options_from_env() -> LaunchOptions {
             .map(|v| v == "1" || v == "true")
             .unwrap_or(false),
         args: env::var("AGENT_BROWSER_ARGS")
-            .map(|v| {
-                v.split([',', '\n'])
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
+            .map(|v| crate::flags::split_browser_args(&v))
             .unwrap_or_default(),
         extensions,
         storage_state: env::var("AGENT_BROWSER_STATE").ok(),
@@ -15715,6 +15710,31 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         assert!(!opts.allow_file_access);
         assert!(opts.hide_scrollbars);
         assert!(!opts.restrict_webrtc);
+    }
+
+    #[test]
+    fn test_launch_options_from_env_args_keep_commas_inside_flag_values() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_ARGS"]);
+        guard.set("AGENT_BROWSER_ARGS", "--window-position=-32000,-32000");
+        assert_eq!(
+            launch_options_from_env().args,
+            vec!["--window-position=-32000,-32000"]
+        );
+
+        guard.set("AGENT_BROWSER_ARGS", "--no-sandbox,--disable-gpu");
+        assert_eq!(
+            launch_options_from_env().args,
+            vec!["--no-sandbox", "--disable-gpu"]
+        );
+
+        guard.set(
+            "AGENT_BROWSER_ARGS",
+            "--window-position=-32000,-32000,--no-sandbox",
+        );
+        assert_eq!(
+            launch_options_from_env().args,
+            vec!["--window-position=-32000,-32000", "--no-sandbox"]
+        );
     }
 
     #[test]

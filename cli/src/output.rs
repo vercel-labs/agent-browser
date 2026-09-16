@@ -4009,7 +4009,8 @@ Options:
   --enable <feature>         Built-in init scripts: react-devtools (repeatable or comma-separated)
                              (or AGENT_BROWSER_ENABLE env)
   --args <args>              Browser launch args, comma or newline separated (or AGENT_BROWSER_ARGS)
-                             e.g., --args "--no-sandbox,--disable-blink-features=AutomationControlled"
+                             Commas inside --flag=value stay intact (e.g. --window-position=x,y)
+                             e.g., --args "--no-sandbox,--window-position=-32000,-32000"
   --user-agent <ua>          Custom User-Agent (or AGENT_BROWSER_USER_AGENT)
   --proxy <server>           Proxy server URL (or AGENT_BROWSER_PROXY, HTTP_PROXY, HTTPS_PROXY, ALL_PROXY)
                              Supports authenticated proxies: --proxy "http://user:pass@127.0.0.1:7890"
@@ -4103,6 +4104,7 @@ Environment:
   AGENT_BROWSER_EXTENSIONS       Comma-separated browser extension paths
   AGENT_BROWSER_INIT_SCRIPTS     Comma-separated paths to page init scripts
   AGENT_BROWSER_ENABLE           Comma-separated built-in init script features (e.g. react-devtools)
+  AGENT_BROWSER_ARGS             Browser launch args, comma or newline separated; commas inside --flag=value stay intact
   AGENT_BROWSER_HEADED           Show browser window (not headless)
   AGENT_BROWSER_NO_XVFB          Disable automatic Xvfb for headed mode on displayless Linux hosts
   AGENT_BROWSER_WEBGPU           Enable WebGPU (SwiftShader software Vulkan on Linux)
