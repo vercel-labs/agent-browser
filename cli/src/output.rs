@@ -1662,6 +1662,25 @@ Examples:
   agent-browser forward
 "##
         }
+        "bringtofront" => {
+            r##"
+agent-browser bringtofront - Raise the browser window for the active tab
+
+Usage: agent-browser bringtofront
+
+Creating a tab or switching to one never raises the browser window, so a
+headed Chrome shared with a person is left alone. Use this command when a
+raise is what you actually want, such as before a screenshot of a tab that
+is not the foreground tab of its window.
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser bringtofront
+"##
+        }
         "reload" => {
             r##"
 agent-browser reload - Reload the current page
@@ -3842,6 +3861,7 @@ Navigation:
   back                       Go back
   forward                    Go forward
   reload                     Reload page
+  bringtofront               Raise the browser window for the active tab
 
 Get Info:  agent-browser get <what> [selector]
   text, html, value, attr <name>, title, url, count, box, styles, cdp-url
