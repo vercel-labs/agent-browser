@@ -4798,6 +4798,11 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         no_xvfb: no_xvfb_from_launch_cmd(cmd),
         restrict_webrtc,
     };
+    if engine.as_deref() == Some("obscura") {
+        if let Some(bypass) = cmd.get("proxyBypass") {
+            launch_options.proxy_bypass = bypass.as_str().map(String::from);
+        }
+    }
     apply_effective_ca_cert(&mut launch_options, &effective_ca_cert);
 
     let external_launch =

@@ -1074,9 +1074,10 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--action-policy <path>` | Path to action policy JSON file (or `AGENT_BROWSER_ACTION_POLICY` env) |
 | `--confirm-actions <list>` | Action categories requiring confirmation (or `AGENT_BROWSER_CONFIRM_ACTIONS` env) |
 | `--confirm-interactive` | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |
-| `--engine <name>` | Browser engine: `chrome` (default), `lightpanda` (or `AGENT_BROWSER_ENGINE` env) |
 | `--input-mode <mode>` | Session pointer movement: `instant` (default), `smooth`, or `human` |
 | `--idle-timeout <time>` | Shut down the daemon after inactivity (`10s`, `3m`, `1h`, or raw ms). Defaults to `1h`; use `0` to disable (or `AGENT_BROWSER_IDLE_TIMEOUT_MS` env) |
+| `--engine <name>` | Browser engine: `chrome` (default), `lightpanda`, `obscura` (experimental; rejects proxy bypass rules) (or `AGENT_BROWSER_ENGINE` env) |
+| `AGENT_BROWSER_OBSCURA_STEALTH` env | Run the Obscura engine (`--engine obscura`) in stealth mode: consistent fingerprint, tracker blocking |
 | `--no-auto-dialog` | Disable automatic dismissal of `alert`/`beforeunload` dialogs (or `AGENT_BROWSER_NO_AUTO_DIALOG` env) |
 | `--model <name>` | AI model for chat command (or `AI_GATEWAY_MODEL` env) |
 | `-v`, `--verbose` | Show tool commands and their raw output (chat) |
@@ -1695,7 +1696,7 @@ agent-browser uses a client-daemon architecture:
 
 The daemon starts automatically on first command and persists between commands for fast subsequent operations. After **1 hour** with no commands or dashboard input it saves configured restore state, closes the browser, and exits, so an integration that dies without calling `close` cannot leak the daemon and its browser indefinitely; the next command starts a fresh daemon and configured state restore works as usual. A session without `--restore` or another restore key does not save browser state, so its transient state and open tabs are discarded at shutdown. Set `--idle-timeout` to a duration such as `30s`, `5m`, or `1h`, or set `AGENT_BROWSER_IDLE_TIMEOUT_MS` to a value in milliseconds. Use `0` to disable idle shutdown entirely. The default never closes a headed browser, including Safari and iOS WebDriver sessions, or a user-attached browser because those may be in direct human use. Provider-owned cloud browsers remain eligible for cleanup. An explicitly set timeout applies to every browser.
 
-**Browser Engine:** Uses Chrome (from Chrome for Testing) by default. The `--engine` flag selects between `chrome` and `lightpanda`. Supported browsers: Chromium/Chrome (via CDP) and Safari (via WebDriver for iOS).
+**Browser Engine:** Uses Chrome (from Chrome for Testing) by default. The `--engine` flag selects between `chrome`, `lightpanda`, and `obscura`. Supported browsers: Chromium/Chrome (via CDP), Lightpanda and Obscura (via CDP), and Safari (via WebDriver for iOS).
 
 ## Platforms
 
@@ -2003,3 +2004,13 @@ When enabled, agent-browser connects to an AgentCore cloud browser session inste
 ## License
 
 Apache-2.0
+
+## Experimental Obscura provider
+
+Select `--engine obscura --executable-path /path/to/obscura` to launch a local Obscura binary. This provider is experimental. Obscura v0.2.2 has known accessibility naming, hidden-element, iframe and screenshot fidelity gaps; successful CDP connection does not establish Chrome parity. Use Chrome for workflows that depend on these features until validated against your target pages.
+
+Local development pages require `OBSCURA_ALLOW_PRIVATE_NETWORK=1` in the environment before the session starts. Close and relaunch the named session when changing engine launch settings. Stealth support depends on how the Obscura binary was built. Unsupported options including `--webgpu`, `--ca-cert`, `--args`, and `--proxy-bypass` are rejected. Proxy bypass rules from `proxyBypass` config, `AGENT_BROWSER_PROXY_BYPASS`, `NO_PROXY`, or `no_proxy` are also rejected, even without a proxy. Remove those settings only if bypass is not needed; otherwise use Chrome. Explicit `--engine obscura` launches validate the current invocation's resolved bypass settings, even with an existing daemon; clearing those settings does not reuse stale daemon environment values. Startup discovery and CDP initialization each have a 10-second deadline, with bounded connection cleanup on initialization failure.
+
+MCP tools use the same provider through `extraArgs`: `["--engine", "obscura", "--executable-path", "/path/to/obscura"]`. A separate engine-specific MCP tool is unnecessary because tools delegate to the canonical CLI parser.
+
+Verify the adapter without an engine using `cd cli && cargo test --locked -j 2 obscura -- --test-threads=1`. To explicitly verify a real binary, run `cd cli && OBSCURA_BIN=/absolute/path/to/obscura cargo test --locked -j 2 e2e_obscura -- --ignored --test-threads=1`. Both ignored E2E tests fail if `OBSCURA_BIN` is missing, empty, invalid, or cannot launch. They enable private-network access for a loopback fixture, isolate proxy settings, clear `AGENT_BROWSER_CDP`, `AGENT_BROWSER_AUTO_CONNECT`, and `AGENT_BROWSER_PROVIDER`, and require an owned Obscura process rather than an attached browser. They check explicit/automatic launch, navigation, JavaScript, a basic snapshot, and close. Passing them does not establish accessibility, iframe, or screenshot fidelity.

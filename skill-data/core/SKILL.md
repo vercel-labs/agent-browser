@@ -576,3 +576,13 @@ That pulls in:
 - `references/proxy-support.md`: proxy configuration and CA certificates for HTTPS interception proxies
 - `references/webgpu.md` — screenshots/video of WebGPU pages (three.js, Babylon.js), Linux/CI setup
 - `templates/*` — starter shell scripts for auth, capture, form automation
+
+## Experimental Obscura provider
+
+Select `--engine obscura --executable-path /path/to/obscura` to launch a local Obscura binary. This provider is experimental. Obscura v0.2.2 has known accessibility naming, hidden-element, iframe and screenshot fidelity gaps; successful CDP connection does not establish Chrome parity. Use Chrome for workflows that depend on these features until validated against your target pages.
+
+Local development pages require `OBSCURA_ALLOW_PRIVATE_NETWORK=1` in the environment before the session starts. Close and relaunch the named session when changing engine launch settings. Stealth support depends on how the Obscura binary was built. Unsupported options including `--webgpu`, `--ca-cert`, `--args`, and `--proxy-bypass` are rejected. Proxy bypass rules from `proxyBypass` config, `AGENT_BROWSER_PROXY_BYPASS`, `NO_PROXY`, or `no_proxy` are also rejected, even without a proxy. Remove those settings only if bypass is not needed; otherwise use Chrome. Explicit `--engine obscura` launches validate the current invocation's resolved bypass settings, even with an existing daemon; clearing those settings does not reuse stale daemon environment values. Startup discovery and CDP initialization each have a 10-second deadline, with bounded connection cleanup on initialization failure.
+
+MCP tools use the same provider through `extraArgs`: `["--engine", "obscura", "--executable-path", "/path/to/obscura"]`. A separate engine-specific MCP tool is unnecessary because tools delegate to the canonical CLI parser.
+
+When verifying a source build, use `cd cli && OBSCURA_BIN=/absolute/path/to/obscura cargo test --locked -j 2 e2e_obscura -- --ignored --test-threads=1`. Missing, empty, invalid, or unlaunchable `OBSCURA_BIN` fails explicitly. The tests use a local fixture with private-network access enabled and proxy settings isolated. They clear `AGENT_BROWSER_CDP`, `AGENT_BROWSER_AUTO_CONNECT`, and `AGENT_BROWSER_PROVIDER`, and require an owned Obscura process rather than an attached browser. Coverage includes explicit/automatic launch, navigation, JavaScript, a basic snapshot, and close, not full browser fidelity. A normal `cargo test` skips these ignored tests and is not evidence of real Obscura verification.
