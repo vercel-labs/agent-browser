@@ -1604,6 +1604,22 @@ agent-browser stream disable              # Stop streaming for the session
 
 The WebSocket server streams the browser viewport and accepts input events.
 
+### Session HTTP Endpoints
+
+The stream port also serves the session preview UI and a small JSON API. Every `/api/` route is restricted to the session's own origin, so a page on another origin can neither drive nor read the session:
+
+<table>
+  <thead>
+    <tr><th>Routes</th><th>Requirement</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>GET /api/tabs</code>, <code>GET /api/status</code>, <code>GET /api/sessions</code>, <code>GET /api/models</code>, <code>GET /api/chat/status</code></td><td>A same-origin <code>Origin</code> or <code>Referer</code>, or neither header at all together with a loopback <code>Host</code> (curl and other non-browser clients)</td></tr>
+    <tr><td><code>POST /api/command</code>, <code>POST /api/chat</code>, <code>POST /api/sessions</code></td><td>A same-origin <code>Origin</code> or <code>Referer</code> matching a loopback <code>Host</code></td></tr>
+  </tbody>
+</table>
+
+Anything else gets a 403. These responses never carry a wildcard `Access-Control-Allow-Origin`, so a cross-origin page cannot read them. A custom tool that posts to `/api/command`, `/api/chat` or `/api/sessions` must send `Origin: http://127.0.0.1:<port>` (or the matching `localhost` form) alongside its `Host` header.
+
 ### WebSocket Protocol
 
 Connect to `ws://localhost:9223` to receive frames and send input:

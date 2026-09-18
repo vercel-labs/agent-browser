@@ -144,10 +144,50 @@ fn is_same_origin_command_request(request: &str) -> bool {
     }
 }
 
-fn command_cors_headers(request: &str) -> String {
+fn has_loopback_host(request: &str) -> bool {
+    request_header_value(request, "host")
+        .map(normalize_host_authority)
+        .is_some_and(|host| is_loopback_authority(&host))
+}
+
+/// Protects read-only session endpoints by requiring same-origin browser
+/// metadata.
+///
+/// Non-browser clients, in particular the dashboard's session proxy, send no
+/// `Origin` and no `Referer`. They are accepted only when the request arrived
+/// with a loopback `Host`, which keeps DNS rebinding out. A browser page that
+/// suppresses both headers can still reach these routes, but it can never read
+/// the response because no response on this surface carries a wildcard
+/// `Access-Control-Allow-Origin` any more.
+fn is_same_origin_read_request(request: &str) -> bool {
+    if request_header_value(request, "origin").is_some()
+        || request_header_value(request, "referer").is_some()
+    {
+        return is_same_origin_command_request(request);
+    }
+
+    has_loopback_host(request)
+}
+
+/// Single gate for the `/api/` surface of the session server.
+///
+/// State-changing methods always require same-origin browser metadata, exactly
+/// like `/api/command`. Reads additionally accept header-less loopback clients
+/// so the dashboard proxy keeps working.
+fn is_authorized_api_request(method: &str, request: &str) -> bool {
+    if method == "GET" || method == "HEAD" {
+        is_same_origin_read_request(request)
+    } else {
+        is_same_origin_command_request(request)
+    }
+}
+
+/// CORS headers for the `/api/` surface. The request origin is reflected only
+/// when it is same-origin, so session data is never readable cross-origin.
+fn api_cors_headers(request: &str) -> String {
     match request_header_value(request, "origin") {
         Some(origin) if is_same_origin_command_request(request) => format!(
-            "Access-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nVary: Origin\r\n"
+            "Access-Control-Allow-Origin: {origin}\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nVary: Origin\r\n"
         ),
         _ => String::new(),
     }
@@ -187,54 +227,38 @@ pub(super) async fn handle_http_request(
     let path = first_line.split_whitespace().nth(1).unwrap_or("/");
     let origin = parse_origin(peeked);
 
+    // Every `/api/` route of this server drives or exposes the live browser
+    // session, so the whole surface is gated the way `/api/command` is.
+    if path.starts_with("/api/") && !is_authorized_api_request(method, &request) {
+        write_json_error_response_no_cors(
+            &mut stream,
+            "403 Forbidden",
+            "Origin or Referer does not match Host header.",
+        )
+        .await;
+        return;
+    }
+
     if method == "OPTIONS" {
-        if path == "/api/command" {
-            if !is_same_origin_command_request(&request) {
-                write_json_error_response_no_cors(
-                    &mut stream,
-                    "403 Forbidden",
-                    "Origin or Referer does not match Host header.",
-                )
-                .await;
-                return;
-            }
-
-            let cors_headers = command_cors_headers(&request);
-            let response = format!(
-                "HTTP/1.1 204 No Content\r\n{cors_headers}Access-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            );
-            let _ = stream.write_all(response.as_bytes()).await;
-            return;
-        }
-
+        let cors_headers = if path.starts_with("/api/") {
+            api_cors_headers(&request)
+        } else {
+            CORS_HEADERS.to_string()
+        };
         let response = format!(
-            "HTTP/1.1 204 No Content\r\n{CORS_HEADERS}Access-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            "HTTP/1.1 204 No Content\r\n{cors_headers}Access-Control-Max-Age: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         );
         let _ = stream.write_all(response.as_bytes()).await;
         return;
     }
 
     if method == "POST" {
-        if path == "/api/command" && !is_same_origin_command_request(&request) {
-            write_json_error_response_no_cors(
-                &mut stream,
-                "403 Forbidden",
-                "Origin or Referer does not match Host header.",
-            )
-            .await;
-            return;
-        }
-
         let full_body = read_full_body(&mut stream, peeked).await;
         if full_body.is_none()
             && (path == "/api/chat" || path == "/api/sessions" || path == "/api/command")
         {
             let body = r#"{"error":"Request body too large"}"#;
-            let cors_headers = if path == "/api/command" {
-                command_cors_headers(&request)
-            } else {
-                CORS_HEADERS.to_string()
-            };
+            let cors_headers = api_cors_headers(&request);
             let response = format!(
                 "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{cors_headers}\r\n",
                 body.len()
@@ -257,8 +281,9 @@ pub(super) async fn handle_http_request(
                     ),
                 ),
             };
+            let cors_headers = api_cors_headers(&request);
             let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n{CORS_HEADERS}\r\n",
+                "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n{cors_headers}\r\n",
                 resp_body.len()
             );
             let _ = stream.write_all(response.as_bytes()).await;
@@ -278,7 +303,7 @@ pub(super) async fn handle_http_request(
                     ),
                 ),
             };
-            let cors_headers = command_cors_headers(&request);
+            let cors_headers = api_cors_headers(&request);
             let response = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n{cors_headers}\r\n",
                 resp_body.len()
@@ -331,8 +356,15 @@ pub(super) async fn handle_http_request(
         serve_embedded_file(path)
     };
 
+    // Session data never carries wildcard CORS; only the embedded dashboard
+    // assets keep the permissive headers.
+    let cors_headers = if path.starts_with("/api/") {
+        api_cors_headers(&request)
+    } else {
+        CORS_HEADERS.to_string()
+    };
     let response = format!(
-        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n{CORS_HEADERS}\r\n",
+        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n{cors_headers}\r\n",
         status,
         content_type,
         body.len()
@@ -711,5 +743,257 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(relayed.contains(r#""action":"tabs""#), "{relayed}");
+    }
+
+    fn assert_forbidden_without_wildcard_cors(response: &str) {
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin: *"),
+            "forbidden response exposed wildcard CORS: {response}"
+        );
+    }
+
+    fn cross_origin_get(path: &str) -> String {
+        format!(
+            "GET {path} HTTP/1.1\r\nHost: localhost:7777\r\nOrigin: https://evil.example\r\n\r\n"
+        )
+    }
+
+    fn same_origin_get(path: &str) -> String {
+        format!(
+            "GET {path} HTTP/1.1\r\nHost: localhost:7777\r\nOrigin: http://localhost:7777\r\n\r\n"
+        )
+    }
+
+    /// The exact request shape the dashboard's `proxy_session_http_route`
+    /// sends: no Origin, no Referer, loopback Host.
+    fn dashboard_proxy_get(path: &str) -> String {
+        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nConnection: close\r\n\r\n")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_origin_chat_post_is_rejected() {
+        let body = r#"{"messages":[{"role":"user","content":"hi"}]}"#;
+        let request = format!(
+            "POST /api/chat HTTP/1.1\r\nHost: localhost:7777\r\nOrigin: https://evil.example\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let response = send_request_to_handler(&request, "x").await;
+
+        assert_forbidden_without_wildcard_cors(&response);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chat_post_without_origin_or_referer_is_rejected() {
+        let body = r#"{"messages":[{"role":"user","content":"hi"}]}"#;
+        let request = format!(
+            "POST /api/chat HTTP/1.1\r\nHost: localhost:7777\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let response = send_request_to_handler(&request, "x").await;
+
+        assert_forbidden_without_wildcard_cors(&response);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_origin_chat_preflight_is_rejected() {
+        let request = concat!(
+            "OPTIONS /api/chat HTTP/1.1\r\n",
+            "Host: localhost:7777\r\n",
+            "Origin: https://evil.example\r\n",
+            "Access-Control-Request-Method: POST\r\n",
+            "Access-Control-Request-Headers: content-type\r\n",
+            "\r\n"
+        );
+
+        let response = send_request_to_handler(request, "x").await;
+
+        assert_forbidden_without_wildcard_cors(&response);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_origin_session_spawn_post_is_rejected() {
+        let body = r#"{"session":"attacker"}"#;
+        let request = format!(
+            "POST /api/sessions HTTP/1.1\r\nHost: localhost:7777\r\nOrigin: https://evil.example\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let response = send_request_to_handler(&request, "x").await;
+
+        assert_forbidden_without_wildcard_cors(&response);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn same_origin_session_spawn_post_reaches_handler() {
+        // An empty object passes the gate and is rejected by `spawn_session`
+        // itself, so no browser is launched by the test.
+        let body = "{}";
+        let request = format!(
+            "POST /api/sessions HTTP/1.1\r\nHost: localhost:7777\r\nOrigin: http://localhost:7777\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let response = send_request_to_handler(&request, "x").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            response.contains("Missing"),
+            "same-origin spawn did not reach the handler: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin: *"),
+            "session spawn response exposed wildcard CORS: {response}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_origin_tabs_get_is_rejected() {
+        let response = send_request_to_handler(&cross_origin_get("/api/tabs"), "x").await;
+
+        assert_forbidden_without_wildcard_cors(&response);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_origin_sessions_get_is_rejected() {
+        let response = send_request_to_handler(&cross_origin_get("/api/sessions"), "x").await;
+
+        assert_forbidden_without_wildcard_cors(&response);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_origin_status_get_is_rejected() {
+        let response = send_request_to_handler(&cross_origin_get("/api/status"), "x").await;
+
+        assert_forbidden_without_wildcard_cors(&response);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_origin_models_get_is_rejected() {
+        let response = send_request_to_handler(&cross_origin_get("/api/models"), "x").await;
+
+        assert_forbidden_without_wildcard_cors(&response);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_origin_referer_tabs_get_is_rejected() {
+        let request = concat!(
+            "GET /api/tabs HTTP/1.1\r\n",
+            "Host: localhost:7777\r\n",
+            "Referer: https://evil.example/page\r\n",
+            "\r\n"
+        );
+
+        let response = send_request_to_handler(request, "x").await;
+
+        assert_forbidden_without_wildcard_cors(&response);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn same_origin_tabs_get_succeeds_without_wildcard_cors() {
+        let response = send_request_to_handler(&same_origin_get("/api/tabs"), "x").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            response.contains("Access-Control-Allow-Origin: http://localhost:7777"),
+            "same-origin tabs response did not reflect origin: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin: *"),
+            "tabs response exposed wildcard CORS: {response}"
+        );
+        assert!(response.ends_with("[]"), "unexpected tabs body: {response}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn same_origin_status_get_succeeds_without_wildcard_cors() {
+        let response = send_request_to_handler(&same_origin_get("/api/status"), "x").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "unexpected response: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin: *"),
+            "status response exposed wildcard CORS: {response}"
+        );
+        assert!(
+            response.contains(r#"{"engine":"chrome"}"#),
+            "unexpected status body: {response}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_proxy_tabs_get_is_allowed() {
+        let response = send_request_to_handler(&dashboard_proxy_get("/api/tabs"), "x").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "dashboard proxy request was refused: {response}"
+        );
+        assert!(
+            !response.contains("Access-Control-Allow-Origin: *"),
+            "proxied tabs response exposed wildcard CORS: {response}"
+        );
+        assert!(response.ends_with("[]"), "unexpected tabs body: {response}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_proxy_status_get_is_allowed() {
+        let response = send_request_to_handler(&dashboard_proxy_get("/api/status"), "x").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "dashboard proxy request was refused: {response}"
+        );
+        assert!(
+            response.contains(r#"{"engine":"chrome"}"#),
+            "unexpected status body: {response}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rebinding_host_tabs_get_without_origin_is_rejected() {
+        let request = concat!(
+            "GET /api/tabs HTTP/1.1\r\n",
+            "Host: attacker.example:7777\r\n",
+            "\r\n"
+        );
+
+        let response = send_request_to_handler(request, "x").await;
+
+        assert_forbidden_without_wildcard_cors(&response);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_assets_are_still_served_cross_origin() {
+        let request = concat!(
+            "GET /index.html HTTP/1.1\r\n",
+            "Host: localhost:7777\r\n",
+            "Origin: https://evil.example\r\n",
+            "\r\n"
+        );
+
+        let response = send_request_to_handler(request, "x").await;
+
+        assert!(
+            !response.starts_with("HTTP/1.1 403 Forbidden"),
+            "static asset route was gated: {response}"
+        );
     }
 }
