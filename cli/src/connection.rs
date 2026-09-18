@@ -1096,7 +1096,10 @@ fn has_os_error(error: &str, code: u32) -> bool {
 /// the extended budget, and that field is set client-side per invocation,
 /// avoiding the daemon's spawn-time env snapshot drifting from the client.
 fn read_timeout_for(cmd: &Value) -> Duration {
-    let op_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(0);
+    let mut op_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(0);
+    if cmd.get("action").and_then(Value::as_str) == Some("mousemove") {
+        op_ms = op_ms.max(cmd.get("duration").and_then(Value::as_u64).unwrap_or(0));
+    }
     Duration::from_millis(op_ms.saturating_add(10_000).max(30_000))
 }
 
@@ -1126,6 +1129,14 @@ fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
 mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
+
+    #[test]
+    fn long_mouse_movement_gets_its_requested_time_budget() {
+        assert_eq!(
+            read_timeout_for(&json!({"action":"mousemove", "duration": 35_000})),
+            Duration::from_secs(45)
+        );
+    }
 
     #[test]
     fn test_get_socket_dir_explicit_override() {

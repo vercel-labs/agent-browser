@@ -6,6 +6,7 @@ use futures_util::FutureExt;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 use crate::native::cdp::client::CdpClient;
+use crate::native::cdp::types::CdpEvent;
 use crate::native::network;
 
 use super::timestamp_ms;
@@ -89,6 +90,31 @@ async fn publish_url(
     let _ = frame_tx.send(message.to_string());
 }
 
+struct CarriedEvents {
+    client: Arc<CdpClient>,
+    receiver: broadcast::Receiver<CdpEvent>,
+    queued: VecDeque<CdpEvent>,
+}
+
+/// Frames queued while stopping belong to the old screencast. Discard them
+/// after the stop attempt while retaining navigation and runtime events that
+/// must survive the restart.
+fn preserve_queued_non_frame_events(
+    receiver: &mut broadcast::Receiver<CdpEvent>,
+    queued: &mut VecDeque<CdpEvent>,
+) {
+    loop {
+        match receiver.try_recv() {
+            Ok(event) if event.method != "Page.screencastFrame" => queued.push_back(event),
+            Ok(_) => {}
+            Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+            Err(broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed) => {
+                break
+            }
+        }
+    }
+}
+
 /// Subscribes to the active page's CDP events and broadcasts stream updates.
 ///
 /// Frames use `frame_watch` so the latest value wins. Other messages stay on
@@ -111,6 +137,10 @@ pub(super) async fn cdp_event_loop(
     recording: Arc<Mutex<bool>>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
+    // CDP broadcasts are not replayed to new subscribers. Preserve the receiver
+    // while restarting a screencast on the same client so navigation events
+    // emitted during the restart remain queued for the rebound session.
+    let mut carried_events: Option<CarriedEvents> = None;
     loop {
         tokio::select! {
             changed = shutdown_rx.changed() => {
@@ -136,7 +166,12 @@ pub(super) async fn cdp_event_loop(
 
         if count > 0 {
             if let Some(ref client) = *guard {
-                let mut event_rx = client.subscribe();
+                let (mut event_rx, mut queued_events) = match carried_events.take() {
+                    Some(carried) if Arc::ptr_eq(&carried.client, client) => {
+                        (carried.receiver, carried.queued)
+                    }
+                    _ => (client.subscribe(), VecDeque::new()),
+                };
                 let client_arc = Arc::clone(client);
                 drop(guard);
 
@@ -197,6 +232,8 @@ pub(super) async fn cdp_event_loop(
 
                 loop {
                     tokio::select! {
+                        biased;
+
                         seeded_frame_id = &mut frame_tree_seed => {
                             seed_in_flight = false;
                             if active_main_frame_id.is_none() {
@@ -243,7 +280,64 @@ pub(super) async fn cdp_event_loop(
                                 return;
                             }
                         }
-                        event = event_rx.recv() => {
+                        _ = client_notify.notified() => {
+                            let count = *client_count.lock().await;
+                            let new_session_id = cdp_session_id.read().await.clone();
+                            if count == 0 {
+                                if supports_screencast {
+                                    let _ = client_arc
+                                        .send_command_no_params("Page.stopScreencast", session_id.as_deref())
+                                        .await;
+                                }
+                                let mut sc = screencasting.lock().await;
+                                *sc = false;
+                                break;
+                            }
+                            let client_changed = {
+                                let guard = client_slot.read().await;
+                                let same = guard
+                                    .as_ref()
+                                    .is_some_and(|c| Arc::ptr_eq(c, &client_arc));
+                                !same
+                            };
+                            let session_changed = new_session_id != session_id;
+                            let new_vw = *viewport_width.lock().await;
+                            let new_vh = *viewport_height.lock().await;
+                            let viewport_changed = new_vw != vw || new_vh != vh;
+                            if client_changed || session_changed || viewport_changed {
+                                // The watch retains its latest value across CDP
+                                // restarts. Invalidate it before stopping so a
+                                // client cannot receive a frame from the old
+                                // tab or viewport while the new cast starts.
+                                frame_watch.send_replace(None);
+                                if supports_screencast {
+                                    let _ = client_arc
+                                        .send_command_no_params("Page.stopScreencast", session_id.as_deref())
+                                        .await;
+                                }
+                                let mut sc = screencasting.lock().await;
+                                *sc = false;
+                                if !client_changed {
+                                    preserve_queued_non_frame_events(
+                                        &mut event_rx,
+                                        &mut queued_events,
+                                    );
+                                    carried_events = Some(CarriedEvents {
+                                        client: Arc::clone(&client_arc),
+                                        receiver: event_rx,
+                                        queued: queued_events,
+                                    });
+                                }
+                                client_notify.notify_one();
+                                break;
+                            }
+                        }
+                        event = async {
+                            match queued_events.pop_front() {
+                                Some(event) => Ok(event),
+                                None => event_rx.recv().await,
+                            }
+                        } => {
                             match event {
                                 Ok(evt) => {
                                     if evt.method == "Page.frameNavigated" {
@@ -324,6 +418,20 @@ pub(super) async fn cdp_event_loop(
                                             }
                                         }
                                     } else if evt.method == "Page.screencastFrame" {
+                                        let matches_loop_session = session_matches(
+                                            session_id.as_deref(),
+                                            evt.session_id.as_deref(),
+                                        );
+                                        let matches_bound_session = {
+                                            let active_session = cdp_session_id.read().await;
+                                            session_matches(
+                                                active_session.as_deref(),
+                                                evt.session_id.as_deref(),
+                                            )
+                                        };
+                                        if !matches_loop_session || !matches_bound_session {
+                                            continue;
+                                        }
                                         if let Some(sid) = evt.params.get("sessionId").and_then(|v| v.as_i64()) {
                                             let _ = client_arc.send_command(
                                                 "Page.screencastFrameAck",
@@ -349,6 +457,29 @@ pub(super) async fn cdp_event_loop(
                                                     "timestamp": frame_timestamp_ms(meta),
                                                 }
                                             });
+
+                                            // The session or viewport can change while the
+                                            // frame acknowledgement is in flight. Hold the
+                                            // shared state guards through publication so the
+                                            // corresponding setter cannot clear the cache and
+                                            // then have this old frame repopulate it.
+                                            let active_client = client_slot.read().await;
+                                            let same_client = active_client
+                                                .as_ref()
+                                                .is_some_and(|client| Arc::ptr_eq(client, &client_arc));
+                                            let active_session = cdp_session_id.read().await;
+                                            let active_vw = viewport_width.lock().await;
+                                            let active_vh = viewport_height.lock().await;
+                                            let frame_is_current = same_client
+                                                && session_matches(
+                                                    active_session.as_deref(),
+                                                    evt.session_id.as_deref(),
+                                                )
+                                                && *active_vw == vw
+                                                && *active_vh == vh;
+                                            if !frame_is_current {
+                                                continue;
+                                            }
                                             frame_watch.send_replace(Some(Arc::new(
                                                 super::StreamFrame {
                                                     seq: Some(seq),
@@ -406,48 +537,14 @@ pub(super) async fn cdp_event_loop(
                                 Err(broadcast::error::RecvError::Closed) => break,
                             }
                         }
-                        _ = client_notify.notified() => {
-                            let count = *client_count.lock().await;
-                            let new_session_id = cdp_session_id.read().await.clone();
-                            if count == 0 {
-                                if supports_screencast {
-                                    let _ = client_arc
-                                        .send_command_no_params("Page.stopScreencast", session_id.as_deref())
-                                        .await;
-                                }
-                                let mut sc = screencasting.lock().await;
-                                *sc = false;
-                                break;
-                            }
-                            let client_changed = {
-                                let guard = client_slot.read().await;
-                                let same = guard
-                                    .as_ref()
-                                    .is_some_and(|c| Arc::ptr_eq(c, &client_arc));
-                                !same
-                            };
-                            let session_changed = new_session_id != session_id;
-                            let new_vw = *viewport_width.lock().await;
-                            let new_vh = *viewport_height.lock().await;
-                            let viewport_changed = new_vw != vw || new_vh != vh;
-                            if client_changed || session_changed || viewport_changed {
-                                if supports_screencast {
-                                    let _ = client_arc
-                                        .send_command_no_params("Page.stopScreencast", session_id.as_deref())
-                                        .await;
-                                }
-                                let mut sc = screencasting.lock().await;
-                                *sc = false;
-                                client_notify.notify_one();
-                                break;
-                            }
-                        }
                     }
                 }
             } else {
+                carried_events = None;
                 drop(guard);
             }
         } else {
+            carried_events = None;
             let was_screencasting = *screencasting.lock().await;
             if was_screencasting {
                 if let Some(ref client) = *guard {
@@ -525,6 +622,18 @@ mod tests {
         mpsc::UnboundedSender<Value>,
         Arc<Mutex<Vec<String>>>,
     ) {
+        mock_cdp_with_rebind_events(main_frame_id, seed_delay, 0).await
+    }
+
+    async fn mock_cdp_with_rebind_events(
+        main_frame_id: &str,
+        seed_delay: std::time::Duration,
+        events_on_next_stop: usize,
+    ) -> (
+        Arc<CdpClient>,
+        mpsc::UnboundedSender<Value>,
+        Arc<Mutex<Vec<String>>>,
+    ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!(
             "ws://127.0.0.1:{}/devtools/browser/mock",
@@ -536,6 +645,7 @@ mod tests {
         let frame_id = main_frame_id.to_string();
 
         tokio::spawn(async move {
+            let mut events_on_next_stop = events_on_next_stop;
             let (stream, _) = listener.accept().await.unwrap();
             let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
             let (mut tx, mut rx) = ws.split();
@@ -565,6 +675,19 @@ mod tests {
                                 }
                             }
                             json!({ "frameTree": { "frame": { "id": frame_id } } })
+                        } else if method == "Page.stopScreencast" && events_on_next_stop > 0 {
+                            let event_count = std::mem::take(&mut events_on_next_stop);
+                            for _ in 0..event_count {
+                                let event = tokio::time::timeout(
+                                    std::time::Duration::from_secs(5),
+                                    event_rx.recv(),
+                                )
+                                .await
+                                .expect("test should inject an event while screencast stops")
+                                .expect("test event channel should stay open");
+                                tx.send(Message::Text(event.to_string())).await.unwrap();
+                            }
+                            json!({})
                         } else {
                             json!({})
                         };
@@ -695,8 +818,11 @@ mod tests {
     struct LoopHarness {
         events: mpsc::UnboundedSender<Value>,
         messages: broadcast::Receiver<String>,
+        frames: watch::Receiver<Option<Arc<super::super::StreamFrame>>>,
         last_tabs: Arc<RwLock<Vec<Value>>>,
         cdp_session_id: Arc<RwLock<Option<String>>>,
+        viewport_width: Arc<Mutex<u32>>,
+        client_notify: Arc<tokio::sync::Notify>,
         shutdown: watch::Sender<bool>,
         task: tokio::task::JoinHandle<()>,
         methods: Arc<Mutex<Vec<String>>>,
@@ -728,11 +854,12 @@ mod tests {
         engine: &str,
     ) -> LoopHarness {
         let (frame_tx, messages) = broadcast::channel(64);
-        let (frame_watch, _) = watch::channel(None);
+        let (frame_watch, frames) = watch::channel(None);
         let client_slot = Arc::new(RwLock::new(Some(client)));
         let client_notify = Arc::new(tokio::sync::Notify::new());
         let client_count = Arc::new(Mutex::new(1));
         let cdp_session_id = Arc::new(RwLock::new(active_session.map(String::from)));
+        let viewport_width = Arc::new(Mutex::new(1280));
         let last_tabs = Arc::new(RwLock::new(vec![
             json!({ "tabId": "t1", "url": "https://active.test/", "active": true }),
             json!({ "tabId": "t2", "url": "https://background.test/", "active": false }),
@@ -747,7 +874,7 @@ mod tests {
             Arc::new(Mutex::new(false)),
             client_count,
             cdp_session_id.clone(),
-            Arc::new(Mutex::new(1280)),
+            viewport_width.clone(),
             Arc::new(Mutex::new(720)),
             last_tabs.clone(),
             Arc::new(RwLock::new(engine.to_string())),
@@ -759,8 +886,11 @@ mod tests {
         LoopHarness {
             events,
             messages,
+            frames,
             last_tabs,
             cdp_session_id,
+            viewport_width,
+            client_notify,
             shutdown,
             task,
             methods,
@@ -813,6 +943,37 @@ mod tests {
         })
         .await
         .expect("timed out waiting for CDP method");
+    }
+
+    async fn publish_frame_and_wait(
+        harness: &mut LoopHarness,
+        session_id: &str,
+        screencast_session_id: i64,
+        data: &str,
+    ) {
+        harness
+            .events
+            .send(json!({
+                "method": "Page.screencastFrame",
+                "sessionId": session_id,
+                "params": {
+                    "sessionId": screencast_session_id,
+                    "data": data,
+                    "metadata": { "timestamp": 1.0 }
+                }
+            }))
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), harness.frames.changed())
+            .await
+            .expect("timed out waiting for test frame")
+            .expect("frame watch should stay open");
+        let frame = harness
+            .frames
+            .borrow()
+            .clone()
+            .expect("test frame should be cached");
+        let payload: Value = serde_json::from_str(&frame.json).unwrap();
+        assert_eq!(payload["data"], data);
     }
 
     /// Reading the float as an integer stamps every frame 0, so no client can
@@ -990,6 +1151,137 @@ mod tests {
         assert_eq!(
             harness.last_tabs.read().await[1]["url"],
             "https://new.test/"
+        );
+
+        stop_loop(harness).await;
+    }
+
+    #[tokio::test]
+    async fn test_old_session_frame_is_ignored_before_rebind_notification() {
+        let mut harness = start_loop(Some("S-OLD"), "F-OLD").await;
+        next_message_of_type(&mut harness.messages, "status").await;
+
+        *harness.cdp_session_id.write().await = Some("S-NEW".to_string());
+        harness
+            .events
+            .send(json!({
+                "method": "Page.screencastFrame",
+                "sessionId": "S-OLD",
+                "params": {
+                    "sessionId": 6,
+                    "data": "stale-frame",
+                    "metadata": { "timestamp": 1.0 }
+                }
+            }))
+            .unwrap();
+        harness
+            .events
+            .send(json!({
+                "method": "Runtime.consoleAPICalled",
+                "sessionId": "S-OLD",
+                "params": {
+                    "type": "log",
+                    "args": [{ "type": "string", "value": "frame barrier" }]
+                }
+            }))
+            .unwrap();
+
+        next_message_of_type(&mut harness.messages, "console").await;
+        assert!(
+            harness.frames.borrow().is_none(),
+            "the previous session must stop publishing frames as soon as the binding changes"
+        );
+
+        stop_loop(harness).await;
+    }
+
+    #[tokio::test]
+    async fn test_same_document_navigation_survives_session_rebind() {
+        let (client, events, methods) =
+            mock_cdp_with_rebind_events("F-NEW", std::time::Duration::ZERO, 2).await;
+        let mut harness = start_loop_with_client(Some("S-OLD"), client, events, methods).await;
+        next_message_of_type(&mut harness.messages, "status").await;
+        publish_frame_and_wait(&mut harness, "S-OLD", 6, "previous-tab-frame").await;
+
+        *harness.cdp_session_id.write().await = Some("S-NEW".to_string());
+        harness.client_notify.notify_one();
+        wait_for_method(&harness.methods, "Page.stopScreencast").await;
+        harness
+            .events
+            .send(json!({
+                "method": "Page.screencastFrame",
+                "sessionId": "S-OLD",
+                "params": {
+                    "sessionId": 7,
+                    "data": "stale-frame",
+                    "metadata": { "timestamp": 1.0 }
+                }
+            }))
+            .unwrap();
+        harness
+            .events
+            .send(json!({
+                "method": "Page.navigatedWithinDocument",
+                "sessionId": "S-NEW",
+                "params": {
+                    "frameId": "F-NEW",
+                    "url": "https://new.test/immediate",
+                    "navigationType": "historyApi"
+                }
+            }))
+            .unwrap();
+
+        let message = next_message_of_type(&mut harness.messages, "url").await;
+        assert_eq!(message["url"], "https://new.test/immediate");
+        assert!(
+            harness.frames.borrow().is_none(),
+            "a frame from the old session must not reach the rebound stream"
+        );
+
+        stop_loop(harness).await;
+    }
+
+    #[tokio::test]
+    async fn test_viewport_rebind_preserves_navigation_without_replaying_stale_frame() {
+        let (client, events, methods) =
+            mock_cdp_with_rebind_events("F-MAIN", std::time::Duration::ZERO, 2).await;
+        let mut harness = start_loop_with_client(Some("S-ACTIVE"), client, events, methods).await;
+        next_message_of_type(&mut harness.messages, "status").await;
+        publish_frame_and_wait(&mut harness, "S-ACTIVE", 7, "previous-size-frame").await;
+
+        *harness.viewport_width.lock().await = 800;
+        harness.client_notify.notify_one();
+        wait_for_method(&harness.methods, "Page.stopScreencast").await;
+        harness
+            .events
+            .send(json!({
+                "method": "Page.screencastFrame",
+                "sessionId": "S-ACTIVE",
+                "params": {
+                    "sessionId": 8,
+                    "data": "old-size-frame",
+                    "metadata": { "timestamp": 2.0 }
+                }
+            }))
+            .unwrap();
+        harness
+            .events
+            .send(json!({
+                "method": "Page.navigatedWithinDocument",
+                "sessionId": "S-ACTIVE",
+                "params": {
+                    "frameId": "F-MAIN",
+                    "url": "https://active.test/resized",
+                    "navigationType": "historyApi"
+                }
+            }))
+            .unwrap();
+
+        let message = next_message_of_type(&mut harness.messages, "url").await;
+        assert_eq!(message["url"], "https://active.test/resized");
+        assert!(
+            harness.frames.borrow().is_none(),
+            "a frame captured at the old viewport must not be relabeled after restart"
         );
 
         stop_loop(harness).await;

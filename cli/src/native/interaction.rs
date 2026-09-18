@@ -5,7 +5,10 @@ use serde_json::Value;
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
 use super::codegen::probe::{capture_resolved_element, ElementCapture};
-use super::element::{resolve_element, resolve_element_object_id, resolve_element_point, RefMap};
+use super::element::{
+    resolve_element, resolve_element_object_id, resolve_element_point, session_viewport_offset,
+    RefMap,
+};
 
 /// Outcome of a click. `dialog_opened` is true if a JavaScript dialog opened
 /// mid-sequence (the page is then blocked until `dialog accept`/`dismiss`).
@@ -15,9 +18,14 @@ use super::element::{resolve_element, resolve_element_object_id, resolve_element
 /// next click would register as a drag or double-click.
 #[derive(Default)]
 pub struct ClickResult {
+    /// Final pointer position in the top-level page viewport, including dialogs.
+    pub position: (f64, f64),
     pub dialog_opened: bool,
     pub pending_release: Option<PendingRelease>,
     pub capture: Option<ElementCapture>,
+    pub x: f64,
+    pub y: f64,
+    pub button_pressed: bool,
 }
 
 pub struct PendingRelease {
@@ -57,6 +65,13 @@ pub async fn click_with_capture(
     // A click-triggered dialog can fire on the frame's own session (OOPIF) or
     // on the top-level page session; both count as "ours". A dialog on any
     // other session belongs to a background tab and must not abort this click.
+    let offset = session_viewport_offset(
+        client,
+        session_id,
+        &point.element.session_id,
+        iframe_sessions,
+    )
+    .await?;
     let mut result = dispatch_click(
         client,
         &point.element.session_id,
@@ -67,6 +82,9 @@ pub async fn click_with_capture(
         click_count,
     )
     .await?;
+    // Compute before dispatch: a click may navigate or open a blocking dialog.
+    result.position = (point.x + offset.0, point.y + offset.1);
+    (result.x, result.y) = result.position;
     result.capture = captured;
     Ok(result)
 }
@@ -120,7 +138,7 @@ pub async fn hover_with_capture(
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
     capture: bool,
-) -> Result<Option<ElementCapture>, String> {
+) -> Result<(Option<ElementCapture>, (f64, f64)), String> {
     let point = resolve_element_point(
         client,
         session_id,
@@ -137,6 +155,13 @@ pub async fn hover_with_capture(
     if let Some(captured) = captured.as_mut() {
         captured.position = Some((point.offset_x, point.offset_y));
     }
+    let offset = session_viewport_offset(
+        client,
+        session_id,
+        &point.element.session_id,
+        iframe_sessions,
+    )
+    .await?;
     client
         .send_command_typed::<_, Value>(
             "Input.dispatchMouseEvent",
@@ -154,7 +179,7 @@ pub async fn hover_with_capture(
             Some(&point.element.session_id),
         )
         .await?;
-    Ok(captured)
+    Ok((captured, (point.x + offset.0, point.y + offset.1)))
 }
 
 pub async fn hover(
@@ -163,7 +188,7 @@ pub async fn hover(
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<(f64, f64), String> {
     hover_with_capture(
         client,
         session_id,
@@ -173,7 +198,7 @@ pub async fn hover(
         false,
     )
     .await
-    .map(|_| ())
+    .map(|(_, position)| position)
 }
 
 pub async fn fill_with_capture(
@@ -631,18 +656,40 @@ pub async fn select_option_with_capture(
     // selects a misspelled option otherwise sees "Done", and only discovers
     // the page state is wrong after more commands. List what was available.
     let js = r#"function(vals) {
+            const normalize = (value) => String(value ?? '')
+                .replace(/[\u200B\u200C\u200D\u2060\uFEFF]/g, '')
+                .replace(/\s+/g, ' ')
+                .trim();
             const options = Array.from(this.options);
-            let matched = 0;
-            for (const opt of options) {
-                opt.selected = vals.includes(opt.value) || vals.includes(opt.textContent.trim());
-                if (opt.selected) matched += 1;
+            const wanted = new Set();
+            for (const value of vals) {
+                let matches = options.filter((opt) =>
+                    value === opt.value ||
+                    value === opt.label.trim() ||
+                    value === opt.textContent.trim()
+                );
+                if (matches.length === 0) {
+                    const normalizedValue = normalize(value);
+                    matches = options.filter((opt) =>
+                        normalize(opt.label) === normalizedValue
+                    );
+                    if (matches.length > 1) {
+                        return { error: 'Multiple options matched ' + JSON.stringify(value) + ' after whitespace normalization' };
+                    }
+                }
+                if (matches.length === 0) {
+                    const available = options.map(o => o.value + ' ("' + normalize(o.label) + '")').join(', ');
+                    return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
+                }
+                for (const opt of matches) wanted.add(opt);
             }
-            if (matched === 0) {
-                const available = options.map(o => o.value + ' ("' + o.textContent.trim() + '")').join(', ');
+            if (wanted.size === 0) {
+                const available = options.map(o => o.value + ' ("' + normalize(o.label) + '")').join(', ');
                 return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
             }
+            for (const opt of options) opt.selected = wanted.has(opt);
             this.dispatchEvent(new Event('change', { bubbles: true }));
-            return { matched };
+            return { matched: wanted.size };
         }"#
     .to_string();
 
@@ -702,7 +749,8 @@ pub async fn check(
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<Option<(f64, f64)>, String> {
+    let mut position = None;
     let is_checked = super::element::is_element_checked(
         client,
         session_id,
@@ -712,7 +760,7 @@ pub async fn check(
     )
     .await?;
     if !is_checked {
-        click(
+        let result = click(
             client,
             session_id,
             ref_map,
@@ -722,6 +770,7 @@ pub async fn check(
             iframe_sessions,
         )
         .await?;
+        position = Some(result.position);
 
         // Verify the click changed the state (Playwright parity: _setChecked re-checks).
         // If the coordinate-based click missed (e.g. hidden input, overlay), retry
@@ -745,7 +794,7 @@ pub async fn check(
             .await?;
         }
     }
-    Ok(())
+    Ok(position)
 }
 
 pub async fn uncheck(
@@ -754,7 +803,8 @@ pub async fn uncheck(
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<Option<(f64, f64)>, String> {
+    let mut position = None;
     let is_checked = super::element::is_element_checked(
         client,
         session_id,
@@ -764,7 +814,7 @@ pub async fn uncheck(
     )
     .await?;
     if is_checked {
-        click(
+        let result = click(
             client,
             session_id,
             ref_map,
@@ -774,6 +824,7 @@ pub async fn uncheck(
             iframe_sessions,
         )
         .await?;
+        position = Some(result.position);
 
         // Same verify-and-retry as check().
         if super::element::is_element_checked(
@@ -795,9 +846,14 @@ pub async fn uncheck(
             .await?;
         }
     }
-    Ok(())
+    Ok(position)
 }
 
+/// Capture the control before the command, and report whether the command
+/// actually changed it. `check` and `uncheck` click only when the control is
+/// not already in the requested state, so a returned position means a real
+/// click happened.
+#[allow(clippy::too_many_arguments)]
 pub async fn set_checked_with_capture(
     client: &CdpClient,
     session_id: &str,
@@ -806,80 +862,43 @@ pub async fn set_checked_with_capture(
     checked: bool,
     iframe_sessions: &HashMap<String, String>,
     capture: bool,
-) -> Result<Option<ElementCapture>, String> {
-    let resolved = resolve_element(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-    )
-    .await?;
-    let captured = if capture {
+) -> Result<(Option<ElementCapture>, Option<(f64, f64)>), String> {
+    let mut captured = if capture {
+        let resolved = resolve_element(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            iframe_sessions,
+        )
+        .await?;
         Some(capture_resolved_element(client, session_id, &resolved).await)
     } else {
         None
     };
-    let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: r#"function(wanted) {
-                    const checked = (el) => {
-                        const tag = el.tagName && el.tagName.toUpperCase();
-                        if (tag === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) return el.checked;
-                        const role = el.getAttribute && el.getAttribute('role');
-                        if (role && ['checkbox','radio','switch','menuitemcheckbox','menuitemradio','option','treeitem'].includes(role)) return el.getAttribute('aria-checked') === 'true';
-                        const label = tag === 'LABEL' ? el : (el.closest && el.closest('label'));
-                        if (label && label.control) return Boolean(label.control.checked);
-                        const input = el.querySelector && el.querySelector('input[type="checkbox"], input[type="radio"]');
-                        return input ? input.checked : false;
-                    };
-                    let changed = false;
-                    if (checked(this) !== wanted) {
-                        const tag = this.tagName && this.tagName.toUpperCase();
-                        const label = tag === 'LABEL' ? this : (this.closest && this.closest('label'));
-                        const nested = this.querySelector && this.querySelector('input[type="checkbox"], input[type="radio"]');
-                        const target = tag === 'INPUT' ? this : (label && label.control) || nested || this;
-                        target.click();
-                        changed = true;
-                    }
-                    return [changed, checked(this)];
-                }"#
-                .to_string(),
-                object_id: Some(resolved.object_id),
-                arguments: Some(vec![CallArgument {
-                    value: Some(serde_json::json!(checked)),
-                    object_id: None,
-                }]),
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&resolved.session_id),
+    let position = if checked {
+        check(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            iframe_sessions,
         )
-        .await?;
-    let outcome = result.result.value;
-    let values = outcome.as_ref().and_then(|value| value.as_array());
-    let changed = values
-        .and_then(|values| values.first())
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false);
-    let actual = values
-        .and_then(|values| values.get(1))
-        .or(outcome.as_ref())
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false);
-    if actual != checked {
-        return Err(format!(
-            "Element did not become {}",
-            if checked { "checked" } else { "unchecked" }
-        ));
-    }
-    let mut captured = captured;
+        .await?
+    } else {
+        uncheck(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            iframe_sessions,
+        )
+        .await?
+    };
     if let Some(captured) = captured.as_mut() {
-        captured.state_changed = Some(changed);
+        captured.state_changed = Some(position.is_some());
     }
-    Ok(captured)
+    Ok((captured, position))
 }
 
 /// Fallback for when the coordinate-based CDP click did not toggle the
@@ -1339,9 +1358,13 @@ async fn dispatch_click(
     {
         // No button was pressed yet, nothing to release.
         return Ok(ClickResult {
+            position: (x, y),
             dialog_opened: true,
             pending_release: None,
             capture: None,
+            x,
+            y,
+            button_pressed: false,
         });
     }
 
@@ -1374,6 +1397,7 @@ async fn dispatch_click(
         // release will never arrive on its own. Hand the caller what it needs
         // to release once the dialog is resolved.
         return Ok(ClickResult {
+            position: (x, y),
             dialog_opened: true,
             pending_release: Some(PendingRelease {
                 session_id: session_id.to_string(),
@@ -1382,6 +1406,9 @@ async fn dispatch_click(
                 button: button.to_string(),
             }),
             capture: None,
+            x,
+            y,
+            button_pressed: true,
         });
     }
 
@@ -1405,9 +1432,13 @@ async fn dispatch_click(
     )
     .await?;
     Ok(ClickResult {
+        position: (x, y),
         dialog_opened,
         pending_release: None,
         capture: None,
+        x,
+        y,
+        button_pressed: true,
     })
 }
 

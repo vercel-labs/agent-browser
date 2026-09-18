@@ -80,7 +80,7 @@ agent-browser click @e12
 
 ## Ref Lifecycle
 
-**IMPORTANT**: Refs are invalidated when the page changes!
+Same-document updates preserve refs for surviving DOM elements. Replaced elements and page or iframe document replacements invalidate the corresponding refs. Invalidated IDs are never recycled within the browser session. JSON snapshot responses list refs that disappeared in `removedRefs`. Virtual accessibility nodes have snapshot-local refs.
 
 ```bash
 # Get initial snapshot
@@ -90,9 +90,9 @@ agent-browser snapshot -i
 # Click triggers page change
 agent-browser click @e1
 
-# MUST re-snapshot to get new refs!
+# Re-snapshot after navigation to get new refs
 agent-browser snapshot -i
-# @e1 [h1] "Page 2"  ← Different element now!
+# @e2 [heading] "Page 2"  ← New element, new ref
 ```
 
 ## Best Practices

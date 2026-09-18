@@ -89,7 +89,11 @@ export async function snapshotUrl(url: string) {
 The sandbox persists between commands, so you can run full automation sequences:
 
 ```ts
-export async function fillAndSubmitForm(url: string, data: Record<string, string>) {
+export async function fillAndSubmitForm(
+  url: string,
+  data: Record<string, string>,
+  postSubmitWaitArgs: string[],
+) {
   return withBrowser(async (sandbox) => {
     await runAgentBrowserCommand(sandbox, ["open", url]);
 
@@ -104,7 +108,9 @@ export async function fillAndSubmitForm(url: string, data: Record<string, string
     }
 
     await runAgentBrowserCommand(sandbox, ["click", "@e5"]);
-    await runAgentBrowserCommand(sandbox, ["wait", "--load", "networkidle"]);
+    // Pass an app-specific wait, such as ["--url", "**/checkout/complete"],
+    // ["--text", "Thanks"], or ["#confirmation"].
+    await runAgentBrowserCommand(sandbox, ["wait", ...postSubmitWaitArgs]);
 
     const ssResult = await runAgentBrowserCommand<{ data?: { path?: string } }>(sandbox, [
       "screenshot",

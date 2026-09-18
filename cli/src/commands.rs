@@ -432,18 +432,22 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         // === Core Actions ===
         "click" => {
             let new_tab = rest.contains(&"--new-tab");
+            let human = rest.contains(&"--human");
             let sel = rest
                 .iter()
-                .find(|arg| **arg != "--new-tab")
+                .find(|arg| **arg != "--new-tab" && **arg != "--human")
                 .ok_or_else(|| ParseError::MissingArguments {
                     context: "click".to_string(),
-                    usage: "click <selector> [--new-tab]",
+                    usage: "click <selector> [--new-tab] [--human]",
                 })?;
+            let mut cmd = json!({ "id": id, "action": "click", "selector": sel });
             if new_tab {
-                Ok(json!({ "id": id, "action": "click", "selector": sel, "newTab": true }))
-            } else {
-                Ok(json!({ "id": id, "action": "click", "selector": sel }))
+                cmd["newTab"] = json!(true);
             }
+            if human {
+                cmd["inputMode"] = json!("human");
+            }
+            Ok(cmd)
         }
         "dblclick" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -555,7 +559,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 context: "drag".to_string(),
                 usage: "drag <source> <target>",
             })?;
-            Ok(json!({ "id": id, "action": "drag", "source": src, "target": tgt }))
+            let mut cmd = json!({ "id": id, "action": "drag", "source": src, "target": tgt });
+            if rest.contains(&"--human") {
+                cmd["inputMode"] = json!("human");
+            }
+            Ok(cmd)
         }
         "upload" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -807,17 +815,41 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             // selector: @ref or CSS selector
             // path: file path (contains / or . or ends with known extension)
             let mut full_page = false;
-            let positional: Vec<&str> = rest
-                .iter()
-                .filter(|arg| match **arg {
-                    "--full" | "-f" => {
-                        full_page = true;
-                        false
+            let mut if_changed = false;
+            let mut threshold = None;
+            let mut positional = Vec::new();
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i] {
+                    "--full" | "-f" => full_page = true,
+                    "--if-changed" => if_changed = true,
+                    "--threshold" => {
+                        let raw = rest.get(i + 1).ok_or_else(|| ParseError::MissingArguments {
+                            context: "screenshot --threshold".to_string(),
+                            usage: "screenshot [selector] [path] [--if-changed] [--threshold <0-1>]",
+                        })?;
+                        let value = raw.parse::<f64>().map_err(|_| ParseError::InvalidValue {
+                            message: format!(
+                                "--threshold expects a number from 0 to 1, got '{}'",
+                                raw
+                            ),
+                            usage:
+                                "screenshot [selector] [path] [--if-changed] [--threshold <0-1>]",
+                        })?;
+                        if !(0.0..=1.0).contains(&value) {
+                            return Err(ParseError::InvalidValue {
+                                message: format!("--threshold must be from 0 to 1, got '{}'", raw),
+                                usage: "screenshot [selector] [path] [--if-changed] [--threshold <0-1>]",
+                            });
+                        }
+                        threshold = Some(value);
+                        if_changed = true;
+                        i += 1;
                     }
-                    _ => true,
-                })
-                .copied()
-                .collect();
+                    arg => positional.push(arg),
+                }
+                i += 1;
+            }
             let (selector, path) = match (positional.first(), positional.get(1)) {
                 (Some(first), Some(second)) => {
                     // Two args: first is selector, second is path
@@ -863,6 +895,12 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             if let Some(ref dir) = flags.screenshot_dir {
                 cmd["screenshotDir"] = json!(dir);
             }
+            if if_changed {
+                cmd["ifChanged"] = json!(true);
+            }
+            if let Some(value) = threshold {
+                cmd["threshold"] = json!(value);
+            }
             Ok(cmd)
         }
         "pdf" => {
@@ -905,6 +943,13 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                             obj.insert("selector".to_string(), json!(s));
                             i += 1;
                         }
+                    }
+                    "--delta" => {
+                        obj.insert("delta".to_string(), json!(true));
+                    }
+                    "--full" => {
+                        obj.insert("full".to_string(), json!(true));
+                        obj.insert("delta".to_string(), json!(true));
                     }
                     _ => {}
                 }
@@ -1062,7 +1107,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     Ok(cmd)
                 }
                 Some("login") => {
-                    const AUTH_LOGIN_USAGE: &str = "agent-browser auth login <name> [--credential-provider <plugin>] [--item <ref>] [--url <url>] [--username-selector <s>] [--password-selector <s>] [--submit-selector <s>]";
+                    const AUTH_LOGIN_USAGE: &str = "agent-browser auth login <name> [--no-navigate] [--credential-provider <plugin>] [--item <ref>] [--url <url>] [--username-selector <s>] [--password-selector <s>] [--submit-selector <s>]";
                     let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "auth login".to_string(),
                         usage: AUTH_LOGIN_USAGE,
@@ -1073,10 +1118,24 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     let mut username_selector: Option<String> = None;
                     let mut password_selector: Option<String> = None;
                     let mut submit_selector: Option<String> = None;
+                    let mut no_navigate = false;
 
                     let mut j = 2;
                     while j < rest.len() {
                         match rest[j] {
+                            "--no-navigate" => {
+                                if rest
+                                    .get(j + 1)
+                                    .is_some_and(|value| !value.starts_with("--"))
+                                {
+                                    return Err(ParseError::InvalidValue {
+                                        message: "--no-navigate does not accept a value"
+                                            .to_string(),
+                                        usage: AUTH_LOGIN_USAGE,
+                                    });
+                                }
+                                no_navigate = true;
+                            }
                             "--credential-provider" => {
                                 let Some(value) = rest.get(j + 1).filter(|v| !v.starts_with("--"))
                                 else {
@@ -1173,6 +1232,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     }
                     if let Some(ss) = submit_selector {
                         cmd["submitSelector"] = json!(ss);
+                    }
+                    if no_navigate {
+                        // Invocation-only behavior. This is intentionally not
+                        // stored in AuthProfile or credential provider data.
+                        cmd["noNavigate"] = json!(true);
                     }
                     Ok(cmd)
                 }
@@ -1678,7 +1742,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     "recording_start",
                     &rest[1..],
                     "record start",
-                    "record start <output.webm|output.mp4> [url] [--fps <n>]",
+                    "record start <output.webm|output.mp4> [url] [--fps <n>] [--cursor] [--contact-sheet] [--contact-sheet-threshold <0-1>]",
                 ),
                 Some("stop") => Ok(json!({ "id": id, "action": "recording_stop" })),
                 Some("restart") => parse_record_take(
@@ -1686,7 +1750,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     "recording_restart",
                     &rest[1..],
                     "record restart",
-                    "record restart <output.webm|output.mp4> [url] [--fps <n>]",
+                    "record restart <output.webm|output.mp4> [url] [--fps <n>] [--cursor] [--contact-sheet] [--contact-sheet-threshold <0-1>]",
                 ),
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
@@ -2112,13 +2176,27 @@ fn parse_webmcp(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     })?;
     match *subcommand {
         "list" => {
-            if let Some(argument) = rest.get(1) {
-                return Err(ParseError::InvalidValue {
-                    message: format!("Unexpected argument for webmcp list: {}", argument),
-                    usage: "webmcp list",
-                });
+            let mut command = json!({"id": id, "action": "webmcp_list"});
+            let mut i = 1;
+            while i < rest.len() {
+                match rest[i] {
+                    "--frame" if rest.get(i + 1).is_some_and(|v| !v.starts_with("--")) => {
+                        command["frameId"] = json!(rest[i + 1]);
+                        i += 2;
+                    }
+                    name if !name.starts_with("--") && command.get("tool").is_none() => {
+                        command["tool"] = json!(name);
+                        i += 1;
+                    }
+                    argument => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unexpected argument for webmcp list: {}", argument),
+                            usage: "webmcp list [tool] [--frame <frame-id>]",
+                        })
+                    }
+                }
             }
-            Ok(json!({ "id": id, "action": "webmcp_list" }))
+            Ok(command)
         }
         "invoke" => {
             let tool = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -2417,7 +2495,8 @@ fn parse_read(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseErro
 }
 
 /// Parse the arguments shared by `record start` and `record restart`:
-/// `<path> [url] [--fps <n>]`.
+/// `<path> [url] [--fps <n>] [--cursor] [--contact-sheet]` plus an optional
+/// contact-sheet pixel-difference threshold.
 ///
 /// `rest` excludes the subcommand. `path` needs an extension so ffmpeg can
 /// pick a container (`.webm` and `.mp4` are the tuned ones). Recording
@@ -2435,6 +2514,9 @@ fn parse_record_take(
     let mut path: Option<&str> = None;
     let mut url: Option<&str> = None;
     let mut fps: Option<u32> = None;
+    let mut cursor = false;
+    let mut contact_sheet = false;
+    let mut contact_sheet_threshold: Option<f64> = None;
 
     let mut i = 0;
     while i < rest.len() {
@@ -2460,6 +2542,41 @@ fn parse_record_take(
                     });
                 }
                 fps = Some(parsed);
+                i += 2;
+            }
+            "--cursor" => {
+                cursor = true;
+                i += 1;
+            }
+            "--contact-sheet" => {
+                contact_sheet = true;
+                i += 1;
+            }
+            "--contact-sheet-threshold" => {
+                let value = rest
+                    .get(i + 1)
+                    .ok_or_else(|| ParseError::MissingArguments {
+                        context: format!("{} --contact-sheet-threshold", context),
+                        usage,
+                    })?;
+                let parsed = value.parse::<f64>().map_err(|_| ParseError::InvalidValue {
+                    message: format!(
+                        "Invalid contact sheet threshold: '{}' is not a number",
+                        value
+                    ),
+                    usage,
+                })?;
+                if !parsed.is_finite() || !(0.0..=1.0).contains(&parsed) {
+                    return Err(ParseError::InvalidValue {
+                        message: format!(
+                            "Invalid contact sheet threshold: {} is out of range (valid range: 0-1)",
+                            parsed
+                        ),
+                        usage,
+                    });
+                }
+                contact_sheet = true;
+                contact_sheet_threshold = Some(parsed);
                 i += 2;
             }
             flag if flag.starts_with("--") => {
@@ -2496,16 +2613,20 @@ fn parse_record_take(
 
     let mut cmd = json!({ "id": id, "action": action, "path": path });
     if let Some(u) = url {
-        // Add https:// prefix if needed (preserve special schemes)
-        let url_str = if u.starts_with("http") || u.contains("://") {
-            u.to_string()
-        } else {
-            format!("https://{}", u)
-        };
+        let url_str = normalize_navigation_url(u);
         cmd["url"] = json!(url_str);
     }
     if let Some(rate) = fps {
         cmd["fps"] = json!(rate);
+    }
+    if cursor {
+        cmd["cursor"] = json!(true);
+    }
+    if contact_sheet {
+        cmd["contactSheet"] = json!(true);
+    }
+    if let Some(threshold) = contact_sheet_threshold {
+        cmd["contactSheetThreshold"] = json!(threshold);
     }
     Ok(cmd)
 }
@@ -3161,7 +3282,32 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                     context: "mouse move".to_string(),
                     usage: "mouse move <x> <y>",
                 })?;
-            Ok(json!({ "id": id, "action": "mousemove", "x": x, "y": y }))
+            let mut cmd = json!({ "id": id, "action": "mousemove", "x": x, "y": y });
+            let mut i = 3;
+            while i < rest.len() {
+                match rest[i] {
+                    "--duration" | "--steps" | "--seed" => {
+                        let flag = rest[i];
+                        let raw = rest.get(i + 1).ok_or_else(|| ParseError::MissingArguments {
+                            context: format!("mouse move {}", flag),
+                            usage: "mouse move <x> <y> [--duration <ms>] [--steps <n>] [--seed <n>]",
+                        })?;
+                        let value = raw.parse::<u64>().map_err(|_| ParseError::InvalidValue {
+                            message: format!("{} expects a non-negative integer, got '{}'", flag, raw),
+                            usage: "mouse move <x> <y> [--duration <ms>] [--steps <n>] [--seed <n>]",
+                        })?;
+                        let key = match flag { "--duration" => "duration", "--steps" => "steps", _ => "seed" };
+                        cmd[key] = json!(value);
+                        i += 2;
+                    }
+                    "--human" => { cmd["inputMode"] = json!("human"); i += 1; }
+                    other => return Err(ParseError::InvalidValue {
+                        message: format!("unexpected argument '{}'", other),
+                        usage: "mouse move <x> <y> [--duration <ms>] [--steps <n>] [--seed <n>] [--human]",
+                    }),
+                }
+            }
+            Ok(cmd)
         }
         Some("down") => {
             Ok(json!({ "id": id, "action": "mousedown", "button": rest.get(1).unwrap_or(&"left") }))
@@ -3584,6 +3730,7 @@ mod tests {
             cli_no_webmcp: false,
             cli_restore: false,
             cli_pin_tab: false,
+            cli_input_mode: false,
             annotate: false,
             color_scheme: None,
             download_path: None,
@@ -3604,6 +3751,7 @@ mod tests {
             plugins: Vec::new(),
             verbose: false,
             quiet: false,
+            input_mode: "instant".to_string(),
         }
     }
 
@@ -4405,6 +4553,26 @@ mod tests {
     }
 
     #[test]
+    fn test_click_human() {
+        let cmd = parse_command(&args("click @e1 --human"), &default_flags()).unwrap();
+        assert_eq!(cmd["selector"], "@e1");
+        assert_eq!(cmd["inputMode"], "human");
+    }
+
+    #[test]
+    fn test_mouse_move_interpolation_options() {
+        let cmd = parse_command(
+            &args("mouse move 600 400 --duration 250 --steps 24 --seed 42 --human"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["duration"], 250);
+        assert_eq!(cmd["steps"], 24);
+        assert_eq!(cmd["seed"], 42);
+        assert_eq!(cmd["inputMode"], "human");
+    }
+
+    #[test]
     fn test_fill() {
         let cmd = parse_command(&args("fill #input hello world"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "fill");
@@ -4761,12 +4929,51 @@ mod tests {
         assert_eq!(cmd["path"], "./button.png");
     }
 
+    #[test]
+    fn test_screenshot_if_changed() {
+        let cmd = parse_command(&args("screenshot --if-changed"), &default_flags()).unwrap();
+        assert_eq!(cmd["ifChanged"], true);
+        assert!(cmd.get("threshold").is_none());
+    }
+
+    #[test]
+    fn test_screenshot_threshold_implies_if_changed() {
+        let cmd = parse_command(
+            &args("screenshot .btn ./button.png --threshold 0.025"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["selector"], ".btn");
+        assert_eq!(cmd["path"], "./button.png");
+        assert_eq!(cmd["ifChanged"], true);
+        assert_eq!(cmd["threshold"], 0.025);
+    }
+
+    #[test]
+    fn test_screenshot_threshold_rejects_out_of_range_value() {
+        let result = parse_command(&args("screenshot --threshold 1.1"), &default_flags());
+        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
+    }
+
+    #[test]
+    fn test_screenshot_threshold_requires_value() {
+        let result = parse_command(&args("screenshot --threshold"), &default_flags());
+        assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
+    }
+
     // === Snapshot ===
 
     #[test]
     fn test_snapshot() {
         let cmd = parse_command(&args("snapshot"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "snapshot");
+    }
+
+    #[test]
+    fn test_snapshot_delta_and_full_flags() {
+        let cmd = parse_command(&args("snapshot --delta --full"), &default_flags()).unwrap();
+        assert_eq!(cmd["delta"], true);
+        assert_eq!(cmd["full"], true);
     }
 
     #[test]
@@ -4966,6 +5173,50 @@ mod tests {
         assert_eq!(cmd["action"], "recording_start");
         assert_eq!(cmd["path"], "output.webm");
         assert_eq!(cmd["fps"], 60);
+    }
+
+    #[test]
+    fn test_record_start_with_cursor() {
+        let cmd =
+            parse_command(&args("record start output.webm --cursor"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "recording_start");
+        assert_eq!(cmd["cursor"], true);
+    }
+
+    #[test]
+    fn test_record_start_with_contact_sheet() {
+        let cmd = parse_command(
+            &args("record start output.webm --contact-sheet --contact-sheet-threshold 0.12"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["contactSheet"], true);
+        assert_eq!(cmd["contactSheetThreshold"], 0.12);
+    }
+
+    #[test]
+    fn test_record_start_threshold_implies_contact_sheet() {
+        let cmd = parse_command(
+            &args("record start output.webm --contact-sheet-threshold 0.01"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["contactSheet"], true);
+        assert_eq!(cmd["contactSheetThreshold"], 0.01);
+    }
+
+    #[test]
+    fn test_record_start_rejects_invalid_contact_sheet_threshold() {
+        for value in ["-0.1", "1.1", "many"] {
+            let result = parse_command(
+                &args(&format!(
+                    "record start output.webm --contact-sheet-threshold {}",
+                    value
+                )),
+                &default_flags(),
+            );
+            assert!(result.is_err(), "threshold {value} should fail");
+        }
     }
 
     #[test]
@@ -5885,7 +6136,8 @@ mod tests {
     #[test]
     fn test_webmcp_rejects_unexpected_arguments() {
         for command in [
-            "webmcp list extra",
+            "webmcp list search extra",
+            "webmcp list --frame",
             "webmcp result invocation-1 extra",
             "webmcp cancel invocation-1 extra",
         ] {
@@ -6527,6 +6779,61 @@ mod tests {
         assert_eq!(cmd["usernameSelector"], "#login_field");
         assert_eq!(cmd["passwordSelector"], "#password");
         assert_eq!(cmd["submitSelector"], "input[type=submit]");
+        assert!(cmd.get("noNavigate").is_none());
+    }
+
+    #[test]
+    fn test_auth_login_no_navigate() {
+        let cmd =
+            parse_command(&args("auth login github --no-navigate"), &default_flags()).unwrap();
+
+        assert_eq!(cmd["action"], "auth_login");
+        assert_eq!(cmd["name"], "github");
+        assert_eq!(cmd["noNavigate"], true);
+        assert!(cmd.get("url").is_none());
+    }
+
+    #[test]
+    fn test_auth_login_no_navigate_with_url() {
+        let cmd = parse_command(
+            &args("auth login github --no-navigate --url https://github.com/login"),
+            &default_flags(),
+        )
+        .unwrap();
+
+        assert_eq!(cmd["action"], "auth_login");
+        assert_eq!(cmd["name"], "github");
+        assert_eq!(cmd["noNavigate"], true);
+        assert_eq!(cmd["url"], "https://github.com/login");
+    }
+
+    #[test]
+    fn test_auth_login_no_navigate_combines_with_provider_and_selectors() {
+        let cmd = parse_command(
+            &args(
+                "auth login work --credential-provider vault --item Work --no-navigate --username-selector #email --password-selector #pass --submit-selector #submit",
+            ),
+            &default_flags(),
+        )
+        .unwrap();
+
+        assert_eq!(cmd["credentialProvider"], "vault");
+        assert_eq!(cmd["credentialItem"], "Work");
+        assert_eq!(cmd["noNavigate"], true);
+        assert_eq!(cmd["usernameSelector"], "#email");
+        assert_eq!(cmd["passwordSelector"], "#pass");
+        assert_eq!(cmd["submitSelector"], "#submit");
+    }
+
+    #[test]
+    fn test_auth_login_no_navigate_rejects_value() {
+        let err = parse_command(
+            &args("auth login github --no-navigate true"),
+            &default_flags(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ParseError::InvalidValue { .. }));
     }
 
     #[test]

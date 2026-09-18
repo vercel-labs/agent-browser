@@ -8,6 +8,102 @@ use super::cdp::types::{
 };
 use super::element::{resolve_ax_session, RefMap};
 
+#[cfg(test)]
+mod document_identity_regressions {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    async fn observe_documents(documents: &[Option<&str>], sessions: &[&str]) -> Vec<String> {
+        let document = Arc::new(Mutex::new(None::<String>));
+        let server_document = document.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                let Ok(text) = message.to_text() else {
+                    continue;
+                };
+                let request: Value = serde_json::from_str(text).unwrap();
+                let result = match request["method"].as_str().unwrap() {
+                    "Page.getFrameTree" => json!({"frameTree": {"frame": {
+                        "id": "child", "loaderId": server_document.lock().unwrap().clone()
+                    }}}),
+                    "Accessibility.getFullAXTree" => json!({"nodes": [{
+                        "nodeId": "1", "role": {"type": "role", "value": "button"},
+                        "name": {"type": "string", "value": "Buy"}, "backendDOMNodeId": 42
+                    }]}),
+                    "Runtime.evaluate" => json!({"result": {"type": "object", "value": []}}),
+                    _ => json!({}),
+                };
+                ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                    json!({"id": request["id"], "result": result}).to_string(),
+                ))
+                .await
+                .unwrap();
+            }
+        });
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut refs = RefMap::new();
+        let mut observations = Vec::new();
+        for (loader, session) in documents.iter().zip(sessions) {
+            *document.lock().unwrap() = loader.map(str::to_string);
+            refs.begin_snapshot();
+            take_snapshot(
+                &client,
+                "parent-session",
+                &SnapshotOptions::default(),
+                &mut refs,
+                Some("child"),
+                &HashMap::from([("child".into(), session.to_string())]),
+            )
+            .await
+            .unwrap();
+            observations.push(refs.entries_sorted()[0].0.clone());
+        }
+        server.abort();
+        observations
+    }
+
+    #[tokio::test]
+    async fn durable_refs_invalidate_replaced_iframe_document() {
+        let refs =
+            observe_documents(&[Some("a"), Some("a"), Some("b")], &["child-session"; 3]).await;
+        assert_eq!(refs[0], refs[1], "same document should preserve refs");
+        assert_ne!(
+            refs[1], refs[2],
+            "replacement document must not reuse a ref for backend ID 42"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_refs_invalidate_replaced_iframe_session() {
+        let refs = observe_documents(&[Some("a"); 2], &["session-a", "session-b"]).await;
+        assert_ne!(
+            refs[0], refs[1],
+            "backend IDs belong to their effective CDP session"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_refs_do_not_share_unknown_document() {
+        let refs = observe_documents(
+            &[None, None, Some("a"), None, Some("a")],
+            &["child-session"; 5],
+        )
+        .await;
+        let unique: std::collections::HashSet<_> = refs.iter().collect();
+        assert_eq!(
+            unique.len(),
+            refs.len(),
+            "unknown identity must break continuity: {refs:?}"
+        );
+    }
+}
+
 const INTERACTIVE_ROLES: &[&str] = &[
     "button",
     "link",
@@ -65,14 +161,23 @@ const STRUCTURAL_ROLES: &[&str] = &[
     "RootWebArea",
 ];
 
-const INVISIBLE_CHARS: &[char] = &[
+const ZERO_WIDTH_CHARS: &[char] = &[
     '\u{FEFF}', // BOM / Zero Width No-Break Space
     '\u{200B}', // Zero Width Space
     '\u{200C}', // Zero Width Non-Joiner
     '\u{200D}', // Zero Width Joiner
     '\u{2060}', // Word Joiner
-    '\u{00A0}', // Non-Breaking Space (&nbsp;)
 ];
+
+fn normalize_snapshot_name(name: &str) -> String {
+    name.chars()
+        .filter_map(|ch| match ch {
+            '\u{00A0}' => Some(' '),
+            ch if ZERO_WIDTH_CHARS.contains(&ch) => None,
+            ch => Some(ch),
+        })
+        .collect()
+}
 
 #[derive(Default)]
 pub struct SnapshotOptions {
@@ -300,6 +405,17 @@ pub async fn take_snapshot(
 
     let (ax_params, effective_session_id) =
         resolve_ax_session(frame_id, session_id, iframe_sessions);
+    // Same-origin children share a CDP session but have separate loaders;
+    // out-of-process children also have their own effective session identity.
+    let frame_tree = client
+        .send_command_no_params("Page.getFrameTree", Some(effective_session_id))
+        .await
+        .ok();
+    let loader = frame_tree
+        .as_ref()
+        .and_then(|tree| frame_loader(&tree["frameTree"], frame_id));
+    let document_is_known =
+        ref_map.observe_document(session_id, frame_id, effective_session_id, loader);
     // Ensure domains are enabled on the iframe session (defensive fallback
     // in case the attach-time enable in execute_command was missed).
     if effective_session_id != session_id {
@@ -401,8 +517,23 @@ pub async fn take_snapshot(
             None
         };
 
-        let ref_id = format!("e{}", next_ref);
-        next_ref += 1;
+        let ref_id = if let Some(backend_node_id) = tree_nodes[*idx]
+            .backend_node_id
+            .filter(|_| document_is_known)
+        {
+            if let Some(existing) = ref_map.durable_ref(session_id, frame_id, backend_node_id) {
+                existing.to_string()
+            } else {
+                let allocated = format!("e{}", next_ref);
+                next_ref += 1;
+                ref_map.remember_durable_ref(session_id, frame_id, backend_node_id, &allocated);
+                allocated
+            }
+        } else {
+            let allocated = format!("e{}", next_ref);
+            next_ref += 1;
+            allocated
+        };
 
         ref_map.add_with_frame(
             ref_id.clone(),
@@ -588,6 +719,17 @@ pub async fn take_snapshot(
 }
 
 /// Resolve the child frame ID for an iframe element given its backendNodeId.
+fn frame_loader<'a>(tree: &'a Value, frame_id: Option<&str>) -> Option<&'a str> {
+    let frame = &tree["frame"];
+    if frame_id.is_none() || frame["id"].as_str() == frame_id {
+        return frame["loaderId"].as_str().filter(|id| !id.is_empty());
+    }
+    tree["childFrames"]
+        .as_array()?
+        .iter()
+        .find_map(|child| frame_loader(child, frame_id))
+}
+
 async fn resolve_iframe_frame_id(
     client: &CdpClient,
     session_id: &str,
@@ -1084,7 +1226,7 @@ fn render_tree(
     // Reduce unnecessary indentation and rendering
     if node.role.is_empty()
         || (node.role == "generic" && !node.has_ref && node.children.len() <= 1)
-        || (node.role == "StaticText" && node.name.replace(INVISIBLE_CHARS, "").is_empty())
+        || (node.role == "StaticText" && normalize_snapshot_name(&node.name).trim().is_empty())
     {
         // Ignored node -- still render children
         for &child in &node.children {
@@ -1133,8 +1275,10 @@ fn render_tree(
         &node.name
     };
     if !unescaped_display_name.is_empty() {
-        if let Ok(display_name) = serde_json::to_string(&unescaped_display_name) {
-            line.push_str(&format!(" {}", display_name.replace(INVISIBLE_CHARS, "")));
+        if let Ok(display_name) =
+            serde_json::to_string(&normalize_snapshot_name(unescaped_display_name))
+        {
+            line.push_str(&format!(" {}", display_name));
         }
     }
 
@@ -1358,6 +1502,15 @@ fn collect_backend_node_ids(node: &Value, ids: &mut std::collections::HashSet<i6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalize_snapshot_name_preserves_word_boundaries() {
+        assert_eq!(
+            normalize_snapshot_name("Capital\u{00A0}Federal"),
+            "Capital Federal"
+        );
+        assert_eq!(normalize_snapshot_name("zero\u{200B}width"), "zerowidth");
+    }
 
     #[test]
     fn test_interactive_roles() {

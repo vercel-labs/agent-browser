@@ -132,6 +132,8 @@ After completion, the browser remains on the second URL.
   </tbody>
 </table>
 
+The `--wait-until` option accepts only `load`, `domcontentloaded`, and `networkidle`; it cannot express an app-specific condition. If a page needs a selector, text, URL, or JavaScript condition, use separate `open` and `wait` commands, then compare the captured snapshots or screenshots instead of using `diff url`. `networkidle` is supported for quiet pages, but SSE, WebSockets, polling, and long-polling can keep it from resolving.
+
 ## Use cases
 
 ### Verifying agent actions

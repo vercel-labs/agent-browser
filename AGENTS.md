@@ -128,68 +128,6 @@ cd cli && cargo fmt -- --check   # Check formatting
 cd cli && cargo clippy            # Lint
 ```
 
-## Windows Debugging
-
-A remote Windows Server 2022 EC2 instance is available for debugging Windows-specific issues. It uses AWS Systems Manager (SSM) with no SSH or open ports. Commands run via `aws ssm send-command` and return stdout/stderr.
-
-### Prerequisites
-
-The instance must be provisioned first (one-time, by a human):
-
-```bash
-./scripts/windows-debug/provision.sh
-```
-
-Requires: AWS CLI v2 configured with `ec2:*`, `iam:CreateRole`, `iam:AttachRolePolicy`, `ssm:SendCommand`, `ssm:GetCommandInvocation` permissions and a default VPC.
-
-### Usage
-
-Start the instance (if stopped):
-
-```bash
-./scripts/windows-debug/start.sh
-```
-
-Run a command on Windows:
-
-```bash
-./scripts/windows-debug/run.sh "<powershell-command>"
-```
-
-Sync the current git branch and rebuild:
-
-```bash
-./scripts/windows-debug/sync.sh
-```
-
-Stop the instance when done (avoids cost):
-
-```bash
-./scripts/windows-debug/stop.sh
-```
-
-### Common Workflows
-
-Run unit tests on Windows:
-
-```bash
-./scripts/windows-debug/run.sh "cd C:\agent-browser && cargo test --manifest-path cli\Cargo.toml"
-```
-
-Run e2e tests on Windows:
-
-```bash
-./scripts/windows-debug/run.sh "cd C:\agent-browser && cargo test e2e --manifest-path cli\Cargo.toml -- --ignored --test-threads=1"
-```
-
-Check bootstrap progress (first boot only):
-
-```bash
-./scripts/windows-debug/run.sh "Get-Content C:\bootstrap.log"
-```
-
-The repo lives at `C:\agent-browser` on the instance. Rust, Git, and Chrome are pre-installed. The `run.sh` wrapper automatically adds cargo and git to PATH.
-
 <!-- opensrc:start -->
 
 ## Source Code Reference

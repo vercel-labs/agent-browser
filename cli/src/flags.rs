@@ -308,6 +308,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--action-policy",
         "--confirm-actions",
         "--engine",
+        "--input-mode",
         "--screenshot-dir",
         "--screenshot-quality",
         "--screenshot-format",
@@ -419,6 +420,8 @@ pub struct Flags {
     pub plugins: Vec<PluginConfig>,
     pub verbose: bool,
     pub quiet: bool,
+    /// Session input behavior selected with `--input-mode`.
+    pub input_mode: String,
 
     // Track which launch-time options were explicitly passed via CLI
     // (as opposed to being set only via environment variables)
@@ -445,6 +448,8 @@ pub struct Flags {
     /// an explicit disable can be sent to the daemon (a bare `pin_tab: false`
     /// just means "absent" and must not override a sticky pin).
     pub cli_pin_tab: bool,
+    /// True when `--input-mode` was explicitly passed, including `instant`.
+    pub cli_input_mode: bool,
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
@@ -655,6 +660,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         plugins,
         verbose: false,
         quiet: false,
+        input_mode: "instant".to_string(),
         cli_executable_path: false,
         cli_extensions: false,
         cli_init_scripts: false,
@@ -675,6 +681,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_no_webmcp: false,
         cli_restore: false,
         cli_pin_tab: false,
+        cli_input_mode: false,
     };
 
     let mut i = 0;
@@ -1043,6 +1050,21 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--input-mode" => {
+                if let Some(s) = args.get(i + 1) {
+                    if matches!(s.as_str(), "instant" | "smooth" | "human") {
+                        flags.input_mode = s.clone();
+                        flags.cli_input_mode = true;
+                    } else {
+                        eprintln!(
+                            "{} --input-mode must be instant, smooth, or human, got '{}'",
+                            color::warning_indicator(),
+                            s
+                        );
+                    }
+                    i += 1;
+                }
+            }
             "--screenshot-dir" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.screenshot_dir = Some(s.clone());
@@ -1176,6 +1198,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--confirm-actions",
         "--config",
         "--engine",
+        "--input-mode",
         "--screenshot-dir",
         "--screenshot-quality",
         "--screenshot-format",
@@ -2185,5 +2208,21 @@ mod tests {
             clean_args(&args("--no-webmcp open example.com")),
             args("open example.com")
         );
+    }
+
+    #[test]
+    fn test_input_mode_is_explicit_and_removed_from_command_args() {
+        let input = args("--input-mode human open example.com");
+        let flags = parse_flags(&input);
+        assert_eq!(flags.input_mode, "human");
+        assert!(flags.cli_input_mode);
+        assert_eq!(clean_args(&input), args("open example.com"));
+    }
+
+    #[test]
+    fn test_input_mode_defaults_without_overwriting_session() {
+        let flags = parse_flags(&args("click @e1"));
+        assert_eq!(flags.input_mode, "instant");
+        assert!(!flags.cli_input_mode);
     }
 }

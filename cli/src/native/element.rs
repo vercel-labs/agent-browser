@@ -37,8 +37,17 @@ pub struct ResolvedElementPoint {
 // `ResolvedElement` is the canonical identity seam for targeted interactions.
 // Callers that capture codegen facts must probe it before they mutate the page.
 
+#[derive(Clone)]
+struct DocumentRefs {
+    session: String,
+    loader: String,
+    refs: HashMap<i64, String>,
+}
+
+#[derive(Clone)]
 pub struct RefMap {
     map: HashMap<String, RefEntry>,
+    documents: HashMap<(String, Option<String>), DocumentRefs>,
     next_ref: usize,
 }
 
@@ -46,6 +55,7 @@ impl RefMap {
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
+            documents: HashMap::new(),
             next_ref: 1,
         }
     }
@@ -125,13 +135,101 @@ impl RefMap {
         entries
     }
 
+    pub fn ref_ids(&self) -> std::collections::HashSet<String> {
+        self.map.keys().cloned().collect()
+    }
+
     pub fn remove(&mut self, ref_id: &str) {
         self.map.remove(ref_id);
     }
 
-    pub fn clear(&mut self) {
+    pub fn begin_snapshot(&mut self) {
         self.map.clear();
-        self.next_ref = 1;
+    }
+
+    /// Observe the document behind a page/frame pair. Unknown documents never
+    /// retain refs, while a changed session or loader replaces the prior bucket.
+    pub fn observe_document(
+        &mut self,
+        page_session: &str,
+        frame: Option<&str>,
+        session: &str,
+        loader: Option<&str>,
+    ) -> bool {
+        let key = (page_session.to_string(), frame.map(str::to_string));
+        let Some(loader) = loader.filter(|id| !id.is_empty()) else {
+            self.invalidate_frame(page_session, frame);
+            return false;
+        };
+        let changed = self
+            .documents
+            .get(&key)
+            .is_none_or(|document| document.session != session || document.loader != loader);
+        if changed {
+            if frame.is_none() {
+                self.documents
+                    .retain(|(entry_page, _), _| entry_page != page_session);
+            }
+            self.documents.insert(
+                key,
+                DocumentRefs {
+                    session: session.to_string(),
+                    loader: loader.to_string(),
+                    refs: HashMap::new(),
+                },
+            );
+        }
+        true
+    }
+
+    fn invalidate_frame(&mut self, page_session: &str, frame: Option<&str>) {
+        if frame.is_none() {
+            self.documents
+                .retain(|(entry_page, _), _| entry_page != page_session);
+        } else {
+            self.documents
+                .remove(&(page_session.to_string(), frame.map(str::to_string)));
+        }
+    }
+
+    pub fn durable_ref(
+        &self,
+        page_session: &str,
+        frame: Option<&str>,
+        backend_node_id: i64,
+    ) -> Option<&str> {
+        self.documents
+            .get(&(page_session.to_string(), frame.map(str::to_string)))?
+            .refs
+            .get(&backend_node_id)
+            .map(String::as_str)
+    }
+
+    pub fn remember_durable_ref(
+        &mut self,
+        page_session: &str,
+        frame: Option<&str>,
+        backend_node_id: i64,
+        ref_id: &str,
+    ) {
+        if let Some(document) = self
+            .documents
+            .get_mut(&(page_session.to_string(), frame.map(str::to_string)))
+        {
+            document.refs.insert(backend_node_id, ref_id.to_string());
+        }
+    }
+
+    pub fn invalidate_page(&mut self, page_session: &str) {
+        self.documents
+            .retain(|(entry_page, _), _| entry_page != page_session);
+        self.map.clear();
+    }
+
+    /// Drop all document identities while preserving the monotonic ref counter.
+    pub fn invalidate_all_documents(&mut self) {
+        self.documents.clear();
+        self.map.clear();
     }
 
     pub fn next_ref_num(&self) -> usize {
@@ -499,6 +597,76 @@ pub async fn resolve_element_point(
         offset_x: model.model.width as f64 / 2.0,
         offset_y: model.model.height as f64 / 2.0,
     })
+}
+
+/// Origin of a CDP session's viewport in the recorded page's CSS coordinates.
+/// Input sent to an OOPIF is local to that session; cursor history is page-local.
+/// Walk owner sessions for nested OOPIFs. Content quads include iframe borders
+/// and scrolling in the owning viewport.
+pub async fn session_viewport_offset(
+    client: &CdpClient,
+    page_session: &str,
+    target_session: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(f64, f64), String> {
+    let mut current = target_session.to_string();
+    let mut offset = (0.0, 0.0);
+    for _ in 0..=iframe_sessions.len() {
+        if current == page_session {
+            return Ok(offset);
+        }
+        let frame = iframe_sessions
+            .iter()
+            .find(|(_, session)| **session == current)
+            .map(|(frame, _)| frame)
+            .ok_or("Cannot locate recording cursor frame")?;
+        let mut owner = None;
+        for candidate in
+            std::iter::once(page_session).chain(iframe_sessions.values().map(String::as_str))
+        {
+            if candidate == current {
+                continue;
+            }
+            let Ok(node) = client
+                .send_command(
+                    "DOM.getFrameOwner",
+                    Some(serde_json::json!({"frameId": frame})),
+                    Some(candidate),
+                )
+                .await
+            else {
+                continue;
+            };
+            let Some(backend_id) = node["backendNodeId"].as_i64() else {
+                continue;
+            };
+            let model = client
+                .send_command(
+                    "DOM.getBoxModel",
+                    Some(serde_json::json!({"backendNodeId": backend_id})),
+                    Some(candidate),
+                )
+                .await?;
+            let quad = model
+                .pointer("/model/content")
+                .and_then(Value::as_array)
+                .ok_or("Cannot locate recording cursor frame bounds")?;
+            let x = quad
+                .first()
+                .and_then(Value::as_f64)
+                .ok_or("Missing frame content x")?;
+            let y = quad
+                .get(1)
+                .and_then(Value::as_f64)
+                .ok_or("Missing frame content y")?;
+            offset.0 += x;
+            offset.1 += y;
+            owner = Some(candidate.to_string());
+            break;
+        }
+        current = owner.ok_or("Cannot locate recording cursor frame owner")?;
+    }
+    Err("Cyclic recording cursor frame ownership".to_string())
 }
 
 /// Hit-test a ref-resolved node at its computed click point and error if an
@@ -1556,15 +1724,50 @@ mod tests {
     }
 
     #[test]
-    fn test_ref_map_clear_resets_ref_numbering() {
+    fn test_ref_map_clear_preserves_monotonic_numbering() {
         let mut map = RefMap::new();
         map.add("e1".to_string(), Some(42), "button", "Submit", None);
         map.set_next_ref_num(2);
 
-        map.clear();
+        map.begin_snapshot();
 
         assert!(map.get("e1").is_none());
+        assert_eq!(map.next_ref_num(), 2);
+    }
+
+    #[test]
+    fn test_durable_refs_are_scoped_by_document_and_frame() {
+        let mut map = RefMap::new();
+        assert!(map.observe_document("page-a", None, "session-a", Some("loader-a")));
+        assert!(map.observe_document(
+            "page-a",
+            Some("frame-a"),
+            "frame-session",
+            Some("frame-loader")
+        ));
+        map.remember_durable_ref("page-a", None, 42, "e1");
+        map.remember_durable_ref("page-a", Some("frame-a"), 42, "e2");
+        assert_eq!(map.durable_ref("page-a", None, 42), Some("e1"));
+        assert_eq!(map.durable_ref("page-a", Some("frame-a"), 42), Some("e2"));
+        assert_eq!(map.durable_ref("page-b", None, 42), None);
+
+        map.invalidate_page("page-a");
+        assert_eq!(map.durable_ref("page-a", None, 42), None);
         assert_eq!(map.next_ref_num(), 1);
+    }
+
+    #[test]
+    fn invalidating_one_page_preserves_other_page_documents() {
+        let mut map = RefMap::new();
+        assert!(map.observe_document("page-a", None, "session-a", Some("loader-a")));
+        map.remember_durable_ref("page-a", None, 42, "e1");
+        assert!(map.observe_document("page-b", None, "session-b", Some("loader-b")));
+        map.remember_durable_ref("page-b", None, 42, "e2");
+
+        map.invalidate_page("page-b");
+
+        assert_eq!(map.durable_ref("page-a", None, 42), Some("e1"));
+        assert_eq!(map.durable_ref("page-b", None, 42), None);
     }
 
     #[test]

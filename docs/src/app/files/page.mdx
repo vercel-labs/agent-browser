@@ -34,9 +34,13 @@ Without `--download-path`, downloads go to a temporary directory that is cleaned
 ```bash
 agent-browser screenshot ./page.png
 agent-browser screenshot --full ./page-full.png
+agent-browser screenshot --if-changed
+agent-browser screenshot --threshold 0.01
 agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80 ./page.jpg
 agent-browser pdf ./page.pdf
 ```
+
+Prefer `--if-changed` for repeated captures: skipping unchanged images is the most token-efficient option. History is per tab and capture scope. The first capture returns a path; later unchanged captures omit it. JSON includes `changed`, `revision`, and `pixelChangeRatio`. `--threshold <0-1>` implies `--if-changed` and treats changes at or below that ratio as unchanged.
 
 Screenshot defaults can also be configured with:
 
