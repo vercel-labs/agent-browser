@@ -143,6 +143,7 @@ Needs `ffmpeg` on PATH; use a path with an extension. `--fps` accepts 1 to 60 an
 ```bash
 agent-browser wait @e1                     # Wait for element
 agent-browser wait 2000                    # Wait milliseconds
+agent-browser wait --selector "[data-id=5]" # Wait for element; required when the selector may be all digits (or -s)
 agent-browser wait --text "Success"        # Wait for text (or -t)
 agent-browser wait --url "**/dashboard"    # Wait for URL pattern (or -u)
 agent-browser wait --load domcontentloaded # Wait for DOMContentLoaded (or -l)

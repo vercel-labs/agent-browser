@@ -695,6 +695,8 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Wait ===
         "wait" => {
+            const WAIT_USAGE: &str =
+                "wait <selector|ms|--selector|--url|--load|--fn|--text> [--timeout <ms>]";
             // --timeout applies to EVERY wait variant (the docs advertise
             // e.g. `wait --url "**/dashboard" --timeout 120000`); it used to
             // be parsed only for --text/--download and silently ignored
@@ -708,11 +710,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     .get(idx + 1)
                     .ok_or_else(|| ParseError::MissingArguments {
                         context: "wait --timeout".to_string(),
-                        usage: "wait <selector|ms|--url|--load|--fn|--text> [--timeout <ms>]",
+                        usage: WAIT_USAGE,
                     })?;
                 timeout_ms = Some(raw.parse::<u64>().map_err(|_| ParseError::InvalidValue {
                     message: format!("--timeout expects a number in ms, got '{}'", raw),
-                    usage: "wait <selector|ms|--url|--load|--fn|--text> [--timeout <ms>]",
+                    usage: WAIT_USAGE,
                 })?);
                 rest.drain(idx..=idx + 1);
             }
@@ -722,6 +724,22 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 }
                 cmd
             };
+
+            // Check for --selector flag: wait --selector "#results"
+            // Callers that always mean a selector (the MCP server, scripts
+            // building selectors from page data) use this so an all-digit
+            // selector is never mistaken for the bare-positional ms sleep.
+            if let Some(idx) = rest.iter().position(|&s| s == "--selector" || s == "-s") {
+                let selector = rest
+                    .get(idx + 1)
+                    .ok_or_else(|| ParseError::MissingArguments {
+                        context: "wait --selector".to_string(),
+                        usage: "wait --selector <selector>",
+                    })?;
+                return Ok(with_timeout(
+                    json!({ "id": id, "action": "wait", "selector": selector }),
+                ));
+            }
 
             // Check for --url flag: wait --url "**/dashboard"
             if let Some(idx) = rest.iter().position(|&s| s == "--url" || s == "-u") {
@@ -803,7 +821,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             } else {
                 Err(ParseError::MissingArguments {
                     context: "wait".to_string(),
-                    usage: "wait <selector|ms|--url|--load|--fn|--text>",
+                    usage: WAIT_USAGE,
                 })
             }
         }
@@ -4943,9 +4961,55 @@ mod tests {
 
     #[test]
     fn test_wait_timeout() {
+        // The bare-positional sleep shorthand stays a sleep.
         let cmd = parse_command(&args("wait 5000"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "wait");
         assert_eq!(cmd["timeout"], 5000);
+        assert!(cmd.get("selector").is_none());
+    }
+
+    #[test]
+    fn test_wait_selector_flag() {
+        let cmd = parse_command(&args("wait --selector #element"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "wait");
+        assert_eq!(cmd["selector"], "#element");
+        assert!(cmd.get("timeout").is_none());
+    }
+
+    #[test]
+    fn test_wait_selector_flag_keeps_numeric_selector_a_selector() {
+        let cmd = parse_command(&args("wait --selector 5000"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "wait");
+        assert_eq!(cmd["selector"], "5000");
+        assert!(cmd.get("timeout").is_none());
+    }
+
+    #[test]
+    fn test_wait_selector_short_flag() {
+        let cmd = parse_command(&args("wait -s #element"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "wait");
+        assert_eq!(cmd["selector"], "#element");
+    }
+
+    #[test]
+    fn test_wait_selector_flag_with_timeout() {
+        let cmd = parse_command(
+            &args("wait --selector 5000 --timeout 3000"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "wait");
+        assert_eq!(cmd["selector"], "5000");
+        assert_eq!(cmd["timeout"], 3000);
+    }
+
+    #[test]
+    fn test_wait_selector_flag_missing_value() {
+        let result = parse_command(&args("wait --selector"), &default_flags());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
     }
 
     #[test]

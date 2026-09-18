@@ -129,6 +129,7 @@ agent-browser find nth 2 ".card" hover
 ```bash
 agent-browser wait <selector>         # Wait for element
 agent-browser wait <ms>               # Wait for time
+agent-browser wait --selector <sel>   # Wait for element; use when the selector may be all digits (or -s)
 agent-browser wait --text "Welcome"   # Wait for text (substring match)
 agent-browser wait --url "**/dash"    # Wait for URL pattern
 agent-browser wait --load domcontentloaded # Wait for DOMContentLoaded
@@ -141,6 +142,8 @@ agent-browser wait "#spinner" --state hidden           # Wait for element to dis
 ```
 
 After a page change, prefer a selector, text, URL, or JavaScript condition that represents the state you need. Use `networkidle` only when the page is known to become quiet, because SSE, WebSockets, polling, and long-polling can keep it from resolving.
+
+A bare positional that parses as a number is the milliseconds shorthand, so `wait 5000` sleeps. Pass `--selector` (or `-s`) whenever the selector is built from page data and could be all digits, such as a numeric id or an all-digit `data-testid`. The MCP tool `agent_browser_wait_for_selector` always uses `--selector`, so a selector there is always a selector.
 
 ## Downloads
 

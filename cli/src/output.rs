@@ -2126,6 +2126,9 @@ Waits for an element to appear, a timeout, or other conditions.
 Modes:
   <selector>           Wait for element to appear
   <ms>                 Wait for specified milliseconds
+  --selector <sel>     Wait for element to appear (alias: -s). Use this when the
+                       selector may be all digits, which a bare positional would
+                       be read as <ms> instead
   --url <pattern>      Wait for URL to match pattern
   --load <state>       Wait for load state (load, domcontentloaded, networkidle)
   --fn <expression>    Wait for JavaScript expression to be truthy
@@ -2148,6 +2151,7 @@ Global Options:
 Examples:
   agent-browser wait "#loading-spinner"
   agent-browser wait 2000
+  agent-browser wait --selector "[data-testid='5000']"
   agent-browser wait --url "**/dashboard"
   # Use networkidle only for pages known to become quiet:
   agent-browser wait --load networkidle
@@ -3818,7 +3822,7 @@ Core Commands:
   download <sel> <path>      Download file by clicking element
   scroll <dir> [px]          Scroll (up/down/left/right)
   scrollintoview <sel>       Scroll element into view
-  wait <sel|ms>              Wait for element or time
+  wait <sel|ms>              Wait for element or time (--selector forces selector)
   screenshot [path]          Take screenshot
   pdf <path>                 Save as PDF
   snapshot                   Accessibility tree with refs (for AI)

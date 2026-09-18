@@ -193,6 +193,7 @@ Agents fail more often from bad waits than from bad selectors. Pick the right wa
 
 ```bash
 agent-browser wait @e1                     # until an element appears
+agent-browser wait --selector "#s5000"     # until an element appears; use when the selector may be all digits
 agent-browser wait --text "Success"        # until the text appears on the page
 agent-browser wait --url "**/dashboard"    # until URL matches pattern (glob)
 agent-browser wait --fn "window.myApp.ready === true"  # until JS condition

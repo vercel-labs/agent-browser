@@ -257,6 +257,7 @@ agent-browser find nth 2 "a" text
 ```bash
 agent-browser wait <selector>         # Wait for element to be visible
 agent-browser wait <ms>               # Wait for time (milliseconds)
+agent-browser wait --selector <sel>    # Wait for element; use when the selector may be all digits (or -s)
 agent-browser wait --text "Welcome"   # Wait for text to appear (substring match)
 agent-browser wait --url "**/dash"    # Wait for URL pattern
 agent-browser wait --load domcontentloaded # Wait for the DOM lifecycle event

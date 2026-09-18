@@ -2234,11 +2234,11 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_SCROLL => call_scroll(arguments),
         TOOL_SCROLL_INTO_VIEW => call_simple_selector(arguments, "scrollintoview"),
         TOOL_WAIT_MS => call_wait_ms(arguments),
-        TOOL_WAIT_FOR_SELECTOR => call_wait_flag(arguments, None, "selector"),
-        TOOL_WAIT_FOR_TEXT => call_wait_flag(arguments, Some("--text"), "text"),
-        TOOL_WAIT_FOR_URL => call_wait_flag(arguments, Some("--url"), "url"),
-        TOOL_WAIT_FOR_LOAD => call_wait_flag(arguments, Some("--load"), "state"),
-        TOOL_WAIT_FOR_FUNCTION => call_wait_flag(arguments, Some("--fn"), "expression"),
+        TOOL_WAIT_FOR_SELECTOR => call_wait_flag(arguments, "--selector", "selector"),
+        TOOL_WAIT_FOR_TEXT => call_wait_flag(arguments, "--text", "text"),
+        TOOL_WAIT_FOR_URL => call_wait_flag(arguments, "--url", "url"),
+        TOOL_WAIT_FOR_LOAD => call_wait_flag(arguments, "--load", "state"),
+        TOOL_WAIT_FOR_FUNCTION => call_wait_flag(arguments, "--fn", "expression"),
         TOOL_WAIT_FOR_DOWNLOAD => call_wait_download(arguments),
         TOOL_SCREENSHOT => call_screenshot(arguments),
         TOOL_PDF => call_one_string(arguments, "pdf", "path"),
@@ -2755,23 +2755,25 @@ fn call_wait_ms(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool(arguments, vec!["wait".to_string(), ms.to_string()], None)
 }
 
-fn call_wait_flag(
+/// Every wait tool passes its value behind an explicit flag. A bare positional
+/// would let an all-digit value (a numeric id, an all-digit data-testid) be
+/// read by the CLI as the `wait <ms>` sleep shorthand instead.
+fn wait_command_args(
     arguments: &Value,
-    flag: Option<&str>,
+    flag: &str,
     value_key: &str,
-) -> Result<Value, ProtocolError> {
+) -> Result<Vec<String>, ProtocolError> {
     let value = required_string(arguments, value_key)?;
-    let mut args = vec!["wait".to_string()];
-    if let Some(flag) = flag {
-        args.push(flag.to_string());
-        args.push(value);
-    } else {
-        args.push(value);
-    }
+    let mut args = vec!["wait".to_string(), flag.to_string(), value];
     if let Some(timeout) = optional_u64(arguments, "waitTimeoutMs")? {
         args.push("--timeout".to_string());
         args.push(timeout.to_string());
     }
+    Ok(args)
+}
+
+fn call_wait_flag(arguments: &Value, flag: &str, value_key: &str) -> Result<Value, ProtocolError> {
+    let args = wait_command_args(arguments, flag, value_key)?;
     call_cli_tool(arguments, args, None)
 }
 
@@ -4179,6 +4181,36 @@ mod tests {
             assert_eq!(command["cursor"], true);
             assert_eq!(command["action"], format!("recording_{operation}"));
         }
+    }
+
+    #[test]
+    fn wait_for_selector_never_degrades_into_a_sleep() {
+        // An all-digit selector (a numeric id, an all-digit data-testid) used
+        // to reach the CLI as a bare positional and be run as `wait <ms>`.
+        for selector in ["5000", "#nonexistent", "[data-testid=\"42\"]"] {
+            let arguments = json!({ "selector": selector });
+            let args = wait_command_args(&arguments, "--selector", "selector").unwrap();
+            let flags = crate::flags::parse_flags(&args);
+            let command = crate::commands::parse_command(&args, &flags).unwrap();
+            assert_eq!(command["action"], "wait");
+            // The sleep shorthand emits `timeout` and no `selector` at all.
+            assert_eq!(command["selector"], selector, "{selector} became a sleep");
+        }
+    }
+
+    #[test]
+    fn wait_for_selector_forwards_wait_timeout_ms() {
+        let args = wait_command_args(
+            &json!({ "selector": "5000", "waitTimeoutMs": 3000 }),
+            "--selector",
+            "selector",
+        )
+        .unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        let command = crate::commands::parse_command(&args, &flags).unwrap();
+        assert_eq!(command["action"], "wait");
+        assert_eq!(command["selector"], "5000");
+        assert_eq!(command["timeout"], 3000);
     }
 
     #[test]
