@@ -202,6 +202,11 @@ agent-browser set media light reduced-motion  # Light mode + reduced motion
 ```bash
 agent-browser cookies                     # Get all cookies
 agent-browser cookies set name value      # Set cookie
+agent-browser cookies set name value --url https://example.com --http-only --secure --same-site Strict
+                                          # Attributes: --url, --domain, --path, --http-only,
+                                          # --secure, --same-site <Strict|Lax|None>, --expires <unix-seconds>
+                                          # (legacy --httpOnly / --sameSite still work; any other
+                                          # unrecognized flag is rejected, never ignored)
 agent-browser cookies clear               # Clear cookies
 agent-browser storage local               # Get all localStorage
 agent-browser storage local key           # Get specific key

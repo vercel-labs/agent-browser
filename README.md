@@ -348,6 +348,8 @@ agent-browser storage local clear     # Clear all
 agent-browser storage session         # Same for sessionStorage
 ```
 
+`cookies set` takes optional attributes: `--url <url>`, `--domain <domain>`, `--path <path>`, `--http-only`, `--secure`, `--same-site <Strict|Lax|None>`, and `--expires <timestamp>`. The older `--httpOnly` and `--sameSite` spellings still work; any other unrecognized flag is rejected instead of being ignored.
+
 ### Network
 
 ```bash

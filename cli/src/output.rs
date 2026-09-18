@@ -2604,10 +2604,13 @@ Cookie Set Options:
   --url <url>                        URL for the cookie (allows setting before page load)
   --domain <domain>                  Cookie domain (e.g., ".example.com")
   --path <path>                      Cookie path (e.g., "/api")
-  --httpOnly                         Set HttpOnly flag (prevents JavaScript access)
+  --http-only                        Set HttpOnly flag (prevents JavaScript access)
   --secure                           Set Secure flag (HTTPS only)
-  --sameSite <Strict|Lax|None>       SameSite policy
+  --same-site <Strict|Lax|None>      SameSite policy
   --expires <timestamp>              Expiration time (Unix timestamp in seconds)
+
+The legacy camelCase spellings --httpOnly and --sameSite are still accepted.
+Any other unrecognized flag is an error, never silently ignored.
 
 Note: If --url, --domain, and --path are all omitted, the cookie will be set
 for the current page URL.
@@ -2623,11 +2626,11 @@ Examples:
   # Set cookie for a URL before loading it (useful for authentication)
   agent-browser cookies set session_id "abc123" --url https://app.example.com
 
-  # Set secure, httpOnly cookie with domain and path
-  agent-browser cookies set auth_token "xyz789" --domain example.com --path /api --httpOnly --secure
+  # Set secure, HttpOnly cookie with domain and path
+  agent-browser cookies set auth_token "xyz789" --domain example.com --path /api --http-only --secure
 
   # Set cookie with SameSite policy
-  agent-browser cookies set tracking_consent "yes" --sameSite Strict
+  agent-browser cookies set tracking_consent "yes" --same-site Strict
 
   # Set cookie with expiration (Unix timestamp)
   agent-browser cookies set temp_token "temp123" --expires 1735689600
@@ -3855,7 +3858,7 @@ Network:  agent-browser network <action>
   har <start|stop> [path]
 
 Storage:
-  cookies [get|set|clear]    Manage cookies (set supports --url, --domain, --path, --httpOnly, --secure, --sameSite, --expires)
+  cookies [get|set|clear]    Manage cookies (set supports --url, --domain, --path, --http-only, --secure, --same-site, --expires)
                              Or:  cookies set --curl <file> [--domain <host>] (auto-detects JSON/cURL/Cookie-header files)
   storage <local|session>    Manage web storage
 
