@@ -2232,7 +2232,8 @@ Usage: agent-browser snapshot [options]
 
 Returns an accessibility tree representation of the page with element
 references (like @e1, @e2) that can be used in subsequent commands.
-Refs can be reused across snapshots. Take a fresh snapshot after navigation.
+Refs can be reused across snapshots. Any navigation invalidates them, including
+a navigation caused by a click, so take a fresh snapshot after one.
 
 Options:
   -i, --interactive    Only include interactive elements

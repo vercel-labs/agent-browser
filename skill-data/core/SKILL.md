@@ -31,7 +31,7 @@ agent-browser click @e3         # 3. Act on refs from the snapshot
 agent-browser snapshot -i       # 4. Re-snapshot after any page change
 ```
 
-Refs (`@e1`, `@e2`, ...) can be reused across snapshots. Take a fresh snapshot after navigation or to observe page changes.
+Refs (`@e1`, `@e2`, ...) can be reused across snapshots. Navigation invalidates them, including a navigation caused by a click, so take a fresh snapshot after navigation or to observe page changes.
 
 ## Always use your own session
 

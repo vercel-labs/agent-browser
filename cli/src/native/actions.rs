@@ -1781,6 +1781,17 @@ impl DaemonState {
                                     } else {
                                         self.webmcp.clear_page_tools(session_id);
                                     }
+                                    // A navigation the daemon did not initiate
+                                    // (a click, a script, a redirect) replaces
+                                    // the document, so refs from the previous
+                                    // one must stop resolving into it.
+                                    if !session_id.is_empty() {
+                                        self.ref_map.invalidate_page_on_document_change(
+                                            session_id,
+                                            session_id,
+                                            frame.get("loaderId").and_then(Value::as_str),
+                                        );
+                                    }
                                 }
                                 if let (Some(frame_id), Some(origin)) = (
                                     frame.get("id").and_then(Value::as_str),
