@@ -138,6 +138,17 @@ agent-browser record start ./demo.webm --contact-sheet # Save a timestamped PNG 
 
 Needs `ffmpeg` on PATH; use a path with an extension. `--fps` accepts 1 to 60 and defaults to 30. `--contact-sheet-threshold <0-1>` adjusts keyframe sensitivity and implies `--contact-sheet`.
 
+## Codegen
+
+```bash
+agent-browser codegen start [--title <title>]
+agent-browser codegen stop [path] [--format json|playwright]
+agent-browser codegen status
+agent-browser codegen discard
+```
+
+Capture supported successful automation actions as a Chrome DevTools Recorder flow. `codegen stop` prints the flow when no path is supplied; `--format playwright` emits an `@playwright/test` spec. Unsafe targets and unsupported actions are omitted and reported as warnings. `codegen status` reports recovery state, warning counts, and projected format counts. `codegen stop` reports selected-format step counts and grouped warning codes. `codegen discard` removes an unfinished or damaged journal. `codegen` is different from `record`, which writes a video. Typed values are retained verbatim, including credentials and upload paths, so review warnings and artifacts before you commit them. See [codegen.md](codegen.md).
+
 ## Wait
 
 ```bash
