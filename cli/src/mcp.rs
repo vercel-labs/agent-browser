@@ -1291,7 +1291,14 @@ fn parity_tools() -> Vec<Value> {
             TOOL_TAB_NEW,
             "Tab new",
             "Open a new tab after applying session setup before its first navigation.",
-            json!({ "url": { "type": "string" }, "label": { "type": "string" } }),
+            json!({
+                "url": { "type": "string" },
+                "label": {
+                    "type": "string",
+                    "description": "Tab label: starts with a letter, then letters, digits, `-`, \
+                                    or `_`; the `t<N>` id form (t1) is reserved."
+                }
+            }),
             &[],
         ),
         tool(TOOL_TAB_LIST, "Tab list", "List tabs.", json!({}), &[]),
