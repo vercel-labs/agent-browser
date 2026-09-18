@@ -1887,6 +1887,72 @@ async fn e2e_codegen_indexes_frames_in_document_order() {
     server.abort();
 }
 
+/// `select` can match an option label after whitespace normalization. No
+/// replay tool normalizes, so the flow must record the option the browser
+/// settled on rather than the string the command was given.
+#[tokio::test]
+#[ignore]
+async fn e2e_codegen_records_the_option_the_browser_selected() {
+    let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_SESSION"]);
+    let socket_dir = std::env::temp_dir().join(format!(
+        "agent-browser-e2e-codegen-select-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&socket_dir).expect("socket directory should be created");
+    guard.set(
+        "AGENT_BROWSER_SOCKET_DIR",
+        socket_dir
+            .to_str()
+            .expect("socket directory should be utf-8"),
+    );
+    guard.set("AGENT_BROWSER_SESSION", "e2e-codegen-select");
+
+    let page = "data:text/html,<select id=pick>\
+<option value=a>Alpha</option><option value=b>Beta  Two</option></select>";
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "codegen_start", "title": "select" }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "3", "action": "navigate", "url": page }),
+            &mut state,
+        )
+        .await,
+    );
+    // The label carries two spaces; the command is given one.
+    assert_success(
+        &execute_command(
+            &json!({ "id": "4", "action": "select", "selector": "#pick", "value": "Beta Two" }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let values = match state.codegen.steps.last() {
+        Some(super::codegen::Step::Select { values, .. }) => values.clone(),
+        other => panic!("the select should be recorded: {other:?}"),
+    };
+    assert_eq!(
+        values,
+        vec!["b".to_string()],
+        "the flow needs the option the browser selected, not the typed label"
+    );
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
 /// Replay the artifact. Every other codegen test checks what capture wrote;
 /// this one runs the generated spec in Playwright's own browser and requires it
 /// to pass its own assertions. Needs `pnpm install` and a Playwright browser.

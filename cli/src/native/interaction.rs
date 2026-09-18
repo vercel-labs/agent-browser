@@ -689,7 +689,9 @@ pub async fn select_option_with_capture(
             }
             for (const opt of options) opt.selected = wanted.has(opt);
             this.dispatchEvent(new Event('change', { bubbles: true }));
-            return { matched: wanted.size };
+            // Report the option values the browser settled on. A label can
+            // match after normalization, and replay tools do not normalize.
+            return { matched: wanted.size, values: options.filter(o => wanted.has(o)).map(o => o.value) };
         }"#
     .to_string();
 
@@ -719,6 +721,21 @@ pub async fn select_option_with_capture(
         return Err(error.to_string());
     }
 
+    let mut captured = captured;
+    if let Some(captured) = captured.as_mut() {
+        captured.selected_values = result
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.get("values"))
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            });
+    }
     Ok(captured)
 }
 

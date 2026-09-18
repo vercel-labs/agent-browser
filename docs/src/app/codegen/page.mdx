@@ -53,6 +53,8 @@ Typed values are included verbatim for replay fidelity. This includes password v
 
 A <code>check</code> or <code>uncheck</code> command that finds the control already in the requested state changes nothing. Codegen records an assertion for that state instead of a click, because a replayed click would clear the control.
 
+A <code>select</code> is recorded as the option the browser settled on, not the text the command was given. A label can match after whitespace normalization, and no replay tool normalizes.
+
 A scroll is recorded as the position the page reached, not as the requested distance. Repeated scrolls therefore replay to the same place, and a scroll that the page limited replays to the limit.
 
 ## Targets that are not unique

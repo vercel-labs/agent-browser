@@ -924,9 +924,15 @@ pub fn record_action<C: Into<ActionContext>>(
                         scope: sc.clone(),
                         asserted_url: None,
                     }),
+                    // Prefer what the browser actually selected. A label can
+                    // match after whitespace normalization, and no replay tool
+                    // normalizes, so the typed string can miss on replay.
                     _ => steps.push(Step::Select {
                         target,
-                        values: select_values(cmd),
+                        values: capture
+                            .and_then(|capture| capture.selected_values.clone())
+                            .filter(|values| !values.is_empty())
+                            .unwrap_or_else(|| select_values(cmd)),
                         scope: sc.clone(),
                         asserted_url: None,
                     }),

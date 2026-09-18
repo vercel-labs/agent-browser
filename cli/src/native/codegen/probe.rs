@@ -31,6 +31,11 @@ pub struct ElementCapture {
     /// replay would then clear the control.
     #[serde(default)]
     pub state_changed: Option<bool>,
+    /// Option values the browser settled on for a select. A label can match
+    /// after whitespace normalization, and no replay tool normalizes, so the
+    /// flow has to record what was actually selected.
+    #[serde(default)]
+    pub selected_values: Option<Vec<String>>,
 }
 
 const ELEMENT_PROBE: &str = r#"function() {
@@ -158,6 +163,7 @@ pub async fn capture_resolved_element(
         scroll_delta: None,
         scroll_position: None,
         state_changed: None,
+        selected_values: None,
     }
 }
 
