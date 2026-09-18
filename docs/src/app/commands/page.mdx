@@ -677,6 +677,24 @@ echo '[
   </tbody>
 </table>
 
+In argument mode each command string is split with POSIX quoting rules:
+
+<table>
+  <thead>
+    <tr><th>Input</th><th>Result</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>"Ada Lovelace"</code></td><td>One argument, <code>Ada Lovelace</code></td></tr>
+    <tr><td><code>'C:\Users\dwin'</code></td><td>Single quotes are literal, backslashes included</td></tr>
+    <tr><td><code>C:\Users\dwin</code></td><td>A bare backslash is literal too</td></tr>
+    <tr><td><code>"say \"hi\" now"</code></td><td>Inside double quotes <code>\"</code> and <code>\\</code> escape</td></tr>
+    <tr><td><code>""</code></td><td>An empty argument, not a dropped one</td></tr>
+    <tr><td><code>It's here</code></td><td>Error: unterminated single quote</td></tr>
+  </tbody>
+</table>
+
+An unterminated quote fails loudly instead of silently stripping text, so a value containing an apostrophe must be double quoted: `agent-browser batch "fill #note \"It's here\""`. Stdin mode needs no quoting at all, so prefer it for values with punctuation.
+
 ## MCP server
 
 ```bash
