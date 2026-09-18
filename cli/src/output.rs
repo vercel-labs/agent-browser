@@ -127,6 +127,21 @@ fn format_storage_text(data: &serde_json::Value) -> Option<String> {
     Some(format!("{}: {}", key, format_storage_value(value)))
 }
 
+/// Render a `get attr` result. A present attribute prints its value, and an
+/// empty attribute prints an empty line just like `get value` on a valueless
+/// element. A missing attribute comes back as JSON null, which would otherwise
+/// fall through to the generic success line, so it prints an explicit marker.
+fn format_attribute_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
+    if action != Some("getattribute") {
+        return None;
+    }
+    match data.get("value") {
+        Some(serde_json::Value::String(value)) => Some(value.clone()),
+        None | Some(serde_json::Value::Null) => Some("(not present)".to_string()),
+        Some(other) => Some(other.to_string()),
+    }
+}
+
 fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
     match action {
         Some("stream_disable") => data
@@ -718,6 +733,11 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         // HTML
         if let Some(html) = data.get("html").and_then(|v| v.as_str()) {
             print_with_boundaries(html, origin, opts);
+            return;
+        }
+        // Attribute (get attr) -- a missing attribute is reported explicitly
+        if let Some(output) = format_attribute_text(action, data) {
+            println!("{}", output);
             return;
         }
         // Value
@@ -2347,7 +2367,7 @@ Subcommands:
   text <selector>            Get text content of element
   html <selector>            Get inner HTML of element
   value <selector>           Get value of input element
-  attr <selector> <name>     Get attribute value
+  attr <selector> <name>     Get attribute value (prints (not present) if absent)
   title                      Get page title
   url                        Get current URL
   count <selector>           Count matching elements
@@ -4290,6 +4310,60 @@ mod tests {
         format_with_boundaries, OutputOptions,
     };
     use serde_json::json;
+
+    #[test]
+    fn test_format_attribute_text_for_present_attribute() {
+        let data = json!({ "value": "1", "origin": "https://example.com" });
+
+        let rendered = super::format_attribute_text(Some("getattribute"), &data).unwrap();
+
+        assert_eq!(rendered, "1");
+    }
+
+    #[test]
+    fn test_format_attribute_text_for_absent_attribute() {
+        let data = json!({ "value": null, "origin": "https://example.com" });
+
+        let rendered = super::format_attribute_text(Some("getattribute"), &data).unwrap();
+
+        assert_eq!(rendered, "(not present)");
+        assert!(!rendered.contains("Done"));
+    }
+
+    #[test]
+    fn test_format_attribute_text_distinguishes_empty_from_absent() {
+        let empty = json!({ "value": "", "origin": "https://example.com" });
+        let absent = json!({ "value": null, "origin": "https://example.com" });
+
+        let empty_rendered = super::format_attribute_text(Some("getattribute"), &empty).unwrap();
+        let absent_rendered = super::format_attribute_text(Some("getattribute"), &absent).unwrap();
+
+        assert_eq!(empty_rendered, "");
+        assert_ne!(empty_rendered, absent_rendered);
+    }
+
+    #[test]
+    fn test_format_attribute_text_ignores_other_actions() {
+        let data = json!({ "value": null });
+
+        assert!(super::format_attribute_text(Some("getvalue"), &data).is_none());
+        assert!(super::format_attribute_text(None, &data).is_none());
+    }
+
+    #[test]
+    fn test_get_attr_json_shape_distinguishes_each_case() {
+        let present = json!({ "success": true, "value": "1" });
+        let empty = json!({ "success": true, "value": "" });
+        let absent = json!({ "success": true, "value": null });
+
+        assert_eq!(present.get("value").and_then(|v| v.as_str()), Some("1"));
+        assert_eq!(empty.get("value").and_then(|v| v.as_str()), Some(""));
+        assert!(absent.get("value").is_some_and(|v| v.is_null()));
+        assert_ne!(
+            serde_json::to_string(&empty).unwrap(),
+            serde_json::to_string(&absent).unwrap()
+        );
+    }
 
     #[test]
     fn test_format_stream_status_text_for_enabled_stream() {
