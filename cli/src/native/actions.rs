@@ -2575,6 +2575,24 @@ fn policy_actions_for_command(
     actions
 }
 
+/// Bind every attached page's CDP session to the target it belongs to.
+///
+/// `Target.attachToTarget` mints a fresh session id on every attach, so after a
+/// reconnect the same page arrives under a new session. The ref map keys a
+/// page's documents on the bound target instead, which is what the page IS.
+fn sync_ref_map_page_targets(state: &mut DaemonState) {
+    let Some(pairs) = state
+        .browser
+        .as_ref()
+        .map(|mgr| mgr.page_session_targets())
+    else {
+        return;
+    };
+    for (session_id, target_id) in pairs {
+        state.ref_map.bind_page_target(&session_id, &target_id);
+    }
+}
+
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     // Unlike normal auth login, no-navigation mode must never launch a
@@ -2900,6 +2918,11 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             );
         }
     }
+
+    // Keep the ref map's page bindings in step with the attached pages, so a
+    // page's durable refs are keyed on its target and outlive the session id a
+    // reconnect replaces. One place, before any command reads or writes them.
+    sync_ref_map_page_targets(state);
 
     let result = match action {
         "launch" => {
@@ -4893,12 +4916,22 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     // Hash comparison and fast process-exit check are evaluated before the
     // async is_connection_alive to skip the expensive CDP liveness probe
     // when a relaunch is already certain.
+    // A relaunch that only replaces the SOCKET to the same external browser is
+    // a reconnect: the browser, its targets, their documents and every
+    // backendNodeId in them outlive it. Only a launch that can produce a
+    // different browser invalidates the durable refs below.
+    let mut reconnect_to_same_browser = false;
     let needs_relaunch = if let Some(ref mut mgr) = state.browser {
         let is_external =
             launch_connection_is_external(cdp_url, cdp_port, auto_connect, provider_name);
         let was_external = mgr.is_cdp_connection();
         let hash_changed = state.launch_hash != Some(new_hash);
         let storage_state_requires_clean_launch = storage_state_owned.is_some() && !is_external;
+        reconnect_to_same_browser = is_external
+            && was_external
+            && !hash_changed
+            && !storage_state_requires_clean_launch
+            && !mgr.has_process_exited();
         is_external != was_external
             || hash_changed
             || storage_state_requires_clean_launch
@@ -4926,7 +4959,10 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         state.effective_ca_cert = effective_ca_cert;
         return Ok(json!({ "launched": true, "reused": true, "relaunchedBrowser": false }));
     }
-    state.ref_map.invalidate_all_documents();
+    if !reconnect_to_same_browser {
+        state.ref_map.invalidate_all_documents();
+    }
+    // The domains a connection enabled do NOT survive it, reconnect or not.
     state.session_setup = SessionSetup::default();
 
     let has_cdp = cdp_url.is_some() || cdp_port.is_some();
