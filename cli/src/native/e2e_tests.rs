@@ -3585,10 +3585,11 @@ async fn e2e_save_state_cross_domain() {
         }
     });
     let mut state = DaemonState::new();
+    let restore_key = format!("e2e-cross-origin-{}", uuid::Uuid::new_v4());
 
     // Launch
     let resp = execute_command(
-        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &json!({ "id": "1", "action": "launch", "headless": true, "restoreKey": restore_key }),
         &mut state,
     )
     .await;
@@ -3673,8 +3674,9 @@ async fn e2e_save_state_cross_domain() {
     let requests_after_save = document_requests.load(Ordering::SeqCst);
     let title = execute_command(&json!({ "id": "9", "action": "title" }), &mut state).await;
     let closed = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
-    server.abort();
     assert_success(&closed);
+    assert_eq!(get_data(&closed)["saveStatus"], "saved");
+    let mut auto_path = get_data(&closed)["statePath"].as_str().unwrap().to_string();
     assert_success(&title);
     assert_eq!(get_data(&title)["title"], "Storage fixture");
     assert_eq!(requests_before_save, 2);
@@ -3724,6 +3726,77 @@ async fn e2e_save_state_cross_domain() {
         "Should include localStorage from example.com origin: {:?}",
         origins
     );
+
+    // Each import path must retain every origin for future saves, without
+    // revisiting old sites through BrowserManager::navigate. The fixture has
+    // no scripts that could recreate missing storage during replay.
+    let mut roundtrips = Vec::new();
+    for (name, launch) in [
+        (
+            "state load",
+            json!({ "action": "launch", "headless": true }),
+        ),
+        (
+            "--state",
+            json!({ "action": "launch", "headless": true, "storageState": tmp_state }),
+        ),
+        (
+            "--restore",
+            json!({ "action": "launch", "headless": true, "restoreKey": restore_key }),
+        ),
+    ] {
+        let mut restored = DaemonState::new();
+        let resp = execute_command(&launch, &mut restored).await;
+        assert_success(&resp);
+        if name == "state load" {
+            let resp = execute_command(
+                &json!({ "action": "state_load", "path": tmp_state }),
+                &mut restored,
+            )
+            .await;
+            assert_success(&resp);
+        }
+        let requests_before_save = document_requests.load(Ordering::SeqCst);
+        let path = tmp_dir.path().join("resaved.json");
+        let resp = execute_command(
+            &json!({ "action": "state_save", "path": path }),
+            &mut restored,
+        )
+        .await;
+        assert_success(&resp);
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let extra_requests = document_requests.load(Ordering::SeqCst) - requests_before_save;
+        let requests_before_close = document_requests.load(Ordering::SeqCst);
+        let closed = execute_command(&json!({ "action": "close" }), &mut restored).await;
+        assert_success(&closed);
+        roundtrips.push((name, saved, extra_requests));
+        if name == "--restore" {
+            assert_eq!(get_data(&closed)["saveStatus"], "saved");
+            auto_path = get_data(&closed)["statePath"].as_str().unwrap().to_string();
+            let auto_saved: Value =
+                serde_json::from_str(&std::fs::read_to_string(&auto_path).unwrap()).unwrap();
+            roundtrips.push((
+                "save on close after restore",
+                auto_saved,
+                document_requests.load(Ordering::SeqCst) - requests_before_close,
+            ));
+        }
+    }
+    server.abort();
+    let _ = std::fs::remove_file(&auto_path);
+    let _ = std::fs::remove_file(format!("{auto_path}.previous"));
+
+    let mut expected = origins.clone();
+    expected.sort_by_key(|origin| origin["origin"].as_str().unwrap().to_string());
+    for (name, saved, extra_requests) in roundtrips {
+        let mut actual = saved["origins"].as_array().unwrap().clone();
+        actual.sort_by_key(|origin| origin["origin"].as_str().unwrap().to_string());
+        assert_eq!(
+            actual, expected,
+            "{name} dropped restored storage on the next save"
+        );
+        assert_eq!(extra_requests, 0, "{name} revisited an origin while saving");
+    }
 }
 
 // ---------------------------------------------------------------------------

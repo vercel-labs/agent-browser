@@ -841,7 +841,7 @@ agent-browser --session "$SESSION" --restore open twitter.com
 agent-browser --session "$SESSION" --restore --restore-check-text Dashboard open twitter.com
 ```
 
-State saving collects storage from previously visited origins using blank intercepted pages, without revisiting those sites over the network. If origin collection fails, the save fails and leaves the existing snapshot unchanged.
+State saving collects storage from previously visited origins using blank intercepted pages, without revisiting those sites over the network. Later saves also collect localStorage from origins imported by `state load`, `--state`, or `--restore`, without needing to revisit them. If origin collection fails, the save fails and leaves the existing snapshot unchanged.
 
 State is saved when the browser closes (explicit `close`, idle timeout, or daemon shutdown) and also periodically while the browser is open, so a browser window you close by hand still leaves a recent save behind. Periodic autosave waits for commands to settle, then saves at most once per `AGENT_BROWSER_AUTOSAVE_INTERVAL_MS` (default 30000; set to `0` to save only on close). Idle sessions keep saving on the same interval, so changes the page makes on its own (token refreshes, background requests) are captured too. It respects the `--restore-save` policy.
 

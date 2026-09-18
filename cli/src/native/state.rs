@@ -205,6 +205,7 @@ async fn collect_storage_in_session(
                     Some(temp_session),
                 ),
                 async {
+                    let mut document_fulfilled = false;
                     loop {
                         let evt = event_rx.recv().await.ok_or("Storage collection session closed")?;
                         if evt.method == "Fetch.requestPaused" {
@@ -220,7 +221,11 @@ async fn collect_storage_in_session(
                                 })),
                                 Some(temp_session),
                             ).await?;
-                        } else if evt.method == "Page.loadEventFired" {
+                            document_fulfilled |= evt.params["resourceType"] == "Document"
+                                && evt.params["request"]["url"] == nav_url;
+                        } else if evt.method == "Page.loadEventFired" && document_fulfilled {
+                            // A delayed about:blank load must not stop the
+                            // pump before this navigation's request is fulfilled.
                             return Ok::<_, String>(());
                         }
                     }
@@ -452,7 +457,13 @@ pub fn validate_state_file(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Result<(), String> {
+/// Replay a snapshot and return its origins so the browser can retain them for
+/// subsequent saves, even when they are no longer in the active frame tree.
+pub async fn load_state(
+    client: &CdpClient,
+    session_id: &str,
+    path: &str,
+) -> Result<Vec<String>, String> {
     let json_str = read_state_json(path)?;
 
     let state: StorageState =
@@ -526,7 +537,11 @@ pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Res
         }
     }
 
-    Ok(())
+    Ok(state
+        .origins
+        .into_iter()
+        .map(|origin| origin.origin)
+        .collect())
 }
 
 fn is_state_file(path: &std::path::Path) -> bool {
@@ -913,6 +928,100 @@ mod tests {
         assert!(
             !target_open,
             "failed collection left its temporary target open"
+        );
+    }
+
+    #[tokio::test]
+    async fn origin_collection_ignores_initial_load_event() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut navigation_id = None;
+            let mut target_closed = false;
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let method = request["method"].as_str().unwrap();
+                if method == "Page.navigate" {
+                    navigation_id = Some(request["id"].clone());
+                    // The about:blank load arrives after the collector's queue
+                    // drain, before the new document's intercepted request.
+                    for event in [
+                        json!({ "method": "Page.loadEventFired", "params": {} }),
+                        json!({ "method": "Fetch.requestPaused", "params": {
+                            "requestId": "document", "resourceType": "Document",
+                            "request": { "url": request["params"]["url"] }
+                        } }),
+                    ] {
+                        let mut event = event;
+                        event["sessionId"] = json!("storage-session");
+                        ws.send(Message::Text(event.to_string())).await.unwrap();
+                    }
+                    // Navigation cannot finish until its request is fulfilled.
+                    continue;
+                }
+                let result = match method {
+                    "Target.createTarget" => json!({ "targetId": "temporary-target" }),
+                    "Target.attachToTarget" => json!({ "sessionId": "storage-session" }),
+                    "Runtime.evaluate" => json!({ "result": { "type": "object", "value": {
+                        "origin": "https://stored.example",
+                        "localStorage": [{ "name": "fixture", "value": "retained" }],
+                        "sessionStorage": []
+                    } } }),
+                    "Target.closeTarget" => {
+                        target_closed = true;
+                        json!({ "success": true })
+                    }
+                    _ => json!({}),
+                };
+                ws.send(Message::Text(
+                    json!({ "id": request["id"], "result": result }).to_string(),
+                ))
+                .await
+                .unwrap();
+                if method == "Fetch.fulfillRequest" {
+                    assert_eq!(request["params"]["requestId"], "document");
+                    ws.send(Message::Text(
+                        json!({
+                            "id": navigation_id.take().unwrap(),
+                            "result": { "frameId": "frame", "loaderId": "navigation" }
+                        })
+                        .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                    ws.send(Message::Text(json!({
+                        "method": "Page.loadEventFired", "sessionId": "storage-session", "params": {}
+                    }).to_string())).await.unwrap();
+                }
+            }
+            target_closed
+        });
+        let client = CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        let result = collect_storage_via_temp_target(
+            &client,
+            &["https://stored.example".to_string()],
+            "fixture storage collection",
+        )
+        .await;
+        client.close().await;
+        assert!(
+            server.await.unwrap(),
+            "collection left its temporary target open"
+        );
+        assert_eq!(
+            serde_json::to_value(result.unwrap()).unwrap(),
+            json!([{
+                "origin": "https://stored.example",
+                "localStorage": [{ "name": "fixture", "value": "retained" }],
+                "sessionStorage": []
+            }])
         );
     }
 

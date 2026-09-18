@@ -3083,6 +3083,7 @@ Usage: agent-browser state <operation> [args]
 
 Save, restore, list, and manage browser state (cookies, localStorage, sessionStorage).
 Saving collects visited origins without revisiting sites over the network.
+Imported origins are remembered for later localStorage collection.
 An origin collection failure leaves the existing snapshot unchanged.
 
 Operations:
