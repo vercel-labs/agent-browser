@@ -151,6 +151,8 @@ agent-browser chat "<instruction>"    # AI chat: natural language browser contro
 agent-browser chat                    # AI chat: interactive REPL mode
 ```
 
+`eval` results that JSON cannot represent (`NaN`, `Infinity`, `-Infinity`, `-0`, BigInt literals and `undefined`) print as the JavaScript token and appear in `--json` as `{"unserializable": "NaN"}`, keeping them distinct from a real `null`.
+
 ### WebMCP (experimental)
 
 WebMCP is enabled by default in agent-browser-managed Chrome. Use `--no-webmcp` to disable the launch features and proactive context.

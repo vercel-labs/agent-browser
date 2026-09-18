@@ -83,6 +83,17 @@ fn print_with_boundaries(content: &str, origin: Option<&str>, opts: &OutputOptio
     }
 }
 
+/// Returns the JavaScript token of an `eval` result that JSON cannot spell
+/// (`NaN`, `Infinity`, `-Infinity`, `-0`, a BigInt literal or `undefined`),
+/// which the native backend tags as `{"unserializable": "<token>"}`.
+fn unserializable_token(value: &serde_json::Value) -> Option<&str> {
+    let object = value.as_object()?;
+    if object.len() != 1 {
+        return None;
+    }
+    object.get("unserializable")?.as_str()
+}
+
 fn format_snapshot_delta(
     snapshot: &serde_json::Map<String, serde_json::Value>,
     origin: Option<&str>,
@@ -770,6 +781,12 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         }
         // Eval result
         if let Some(result) = data.get("result") {
+            // Values JSON cannot spell (NaN, Infinity, BigInt, undefined) come
+            // back tagged; print the bare JavaScript token for humans.
+            if let Some(token) = unserializable_token(result) {
+                print_with_boundaries(token, origin, opts);
+                return;
+            }
             let formatted = serde_json::to_string_pretty(result).unwrap_or_default();
             print_with_boundaries(&formatted, origin, opts);
             return;
@@ -2267,6 +2284,10 @@ agent-browser eval - Execute JavaScript
 Usage: agent-browser eval [options] <script>
 
 Executes JavaScript code in the browser context and returns the result.
+
+Values JSON cannot represent (NaN, Infinity, -Infinity, -0, BigInt literals
+and undefined) print as the JavaScript token; with --json they come back as
+{"unserializable": "NaN"}, so they stay distinct from a real null.
 
 Options:
   -b, --base64         Decode script from base64 (avoids shell escaping issues)
@@ -4287,9 +4308,32 @@ mod tests {
     use super::{
         boundary_origin, format_a11y_text, format_snapshot_delta, format_storage_text,
         format_vitals_text, format_webmcp_context, format_webmcp_text, format_webmcp_tool_text,
-        format_with_boundaries, OutputOptions,
+        format_with_boundaries, unserializable_token, OutputOptions,
     };
     use serde_json::json;
+
+    #[test]
+    fn test_unserializable_token_extracts_js_spelling() {
+        assert_eq!(
+            unserializable_token(&json!({ "unserializable": "NaN" })),
+            Some("NaN")
+        );
+        assert_eq!(
+            unserializable_token(&json!({ "unserializable": "undefined" })),
+            Some("undefined")
+        );
+    }
+
+    #[test]
+    fn test_unserializable_token_ignores_ordinary_results() {
+        assert_eq!(unserializable_token(&json!(null)), None);
+        assert_eq!(unserializable_token(&json!("NaN")), None);
+        assert_eq!(unserializable_token(&json!({ "a": 1 })), None);
+        assert_eq!(
+            unserializable_token(&json!({ "unserializable": "NaN", "a": 1 })),
+            None
+        );
+    }
 
     #[test]
     fn test_format_stream_status_text_for_enabled_stream() {
