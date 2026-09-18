@@ -344,6 +344,8 @@ agent-browser plugin run <name> <type> --payload <json>
                                           # Run an arbitrary plugin request
 ```
 
+Saved profiles are always encrypted. `AGENT_BROWSER_ENCRYPTION_KEY` must be a 64-character hex string when it is set; a malformed value fails `auth save` with the same message `auth show` reports instead of falling back to the auto-generated `~/.agent-browser/.encryption-key`.
+
 `auth login` normally navigates to the effective credential URL. `--no-navigate` requires an existing active top-level HTTP(S) page, checks that its scheme, host, and effective port match the effective credential URL, then uses the normal selector waits, fills, and submit click without replacing the document. Paths, queries, and fragments may differ, and submit-triggered navigation remains enabled. Command-level `--url` takes precedence over stored or provider metadata and becomes the expected-origin constraint in this mode.
 
 Credential provider plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol and must declare `credential.read`. Use `--confirm-actions plugin:<name>:credential.read` to require explicit approval before a plugin resolves secrets.

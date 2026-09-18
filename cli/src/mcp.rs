@@ -1489,7 +1489,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_AUTH_SAVE,
             "Auth save",
-            "Save an auth profile.",
+            "Save an auth profile. Fails when AGENT_BROWSER_ENCRYPTION_KEY is set but is not a 64-character hex string.",
             json!({
                 "name": { "type": "string" },
                 "url": { "type": "string" },

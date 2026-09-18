@@ -2777,6 +2777,12 @@ Login behavior:
   Selector wait timeout follows the default action timeout.
   Plugin credentials are resolved just-in-time and are not saved locally.
 
+Encryption key:
+  Profiles are encrypted with AGENT_BROWSER_ENCRYPTION_KEY (64-char hex) when it
+  is set, otherwise with an auto-generated ~/.agent-browser/.encryption-key.
+  A key that is set but not a 64-char hex string fails the save instead of
+  falling back to a generated key. Generate one: openssl rand -hex 32
+
 Global Options:
   --json                   Output as JSON
   --session <name>         Use specific session
