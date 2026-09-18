@@ -862,7 +862,8 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_FILL,
             "Fill input",
-            "Clear and fill an input by @ref or CSS selector.",
+            "Clear and fill an input by @ref or CSS selector. Fails if the element is \
+             readonly, disabled, or not editable, or if it did not accept the whole text.",
             json!({
                 "selector": selector_schema(),
                 "text": { "type": "string", "description": "Text to fill." }

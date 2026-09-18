@@ -1759,6 +1759,84 @@ async fn e2e_form_interaction() {
     assert_success(&resp);
 }
 
+/// `fill` must refuse elements that cannot accept typed input instead of
+/// wiping their value via JS and reporting success, and must report a value
+/// the element truncated or rejected.
+#[tokio::test]
+#[ignore]
+async fn e2e_fill_rejects_non_editable_elements() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = concat!(
+        "data:text/html,<html><body>",
+        "<input id='ro' value='READONLY' readonly>",
+        "<input id='dis' value='DISABLED' disabled>",
+        "<input id='short' maxlength='5'>",
+        "<div id='panel'>static</div>",
+        "</body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    for (id, selector) in [("10", "#ro"), ("11", "#dis"), ("12", "#panel")] {
+        let resp = execute_command(
+            &json!({ "id": id, "action": "fill", "selector": selector, "value": "HACKED" }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(
+            resp.get("success").and_then(Value::as_bool),
+            Some(false),
+            "fill of {} should fail: {}",
+            selector,
+            serde_json::to_string_pretty(&resp).unwrap_or_default()
+        );
+    }
+
+    // The original values must survive the refused fills.
+    assert_evaluate(
+        &mut state,
+        "13",
+        "document.getElementById('ro').value",
+        json!("READONLY"),
+    )
+    .await;
+    assert_evaluate(
+        &mut state,
+        "14",
+        "document.getElementById('dis').value",
+        json!("DISABLED"),
+    )
+    .await;
+
+    // maxlength truncation must be reported, not silently accepted.
+    let resp = execute_command(
+        &json!({ "id": "15", "action": "fill", "selector": "#short", "value": "0123456789" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(Value::as_bool),
+        Some(false),
+        "truncated fill should fail: {}",
+        serde_json::to_string_pretty(&resp).unwrap_or_default()
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_select_option_label_override_names() {

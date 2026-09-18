@@ -1783,6 +1783,11 @@ Usage: agent-browser fill <selector> <text>
 Clears the input field and fills it with the specified text.
 This replaces any existing content in the field.
 
+Fails without touching the element if it is readonly, disabled, or is not an
+input, textarea, or contenteditable element. Also fails if the element did not
+accept the whole text (for example a maxlength cap, or a type=number input
+rejecting non-numeric text); the error reports the value the element holds.
+
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
