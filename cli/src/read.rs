@@ -9,6 +9,7 @@ use url::Url;
 
 const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 const BODY_LIMIT: usize = 2 * 1024 * 1024;
+const META_CHARSET_SNIFF_LIMIT: usize = 4096;
 const READ_ACCEPT: &str = "text/markdown, text/plain;q=0.9, text/html;q=0.7, */*;q=0.1";
 const USER_AGENT_VALUE: &str = concat!("agent-browser/", env!("CARGO_PKG_VERSION"), " read");
 
@@ -350,7 +351,7 @@ async fn fetch_read_url(
         .unwrap_or("")
         .to_string();
     let success = response.status().is_success();
-    let (body, truncated) = read_limited_text(response).await?;
+    let (body, truncated) = read_limited_text(response, &content_type).await?;
 
     Ok(ReadFetch {
         final_url,
@@ -989,7 +990,10 @@ fn filter_markdown_sections(body: &str, filter: &str, no_match_message: &str) ->
     }
 }
 
-async fn read_limited_text(response: reqwest::Response) -> Result<(String, bool), String> {
+async fn read_limited_text(
+    response: reqwest::Response,
+    content_type: &str,
+) -> Result<(String, bool), String> {
     let mut bytes = Vec::new();
     let mut truncated = false;
     let mut stream = response.bytes_stream();
@@ -1007,7 +1011,87 @@ async fn read_limited_text(response: reqwest::Response) -> Result<(String, bool)
         }
         bytes.extend_from_slice(&chunk);
     }
-    Ok((String::from_utf8_lossy(&bytes).to_string(), truncated))
+    Ok((decode_body(&bytes, content_type), truncated))
+}
+
+/// Decode a response body using the charset declared by the Content-Type header, falling back to a
+/// `<meta>` declaration in the document head and finally to UTF-8. Undecodable bytes become
+/// replacement characters rather than an error, matching how browsers render the same response.
+fn decode_body(bytes: &[u8], content_type: &str) -> String {
+    let encoding = charset_from_content_type(content_type)
+        .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+        .or_else(|| {
+            charset_from_meta(bytes)
+                .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+        })
+        .unwrap_or(encoding_rs::UTF_8);
+    encoding.decode(bytes).0.into_owned()
+}
+
+fn charset_from_content_type(content_type: &str) -> Option<String> {
+    content_type.split(';').skip(1).find_map(|parameter| {
+        let (key, value) = parameter.split_once('=')?;
+        if !key.trim().eq_ignore_ascii_case("charset") {
+            return None;
+        }
+        let value = value.trim().trim_matches(['"', '\'']).trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
+/// Scan the start of a document for `<meta charset=...>` or
+/// `<meta http-equiv="Content-Type" content="...; charset=...">`. Only the prefix is inspected
+/// because the declaration has to appear early to be honored by browsers.
+fn charset_from_meta(bytes: &[u8]) -> Option<String> {
+    let prefix = &bytes[..bytes.len().min(META_CHARSET_SNIFF_LIMIT)];
+    let head = String::from_utf8_lossy(prefix).to_ascii_lowercase();
+    let mut rest = head.as_str();
+    while let Some(start) = rest.find("<meta") {
+        let tag = &rest[start..];
+        let end = tag.find('>').unwrap_or(tag.len());
+        // A charset attribute matches both meta forms: the shorthand attribute and the charset
+        // parameter inside an http-equiv content value.
+        if let Some(charset) = tag_attribute_value(&tag[..end], "charset") {
+            return Some(charset);
+        }
+        if end >= tag.len() {
+            break;
+        }
+        rest = &tag[end + 1..];
+    }
+    None
+}
+
+fn tag_attribute_value(tag: &str, name: &str) -> Option<String> {
+    let mut rest = tag;
+    while let Some(index) = rest.find(name) {
+        let preceded_by_boundary = rest[..index]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| ch.is_whitespace() || ch == ';' || ch == '"' || ch == '\'');
+        let after = rest[index + name.len()..].trim_start();
+        if preceded_by_boundary {
+            if let Some(value) = after.strip_prefix('=') {
+                let value = value.trim_start();
+                let value = if let Some(quoted) = value.strip_prefix('"') {
+                    quoted.split('"').next().unwrap_or("")
+                } else if let Some(quoted) = value.strip_prefix('\'') {
+                    quoted.split('\'').next().unwrap_or("")
+                } else {
+                    value
+                        .split([' ', '\t', '\r', '\n', ';', '/', '>'])
+                        .next()
+                        .unwrap_or("")
+                };
+                let value = value.trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+        rest = &rest[index + name.len()..];
+    }
+    None
 }
 
 fn html_to_markdownish(html: &str) -> String {
@@ -1394,6 +1478,100 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
 
         let err = content_from_fetch(&fetch, &options).unwrap_err();
         assert_eq!(err, "Expected text/markdown, got text/html");
+    }
+
+    /// "Café ÜBER Straße" encoded as ISO-8859-1.
+    const LATIN1_TEXT: &[u8] = b"Caf\xe9 \xdcBER Stra\xdfe";
+
+    #[test]
+    fn decode_body_uses_header_charset() {
+        let decoded = decode_body(LATIN1_TEXT, "text/html; charset=iso-8859-1");
+        assert_eq!(decoded, "Café ÜBER Straße");
+    }
+
+    #[test]
+    fn decode_body_uses_meta_charset_when_header_omits_it() {
+        let mut bytes = b"<html><head><meta charset=\"iso-8859-1\"></head><body>".to_vec();
+        bytes.extend_from_slice(LATIN1_TEXT);
+        bytes.extend_from_slice(b"</body></html>");
+
+        let decoded = decode_body(&bytes, "text/html");
+        assert!(decoded.contains("Café ÜBER Straße"));
+    }
+
+    #[test]
+    fn decode_body_uses_meta_http_equiv_content_type() {
+        let mut bytes = b"<html><head><meta http-equiv='Content-Type' ".to_vec();
+        bytes.extend_from_slice(b"content='text/html; charset=latin1'></head><body>");
+        bytes.extend_from_slice(LATIN1_TEXT);
+        bytes.extend_from_slice(b"</body></html>");
+
+        let decoded = decode_body(&bytes, "");
+        assert!(decoded.contains("Café ÜBER Straße"));
+    }
+
+    #[test]
+    fn decode_body_keeps_utf8_with_explicit_charset() {
+        let text = "Café ÜBER Straße";
+        assert_eq!(
+            decode_body(text.as_bytes(), "text/plain; charset=UTF-8"),
+            text
+        );
+    }
+
+    #[test]
+    fn decode_body_keeps_utf8_without_charset() {
+        let text = "# Café\n\nPrécis résumé naïve\n";
+        assert_eq!(decode_body(text.as_bytes(), "text/markdown"), text);
+        assert_eq!(decode_body(text.as_bytes(), ""), text);
+    }
+
+    #[test]
+    fn decode_body_ignores_unknown_charset_and_falls_back_to_utf8() {
+        let text = "Café";
+        assert_eq!(
+            decode_body(text.as_bytes(), "text/html; charset=not-a-real-charset"),
+            text
+        );
+    }
+
+    #[test]
+    fn decode_body_replaces_invalid_bytes_instead_of_failing() {
+        let decoded = decode_body(b"ok \xff\xfe tail", "text/plain; charset=utf-8");
+        assert!(decoded.starts_with("ok "));
+        assert!(decoded.ends_with(" tail"));
+        assert!(decoded.contains('\u{fffd}'));
+    }
+
+    #[tokio::test]
+    async fn run_read_decodes_declared_charset() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{}", addr);
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0_u8; 2048];
+            let _ = stream.read(&mut buf).await.unwrap_or(0);
+            let mut body = b"<h1>".to_vec();
+            body.extend_from_slice(LATIN1_TEXT);
+            body.extend_from_slice(b"</h1>");
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=iso-8859-1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let mut response = header.into_bytes();
+            response.extend_from_slice(&body);
+            let _ = stream.write_all(&response).await;
+        });
+
+        let options = ReadOptions {
+            headers: HashMap::from([("Accept".to_string(), "text/html".to_string())]),
+            ..ReadOptions::default()
+        };
+        let data = run_read(&base, options).await.unwrap();
+        let content = data["content"].as_str().unwrap();
+        assert!(content.contains("# Café ÜBER Straße"));
     }
 
     #[tokio::test]
