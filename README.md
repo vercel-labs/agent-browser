@@ -151,6 +151,8 @@ agent-browser chat "<instruction>"    # AI chat: natural language browser contro
 agent-browser chat                    # AI chat: interactive REPL mode
 ```
 
+`select` matches each value against an exact option value or an exact visible label; when nothing matches exactly, labels are compared again with whitespace normalized, so non-breaking and ordinary spaces are equivalent. A value that matches more than one option fails and lists the candidates rather than picking one, so pass the exact option value when two options share a label. Each additional value selects an additional option in a `<select multiple>`.
+
 ### WebMCP (experimental)
 
 WebMCP is enabled by default in agent-browser-managed Chrome. Use `--no-webmcp` to disable the launch features and proactive context.

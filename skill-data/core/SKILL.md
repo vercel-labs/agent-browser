@@ -161,6 +161,8 @@ agent-browser drag @e1 @e2                # drag and drop
 agent-browser drag @e1 @e2 --human        # drag with curved, eased movement
 ```
 
+`select` matches each value against an exact option value or an exact visible label, falling back to the label with whitespace normalized. A value that matches more than one option fails and names the candidates, so pass the exact option value when a label is shared.
+
 ### When refs don't work or you don't want to snapshot
 
 Use semantic locators:

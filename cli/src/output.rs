@@ -1892,7 +1892,12 @@ agent-browser select - Select a dropdown option
 Usage: agent-browser select <selector> <value...>
 
 Selects one or more options in a <select> dropdown by value or visible label.
-Label matching normalizes whitespace such as non-breaking spaces.
+Each value is matched against the exact option value or the exact visible
+label; if nothing matches exactly, labels are compared again with whitespace
+normalized (non-breaking spaces included). A value that matches more than one
+option fails and lists the candidates instead of picking one, so pass the
+exact option value when labels collide. Each extra value selects one more
+option in a <select multiple>.
 
 Global Options:
   --json               Output as JSON
