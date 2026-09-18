@@ -3560,6 +3560,30 @@ async fn e2e_state_management() {
 #[tokio::test]
 #[ignore]
 async fn e2e_save_state_cross_domain() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let origin_a = format!("http://127.0.0.1:{port}");
+    let origin_b = format!("http://localhost:{port}");
+    let document_requests = Arc::new(AtomicUsize::new(0));
+    let requests = document_requests.clone();
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let requests = requests.clone();
+            tokio::spawn(async move {
+                let mut buffer = [0; 4096];
+                let n = stream.read(&mut buffer).await.unwrap_or(0);
+                if buffer[..n].starts_with(b"GET / HTTP/") {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                }
+                let body = "<title>Storage fixture</title>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
     let mut state = DaemonState::new();
 
     // Launch
@@ -3572,7 +3596,7 @@ async fn e2e_save_state_cross_domain() {
 
     // Navigate to domain A and set cookie + localStorage
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "https://httpbin.org/html" }),
+        &json!({ "id": "2", "action": "navigate", "url": &origin_a }),
         &mut state,
     )
     .await;
@@ -3600,7 +3624,7 @@ async fn e2e_save_state_cross_domain() {
 
     // Navigate to domain B and set cookie + localStorage
     let resp = execute_command(
-        &json!({ "id": "5", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "5", "action": "navigate", "url": &origin_b }),
         &mut state,
     )
     .await;
@@ -3626,9 +3650,13 @@ async fn e2e_save_state_cross_domain() {
     .await;
     assert_success(&resp);
 
-    // Save state (currently on example.com)
-    let tmp_state = std::env::temp_dir()
-        .join("agent-browser-e2e-cross-domain-state.json")
+    // Saving older origins must use blank intercepted documents, without
+    // depending on their servers or running their scripts again.
+    let requests_before_save = document_requests.load(Ordering::SeqCst);
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let tmp_state = tmp_dir
+        .path()
+        .join("state.json")
         .to_string_lossy()
         .to_string();
     let resp = execute_command(
@@ -3641,6 +3669,19 @@ async fn e2e_save_state_cross_domain() {
     // Read and verify saved state
     let saved = std::fs::read_to_string(&tmp_state).expect("State file should exist");
     let state_data: serde_json::Value = serde_json::from_str(&saved).unwrap();
+
+    let requests_after_save = document_requests.load(Ordering::SeqCst);
+    let title = execute_command(&json!({ "id": "9", "action": "title" }), &mut state).await;
+    let closed = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    server.abort();
+    assert_success(&closed);
+    assert_success(&title);
+    assert_eq!(get_data(&title)["title"], "Storage fixture");
+    assert_eq!(requests_before_save, 2);
+    assert_eq!(
+        requests_after_save, requests_before_save,
+        "state save revisited an origin over the network"
+    );
 
     // Verify BOTH domain cookies are present
     let cookies = state_data["cookies"].as_array().unwrap();
@@ -3660,16 +3701,18 @@ async fn e2e_save_state_cross_domain() {
     // Verify BOTH origins' localStorage are present
     let origins = state_data["origins"].as_array().unwrap();
     let has_origin_a = origins.iter().any(|o| {
-        o["origin"].as_str().is_some_and(|s| s.contains("httpbin"))
-            && o["localStorage"]
-                .as_array()
-                .is_some_and(|ls| ls.iter().any(|e| e["name"] == "domainA_key"))
+        o["origin"] == origin_a
+            && o["localStorage"].as_array().is_some_and(|ls| {
+                ls.iter()
+                    .any(|e| e["name"] == "domainA_key" && e["value"] == "domainA_val")
+            })
     });
     let has_origin_b = origins.iter().any(|o| {
-        o["origin"].as_str().is_some_and(|s| s.contains("example"))
-            && o["localStorage"]
-                .as_array()
-                .is_some_and(|ls| ls.iter().any(|e| e["name"] == "domainB_key"))
+        o["origin"] == origin_b
+            && o["localStorage"].as_array().is_some_and(|ls| {
+                ls.iter()
+                    .any(|e| e["name"] == "domainB_key" && e["value"] == "domainB_val")
+            })
     });
     assert!(
         has_origin_a,
@@ -3681,12 +3724,6 @@ async fn e2e_save_state_cross_domain() {
         "Should include localStorage from example.com origin: {:?}",
         origins
     );
-
-    // Clean up
-    let _ = std::fs::remove_file(&tmp_state);
-
-    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
-    assert_success(&resp);
 }
 
 // ---------------------------------------------------------------------------
