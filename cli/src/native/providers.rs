@@ -141,7 +141,7 @@ pub async fn close_provider_session_with_plugins(
             if let Ok(api_key) = env::var("BROWSER_USE_API_KEY") {
                 let _ = client
                     .patch(format!(
-                        "https://api.browser-use.com/api/v2/browsers/{}",
+                        "https://api.browser-use.com/api/v4/browsers/{}",
                         session.session_id
                     ))
                     .header("X-Browser-Use-API-Key", &api_key)
@@ -385,9 +385,92 @@ async fn connect_browser_use() -> Result<(String, Option<ProviderSession>), Stri
     let api_key = env::var("BROWSER_USE_API_KEY")
         .map_err(|_| "BROWSER_USE_API_KEY environment variable is not set")?;
 
-    let ws_url = format!("wss://connect.browser-use.com?apiKey={}", api_key);
+    let response = reqwest::Client::new()
+        .post("https://api.browser-use.com/api/v4/browsers")
+        .header("X-Browser-Use-API-Key", &api_key)
+        .header("Content-Type", "application/json")
+        .json(&browser_use_create_body_from_lookup(|name| {
+            env::var(name).ok()
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Browser Use request failed: {}", e))?;
 
-    Ok((ws_url, None))
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read Browser Use response: {}", e))?;
+    if !status.is_success() {
+        return Err(format!(
+            "Browser Use API error ({}): {}",
+            status.as_u16(),
+            body
+        ));
+    }
+
+    let response: Value =
+        serde_json::from_str(&body).map_err(|e| format!("Invalid Browser Use response: {}", e))?;
+    parse_browser_use_connection(&response)
+}
+
+/// Build the supported Browser Use Cloud V4 options. Custom proxies are not exposed.
+fn browser_use_create_body_from_lookup<F>(mut lookup: F) -> Value
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut body = serde_json::Map::new();
+
+    if let Some(profile_id) = lookup("BROWSER_USE_PROFILE_ID").filter(|value| !value.is_empty()) {
+        body.insert("profileId".to_string(), json!(profile_id));
+    }
+
+    if let Some(proxy_country) =
+        lookup("BROWSER_USE_PROXY_COUNTRY").filter(|value| !value.is_empty())
+    {
+        let proxy_country = proxy_country.to_ascii_lowercase();
+        body.insert(
+            "proxyCountryCode".to_string(),
+            if matches!(proxy_country.as_str(), "none" | "direct") {
+                Value::Null
+            } else {
+                json!(proxy_country)
+            },
+        );
+    }
+
+    if let Some(recording) = lookup("BROWSER_USE_ENABLE_RECORDING") {
+        body.insert(
+            "enableRecording".to_string(),
+            json!(!matches!(
+                recording.to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | ""
+            )),
+        );
+    }
+
+    Value::Object(body)
+}
+
+fn parse_browser_use_connection(
+    response: &Value,
+) -> Result<(String, Option<ProviderSession>), String> {
+    let session_id = response
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Browser Use response missing id".to_string())?;
+    let ws_url = response
+        .get("cdpUrl")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Browser Use response missing cdpUrl".to_string())?;
+
+    Ok((
+        ws_url.to_string(),
+        Some(ProviderSession {
+            provider: "browser-use".to_string(),
+            session_id: session_id.to_string(),
+        }),
+    ))
 }
 
 async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
@@ -868,6 +951,43 @@ async fn close_agentcore_session(session_id: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
+
+    #[test]
+    fn test_browser_use_v4_options_and_response() {
+        let values = std::collections::HashMap::from([
+            ("BROWSER_USE_PROFILE_ID", "profile-123"),
+            ("BROWSER_USE_PROXY_COUNTRY", "DE"),
+            ("BROWSER_USE_ENABLE_RECORDING", "true"),
+        ]);
+        let body = browser_use_create_body_from_lookup(|name| {
+            values.get(name).map(|value| (*value).to_string())
+        });
+        assert_eq!(
+            body,
+            json!({
+                "profileId": "profile-123",
+                "proxyCountryCode": "de",
+                "enableRecording": true,
+            })
+        );
+        assert!(body.get("customProxy").is_none());
+
+        let (ws_url, session) = parse_browser_use_connection(&json!({
+            "id": "browser-123",
+            "cdpUrl": "wss://browser.example/devtools/browser/123",
+        }))
+        .unwrap();
+        assert_eq!(ws_url, "wss://browser.example/devtools/browser/123");
+        assert_eq!(session.unwrap().session_id, "browser-123");
+    }
+
+    #[test]
+    fn test_browser_use_managed_proxy_can_be_disabled() {
+        let body = browser_use_create_body_from_lookup(|name| {
+            (name == "BROWSER_USE_PROXY_COUNTRY").then(|| "direct".to_string())
+        });
+        assert_eq!(body, json!({ "proxyCountryCode": null }));
+    }
 
     #[test]
     fn test_connect_provider_unknown() {
