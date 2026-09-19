@@ -1,0 +1,100 @@
+# AginxBrowser
+
+[AginxBrowser](https://github.com/yinnho/aginxbrowser) is a single-binary headless browser engine written in Rust. It ships one static binary that speaks CDP, starts without downloading a browser, and exposes an MCP/HTTP surface of its own for agent use.
+
+Its rendering engine is an obscura-lineage CSS/layout/paint implementation, not Chromium. It implements a growing subset of the web platform rather than the full Chromium surface, so it trades fidelity for footprint. Prefer Chrome when a page depends on uncommon browser APIs or pixel-exact rendering.
+
+agent-browser manages AginxBrowser the same way it manages Chrome: spawning the process, connecting via CDP, and shutting it down. Downstream commands (snapshot, click, fill, screenshot, etc.) work through the same CDP protocol path.
+
+## Installation
+
+Install the `aginxbrowser` binary before using it with agent-browser:
+
+<table>
+  <thead>
+    <tr><th>Method</th><th>Command</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Install script</td>
+      <td><code>curl -fsSL https://browser.aginx.net/install.sh \| sh</code></td>
+    </tr>
+    <tr>
+      <td>Homebrew (macOS / Linux)</td>
+      <td><code>brew install yinnho/aginxbrowser/aginxbrowser</code></td>
+    </tr>
+    <tr>
+      <td>GitHub Releases</td>
+      <td><a href="https://github.com/yinnho/aginxbrowser/releases">Prebuilt binaries for macOS, Linux (glibc and musl), and Windows</a></td>
+    </tr>
+  </tbody>
+</table>
+
+The binary must be on your `PATH` (e.g. `/usr/local/bin/aginxbrowser` or `~/.local/bin/aginxbrowser`) or passed explicitly via `--executable-path`.
+
+## Usage
+
+Use the `--engine` flag to select AginxBrowser:
+
+```bash
+agent-browser --engine aginxbrowser open example.com
+agent-browser --engine aginxbrowser snapshot
+agent-browser --engine aginxbrowser screenshot
+```
+
+Or set it as the default via environment variable:
+
+```bash
+export AGENT_BROWSER_ENGINE=aginxbrowser
+agent-browser open example.com
+```
+
+Or in your `agent-browser.json` config:
+
+```json
+{
+  "engine": "aginxbrowser"
+}
+```
+
+## Custom Binary Path
+
+If the `aginxbrowser` binary is not in your `PATH`, use `--executable-path`:
+
+```bash
+agent-browser --engine aginxbrowser --executable-path /path/to/aginxbrowser open example.com
+```
+
+## Differences from Chrome
+
+AginxBrowser is headless only and purpose-built for agent workloads:
+
+<table>
+  <thead>
+    <tr><th>Feature</th><th>Status</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>File access (<code>--allow-file-access</code>)</td><td>Supported (engine-native flag)</td></tr>
+    <tr><td>Extensions (<code>--extension</code>)</td><td>Not supported</td></tr>
+    <tr><td>Persistent profiles (<code>--profile</code>)</td><td>Not supported</td></tr>
+    <tr><td>Storage state (<code>--state</code>)</td><td>Not supported</td></tr>
+    <tr><td>Headed mode (<code>--headed</code>)</td><td>Not applicable (headless only)</td></tr>
+    <tr><td>WebGPU (<code>--webgpu</code>)</td><td>Not supported</td></tr>
+    <tr><td>Custom Chrome arguments (<code>--args</code>)</td><td>Not supported</td></tr>
+  </tbody>
+</table>
+
+Proxy configuration (`--proxy`) is forwarded to the engine through its `AGINXBROWSER_PROXY` environment variable.
+
+agent-browser returns a clear error if you combine `--engine aginxbrowser` with unsupported flags.
+
+## When to Use AginxBrowser
+
+AginxBrowser is a good fit for:
+
+- Environments where downloading Chromium is impractical or slow
+- Agent workflows that read local `file://` content (with `--allow-file-access`)
+- High-volume parallel automation where a small, fast-starting binary helps
+- Teams already using AginxBrowser's MCP/HTTP surface that want CLI access to the same engine
+
+Use Chrome when you need full browser fidelity, extensions, or persistent profiles.
