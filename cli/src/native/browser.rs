@@ -192,6 +192,52 @@ fn active_page_index_after_add(
     }
 }
 
+/// Loopback hosts to try for a launched Chrome's DevTools WebSocket, in order.
+const LAUNCH_LOOPBACK_HOSTS: [&str; 3] = ["127.0.0.1", "[::1]", "localhost"];
+
+/// Build the candidate WebSocket URLs for a launched Chrome. Port discovery
+/// hard-codes 127.0.0.1, but on some stacks (WSL2, issue #1791) the ephemeral
+/// listener comes up on the IPv6 loopback instead, so the remaining loopback
+/// hosts are tried before giving up. URLs that do not point at 127.0.0.1 are
+/// returned unchanged.
+fn loopback_ws_candidates(ws_url: &str) -> Vec<String> {
+    if !ws_url.contains("127.0.0.1") {
+        return vec![ws_url.to_string()];
+    }
+    LAUNCH_LOOPBACK_HOSTS
+        .iter()
+        .map(|host| ws_url.replacen("127.0.0.1", host, 1))
+        .collect()
+}
+
+/// Connect to a freshly launched Chrome's DevTools WebSocket.
+///
+/// `DevToolsActivePort` only tells us the port, not which loopback address the
+/// server bound, and the listen socket can come up a moment after the file
+/// appears. Try every loopback host within a short retry window so a transient
+/// refusal or an IPv6-only listener does not fail the launch.
+async fn connect_launched_chrome(ws_url: &str) -> Result<CdpClient, String> {
+    const CONNECT_DEADLINE: Duration = Duration::from_secs(6);
+    let deadline = Instant::now() + CONNECT_DEADLINE;
+    let candidates = loopback_ws_candidates(ws_url);
+    let mut last_err = String::new();
+    loop {
+        for candidate in &candidates {
+            match CdpClient::connect(candidate).await {
+                Ok(client) => return Ok(client),
+                Err(e) => last_err = format!("{candidate}: {e}"),
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "Could not connect to the launched browser's DevTools socket after trying {} loopback candidate(s). Last error: {last_err}",
+                candidates.len()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 /// Converts common error messages into AI-friendly, actionable descriptions.
 pub fn to_ai_friendly_error(error: &str) -> String {
     let lower = error.to_lowercase();
@@ -521,7 +567,7 @@ impl BrowserManager {
         let mut manager = if engine == "lightpanda" {
             initialize_lightpanda_manager(ws_url, process).await?
         } else {
-            let client = Arc::new(CdpClient::connect(&ws_url).await?);
+            let client = Arc::new(connect_launched_chrome(&ws_url).await?);
             let mut manager = Self {
                 client,
                 browser_process: Some(process),
@@ -2687,6 +2733,28 @@ mod tests {
     #[test]
     fn test_validate_launch_options_valid() {
         assert!(validate_launch_options(None, false, None, None, false, None, None).is_ok());
+    }
+
+    #[test]
+    fn test_loopback_ws_candidates_cover_both_loopbacks() {
+        let url = "ws://127.0.0.1:57082/devtools/browser/abc";
+        let candidates = loopback_ws_candidates(url);
+        assert_eq!(
+            candidates,
+            vec![
+                "ws://127.0.0.1:57082/devtools/browser/abc",
+                "ws://[::1]:57082/devtools/browser/abc",
+                "ws://localhost:57082/devtools/browser/abc",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_loopback_ws_candidates_leave_other_hosts_untouched() {
+        // A user-supplied --cdp URL must not be silently rewritten to a
+        // different host: only the launch discovery path gets the fallback.
+        let url = "ws://myproxy.internal:9222/devtools/browser/abc";
+        assert_eq!(loopback_ws_candidates(url), vec![url.to_string()]);
     }
 
     #[test]
