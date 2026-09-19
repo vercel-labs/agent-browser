@@ -2496,6 +2496,7 @@ fn skip_launch_action(action: &str) -> bool {
         "" | "launch"
             | "close"
             | "read"
+            | "cdp_url"
             | "har_stop"
             | "credentials_set"
             | "credentials_get"
@@ -13389,6 +13390,18 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cdp_url_is_a_skip_launch_action() {
+        // get cdp-url is a metadata query: after `close` it must surface
+        // "Browser not launched" instead of silently spinning up a fresh
+        // Chrome (which re-inserts a Dock tile on every macOS cleanup, see
+        // issue #1854).
+        assert!(super::skip_launch_action("cdp_url"));
+        // The launch-triggering commands stay on the other side.
+        assert!(!super::skip_launch_action("open"));
+        assert!(!super::skip_launch_action("navigate"));
+    }
+
     #[tokio::test]
     async fn human_command_does_not_change_session_default() {
         let mut state = super::DaemonState::new();
