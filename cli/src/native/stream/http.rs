@@ -348,17 +348,23 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
         .or_else(|| buf.windows(2).position(|w| w == b"\n\n").map(|p| p + 2))
 }
 
-fn parse_content_length_bytes(headers: &[u8]) -> Option<usize> {
-    let header_str = std::str::from_utf8(headers).ok()?;
-    for line in header_str.lines() {
-        if line.len() > 16 && line[..16].eq_ignore_ascii_case("content-length: ") {
-            return line[16..].trim().parse().ok();
+pub(super) fn parse_content_length(headers: &str) -> Option<usize> {
+    for line in headers.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            return value.trim().parse().ok();
         }
     }
     None
 }
 
-const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+fn parse_content_length_bytes(headers: &[u8]) -> Option<usize> {
+    parse_content_length(std::str::from_utf8(headers).ok()?)
+}
+
+pub(super) const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 
 async fn read_full_body(stream: &mut tokio::net::TcpStream, peeked: &[u8]) -> Option<String> {
     let body_offset = find_header_end(peeked)?;
@@ -711,5 +717,38 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(relayed.contains(r#""action":"tabs""#), "{relayed}");
+    }
+
+    #[test]
+    fn content_length_is_parsed_from_standard_header() {
+        let headers = b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 17\r\n\r\n";
+        assert_eq!(parse_content_length_bytes(headers), Some(17));
+    }
+
+    #[test]
+    fn content_length_is_parsed_case_insensitively() {
+        let headers = b"POST / HTTP/1.1\r\nCONTENT-LENGTH: 42\r\n\r\n";
+        assert_eq!(parse_content_length_bytes(headers), Some(42));
+    }
+
+    #[test]
+    fn content_length_is_parsed_without_space_after_colon() {
+        let headers = b"POST / HTTP/1.1\r\nContent-Length:42\r\n\r\n";
+        assert_eq!(parse_content_length_bytes(headers), Some(42));
+    }
+
+    #[test]
+    fn content_length_is_none_when_header_is_absent() {
+        let headers = b"POST / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        assert_eq!(parse_content_length_bytes(headers), None);
+    }
+
+    #[test]
+    fn multibyte_header_split_at_byte_sixteen_does_not_panic() {
+        let headers = format!(
+            "POST / HTTP/1.1\r\n{}\u{e9}BBBB: 1\r\nContent-Length: 17\r\n\r\n",
+            "A".repeat(15)
+        );
+        assert_eq!(parse_content_length_bytes(headers.as_bytes()), Some(17));
     }
 }
