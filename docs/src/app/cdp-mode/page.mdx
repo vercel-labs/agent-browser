@@ -78,6 +78,8 @@ With `--pin-tab`:
 - `tab list`, `tab new`, and `tab <ref>` still work in that state, so an agent can recover by binding a new tab
 - Tabs opened by other sessions or the user never steal the pinned session's active tab
 
+Sessions also keep their hands off the window itself: tabs are created in the background and switching to one skips `Page.bringToFront`, so driving a shared browser does not pull it over the app the person is using. `bringtofront` is there when a raise is what you actually want, and a screenshot of a background tab needs it.
+
 The flag is sticky per session: pass it once and later commands and daemon restarts keep the strict semantics. Pass `--no-pin-tab` to explicitly turn the pin off again. See [Sessions](/sessions) for the multi-session workflow and [Commands](/commands) for tab refs by CDP target id.
 
 The structured <code>lastUrl</code> is emitted only for sanitized HTTP(S) URLs and <code>about:blank</code>. Credentials, query strings, and fragments are removed from HTTP(S) URLs, while opaque URLs such as <code>data:</code> are omitted. Batch JSON exposes the recovery object under <code>result</code>.

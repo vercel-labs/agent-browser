@@ -98,6 +98,7 @@ pub fn is_top_level_command(value: &str) -> bool {
             | "back"
             | "forward"
             | "reload"
+            | "bringtofront"
             | "read"
             | "click"
             | "dblclick"
@@ -425,6 +426,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "back" => Ok(json!({ "id": id, "action": "back" })),
         "forward" => Ok(json!({ "id": id, "action": "forward" })),
         "reload" => Ok(json!({ "id": id, "action": "reload" })),
+        "bringtofront" => Ok(json!({ "id": id, "action": "bringtofront" })),
         "read" => parse_read(&rest, &id, flags),
         "webmcp" => parse_webmcp(&rest, &id),
 
@@ -4446,6 +4448,12 @@ mod tests {
     fn test_reload() {
         let cmd = parse_command(&args("reload"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "reload");
+    }
+
+    #[test]
+    fn test_bringtofront() {
+        let cmd = parse_command(&args("bringtofront"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "bringtofront");
     }
 
     // === Core Actions ===
