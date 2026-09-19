@@ -15,6 +15,47 @@ pub enum PolicyResult {
     RequiresConfirmation,
 }
 
+/// Return the user-facing policy category for a protocol action.
+fn action_category(action: &str) -> Option<&'static str> {
+    match action {
+        "navigate" | "back" | "forward" | "reload" | "tab_new" => Some("navigate"),
+        "click" | "dblclick" | "tap" => Some("click"),
+        "fill" | "type" | "keyboard" | "inserttext" | "select" | "multiselect" | "check"
+        | "uncheck" | "clear" | "selectall" | "setvalue" => Some("fill"),
+        "evaluate" | "evalhandle" | "addscript" | "addinitscript" | "addstyle" | "expose"
+        | "setcontent" => Some("eval"),
+        "download" | "waitfordownload" => Some("download"),
+        "upload" => Some("upload"),
+        "snapshot" | "screenshot" | "pdf" | "diff_snapshot" | "diff_screenshot" | "diff_url" => {
+            Some("snapshot")
+        }
+        "scroll" | "scrollintoview" => Some("scroll"),
+        "wait" | "waitforurl" | "waitforloadstate" | "waitforfunction" => Some("wait"),
+        "read" => Some("read"),
+        "gettext" | "content" | "innerhtml" | "innertext" | "inputvalue" | "url" | "title"
+        | "getattribute" | "count" | "boundingbox" | "styles" | "isvisible" | "isenabled"
+        | "ischecked" | "responsebody" | "getbyrole" | "getbytext" | "getbylabel"
+        | "getbyplaceholder" | "getbyalttext" | "getbytitle" | "getbytestid" | "nth" | "find" => {
+            Some("get")
+        }
+        "hover" | "focus" | "drag" | "press" | "keydown" | "keyup" | "mousemove" | "mousedown"
+        | "mouseup" | "wheel" | "dispatch" | "mouse" | "swipe" => Some("interact"),
+        "route" | "unroute" | "requests" | "request_detail" | "har_start" | "har_stop" => {
+            Some("network")
+        }
+        "state_save" | "state_load" | "cookies_set" | "storage_set" | "credentials" => {
+            Some("state")
+        }
+        _ => None,
+    }
+}
+
+fn list_matches_action(list: &[String], action: &str) -> bool {
+    let category = action_category(action);
+    list.iter()
+        .any(|entry| entry == action || category.is_some_and(|category| entry == category))
+}
+
 /// Policy configuration loaded from a JSON file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionPolicy {
@@ -56,6 +97,7 @@ impl ConfirmActions {
 
     pub fn requires_confirmation(&self, action: &str) -> bool {
         self.categories.contains(action)
+            || action_category(action).is_some_and(|category| self.categories.contains(category))
     }
 }
 
@@ -83,19 +125,19 @@ impl ActionPolicy {
     /// Check whether an action is allowed, denied, or requires confirmation.
     pub fn check(&self, action: &str) -> PolicyResult {
         if let Some(deny) = &self.deny {
-            if deny.iter().any(|a| a == action) {
+            if list_matches_action(deny, action) {
                 return PolicyResult::Deny(format!("Action '{}' is denied by policy", action));
             }
         }
 
         if let Some(confirm) = &self.confirm {
-            if confirm.iter().any(|a| a == action) {
+            if list_matches_action(confirm, action) {
                 return PolicyResult::RequiresConfirmation;
             }
         }
 
         if let Some(allow) = &self.allow {
-            if !allow.is_empty() && !allow.iter().any(|a| a == action) {
+            if !allow.is_empty() && !list_matches_action(allow, action) {
                 let is_default_deny = self
                     .default
                     .as_deref()
@@ -205,6 +247,64 @@ mod tests {
     }
 
     #[test]
+    fn test_policy_categories_cover_protocol_actions() {
+        let json = r#"{
+            "default": "deny",
+            "allow": ["navigate", "snapshot", "click", "scroll", "wait", "get"]
+        }"#;
+        let policy: ActionPolicy = serde_json::from_str(json).unwrap();
+
+        for action in [
+            "reload",
+            "back",
+            "forward",
+            "screenshot",
+            "pdf",
+            "diff_snapshot",
+            "dblclick",
+            "tap",
+            "scrollintoview",
+            "waitforurl",
+            "title",
+            "url",
+            "count",
+            "isvisible",
+            "getbyrole",
+        ] {
+            assert_eq!(policy.check(action), PolicyResult::Allow, "{action}");
+        }
+    }
+
+    #[test]
+    fn test_policy_category_deny_and_confirm() {
+        let json = r#"{
+            "default": "allow",
+            "deny": ["eval"],
+            "confirm": ["network"]
+        }"#;
+        let policy: ActionPolicy = serde_json::from_str(json).unwrap();
+
+        assert!(matches!(policy.check("setcontent"), PolicyResult::Deny(_)));
+        assert_eq!(
+            policy.check("har_start"),
+            PolicyResult::RequiresConfirmation
+        );
+        assert_eq!(
+            policy.check("request_detail"),
+            PolicyResult::RequiresConfirmation
+        );
+    }
+
+    #[test]
+    fn test_policy_preserves_exact_action_names() {
+        let json = r#"{"default": "deny", "allow": ["evalhandle"]}"#;
+        let policy: ActionPolicy = serde_json::from_str(json).unwrap();
+
+        assert_eq!(policy.check("evalhandle"), PolicyResult::Allow);
+        assert!(matches!(policy.check("evaluate"), PolicyResult::Deny(_)));
+    }
+
+    #[test]
     fn test_confirm_actions_from_env() {
         let _guard = EnvGuard::new(&["AGENT_BROWSER_CONFIRM_ACTIONS"]);
         _guard.set("AGENT_BROWSER_CONFIRM_ACTIONS", "navigate,click,fill");
@@ -213,5 +313,16 @@ mod tests {
         assert!(ca.requires_confirmation("click"));
         assert!(ca.requires_confirmation("fill"));
         assert!(!ca.requires_confirmation("screenshot"));
+    }
+
+    #[test]
+    fn test_confirm_actions_category_from_env() {
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_CONFIRM_ACTIONS"]);
+        _guard.set("AGENT_BROWSER_CONFIRM_ACTIONS", "eval,get");
+        let ca = ConfirmActions::from_env().unwrap();
+
+        assert!(ca.requires_confirmation("setcontent"));
+        assert!(ca.requires_confirmation("getbyrole"));
+        assert!(!ca.requires_confirmation("click"));
     }
 }
