@@ -1,8 +1,78 @@
 # Skills Evals
 
-Tests whether the thin SKILL.md + CLI-served skills approach works: do agents load the right skill via `agent-browser skills get`, then produce correct agent-browser commands?
+The primary suite runs real Claude Code and Codex sessions in Vercel Sandboxes. Each trial boots from the same source-specific snapshot with pinned CLIs, Chrome, and a Linux build of the checkout. Interactive CLI sessions run in tmux pseudoterminals; headed Chrome runs on Xvfb. CLI mode and browser mode are independent.
 
-## Prerequisites
+## Setup
+
+Use Node.js 24 or later, pnpm, and a Vercel project you can access with Sandbox and AI Gateway available. The eval package is intentionally separate from the root pnpm workspace. When linking, select your own team and create or choose a project.
+
+```bash
+pnpm --dir evals install --ignore-workspace --frozen-lockfile
+vercel link --cwd evals
+vercel env pull --cwd evals --environment development --yes
+pnpm --dir evals run sandbox:check-auth
+pnpm --dir evals run sandbox:prepare
+```
+
+The runner loads `evals/.env.local` and uses `@vercel/oidc` to refresh the linked project's token when needed. On Vercel or in CI, supply `VERCEL_OIDC_TOKEN`. The token creates sandboxes and authenticates AI Gateway calls through Sandbox credential brokering: the CLIs receive a non-secret placeholder, and the Sandbox firewall replaces its authorization header on requests to `ai-gateway.vercel.sh/v1/`. The real token stays outside the guest. No separate AI Gateway API key is required. Tokens, local project linkage, and snapshot manifests are ignored by Git.
+
+`sandbox:check-auth` creates a short-lived VM, calls both provider API protocols using brokered OIDC, verifies that OIDC is absent from the guest environment, and stops the VM. This check calls the models and incurs normal usage.
+
+`sandbox:prepare` uploads an allowlist of source files, installs the tool versions in `sandbox/tools/pnpm-lock.yaml`, builds the native CLI with `cargo build --locked --profile ci`, installs the pinned Chrome version, and saves a snapshot. `sandbox/environment.json` pins the runtime, Rust, pnpm, Chrome, default models, and VM resources. The resulting `.sandbox-snapshot.json` records the source hash, project, binary hash, observed tool versions, and all installed RPM versions. It contains no model credentials.
+
+A snapshot fixes the complete filesystem for subsequent runs, including system packages. Rebuilding can pick up changes to the base runtime or RPM repositories; use the recorded snapshot ID for repeat comparisons. Snapshots expire after 30 days. Run `sandbox:prepare` again after changing CLI source, skills, dependency locks, or environment pins. A stale source hash or different Vercel project fails before model execution. The Rust-only build includes the standard dashboard placeholder; these cases exercise the CLI and browser rather than the dashboard UI.
+
+## Run the suite
+
+```bash
+# List cases without creating a sandbox
+pnpm --dir evals run eval:live --list
+
+# Both providers, both CLI modes, both browser modes
+pnpm --dir evals run eval
+
+# Small comparison: real screenshot task, both CLI modes, headed Chrome
+pnpm --dir evals run eval:paired --case page-screenshot --browser-mode headed
+
+# Repeat a Codex comparison three times
+pnpm --dir evals run eval:paired --provider codex --case form-submit --runs 3
+
+# Use the providers' normal permission prompts instead of unattended permissions
+pnpm --dir evals run eval:live --provider claude --mode interactive --permissions default
+
+# Deterministic harness and grading checks, without model calls
+pnpm --dir evals run test:live
+pnpm --dir evals run test:sandbox
+```
+
+`--mode interactive|headless|paired` selects the CLI entry point. Interactive means the real `claude` or `codex` TUI with a TTY; headless means `claude -p` or `codex exec`. `--browser-mode headed|headless|both` selects Chrome's launch mode. Headed Chrome has a real virtual X display; it does not open a window on your computer. Browser cases record the actual Chrome process arguments and fail if the observed mode differs from the requested mode.
+
+Every provider, mode, case, browser mode, and repetition gets a fresh VM and fresh CLI profile. The task is described naturally, with the discovery stub installed in the provider's normal project skill directory. The runner does not inject the skill into the prompt. Paired runs alternate CLI order between repetitions. The full default matrix is 32 trials.
+
+For unattended comparisons, the default `--permissions unattended` uses the providers' permission bypass modes inside the disposable VM. This keeps tool permission dialogs from determining the score; it is a recorded difference from the default local user experience. `--permissions default` keeps normal provider permissions. The harness acknowledges only startup trust for its generated fixture folder; tool prompts require operator input and can time out. Interactive runs print a Sandbox CLI shell command and a private tmux attach command. Run the shell command from the linked `evals/` directory, then attach to the TUI. Raw terminal captures and a TTY check are saved with the results.
+
+Use repeated `--case` flags to select cases, `--timeout` for a per-case limit in seconds, `--results` for a new local output directory, `--snapshot` for another prepared manifest, and `--claude-model` / `--codex-model` to override default models. Run `pnpm --dir evals run eval:live --help` for all options.
+
+## Cases and grading
+
+- `page-screenshot`: visit a local page, save a real PNG, and report its unique heading. The grader validates image data and independently observes the screenshot's page URL.
+- `form-submit`: register a test user through a local form. The server verifies the submitted fields and the grader requires successful browser interaction.
+- `local-doc-edit`: edit browser-related prose in a README without activating the browser skill.
+- `local-code-fix`: fix local URL handling without activating the browser skill. The disposable Vercel guest restores and runs an independent test oracle.
+
+Browser cases require a successful `skills get core` before the first browser action starts. Hypothetical commands do not count. Form submissions must arrive as a Chrome form request correlated with a successful submit-capable browser command. Failed commands and recovery remain visible. Negative cases reject CLI invocations and observed skill activation attempts, even when the edit succeeds. Missing native provider completion events fail closed.
+
+Results default to `evals/results/sandbox-<timestamp>/`. The top-level `results.json` contains scores and comparisons grouped by provider, case, repetition, and browser mode. Each trial includes `sandbox.json`, `result.json`, and `artifacts.tar.gz`. Extract the archive to inspect prompts, provider transcripts, commands, fixture events, final answers, screenshots, workspace changes, and terminal captures. The runner downloads available artifacts and stops the VM after success or failure. VM lifetimes are bounded independently of the local process. A missing report or artifact download failure fails the trial.
+
+These are behavioral acceptance checks. Model sampling, provider behavior, and manual permission response times still vary; a fixed VM does not make model outputs deterministic. The Codex observer currently reads native rollout completion events. Provider format changes require a harness update and fail with missing-completion errors rather than silently passing.
+
+## Local debugging
+
+`pnpm --dir evals run eval:local` runs the same cases on a POSIX host with Python 3.10+, tmux, Chrome, agent-browser, and the provider CLIs installed. It inherits local logins, skills, and permission policies. The local code grader uses a restricted AST interpreter and never imports or executes agent-written Python; the disposable Vercel guest uses the full independent test oracle. `--open-terminal` opens each interactive session in macOS Terminal. `--binary`, `--chrome`, `--skill`, and `--skills-dir` select local inputs. Personal skill collisions are reported through `observed_skill_sources` and `other_skill_source_loaded`. Local results are useful for debugging but do not have the isolation of the sandbox workflow.
+
+## Original prompt-based evals
+
+### Prerequisites
 
 - [Bun](https://bun.sh) installed
 - `AI_GATEWAY_API_KEY` set (Vercel AI Gateway key)
@@ -55,12 +125,11 @@ bun run run.ts --provider codex --category skill-selection --judge
 Or via package scripts:
 
 ```bash
-bun run eval           # run all (Claude)
-bun run eval:claude    # run all (Claude, explicit)
-bun run eval:codex     # run all (Codex)
-bun run eval:context   # measure CLI vs MCP context footprint
-bun run eval:judge     # run all with LLM judge
-bun run eval:json      # JSON output
+pnpm run eval:prompt                    # original prompt suite (Claude)
+pnpm run eval:prompt --provider codex   # original prompt suite (Codex)
+pnpm run eval:context                   # CLI vs MCP context footprint
+pnpm run eval:judge                     # original prompt suite with LLM judge
+pnpm run eval:json                      # original prompt suite JSON output
 ```
 
 ## Providers
