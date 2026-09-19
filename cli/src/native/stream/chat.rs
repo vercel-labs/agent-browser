@@ -463,7 +463,10 @@ pub(crate) async fn execute_chat_tool(session: &str, command: &str) -> String {
     let single = command.split("&&").next().unwrap_or(command);
     let single = single.split(';').next().unwrap_or(single).trim();
     let stripped = single.strip_prefix("agent-browser ").unwrap_or(single);
-    let words = crate::commands::shell_words_split(stripped);
+    let words = match crate::commands::shell_words_split(stripped) {
+        Ok(words) => words,
+        Err(e) => return e,
+    };
 
     let mut global_flags: Vec<String> = Vec::new();
     let mut cmd_words: Vec<String> = Vec::new();

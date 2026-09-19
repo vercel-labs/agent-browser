@@ -301,6 +301,14 @@ echo '[
 ]' | agent-browser batch --json
 ```
 
+In argument mode each command string is split with POSIX quoting rules: single quotes keep their contents literal, double quotes group words and accept `\"` and `\\` as escapes, a bare backslash is literal (so `C:\Users\dwin` survives), and `""` passes an empty argument. An unterminated quote is a loud error rather than silently stripped text, so a value containing an apostrophe must be double quoted:
+
+```bash
+agent-browser batch "fill #note \"It's here\""
+```
+
+Stdin mode needs no quoting at all, so prefer it for values with punctuation.
+
 ### Clipboard
 
 ```bash

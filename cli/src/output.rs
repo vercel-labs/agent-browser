@@ -3509,6 +3509,13 @@ Argument Mode:
   Each quoted argument is a full command string:
   agent-browser batch "open https://example.com" "snapshot -i" "screenshot"
 
+  Each command string is split with POSIX quoting rules. Single quotes keep
+  their contents literal, double quotes group words and accept \" and \\ as
+  escapes, a bare backslash is literal (so C:\Users\dwin survives), and ""
+  passes an empty argument. An unterminated quote is an error, so text with
+  an apostrophe must be double quoted: "fill #note \"It's here\"".
+  Stdin mode needs no quoting at all.
+
 Stdin Mode (JSON):
   A JSON array of string arrays. Each inner array is one command:
   [
