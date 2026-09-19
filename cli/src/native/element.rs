@@ -938,17 +938,24 @@ fn build_selector_js(selector: &str) -> String {
         r#"(() => {{
             const el = {find_expr};
             if (!el) return null;
+            const vw = window.innerWidth || document.documentElement.clientWidth;
+            const vh = window.innerHeight || document.documentElement.clientHeight;
             const inView = (r) => r.width > 0 && r.height > 0 &&
-                r.bottom > 0 && r.right > 0 &&
-                r.top < (window.innerHeight || document.documentElement.clientHeight) &&
-                r.left < (window.innerWidth || document.documentElement.clientWidth);
+                r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw;
+            // The click point is the center, so the center is what must be in
+            // view. An element that straddles the viewport edge intersects it
+            // (inView is true) while its center lies outside; a click there
+            // lands on nothing and still reports success.
+            const pointInView = (px, py) => px >= 0 && py >= 0 && px < vw && py < vh;
             let rect = el.getBoundingClientRect();
-            if (!inView(rect)) {{
+            let x = rect.x + rect.width / 2;
+            let y = rect.y + rect.height / 2;
+            if (!inView(rect) || !pointInView(x, y)) {{
                 el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
                 rect = el.getBoundingClientRect();
+                x = rect.x + rect.width / 2;
+                y = rect.y + rect.height / 2;
             }}
-            const x = rect.x + rect.width / 2;
-            const y = rect.y + rect.height / 2;
             const blockerAt = {BLOCKER_AT_JS};
             return {{ x: x, y: y, blocker: blockerAt(document, el, x, y) }};
         }})()"#,
