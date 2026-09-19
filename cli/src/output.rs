@@ -127,6 +127,22 @@ fn format_storage_text(data: &serde_json::Value) -> Option<String> {
     Some(format!("{}: {}", key, format_storage_value(value)))
 }
 
+/// Formats the plain-text output for `react tree` when the daemon returns a
+/// preformatted tree string. Returns `None` when the payload has no top-level
+/// `tree` field so other formatters still get a chance to run. An empty tree
+/// (only comment lines) renders an explicit hint instead of nothing.
+fn format_react_tree_text(data: &serde_json::Value) -> Option<String> {
+    let tree = data.get("tree")?.as_str()?;
+    let has_nodes = tree
+        .lines()
+        .any(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'));
+    Some(if has_nodes {
+        tree.to_string()
+    } else {
+        "No React component tree found. Is the page built with React? Launch with --enable react-devtools to inject the hook.".to_string()
+    })
+}
+
 fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
     match action {
         Some("stream_disable") => data
@@ -1503,6 +1519,13 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                 );
                 return;
             }
+        }
+
+        // React tree (plain text form): the daemon returns a preformatted tree;
+        // without this branch it falls through to the generic "Done" line.
+        if let Some(tree) = format_react_tree_text(data) {
+            println!("{}", tree);
+            return;
         }
 
         // Confirmation required (for orchestrator use)
@@ -4302,6 +4325,35 @@ mod tests {
         format_with_boundaries, OutputOptions,
     };
     use serde_json::json;
+
+    #[test]
+    fn test_format_react_tree_text_prints_preformatted_tree() {
+        let data = json!({
+            "tree": "# React component tree\n# Columns: depth id parent name [key=...]\n# Use `react inspect <id>` for props/hooks/state.\n0 App\n└─ 1 Counter [key=7]"
+        });
+
+        let rendered = super::format_react_tree_text(&data).unwrap();
+
+        assert!(rendered.contains("0 App"));
+        assert!(rendered.contains("1 Counter [key=7]"));
+    }
+
+    #[test]
+    fn test_format_react_tree_text_empty_tree_gets_hint() {
+        let data = json!({
+            "tree": "# React component tree\n# Columns: depth id parent name [key=...]\n# Use `react inspect <id>` for props/hooks/state."
+        });
+
+        let rendered = super::format_react_tree_text(&data).unwrap();
+
+        assert!(rendered.starts_with("No React component tree found."));
+    }
+
+    #[test]
+    fn test_format_react_tree_text_ignores_payloads_without_tree() {
+        assert!(super::format_react_tree_text(&json!({ "done": true })).is_none());
+        assert!(super::format_react_tree_text(&json!({ "tree": 42 })).is_none());
+    }
 
     #[test]
     fn test_format_stream_status_text_for_enabled_stream() {
