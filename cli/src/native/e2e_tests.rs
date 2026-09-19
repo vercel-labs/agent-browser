@@ -1890,6 +1890,101 @@ async fn e2e_select_option_label_override_names() {
     }
 }
 
+/// A request that matches more than one option must fail instead of silently
+/// selecting one of them: a single-select keeps only the last option marked
+/// selected, so an ambiguous request used to land on an option nobody asked
+/// for. Several requests still select several options in a multi-select.
+#[tokio::test]
+#[ignore]
+async fn e2e_select_option_ambiguous_matches() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<html><body></body></html>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let script = r#"(() => {
+        const add = (select, value, label) => {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = label;
+            select.appendChild(option);
+        };
+        const tricky = document.createElement('select');
+        tricky.id = 'tricky';
+        add(tricky, 'a', 'Alpha');
+        add(tricky, 'b', 'Beta');
+        add(tricky, 'Alpha', 'TrickyValueIsAlpha');
+        document.body.appendChild(tricky);
+
+        const dupes = document.createElement('select');
+        dupes.id = 'dupes';
+        add(dupes, 'us', 'United States');
+        add(dupes, 'usa', 'United States');
+        document.body.appendChild(dupes);
+
+        const many = document.createElement('select');
+        many.id = 'many';
+        many.multiple = true;
+        add(many, 'a', 'One');
+        add(many, 'b', 'Two');
+        add(many, 'c', 'Three');
+        document.body.appendChild(many);
+    })()"#;
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": script }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // "Alpha" is both the label of the first option and the value of the last.
+    let resp = select_values(&mut state, "4", "#tricky", &["Alpha"]).await;
+    assert_eq!(resp["success"], false);
+    assert!(resp["error"]
+        .as_str()
+        .unwrap()
+        .contains("Multiple options matched"));
+    assert_evaluate(&mut state, "5", "tricky.value", json!("a")).await;
+
+    let resp = select_values(&mut state, "6", "#tricky", &["Beta"]).await;
+    assert_success(&resp);
+    assert_evaluate(&mut state, "7", "tricky.value", json!("b")).await;
+
+    // Two options sharing one visible label are ambiguous by label, and the
+    // exact value still picks one of them.
+    let resp = select_values(&mut state, "8", "#dupes", &["United States"]).await;
+    assert_eq!(resp["success"], false);
+    assert_evaluate(&mut state, "9", "dupes.value", json!("us")).await;
+
+    let resp = select_values(&mut state, "10", "#dupes", &["usa"]).await;
+    assert_success(&resp);
+    assert_evaluate(&mut state, "11", "dupes.value", json!("usa")).await;
+
+    let resp = select_values(&mut state, "12", "#many", &["One", "c"]).await;
+    assert_success(&resp);
+    assert_evaluate(
+        &mut state,
+        "13",
+        "[...many.selectedOptions].map(option => option.value)",
+        json!(["a", "c"]),
+    )
+    .await;
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_select_option_normalized_names() {
