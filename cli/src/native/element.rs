@@ -204,6 +204,40 @@ impl RefMap {
         self.map.clear();
     }
 
+    /// Invalidate a page's refs when a navigation the daemon did not initiate
+    /// replaced its main-frame document. Re-observing the same document is a
+    /// no-op, so same-document changes keep their refs. Returns whether the
+    /// page was invalidated.
+    pub fn invalidate_page_on_document_change(
+        &mut self,
+        page_session: &str,
+        session: &str,
+        loader: Option<&str>,
+    ) -> bool {
+        let loader = loader.filter(|id| !id.is_empty());
+        let unchanged = self
+            .documents
+            .get(&(page_session.to_string(), None))
+            .is_some_and(|document| {
+                loader
+                    .is_some_and(|loader| document.session == session && document.loader == loader)
+            });
+        if unchanged {
+            return false;
+        }
+        // Without a recorded document this page never issued refs, so an
+        // unrelated page's refs must not be dropped on its behalf.
+        if !self
+            .documents
+            .keys()
+            .any(|(entry_page, _)| entry_page == page_session)
+        {
+            return false;
+        }
+        self.invalidate_page(page_session);
+        true
+    }
+
     /// Drop all document identities while preserving the monotonic ref counter.
     pub fn invalidate_all_documents(&mut self) {
         self.documents.clear();
@@ -1589,6 +1623,80 @@ mod tests {
 
         assert_eq!(map.durable_ref("page-a", None, 42), Some("e1"));
         assert_eq!(map.durable_ref("page-b", None, 42), None);
+    }
+
+    #[test]
+    fn click_triggered_navigation_invalidates_issued_refs() {
+        // snapshot on the first document hands out @e7
+        let mut map = RefMap::new();
+        assert!(map.observe_document("page-a", None, "page-a", Some("loader-1")));
+        map.add("e7".to_string(), Some(42), "button", "Delete", None);
+        map.remember_durable_ref("page-a", None, 42, "e7");
+        map.set_next_ref_num(8);
+        assert!(map.get("e7").is_some());
+
+        // a click navigates the page, so the document is replaced
+        assert!(map.invalidate_page_on_document_change("page-a", "page-a", Some("loader-2")));
+
+        assert!(map.get("e7").is_none());
+        assert_eq!(map.durable_ref("page-a", None, 42), None);
+        assert_eq!(map.next_ref_num(), 8);
+    }
+
+    #[test]
+    fn document_change_on_one_page_preserves_other_page_refs() {
+        let mut map = RefMap::new();
+        assert!(map.observe_document("page-a", None, "page-a", Some("loader-a")));
+        map.remember_durable_ref("page-a", None, 42, "e1");
+        assert!(map.observe_document("page-b", None, "page-b", Some("loader-b")));
+        map.remember_durable_ref("page-b", None, 42, "e2");
+
+        assert!(map.invalidate_page_on_document_change("page-b", "page-b", Some("loader-b2")));
+
+        assert_eq!(map.durable_ref("page-a", None, 42), Some("e1"));
+        assert_eq!(map.durable_ref("page-b", None, 42), None);
+    }
+
+    #[test]
+    fn same_document_navigation_keeps_refs() {
+        let mut map = RefMap::new();
+        assert!(map.observe_document("page-a", None, "page-a", Some("loader-1")));
+        map.add("e1".to_string(), Some(42), "button", "Delete", None);
+        map.remember_durable_ref("page-a", None, 42, "e1");
+
+        // Same session and loader: the document survived the change.
+        assert!(!map.invalidate_page_on_document_change("page-a", "page-a", Some("loader-1")));
+        assert!(map.observe_document("page-a", None, "page-a", Some("loader-1")));
+
+        assert!(map.get("e1").is_some());
+        assert_eq!(map.durable_ref("page-a", None, 42), Some("e1"));
+    }
+
+    #[test]
+    fn document_change_on_untracked_page_keeps_refs() {
+        let mut map = RefMap::new();
+        assert!(map.observe_document("page-a", None, "page-a", Some("loader-a")));
+        map.add("e1".to_string(), Some(42), "button", "Delete", None);
+        map.remember_durable_ref("page-a", None, 42, "e1");
+
+        // A page that never issued refs must not clear another page's refs.
+        assert!(!map.invalidate_page_on_document_change("page-b", "page-b", Some("loader-b")));
+
+        assert!(map.get("e1").is_some());
+        assert_eq!(map.durable_ref("page-a", None, 42), Some("e1"));
+    }
+
+    #[test]
+    fn missing_loader_invalidates_tracked_page() {
+        let mut map = RefMap::new();
+        assert!(map.observe_document("page-a", None, "page-a", Some("loader-a")));
+        map.add("e1".to_string(), Some(42), "button", "Delete", None);
+        map.remember_durable_ref("page-a", None, 42, "e1");
+
+        assert!(map.invalidate_page_on_document_change("page-a", "page-a", None));
+
+        assert!(map.get("e1").is_none());
+        assert_eq!(map.durable_ref("page-a", None, 42), None);
     }
 
     #[test]
