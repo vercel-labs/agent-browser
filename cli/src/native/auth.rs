@@ -111,10 +111,23 @@ fn get_encryption_key() -> Result<Vec<u8>, String> {
     ))
 }
 
-/// Ensure an encryption key exists, auto-generating one if needed.
+/// Is a key source already configured?
+///
+/// A key may only be auto-generated when nothing is configured at all. When the
+/// environment variable is set, or a key file already exists, that source must
+/// parse: generating a fresh key instead would encrypt profiles under a key the
+/// read path can never reproduce.
+fn encryption_key_is_configured(env_key: Option<&str>, key_file_exists: bool) -> bool {
+    env_key.is_some() || key_file_exists
+}
+
+/// Ensure an encryption key exists, auto-generating one only when no key source
+/// is configured. A configured but malformed key fails with the same message the
+/// read path produces.
 fn ensure_encryption_key() -> Result<Vec<u8>, String> {
-    if let Ok(key) = get_encryption_key() {
-        return Ok(key);
+    let env_key = std::env::var(ENCRYPTION_KEY_ENV).ok();
+    if encryption_key_is_configured(env_key.as_deref(), get_key_file_path().exists()) {
+        return get_encryption_key();
     }
 
     let mut key = [0u8; 32];
@@ -393,17 +406,34 @@ pub(crate) static AUTH_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(
 mod tests {
     use super::*;
 
-    fn with_test_key<F: FnOnce()>(f: F) {
+    fn with_env_key<F: FnOnce()>(value: &str, f: F) {
         let _lock = AUTH_TEST_MUTEX.lock().unwrap();
         let original = std::env::var(ENCRYPTION_KEY_ENV).ok();
-        let test_key = "a".repeat(64);
         // SAFETY: TEST_MUTEX serializes all test access so no concurrent mutation.
-        unsafe { std::env::set_var(ENCRYPTION_KEY_ENV, &test_key) };
+        unsafe { std::env::set_var(ENCRYPTION_KEY_ENV, value) };
         f();
         // SAFETY: TEST_MUTEX serializes all test access so no concurrent mutation.
         match original {
             Some(val) => unsafe { std::env::set_var(ENCRYPTION_KEY_ENV, val) },
             None => unsafe { std::env::remove_var(ENCRYPTION_KEY_ENV) },
+        }
+    }
+
+    fn with_test_key<F: FnOnce()>(f: F) {
+        with_env_key(&"a".repeat(64), f);
+    }
+
+    fn sample_profile(name: &str) -> AuthProfile {
+        AuthProfile {
+            name: name.to_string(),
+            url: "https://example.com".to_string(),
+            username: "user".to_string(),
+            password: "pass".to_string(),
+            username_selector: None,
+            password_selector: None,
+            submit_selector: None,
+            created_at: None,
+            last_login_at: None,
         }
     }
 
@@ -469,6 +499,55 @@ mod tests {
             assert_eq!(key.len(), 32);
             assert!(key.iter().all(|&b| b == 0xaa));
         });
+    }
+
+    #[test]
+    fn test_ensure_encryption_key_uses_valid_env_key() {
+        with_test_key(|| {
+            let key = ensure_encryption_key().unwrap();
+            assert_eq!(key.len(), 32);
+            assert!(key.iter().all(|&b| b == 0xaa));
+        });
+    }
+
+    #[test]
+    fn test_ensure_encryption_key_rejects_malformed_env_key() {
+        // A set but malformed key must fail at write time with the same message
+        // the read path produces, instead of generating a local key that can
+        // never decrypt what it just encrypted.
+        // An empty value is left out: Windows treats setting an empty variable
+        // as removing it, which is the legitimate "no key configured" case.
+        let malformed_keys = ["nothex".to_string(), "a".repeat(63), "g".repeat(64)];
+        for malformed in &malformed_keys {
+            with_env_key(malformed, || {
+                let write_err = ensure_encryption_key().unwrap_err();
+                let read_err = get_encryption_key().unwrap_err();
+                assert_eq!(write_err, read_err);
+                assert!(
+                    write_err.contains("should be a 64-character hex string (256 bits)"),
+                    "unexpected error: {}",
+                    write_err
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn test_encrypt_profile_rejects_malformed_env_key() {
+        with_env_key("nothex", || {
+            let err = encrypt_profile(&sample_profile("invalid-key")).unwrap_err();
+            assert_eq!(err, get_encryption_key().unwrap_err());
+        });
+    }
+
+    #[test]
+    fn test_encryption_key_is_configured() {
+        // Nothing configured is the only case that may generate a local key.
+        assert!(!encryption_key_is_configured(None, false));
+        assert!(encryption_key_is_configured(None, true));
+        assert!(encryption_key_is_configured(Some("nothex"), false));
+        let valid = "a".repeat(64);
+        assert!(encryption_key_is_configured(Some(valid.as_str()), false));
     }
 
     #[test]
