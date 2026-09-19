@@ -1,40 +1,36 @@
-import { readFile } from "fs/promises";
-import { join } from "path";
+import { applyMarkdownHeaders } from "@vercel/agent-readability";
 import { NextRequest, NextResponse } from "next/server";
-import { mdxToCleanMarkdown } from "@/lib/mdx-to-markdown";
+import {
+  isSafePathSegments,
+  loadDocsSource,
+  normalizeDocsHref,
+} from "@/lib/docs-source";
+import { applyDocsResponseHeaders } from "@/lib/docs-response-headers";
 
 export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
-  const docPath = searchParams.get("path");
-
+  const docPath = req.nextUrl.searchParams.get("path");
+  const headers = new Headers();
+  applyDocsResponseHeaders(headers);
   if (!docPath) {
     return NextResponse.json(
       { error: "Missing ?path= parameter" },
-      { status: 400 },
+      { status: 400, headers },
     );
   }
-
-  const normalized = docPath
-    .replace(/^\//, "")
-    .replace(/\.\./g, "")
-    .replace(/[^a-zA-Z0-9/_-]/g, "");
-
-  const slug = normalized;
-  const filePath = slug
-    ? join(process.cwd(), "src", "app", ...slug.split("/"), "page.mdx")
-    : join(process.cwd(), "src", "app", "page.mdx");
-
-  try {
-    const raw = await readFile(filePath, "utf-8");
-    const markdown = mdxToCleanMarkdown(raw);
-
-    return new NextResponse(markdown, {
-      headers: {
-        "Content-Type": "text/markdown; charset=utf-8",
-        "Cache-Control": "public, max-age=3600",
-      },
-    });
-  } catch {
-    return NextResponse.json({ error: "Page not found" }, { status: 404 });
+  const href = normalizeDocsHref(
+    docPath.startsWith("/") ? docPath : `/${docPath}`,
+  );
+  const segments = href === "/" ? [] : href.slice(1).split("/");
+  const page = isSafePathSegments(segments) ? await loadDocsSource(href) : null;
+  if (!page) {
+    headers.set("X-Robots-Tag", "noindex, nofollow");
+    return NextResponse.json(
+      { error: "Page not found" },
+      { status: 404, headers },
+    );
   }
+  headers.set("Content-Type", "text/markdown; charset=utf-8");
+  applyMarkdownHeaders(headers, { canonicalUrl: page.canonicalUrl });
+  applyDocsResponseHeaders(headers);
+  return new NextResponse(page.legacyMarkdown, { headers });
 }

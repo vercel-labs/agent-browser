@@ -10,8 +10,11 @@ minimumReleaseAgeExclude:
   - '@agent-browser/sandbox'
   - eve
 allowBuilds:
+  esbuild: false
   '@mongodb-js/zstd': false
   msw: false
   node-liblzma: false
   sharp: false
   unrs-resolver: false
+patchedDependencies:
+  next@16.3.4: patches/next@16.3.4.patch
