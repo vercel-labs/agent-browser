@@ -1082,9 +1082,10 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--action-policy <path>` | Path to action policy JSON file (or `AGENT_BROWSER_ACTION_POLICY` env) |
 | `--confirm-actions <list>` | Action categories requiring confirmation (or `AGENT_BROWSER_CONFIRM_ACTIONS` env) |
 | `--confirm-interactive` | Interactive confirmation prompts; auto-denies if stdin is not a TTY (or `AGENT_BROWSER_CONFIRM_INTERACTIVE` env) |
-| `--engine <name>` | Browser engine: `chrome` (default), `lightpanda` (or `AGENT_BROWSER_ENGINE` env) |
 | `--input-mode <mode>` | Session pointer movement: `instant` (default), `smooth`, or `human` |
 | `--idle-timeout <time>` | Shut down the daemon after inactivity (`10s`, `3m`, `1h`, or raw ms). Defaults to `1h`; use `0` to disable (or `AGENT_BROWSER_IDLE_TIMEOUT_MS` env) |
+| `--engine <name>` | Browser engine: `chrome` (default), `lightpanda`, `obscura` (experimental; rejects proxy bypass rules) (or `AGENT_BROWSER_ENGINE` env) |
+| `AGENT_BROWSER_OBSCURA_STEALTH` env | Run the Obscura engine (`--engine obscura`) in stealth mode: consistent fingerprint, tracker blocking |
 | `--no-auto-dialog` | Disable automatic dismissal of `alert`/`beforeunload` dialogs (or `AGENT_BROWSER_NO_AUTO_DIALOG` env) |
 | `--model <name>` | AI model for chat command (or `AI_GATEWAY_MODEL` env) |
 | `-v`, `--verbose` | Show tool commands and their raw output (chat) |
@@ -1703,7 +1704,7 @@ agent-browser uses a client-daemon architecture:
 
 The daemon starts automatically on first command and persists between commands for fast subsequent operations. After **1 hour** with no commands or dashboard input it saves configured restore state, closes the browser, and exits, so an integration that dies without calling `close` cannot leak the daemon and its browser indefinitely; the next command starts a fresh daemon and configured state restore works as usual. A session without `--restore` or another restore key does not save browser state, so its transient state and open tabs are discarded at shutdown. Set `--idle-timeout` to a duration such as `30s`, `5m`, or `1h`, or set `AGENT_BROWSER_IDLE_TIMEOUT_MS` to a value in milliseconds. Use `0` to disable idle shutdown entirely. The default never closes a headed browser, including Safari and iOS WebDriver sessions, or a user-attached browser because those may be in direct human use. Provider-owned cloud browsers remain eligible for cleanup. An explicitly set timeout applies to every browser.
 
-**Browser Engine:** Uses Chrome (from Chrome for Testing) by default. The `--engine` flag selects between `chrome` and `lightpanda`. Supported browsers: Chromium/Chrome (via CDP) and Safari (via WebDriver for iOS).
+**Browser Engine:** Uses Chrome (from Chrome for Testing) by default. The `--engine` flag selects between `chrome`, `lightpanda`, and `obscura`. Supported browsers: Chromium/Chrome (via CDP), Lightpanda and Obscura (via CDP), and Safari (via WebDriver for iOS).
 
 ## Platforms
 
@@ -2011,3 +2012,7 @@ When enabled, agent-browser connects to an AgentCore cloud browser session inste
 ## License
 
 Apache-2.0
+
+## Obscura (experimental)
+
+Use `--engine obscura --executable-path /path/to/obscura` to launch a local Obscura binary. Obscura v0.2.2 has accessibility, iframe, and rendering limitations; use Chrome when fidelity matters. See the [engine documentation](https://agent-browser.dev/engines/obscura) for setup, configuration, and MCP usage, and the [contributor guide](AGENTS.md#obscura-adapter) for source-build testing.
