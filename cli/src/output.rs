@@ -3421,6 +3421,8 @@ Usage: agent-browser device <subcommand>
 Subcommands:
   list    List available iOS simulators
 
+Simulators whose runtimes are unavailable are excluded from listing and selection.
+
 Options:
   --json               Output as JSON
   --session <name>     Use specific session
