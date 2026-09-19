@@ -51,5 +51,10 @@
     "url": "https://github.com/vercel-labs/agent-browser/issues"
   },
   "homepage": "https://agent-browser.dev",
-  "devDependencies": {}
+  "devDependencies": {},
+  "pnpm": {
+    "overrides": {
+      "brace-expansion": "5.0.9"
+    }
+  }
 }
