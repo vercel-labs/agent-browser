@@ -155,6 +155,7 @@ agent-browser close                   # Close browser (aliases: quit, exit)
 agent-browser close --all             # Close all active sessions
 agent-browser chat "<instruction>"    # AI chat: natural language browser control (single-shot)
 agent-browser chat                    # AI chat: interactive REPL mode
+agent-browser goal "<goal>"           # Goal mode: an evaluation model picks each click from the snapshot
 ```
 
 ### WebMCP (experimental)
@@ -599,7 +600,7 @@ Profiles:
 - `core` — Default. Navigation, snapshots, interaction, waits, reads, screenshots, JavaScript eval, close, tab basics, and profile discovery
 - `network` — Network routes, request inspection, HAR, headers, credentials, offline
 - `state` — Cookies, storage, auth, saved state, sessions, profiles, skills
-- `debug` — Console/errors, tracing, profiling, recording, a11y audit, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
+- `debug` — Console/errors, tracing, profiling, recording, a11y audit, clipboard, plugins, doctor, dashboard, install, upgrade, chat, goal, diff, batch, confirm/deny
 - `tabs` — Back/forward/reload, tabs, windows, frames, dialogs
 - `react` — React tree/inspect/renders/suspense, vitals, pushstate
 - `mobile` — Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
@@ -1087,6 +1088,9 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--idle-timeout <time>` | Shut down the daemon after inactivity (`10s`, `3m`, `1h`, or raw ms). Defaults to `1h`; use `0` to disable (or `AGENT_BROWSER_IDLE_TIMEOUT_MS` env) |
 | `--no-auto-dialog` | Disable automatic dismissal of `alert`/`beforeunload` dialogs (or `AGENT_BROWSER_NO_AUTO_DIALOG` env) |
 | `--model <name>` | AI model for chat command (or `AI_GATEWAY_MODEL` env) |
+| `--max-steps <n>` | Action budget for the goal command (default: 40) |
+| `--eval-model <model>` | Evaluation model for the goal command (or `AGENT_BROWSER_GOAL_MODEL` env) |
+| `--text-model <model>` | Text model for the goal command's `TYPE_TEXT` (or `AGENT_BROWSER_GOAL_TEXT_MODEL` env) |
 | `-v`, `--verbose` | Show tool commands and their raw output (chat) |
 | `-q`, `--quiet` | Show only AI text responses, hide tool calls (chat) |
 | `--config <path>` | Use a custom config file (or `AGENT_BROWSER_CONFIG` env) |
@@ -1154,6 +1158,29 @@ agent-browser --model openai/gpt-4o chat "take a screenshot" # Override model
 ```
 
 The `chat` command translates natural language instructions into agent-browser commands, executes them, and streams the AI response. In interactive mode, type `quit` to exit. Use `--json` for structured output suitable for agent consumption.
+
+**Goal mode:**
+
+`goal` is the fast sibling of `chat`. Instead of a chat model writing commands, a System One evaluation model (`typesafe-ai/jev` on the AI Gateway by default) answers two typed questions on every step: which operation comes next and which element from the current snapshot it targets. Only observed elements are offered, so the model never produces a selector, a URL, or a script. When it picks `TYPE_TEXT`, a small text model (`inception/mercury-2.5` by default) writes the field value from the goal. One decision costs one gateway request and typically well under a second.
+
+```bash
+agent-browser open https://www.google.com/travel/flights
+agent-browser goal "Find one-way flights from Zurich to London on 20 September for one adult. Stop when flight options are visible."
+agent-browser goal --max-steps 10 "Open the pricing page"
+agent-browser -v goal "Accept the cookie banner"             # Show probability, confidence, and page change per step
+agent-browser --json goal "Accept the cookie banner"         # Every step with timings, for agents
+```
+
+Every action runs through the normal command pipeline (`click @eN`, `fill @eN`, `scroll`, `wait`), so action policies, `--confirm-actions`, `--allowed-domains`, and session isolation apply unchanged. The run stops on `DONE`, `BLOCKED`, the step budget, the time budget, or three consecutive actions that do not change the page, and exits `0` only on `DONE`. `DONE` is the model's opinion, not proof: verify the outcome with `snapshot`, `get url`, or a screenshot. Start from a page that is already open; `goal` does not navigate on its own, and it does not see inside iframes, shadow roots, or canvas.
+
+Goal options and environment variables:
+
+```bash
+--max-steps <n>          # Action budget (default: 40)
+--timeout <ms>           # Time budget in milliseconds (default: 120000)
+--eval-model <model>     # Evaluation model (or AGENT_BROWSER_GOAL_MODEL, default: typesafe-ai/jev)
+--text-model <model>     # Text model for TYPE_TEXT (or AGENT_BROWSER_GOAL_TEXT_MODEL, default: inception/mercury-2.5)
+```
 
 **Dashboard usage:**
 

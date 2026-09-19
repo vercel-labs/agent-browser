@@ -5,6 +5,7 @@ mod commands;
 mod connection;
 mod doctor;
 mod flags;
+mod goal;
 mod install;
 mod mcp;
 mod native;
@@ -2075,6 +2076,14 @@ fn main() {
         return;
     }
 
+    // Handle goal command: the loop runs here in the CLI and drives the
+    // daemon through the same parse/attach/send path as every other command.
+    if cmd.get("action").and_then(|v| v.as_str()) == Some("goal") {
+        let runner = |words: &[String]| run_words(words, &flags, &daemon_opts);
+        goal::run_goal(&flags, &daemon_opts, &cmd, &runner);
+        return;
+    }
+
     let output_opts = OutputOptions::from_flags(&flags);
 
     match send_command_with_respawn(cmd.clone(), &flags.session, &daemon_opts) {
@@ -2109,6 +2118,23 @@ fn main() {
             exit(1);
         }
     }
+}
+
+/// Parse CLI words, attach the session's launch and policy context, and send
+/// the command to the daemon. This is the single-command path with no
+/// printing, used by loops such as `goal` that execute many commands in one
+/// process.
+fn run_words(
+    words: &[String],
+    flags: &Flags,
+    daemon_opts: &DaemonOptions,
+) -> Result<connection::Response, String> {
+    let mut parsed = parse_command(words, flags).map_err(|e| e.format())?;
+    attach_input_mode(&mut parsed, flags);
+    attach_plugins_to_command(&mut parsed, &flags.plugins);
+    attach_restore_config_to_command(&mut parsed, flags);
+    attach_pin_tab_to_command(&mut parsed, flags);
+    send_command_with_respawn(parsed, &flags.session, daemon_opts)
 }
 
 /// send_command plus the daemon-shutdown-race recovery: ensure_daemon no

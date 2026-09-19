@@ -175,6 +175,7 @@ const TOOL_DASHBOARD_STOP: &str = "agent_browser_dashboard_stop";
 const TOOL_INSTALL: &str = "agent_browser_install";
 const TOOL_UPGRADE: &str = "agent_browser_upgrade";
 const TOOL_CHAT: &str = "agent_browser_chat";
+const TOOL_GOAL: &str = "agent_browser_goal";
 const TOOL_EVAL: &str = "agent_browser_eval";
 const TOOL_CLOSE: &str = "agent_browser_close";
 const TOOL_TOOLS_PROFILES: &str = "agent_browser_tools_profiles";
@@ -265,7 +266,7 @@ impl ToolProfile {
             Self::Core => "Everyday browser automation with navigation, snapshots, common interaction, waits, screenshots, basic reads, tab basics, JavaScript eval, close, and profile discovery.",
             Self::Network => "Network interception, request inspection, HAR capture, headers, credentials, and offline mode.",
             Self::State => "Cookies, storage, auth profiles, saved browser state, sessions, Chrome profiles, and bundled skills.",
-            Self::Debug => "Console/errors, highlighting, DevTools, tracing, profiling, accessibility audits, PDF, downloads/uploads, recording, clipboard, plugin registry and plugin command.run, doctor, dashboard, install, upgrade, and chat.",
+            Self::Debug => "Console/errors, highlighting, DevTools, tracing, profiling, accessibility audits, PDF, downloads/uploads, recording, clipboard, plugin registry and plugin command.run, doctor, dashboard, install, upgrade, chat, and goal.",
             Self::Tabs => "Tab, window, frame, and JavaScript dialog management.",
             Self::React => "React tree inspection, render recording, Suspense inspection, Web Vitals, SPA pushstate, and init-script removal.",
             Self::Mobile => "Viewport/device/geolocation/media emulation plus touch, swipe, and lower-level mouse tools.",
@@ -458,6 +459,7 @@ const DEBUG_PROFILE_TOOLS: &[&str] = &[
     TOOL_INSTALL,
     TOOL_UPGRADE,
     TOOL_CHAT,
+    TOOL_GOAL,
 ];
 
 const TABS_PROFILE_TOOLS: &[&str] = &[
@@ -1893,6 +1895,19 @@ fn parity_tools() -> Vec<Value> {
             json!({ "message": { "type": "string" }, "model": { "type": "string" }, "verbose": { "type": "boolean" }, "quiet": { "type": "boolean" } }),
             &["message"],
         ),
+        tool(
+            TOOL_GOAL,
+            "Goal",
+            "Drive the open page toward one natural-language goal. An evaluation model picks an operation and an observed element on every step; actions run through the normal command pipeline. Requires AI_GATEWAY_API_KEY. Verify the outcome afterwards; DONE is the model's opinion.",
+            json!({
+                "goal": { "type": "string", "description": "What to achieve on the open page, including when to stop." },
+                "maxSteps": { "type": "integer", "minimum": 1, "description": "Action budget (default 40)." },
+                "timeoutMs": { "type": "integer", "minimum": 1, "description": "Time budget in milliseconds (default 120000)." },
+                "evalModel": { "type": "string", "description": "Evaluation model (default typesafe-ai/jev)." },
+                "textModel": { "type": "string", "description": "Text model for TYPE_TEXT (default inception/mercury-2.5)." }
+            }),
+            &["goal"],
+        ),
     ]
 }
 
@@ -2381,6 +2396,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_INSTALL => call_install(arguments),
         TOOL_UPGRADE => call_literal(arguments, &["upgrade"]),
         TOOL_CHAT => call_chat(arguments),
+        TOOL_GOAL => call_cli_tool(arguments, goal_args(arguments)?, None),
         TOOL_EVAL => call_eval(arguments),
         TOOL_CLOSE => call_close(arguments),
         _ => unreachable!("known MCP tool missing call handler: {}", name),
@@ -3642,6 +3658,31 @@ fn call_chat(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool(arguments, args, None)
 }
 
+/// Build the CLI words for `goal`, mirroring the CLI parser's local flags so
+/// the MCP surface cannot drift from `agent-browser goal --help`.
+fn goal_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let goal = required_string(arguments, "goal")?;
+    let mut args = vec!["goal".to_string()];
+    if let Some(max_steps) = optional_u64(arguments, "maxSteps")? {
+        args.push("--max-steps".to_string());
+        args.push(max_steps.to_string());
+    }
+    if let Some(timeout) = optional_u64(arguments, "timeoutMs")? {
+        args.push("--timeout".to_string());
+        args.push(timeout.to_string());
+    }
+    if let Some(model) = optional_string(arguments, "evalModel")? {
+        args.push("--eval-model".to_string());
+        args.push(model);
+    }
+    if let Some(model) = optional_string(arguments, "textModel")? {
+        args.push("--text-model".to_string());
+        args.push(model);
+    }
+    args.push(goal);
+    Ok(args)
+}
+
 fn call_eval(arguments: &Value) -> Result<Value, ProtocolError> {
     let script = required_string(arguments, "script")?;
     call_cli_tool(
@@ -4714,6 +4755,43 @@ mod tests {
         let payload: Value = serde_json::from_str(&args[5]).unwrap();
         assert_eq!(payload["siteKey"], "abc");
         assert_eq!(payload["url"], "https://example.com");
+    }
+
+    #[test]
+    fn goal_args_use_cli_parser_flags() {
+        let args = goal_args(&json!({
+            "goal": "Open the pricing page",
+            "maxSteps": 5,
+            "timeoutMs": 30000,
+            "evalModel": "typesafe-ai/jev",
+            "textModel": "inception/mercury-2.5"
+        }))
+        .unwrap();
+        assert_eq!(
+            args,
+            [
+                "goal",
+                "--max-steps",
+                "5",
+                "--timeout",
+                "30000",
+                "--eval-model",
+                "typesafe-ai/jev",
+                "--text-model",
+                "inception/mercury-2.5",
+                "Open the pricing page"
+            ]
+        );
+        // The CLI parser accepts exactly these words and keeps the goal intact.
+        let flags = crate::flags::parse_flags(&args);
+        let parsed = crate::commands::parse_command(&args, &flags).unwrap();
+        assert_eq!(parsed["action"], "goal");
+        assert_eq!(parsed["goal"], "Open the pricing page");
+        assert_eq!(parsed["maxSteps"], 5);
+        assert_eq!(parsed["timeoutMs"], 30000);
+        assert_eq!(parsed["model"], "typesafe-ai/jev");
+        assert_eq!(parsed["textModel"], "inception/mercury-2.5");
+        assert!(goal_args(&json!({})).is_err());
     }
 
     #[test]

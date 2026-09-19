@@ -42,6 +42,7 @@ agent-browser stream disable          # Stop runtime WebSocket streaming
 agent-browser close                   # Close browser (aliases: quit, exit)
 agent-browser close --all             # Close all active sessions
 agent-browser mcp                     # Start an MCP stdio server
+agent-browser goal "<goal>"           # Evaluation model drives the open page toward one goal
 ```
 
 Browser responses automatically announce WebMCP tools on first discovery and when the catalog changes. Summaries contain only names, brief descriptions, origins, and frame IDs. Choose a relevant tool, then fetch its full schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking it. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context. JSON exposes updates as `data.webmcp`; CLI and MCP text include the same bounded summary. See [WebMCP](/webmcp) for update semantics and security.
@@ -525,6 +526,52 @@ Chat-specific options:
 -v, --verbose            # Show tool commands and their raw output
 -q, --quiet              # Show only the AI text response (hide tool calls)
 ```
+
+## Goal
+
+Give the open page one natural-language goal and let an evaluation model choose every action. On each step the `goal` command sends the current snapshot as a numbered element table to the model (`typesafe-ai/jev` on the AI Gateway by default), which answers two typed questions in one request: the next operation and the element index it targets. Only observed elements are offered, so the model never produces a selector, a URL, or a script. When the operation is `TYPE_TEXT`, a small text model writes the field value from the goal. Requires `AI_GATEWAY_API_KEY` to be set.
+
+```bash
+agent-browser open https://www.google.com/travel/flights
+agent-browser goal "Find one-way flights from Zurich to London on 20 September for one adult. Stop when flight options are visible."
+agent-browser goal --max-steps 10 "Open the pricing page"    # Cap the action budget
+agent-browser -v goal "Accept the cookie banner"             # Probability, confidence, and page change per step
+agent-browser -q goal "Accept the cookie banner"             # Only the final result
+agent-browser --json goal "Accept the cookie banner"         # Structured output with every step and timing
+```
+
+Actions run through the normal command pipeline as `click @eN`, `fill @eN`, `scroll`, and `wait`, so action policies, `--confirm-actions`, `--allowed-domains`, and session isolation apply unchanged. The run stops on `DONE`, `BLOCKED`, the step budget, the time budget, or three consecutive actions that do not change the page. The exit code is `0` only on `DONE`. `DONE` is the model's opinion, not proof, so verify the outcome with `snapshot`, `get url`, or a screenshot. Start from a page that is already open; `goal` does not navigate on its own, and it cannot see inside iframes, shadow roots, or canvas.
+
+Goal-specific options:
+
+<table>
+  <thead>
+    <tr>
+      <th>Option</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>--max-steps &lt;n&gt;</code></td>
+      <td>Action budget (default: 40)</td>
+    </tr>
+    <tr>
+      <td><code>--timeout &lt;ms&gt;</code></td>
+      <td>Time budget in milliseconds (default: 120000)</td>
+    </tr>
+    <tr>
+      <td><code>--eval-model &lt;model&gt;</code></td>
+      <td>Evaluation model, or <code>AGENT_BROWSER_GOAL_MODEL</code> (default: <code>typesafe-ai/jev</code>)</td>
+    </tr>
+    <tr>
+      <td><code>--text-model &lt;model&gt;</code></td>
+      <td>Text model for <code>TYPE_TEXT</code>, or <code>AGENT_BROWSER_GOAL_TEXT_MODEL</code> (default: <code>inception/mercury-2.5</code>)</td>
+    </tr>
+  </tbody>
+</table>
+
+`--debug` additionally writes every model request and reply to stderr, which is the quickest way to see what the model was offered on a step that went wrong. The `--json` result carries `status` (`done`, `blocked`, `timeout`, or `error`), the final `url`, `elapsedMs`, and one entry per step with the operation, the target ref, role and name, any typed text, the target probability, the model's confidence, the operation distribution, and per-phase timings.
 
 ## Navigation
 
