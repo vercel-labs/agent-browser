@@ -318,7 +318,10 @@ agent-browser screenshot --full full.png        # full scroll height
 agent-browser screenshot --annotate map.png     # numbered labels + legend keyed to snapshot refs
 agent-browser screenshot --if-changed           # recommended: skip unchanged images to save tokens
 agent-browser screenshot --threshold 0.01       # ignore changes affecting at most 1% of pixels
+agent-browser screenshot shot.jpg               # JPEG, chosen by the .jpg extension
 ```
+
+The path extension picks the encoder: `.png` writes PNG, `.jpg` or `.jpeg` writes JPEG, and `.webp` is rejected. `--screenshot-format` applies only when the path has no image extension; a conflicting flag is ignored with a warning.
 
 Prefer `--if-changed` for repeated captures: skipping unchanged images is the most token-efficient option. The first capture returns a path; later unchanged captures omit it. See [conditional screenshot responses](references/commands.md#screenshots-and-pdf) for JSON fields.
 

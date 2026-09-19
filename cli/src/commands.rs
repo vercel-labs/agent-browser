@@ -328,6 +328,48 @@ fn parse_cookie_header(header: &str) -> Result<Vec<Value>, String> {
     Ok(out)
 }
 
+/// Maps a known image extension on `path` to the encoder it implies.
+fn screenshot_format_from_extension(path: &str) -> Option<&'static str> {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".png") {
+        Some("png")
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        Some("jpeg")
+    } else if lower.ends_with(".webp") {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
+/// Resolves the encoder used for a screenshot so the bytes always match the
+/// file extension. The extension is authoritative: `shot.jpg` holds JPEG and
+/// `page.png` holds PNG whatever `--screenshot-format` says. The flag applies
+/// when the path carries no image extension, or when there is no path at all.
+fn resolve_screenshot_format(
+    path: Option<&str>,
+    explicit: Option<&str>,
+) -> Result<&'static str, String> {
+    let explicit = match explicit {
+        Some("png") => Some("png"),
+        Some("jpeg") | Some("jpg") => Some("jpeg"),
+        Some(other) => {
+            return Err(format!(
+                "--screenshot-format must be png or jpeg, got '{}'",
+                other
+            ));
+        }
+        None => None,
+    };
+    match path.and_then(screenshot_format_from_extension) {
+        Some("webp") => Err(
+            "screenshot cannot encode .webp; use a .png, .jpg, or .jpeg output path".to_string(),
+        ),
+        Some(from_path) => Ok(from_path),
+        None => Ok(explicit.unwrap_or("png")),
+    }
+}
+
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
     let mut result = parse_command_inner(args, flags)?;
 
@@ -879,14 +921,34 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 "path": path, "selector": selector,
                 "fullPage": full_page, "annotate": flags.annotate
             });
-            if let Some(ref fmt) = flags.screenshot_format {
-                cmd["format"] = json!(fmt);
+            let requested_format = flags.screenshot_format.as_deref();
+            let format = match resolve_screenshot_format(path, requested_format) {
+                Ok(format) => format,
+                Err(message) => {
+                    return Err(ParseError::InvalidValue {
+                        message,
+                        usage: "screenshot [selector] [path] [--screenshot-format png|jpeg]",
+                    });
+                }
+            };
+            if let Some(requested) = requested_format {
+                // The flag alone would have produced a different encoder, so the
+                // extension overrode it: say so instead of writing quietly.
+                if resolve_screenshot_format(None, Some(requested)) != Ok(format) {
+                    eprintln!(
+                        "{} --screenshot-format {} ignored: the output path extension selects {}",
+                        color::warning_indicator(),
+                        requested,
+                        format
+                    );
+                }
             }
+            cmd["format"] = json!(format);
             if let Some(q) = flags.screenshot_quality {
                 cmd["quality"] = json!(q);
-                if flags.screenshot_format.as_deref() != Some("jpeg") {
+                if format != "jpeg" {
                     eprintln!(
-                        "{} --screenshot-quality is ignored for PNG; use --screenshot-format jpeg",
+                        "{} --screenshot-quality is ignored for PNG; use a .jpg path",
                         color::warning_indicator()
                     );
                 }
@@ -4864,6 +4926,109 @@ mod tests {
     fn test_screenshot_threshold_requires_value() {
         let result = parse_command(&args("screenshot --threshold"), &default_flags());
         assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
+    }
+
+    fn flags_with_screenshot_format(format: &str) -> Flags {
+        Flags {
+            screenshot_format: Some(format.to_string()),
+            ..default_flags()
+        }
+    }
+
+    #[test]
+    fn resolve_screenshot_format_reads_jpg_extension() {
+        assert_eq!(resolve_screenshot_format(Some("out.jpg"), None), Ok("jpeg"));
+        let upper = resolve_screenshot_format(Some("/tmp/out.JPEG"), None);
+        assert_eq!(upper, Ok("jpeg"));
+    }
+
+    #[test]
+    fn resolve_screenshot_format_reads_png_extension() {
+        assert_eq!(
+            resolve_screenshot_format(Some("./out.png"), None),
+            Ok("png")
+        );
+    }
+
+    #[test]
+    fn resolve_screenshot_format_defaults_to_png() {
+        assert_eq!(resolve_screenshot_format(None, None), Ok("png"));
+        assert_eq!(resolve_screenshot_format(Some("out"), None), Ok("png"));
+    }
+
+    #[test]
+    fn resolve_screenshot_format_uses_flag_without_extension() {
+        assert_eq!(resolve_screenshot_format(None, Some("jpeg")), Ok("jpeg"));
+        let bare = resolve_screenshot_format(Some("shots/out"), Some("jpeg"));
+        assert_eq!(bare, Ok("jpeg"));
+    }
+
+    #[test]
+    fn resolve_screenshot_format_accepts_matching_flag_and_extension() {
+        let jpeg = resolve_screenshot_format(Some("out.jpg"), Some("jpeg"));
+        assert_eq!(jpeg, Ok("jpeg"));
+        let png = resolve_screenshot_format(Some("out.png"), Some("png"));
+        assert_eq!(png, Ok("png"));
+    }
+
+    #[test]
+    fn resolve_screenshot_format_extension_beats_conflicting_flag() {
+        let png = resolve_screenshot_format(Some("out.png"), Some("jpeg"));
+        assert_eq!(png, Ok("png"));
+        let jpeg = resolve_screenshot_format(Some("out.jpg"), Some("png"));
+        assert_eq!(jpeg, Ok("jpeg"));
+    }
+
+    #[test]
+    fn resolve_screenshot_format_rejects_webp_extension() {
+        let err = resolve_screenshot_format(Some("out.webp"), None).unwrap_err();
+        assert!(err.contains(".webp"), "unexpected message: {}", err);
+    }
+
+    #[test]
+    fn resolve_screenshot_format_rejects_unsupported_flag() {
+        let err = resolve_screenshot_format(None, Some("gif")).unwrap_err();
+        assert!(err.contains("png or jpeg"), "unexpected message: {}", err);
+    }
+
+    #[test]
+    fn test_screenshot_jpg_path_selects_jpeg_encoder() {
+        let cmd = parse_command(&args("screenshot shot.jpg"), &default_flags()).unwrap();
+        assert_eq!(cmd["path"], "shot.jpg");
+        assert_eq!(cmd["format"], "jpeg");
+    }
+
+    #[test]
+    fn test_screenshot_png_path_overrides_conflicting_format_flag() {
+        let flags = flags_with_screenshot_format("jpeg");
+        let cmd = parse_command(&args("screenshot page.png"), &flags).unwrap();
+        assert_eq!(cmd["path"], "page.png");
+        assert_eq!(cmd["format"], "png");
+    }
+
+    #[test]
+    fn test_screenshot_without_path_keeps_format_flag() {
+        let flags = flags_with_screenshot_format("jpeg");
+        let cmd = parse_command(&args("screenshot"), &flags).unwrap();
+        assert_eq!(cmd["path"], serde_json::Value::Null);
+        assert_eq!(cmd["format"], "jpeg");
+    }
+
+    #[test]
+    fn test_screenshot_selector_args_are_not_treated_as_paths() {
+        let flags = flags_with_screenshot_format("jpeg");
+        for selector in ["#header", ".my-button", "@e1"] {
+            let cmd = parse_command(&args(&format!("screenshot {}", selector)), &flags).unwrap();
+            assert_eq!(cmd["selector"], selector);
+            assert_eq!(cmd["path"], serde_json::Value::Null);
+            assert_eq!(cmd["format"], "jpeg");
+        }
+    }
+
+    #[test]
+    fn test_screenshot_rejects_webp_path() {
+        let result = parse_command(&args("screenshot out.webp"), &default_flags());
+        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
     }
 
     // === Snapshot ===
