@@ -34,6 +34,7 @@ use super::providers;
 use super::react;
 use super::recording::{self, RecordingState};
 use super::screenshot::{self, ScreenshotOptions};
+use super::session_allowlist;
 use super::snapshot::{self, SnapshotOptions};
 use super::state;
 use super::storage;
@@ -3544,9 +3545,30 @@ async fn ensure_state_replay_supported_by_active_domain_filter(
     Ok(())
 }
 
-async fn restore_domain_filter(state: &mut DaemonState, filter: &Option<DomainFilter>) {
+/// Keep the session's persisted allowlist in step with the in-memory filter, so
+/// a daemon that replaces this one re-applies exactly what the session is
+/// running with. A write that fails is reported instead of swallowed:
+/// containment nobody can restore after a restart is the bug this guards.
+fn persist_session_allowlist(session: &str, filter: Option<&DomainFilter>) -> Result<(), String> {
+    let domains = filter
+        .map(|filter| filter.allowed_domains.as_slice())
+        .unwrap_or(&[]);
+    session_allowlist::save(session, domains).map_err(|e| {
+        format!(
+            "{} — refusing to apply --allowed-domains that would not survive a daemon restart",
+            e
+        )
+    })
+}
+
+async fn restore_domain_filter(
+    state: &mut DaemonState,
+    filter: &Option<DomainFilter>,
+) -> Result<(), String> {
+    persist_session_allowlist(&state.session_id, filter.as_ref())?;
     let mut current = state.domain_filter.write().await;
     *current = filter.clone();
+    Ok(())
 }
 
 fn chrome_switch_name(arg: &str) -> Option<&str> {
@@ -4869,12 +4891,17 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     })?;
 
     if let Some(domains) = requested_allowed_domains {
-        let mut filter = state.domain_filter.write().await;
-        *filter = if domains.is_empty() {
+        let requested_filter = if domains.is_empty() {
             None
         } else {
             Some(DomainFilter::new(&domains.join(",")))
         };
+        // Persisted before it is installed: an allowlist the next daemon
+        // cannot restore must fail the launch, not run for one process and
+        // then vanish on the next restart.
+        persist_session_allowlist(&state.session_id, requested_filter.as_ref())?;
+        let mut filter = state.domain_filter.write().await;
+        *filter = requested_filter;
     }
 
     let (connection_kind, connection_target) =
@@ -5035,8 +5062,15 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
                     if let Some(ref ps) = conn.session {
                         providers::close_provider_session_with_plugins(ps, &command_plugins).await;
                     }
-                    restore_domain_filter(state, &previous_domain_filter).await;
-                    return Err(direct_page_allowed_domains_error());
+                    // The rejected allowlist was persisted before it was
+                    // installed, so the rollback has to reach the file too or a
+                    // later restart would resurrect it.
+                    return Err(
+                        match restore_domain_filter(state, &previous_domain_filter).await {
+                            Ok(()) => direct_page_allowed_domains_error(),
+                            Err(e) => format!("{} ({})", direct_page_allowed_domains_error(), e),
+                        },
+                    );
                 }
                 let provider_metadata = conn.metadata.clone();
 
@@ -16106,6 +16140,25 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[test]
+    fn test_persist_session_allowlist_outlives_the_daemon_that_installed_it() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_NAMESPACE"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+
+        let filter = DomainFilter::new("allowed.test");
+        persist_session_allowlist("persisted", Some(&filter)).unwrap();
+        assert_eq!(
+            session_allowlist::load("persisted"),
+            Ok(Some(vec!["allowed.test".to_string()]))
+        );
+
+        // Dropping the filter is the only thing that clears the file.
+        persist_session_allowlist("persisted", None).unwrap();
+        assert_eq!(session_allowlist::load("persisted"), Ok(None));
+    }
+
+    #[test]
     fn test_network_controls_required_only_when_filter_or_proxy_auth_active() {
         let filter = DomainFilter::new("example.com");
         assert!(!network_controls_required(None, false));
@@ -16622,8 +16675,18 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"launch":{"arg
     async fn test_allowed_domains_reject_direct_page_provider_plugins() {
         use std::os::unix::fs::PermissionsExt;
 
-        let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_SOCKET_DIR",
+            "AGENT_BROWSER_SESSION",
+        ]);
         guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        let socket_dir = tempfile::tempdir().unwrap();
+        guard.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            socket_dir.path().to_str().unwrap(),
+        );
+        guard.set("AGENT_BROWSER_SESSION", "direct-page-rollback");
         let dir = tempfile::tempdir().unwrap();
         let plugin_path = dir.path().join("mock-direct-page-provider");
         fs::write(
@@ -16669,6 +16732,11 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert!(
             state.browser.is_none(),
             "direct-page provider should be rejected before CDP connect"
+        );
+        assert_eq!(
+            session_allowlist::load("direct-page-rollback"),
+            Ok(None),
+            "a rejected launch must not leave its allowlist behind for the next daemon"
         );
     }
 

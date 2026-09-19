@@ -1352,6 +1352,15 @@ fn main() {
             libc::signal(libc::SIGPIPE, libc::SIG_IGN);
         }
         let session = env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string());
+        // Re-apply the session's persisted --allowed-domains before the daemon
+        // serves anything: a daemon that replaces one which had an allowlist
+        // (idle expiry, a kill, a restart forced by different daemon options)
+        // must not run the session unfiltered. Runs before the async runtime
+        // exists, so the environment write has no other threads to race.
+        if let Err(e) = native::session_allowlist::apply_to_process_env(&session) {
+            eprintln!("{}", e);
+            exit(1);
+        }
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
         rt.block_on(native::daemon::run_daemon(&session));
         return;
