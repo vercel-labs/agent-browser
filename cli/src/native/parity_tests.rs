@@ -135,6 +135,8 @@ const DOCUMENTED_ACTIONS: &[&str] = &[
     "permissions",
     "dialog",
     "upload",
+    "drop",
+    "paste",
     "addscript",
     "addinitscript",
     "addstyle",
@@ -304,6 +306,14 @@ fn minimal_command(action: &str, id: &str) -> Value {
         "upload" => {
             obj.insert("selector".to_string(), json!("input[type=file]"));
             obj.insert("files".to_string(), json!([]));
+        }
+        "drop" => {
+            obj.insert("selector".to_string(), json!("#drop-zone"));
+            obj.insert("files".to_string(), json!([]));
+        }
+        "paste" => {
+            obj.insert("selector".to_string(), json!("#drop-zone"));
+            obj.insert("file".to_string(), json!(""));
         }
         "dialog" => {
             obj.insert("accept".to_string(), json!(true));

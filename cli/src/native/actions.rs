@@ -2538,6 +2538,11 @@ fn policy_actions_for_command(
     if action == "a11y" && cmd.get("url").and_then(|v| v.as_str()).is_some() {
         actions.push("navigate".to_string());
     }
+    // File gestures share the `upload` policy category so a single deny or
+    // confirm rule covers every way a local file can be handed to the page.
+    if matches!(action, "drop" | "paste") {
+        actions.push("upload".to_string());
+    }
     if action == "auth_login" {
         if let Some(provider) = cmd.get("credentialProvider").and_then(|v| v.as_str()) {
             let plugins = plugins_from_command_or_env(cmd);
@@ -3046,6 +3051,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "find" => handle_find(cmd, state).await,
         "evalhandle" => handle_evalhandle(cmd, state).await,
         "drag" => handle_drag(cmd, state).await,
+        "drop" => handle_drop(cmd, state).await,
+        "paste" => handle_paste_file(cmd, state).await,
         "expose" => handle_expose(cmd, state).await,
         "pause" => handle_pause(state).await,
         "multiselect" => handle_multiselect(cmd, state).await,
@@ -10688,6 +10695,266 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
     Ok(json!({ "dragged": true, "source": source, "target": target }))
 }
 
+/// Shared JS preamble that turns base64 payloads into a `DataTransfer` holding
+/// real `File` objects. Paste has no CDP primitive that carries a file, so both
+/// handlers build the event in-page (the route Playwright documents for file
+/// drops). `Input.dispatchDragEvent` with `DragData.files` could carry the drop
+/// half, but it needs drag interception and is unproven headless here; one
+/// mechanism keeps drop and paste behaving identically. Bytes travel as base64
+/// rather than a JS array literal to keep the payload small.
+const FILE_DATATRANSFER_JS: &str = r#"const dt = new DataTransfer();
+for (const f of files) {
+    const bin = atob(f.data);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    dt.items.add(new File([bytes], f.name, { type: f.type }));
+}"#;
+
+/// Guess a MIME type from the file extension. Handlers frequently branch on
+/// `file.type` (image previews, accept checks), so a stable value matters more
+/// than a perfect one; unknown extensions fall back to octet-stream.
+fn guess_mime_type(path: &str) -> String {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        "tif" | "tiff" => "image/tiff",
+        "txt" => "text/plain",
+        "md" => "text/markdown",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" | "mjs" => "text/javascript",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+/// Read local files into `{ name, type, data }` payloads for the in-page
+/// `DataTransfer`. The daemon shares the filesystem with the CLI, so paths are
+/// read here rather than shipped through argv (which caps out around 128 KiB
+/// per argument on Linux and much lower on Windows `cmd.exe`).
+fn read_file_payloads(paths: &[String]) -> Result<Vec<Value>, String> {
+    if paths.is_empty() {
+        return Err("No files provided. Pass one or more file paths.".to_string());
+    }
+    let mut payloads = Vec::with_capacity(paths.len());
+    for path in paths {
+        let bytes = fs::read(path).map_err(|e| format!("Failed to read file '{}': {}", path, e))?;
+        let name = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path.as_str())
+            .to_string();
+        payloads.push(json!({
+            "name": name,
+            "type": guess_mime_type(path),
+            "data": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes),
+        }));
+    }
+    Ok(payloads)
+}
+
+/// Dispatch a synthetic event on the resolved element and report whether a
+/// listener called `preventDefault()` plus how many files the DataTransfer
+/// actually carried.
+async fn dispatch_file_event(
+    mgr: &BrowserManager,
+    session_id: &str,
+    state: &DaemonState,
+    selector: &str,
+    payloads: &[Value],
+    function_declaration: &str,
+    verb: &str,
+) -> Result<(usize, bool), String> {
+    use super::element::resolve_element_object_id;
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        &mgr.client,
+        session_id,
+        &state.ref_map,
+        selector,
+        &state.iframe_sessions,
+    )
+    .await?;
+
+    let call_params = json!({
+        "objectId": object_id,
+        "functionDeclaration": function_declaration,
+        "arguments": [{ "value": payloads }],
+        "returnByValue": true,
+    });
+    let call_result = mgr
+        .client
+        .send_command(
+            "Runtime.callFunctionOn",
+            Some(call_params),
+            Some(&effective_session_id),
+        )
+        .await?;
+
+    if let Some(exc) = call_result.get("exceptionDetails") {
+        let text = exc
+            .get("exception")
+            .and_then(|e| e.get("description"))
+            .and_then(|d| d.as_str())
+            .or_else(|| exc.get("text").and_then(|t| t.as_str()))
+            .unwrap_or("event dispatch failed");
+        return Err(format!("{} dispatch failed: {}", verb, text));
+    }
+
+    let value = call_result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let files = value
+        .get("files")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(payloads.len() as u64) as usize;
+    let prevented = value
+        .get("defaultPrevented")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok((files, prevented))
+}
+
+/// `drop <sel|@ref> <files...>`: drop real files onto an element, including
+/// drop zones that have no `<input type="file">` for `upload` to target.
+async fn handle_drop(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+    let selector = cmd
+        .get("selector")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'selector' parameter")?;
+
+    let files: Vec<String> = cmd
+        .get("files")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .or_else(|| {
+            cmd.get("file")
+                .and_then(|v| v.as_str())
+                .map(|s| vec![s.to_string()])
+        })
+        .unwrap_or_default();
+    let payloads = read_file_payloads(&files)?;
+
+    let function = format!(
+        r#"function(files) {{
+            {FILE_DATATRANSFER_JS}
+            const rect = this.getBoundingClientRect();
+            const clientX = rect.left + rect.width / 2;
+            const clientY = rect.top + rect.height / 2;
+            const make = (type) => new DragEvent(type, {{
+                bubbles: true, cancelable: true, composed: true, clientX, clientY, dataTransfer: dt,
+            }});
+            this.dispatchEvent(make('dragenter'));
+            this.dispatchEvent(make('dragover'));
+            const drop = make('drop');
+            this.dispatchEvent(drop);
+            return {{ files: dt.files.length, defaultPrevented: drop.defaultPrevented }};
+        }}"#
+    );
+
+    let (count, prevented) = dispatch_file_event(
+        mgr,
+        &session_id,
+        state,
+        selector,
+        &payloads,
+        &function,
+        "drop",
+    )
+    .await?;
+
+    Ok(json!({
+        "dropped": count,
+        "selector": selector,
+        "paths": files,
+        "defaultPrevented": prevented,
+    }))
+}
+
+/// `paste <sel|@ref> --file <path>`: paste a file or image at an element by
+/// dispatching a synthetic `ClipboardEvent` whose `clipboardData` carries the
+/// file, so handlers reading `items[i].getAsFile()` receive it. `clipboardData`
+/// is defined on the event instance because it is not part of the
+/// `ClipboardEventInit` dictionary in Chrome.
+async fn handle_paste_file(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+    let selector = cmd
+        .get("selector")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'selector' parameter")?;
+
+    let paths: Vec<String> = cmd
+        .get("file")
+        .and_then(|v| v.as_str())
+        .map(|s| vec![s.to_string()])
+        .or_else(|| {
+            cmd.get("files").and_then(|v| v.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    if paths.is_empty() {
+        return Err("Missing '--file' parameter".to_string());
+    }
+    let payloads = read_file_payloads(&paths)?;
+
+    let function = format!(
+        r#"function(files) {{
+            {FILE_DATATRANSFER_JS}
+            const event = new ClipboardEvent('paste', {{ bubbles: true, cancelable: true }});
+            if (!event.clipboardData) {{
+                Object.defineProperty(event, 'clipboardData', {{ value: dt }});
+            }}
+            this.dispatchEvent(event);
+            return {{ files: dt.files.length, defaultPrevented: event.defaultPrevented }};
+        }}"#
+    );
+
+    let (count, prevented) = dispatch_file_event(
+        mgr,
+        &session_id,
+        state,
+        selector,
+        &payloads,
+        &function,
+        "paste",
+    )
+    .await?;
+
+    Ok(json!({
+        "pasted": count,
+        "selector": selector,
+        "paths": paths,
+        "defaultPrevented": prevented,
+    }))
+}
+
 async fn handle_expose(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -14348,6 +14615,31 @@ mod tests {
         assert_eq!(
             policy_actions_for_command(&current_page, "a11y", false),
             vec!["a11y".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_file_gesture_policy_actions_include_upload() {
+        let drop_cmd = json!({
+            "action": "drop",
+            "id": "drop-policy",
+            "selector": "#drop-zone",
+            "files": ["/tmp/a.png"]
+        });
+        let paste_cmd = json!({
+            "action": "paste",
+            "id": "paste-policy",
+            "selector": "#editor",
+            "file": "/tmp/a.png"
+        });
+
+        assert_eq!(
+            policy_actions_for_command(&drop_cmd, "drop", false),
+            vec!["drop".to_string(), "upload".to_string()]
+        );
+        assert_eq!(
+            policy_actions_for_command(&paste_cmd, "paste", false),
+            vec!["paste".to_string(), "upload".to_string()]
         );
     }
 

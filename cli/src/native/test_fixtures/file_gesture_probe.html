@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>File Gesture Probe</title>
+  <style>
+    body {
+      margin: 24px;
+      font: 14px/1.4 sans-serif;
+    }
+
+    #drop-zone {
+      padding: 12px 16px;
+      border: 1px dashed #666;
+    }
+
+    #paste-zone {
+      margin-top: 16px;
+      min-height: 60px;
+      border: 1px solid #999;
+      padding: 8px;
+    }
+
+    pre {
+      margin-top: 24px;
+      white-space: pre-wrap;
+      font-family: ui-monospace, monospace;
+    }
+  </style>
+</head>
+<body>
+  <button id="drop-zone" type="button">drop files here</button>
+  <div id="paste-zone" contenteditable="true">paste here</div>
+  <pre id="log"></pre>
+  <script>
+    window.__fileGestureProbe = { drops: [], pastes: [] };
+
+    const logEl = document.getElementById("log");
+    const render = () => {
+      logEl.textContent = JSON.stringify(window.__fileGestureProbe);
+    };
+
+    function summarize(dataTransfer) {
+      const files = [];
+      const items = [];
+      if (dataTransfer) {
+        for (let i = 0; i < dataTransfer.files.length; i++) {
+          const f = dataTransfer.files[i];
+          files.push({ name: f.name, type: f.type, size: f.size });
+        }
+        for (let i = 0; i < dataTransfer.items.length; i++) {
+          const it = dataTransfer.items[i];
+          const f = it.kind === "file" && it.getAsFile ? it.getAsFile() : null;
+          items.push({ kind: it.kind, type: it.type, name: f ? f.name : null });
+        }
+      }
+      return { files: files, items: items };
+    }
+
+    const dropZone = document.getElementById("drop-zone");
+    for (const type of ["dragenter", "dragover", "drop"]) {
+      dropZone.addEventListener(type, (event) => {
+        event.preventDefault();
+        if (type !== "drop") return;
+        window.__fileGestureProbe.drops.push(summarize(event.dataTransfer));
+        render();
+      });
+    }
+
+    document.getElementById("paste-zone").addEventListener("paste", (event) => {
+      window.__fileGestureProbe.pastes.push(summarize(event.clipboardData));
+      render();
+    });
+  </script>
+</body>
+</html>
