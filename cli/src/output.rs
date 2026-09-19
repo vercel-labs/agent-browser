@@ -2659,8 +2659,10 @@ Manage browser tabs in the current window. Stable tab ids look like `t1`,
 `t2`, `t3`. An id is never reused within a session, so scripts can keep
 referring to the same tab across commands. Optional user-assigned labels
 (e.g. `docs`, `app`) are interchangeable with ids everywhere a tab ref is
-accepted. CDP target ids (from `tab list --json`) are also accepted as tab
-refs; unlike `t<N>` ids they stay stable across daemon restarts.
+accepted. A label starts with a letter and contains only letters, digits,
+`-`, and `_`; the `t<N>` id form (`t1`) is reserved and rejected as a label.
+CDP target ids (from `tab list --json`) are also accepted as tab refs;
+unlike `t<N>` ids they stay stable across daemon restarts.
 
 Tabs opened with `tab new` or `click --new-tab` inherit the session's user
 agent, headers, HTTP credentials, init scripts, routes, and emulation

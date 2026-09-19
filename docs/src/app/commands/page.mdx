@@ -251,7 +251,7 @@ agent-browser frame main                       # Back to main frame
 
 Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused within a session, so `t2` keeps pointing at the same tab even as other tabs are opened or closed. The `t` prefix mirrors the `@e1` element-ref convention and is not interchangeable with positional integers — `agent-browser tab 2` errors with a teaching message; use `t2`.
 
-You can also assign a memorable label (`docs`, `app`, `admin`) at tab-creation time and use it anywhere an id is accepted:
+You can also assign a memorable label (`docs`, `app`, `admin`) at tab-creation time and use it anywhere an id is accepted. A label must start with a letter and contain only letters, digits, `-`, and `_`, and it can't take the `t<N>` id form (`t1`), which would make the labelled tab unreachable:
 
 ```bash
 agent-browser tab new --label docs https://docs.example.com
