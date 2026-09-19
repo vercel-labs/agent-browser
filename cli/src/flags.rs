@@ -383,6 +383,8 @@ pub struct Flags {
     pub state: Option<String>,
     pub proxy: Option<String>,
     pub proxy_bypass: Option<String>,
+    /// Raw `--args` / `AGENT_BROWSER_ARGS` / config `args` string. Split into
+    /// Chrome argv with [`split_browser_args`] at launch, not during flag parse.
     pub args: Option<String>,
     pub user_agent: Option<String>,
     pub provider: Option<String>,
@@ -1254,6 +1256,46 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
     result
 }
 
+/// Split `--args` / `AGENT_BROWSER_ARGS` / config `args` into Chrome argv.
+///
+/// Newlines always separate arguments. A comma only separates when it is
+/// followed by optional whitespace and `--`, so values such as
+/// `--window-position=-32000,-32000` stay a single argument while
+/// `--no-sandbox,--disable-gpu` still becomes two.
+pub(crate) fn split_browser_args(raw: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    for line in raw.lines() {
+        let mut remaining = line.trim();
+        if remaining.is_empty() {
+            continue;
+        }
+        while let Some(idx) = find_browser_arg_separator(remaining) {
+            let part = remaining[..idx].trim();
+            if !part.is_empty() {
+                args.push(part.to_string());
+            }
+            remaining = remaining[idx + 1..].trim_start();
+        }
+        let part = remaining.trim();
+        if !part.is_empty() {
+            args.push(part.to_string());
+        }
+    }
+    args
+}
+
+fn find_browser_arg_separator(s: &str) -> Option<usize> {
+    let mut search_from = 0;
+    while let Some(rel) = s[search_from..].find(',') {
+        let idx = search_from + rel;
+        if s[idx + 1..].trim_start().starts_with("--") {
+            return Some(idx);
+        }
+        search_from = idx + 1;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1267,6 +1309,78 @@ mod tests {
     fn test_parse_headers_flag() {
         let flags = parse_flags(&args(r#"open example.com --headers {"Auth":"token"}"#));
         assert_eq!(flags.headers, Some(r#"{"Auth":"token"}"#.to_string()));
+    }
+
+    #[test]
+    fn test_split_browser_args_keeps_commas_inside_flag_values() {
+        assert_eq!(
+            split_browser_args("--window-position=-32000,-32000"),
+            vec!["--window-position=-32000,-32000"]
+        );
+        assert_eq!(
+            split_browser_args("--window-size=1280,720"),
+            vec!["--window-size=1280,720"]
+        );
+        assert_eq!(
+            split_browser_args("--disable-features=A,B,C"),
+            vec!["--disable-features=A,B,C"]
+        );
+    }
+
+    #[test]
+    fn test_split_browser_args_splits_comma_separated_flags() {
+        assert_eq!(
+            split_browser_args("--no-sandbox,--disable-gpu"),
+            vec!["--no-sandbox", "--disable-gpu"]
+        );
+        assert_eq!(
+            split_browser_args("--no-sandbox, --disable-gpu"),
+            vec!["--no-sandbox", "--disable-gpu"]
+        );
+        assert_eq!(
+            split_browser_args("--window-position=-32000,-32000,--no-sandbox"),
+            vec!["--window-position=-32000,-32000", "--no-sandbox"]
+        );
+    }
+
+    #[test]
+    fn test_split_browser_args_splits_on_newlines() {
+        assert_eq!(
+            split_browser_args("--window-position=-32000,-32000\n--no-sandbox"),
+            vec!["--window-position=-32000,-32000", "--no-sandbox"]
+        );
+        assert_eq!(
+            split_browser_args("--no-sandbox\r\n--disable-gpu"),
+            vec!["--no-sandbox", "--disable-gpu"]
+        );
+    }
+
+    #[test]
+    fn test_parse_args_flag_keeps_raw_string_with_commas() {
+        let flags = parse_flags(&[
+            "--args".to_string(),
+            "--window-position=-32000,-32000".to_string(),
+            "open".to_string(),
+        ]);
+        assert_eq!(
+            flags.args.as_deref(),
+            Some("--window-position=-32000,-32000")
+        );
+        assert_eq!(
+            split_browser_args(flags.args.as_ref().unwrap()),
+            vec!["--window-position=-32000,-32000"]
+        );
+
+        let flags = parse_flags(&[
+            "--args".to_string(),
+            "--no-sandbox,--disable-gpu".to_string(),
+            "open".to_string(),
+        ]);
+        assert_eq!(flags.args.as_deref(), Some("--no-sandbox,--disable-gpu"));
+        assert_eq!(
+            split_browser_args(flags.args.as_ref().unwrap()),
+            vec!["--no-sandbox", "--disable-gpu"]
+        );
     }
 
     #[test]
