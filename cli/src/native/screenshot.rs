@@ -169,7 +169,7 @@ async fn capture_screenshot_base64(
         },
         clip: None,
         from_surface: Some(true),
-        capture_beyond_viewport: if options.full_page { Some(true) } else { None },
+        capture_beyond_viewport: capture_beyond_viewport(options),
     };
 
     if options.full_page {
@@ -211,6 +211,10 @@ async fn capture_screenshot_base64(
         .await?;
 
     Ok(result.data)
+}
+
+fn capture_beyond_viewport(options: &ScreenshotOptions) -> Option<bool> {
+    (options.full_page || options.selector.is_some()).then_some(true)
 }
 
 async fn collect_annotations(
@@ -588,6 +592,21 @@ fn get_screenshot_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selector_screenshots_capture_beyond_the_initial_viewport() {
+        let options = ScreenshotOptions {
+            selector: Some("#below-fold".to_string()),
+            ..ScreenshotOptions::default()
+        };
+
+        assert_eq!(capture_beyond_viewport(&options), Some(true));
+    }
+
+    #[test]
+    fn viewport_screenshots_keep_the_default_capture_extent() {
+        assert_eq!(capture_beyond_viewport(&ScreenshotOptions::default()), None);
+    }
 
     #[test]
     fn filters_annotations_to_target_overlap() {
