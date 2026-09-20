@@ -194,7 +194,8 @@ async fn capture_screenshot_base64(
         }
     } else if let Some(ref selector) = options.selector {
         if let Some(rect) =
-            get_rect_for_selector(client, session_id, ref_map, selector, iframe_sessions).await?
+            get_document_rect_for_selector(client, session_id, ref_map, selector, iframe_sessions)
+                .await?
         {
             params.clip = Some(Viewport {
                 x: rect.x,
@@ -326,6 +327,34 @@ async fn get_rect_for_selector(
     )
     .await?;
     get_rect_for_object(client, &effective_session_id, &object_id).await
+}
+
+async fn get_document_rect_for_selector(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<Option<Rect>, String> {
+    let (object_id, effective_session_id) = super::element::resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector,
+        iframe_sessions,
+    )
+    .await?;
+    let Some(rect) = get_rect_for_object(client, &effective_session_id, &object_id).await? else {
+        return Ok(None);
+    };
+    let scroll = get_scroll_offsets(client, &effective_session_id).await?;
+    Ok(Some(offset_rect(rect, scroll)))
+}
+
+fn offset_rect(mut rect: Rect, (scroll_x, scroll_y): (f64, f64)) -> Rect {
+    rect.x += scroll_x;
+    rect.y += scroll_y;
+    rect
 }
 
 async fn get_rect_for_object(
@@ -606,6 +635,23 @@ mod tests {
     #[test]
     fn viewport_screenshots_keep_the_default_capture_extent() {
         assert_eq!(capture_beyond_viewport(&ScreenshotOptions::default()), None);
+    }
+
+    #[test]
+    fn selector_clip_uses_document_coordinates_after_scroll() {
+        let rect = Rect {
+            x: 10.0,
+            y: 197.0,
+            width: 200.0,
+            height: 200.0,
+        };
+
+        let document_rect = offset_rect(rect, (0.0, 503.0));
+
+        assert_eq!(document_rect.x, 10.0);
+        assert_eq!(document_rect.y, 700.0);
+        assert_eq!(document_rect.width, 200.0);
+        assert_eq!(document_rect.height, 200.0);
     }
 
     #[test]
