@@ -4562,9 +4562,9 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
         }
     };
     if let Some(path) = state::find_auto_state_file(&session_name) {
-        if let Some(ref mgr) = state.browser {
-            if let Ok(session_id) = mgr.active_session_id() {
-                match state::load_state(&mgr.client, session_id, &path).await {
+        if let Some(ref mut mgr) = state.browser {
+            if let Ok(session_id) = mgr.active_session_id().map(str::to_string) {
+                match mgr.load_state(&session_id, &path).await {
                     Ok(()) => {
                         state.restore_status = "loaded".to_string();
                         state.restore_status_detail = None;
@@ -4786,9 +4786,9 @@ async fn load_storage_state(state: &mut DaemonState, path: &Option<String>) -> R
         ensure_state_replay_supported_by_active_domain_filter(state, "--state/storageState")
             .await?;
         let mut loaded = false;
-        if let Some(ref mgr) = state.browser {
-            if let Ok(session_id) = mgr.active_session_id() {
-                state::load_state(&mgr.client, session_id, path).await?;
+        if let Some(ref mut mgr) = state.browser {
+            if let Ok(session_id) = mgr.active_session_id().map(str::to_string) {
+                mgr.load_state(&session_id, path).await?;
                 loaded = true;
             }
         }
@@ -7223,7 +7223,12 @@ async fn handle_state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .ok_or("Missing 'path' parameter")?;
 
     ensure_state_replay_supported_by_active_domain_filter(state, "state load").await?;
-    state::load_state(&mgr.client, &session_id, path).await?;
+    state
+        .browser
+        .as_mut()
+        .unwrap()
+        .load_state(&session_id, path)
+        .await?;
     mark_explicit_storage_state_loaded(state, path);
     Ok(json!({ "loaded": true, "path": path }))
 }

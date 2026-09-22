@@ -1539,14 +1539,14 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_STATE_SAVE,
             "State save",
-            "Save cookies and storage state.",
+            "Save cookies and storage without revisiting sites over the network. An origin collection failure leaves the existing snapshot unchanged.",
             json!({ "path": { "type": "string" } }),
             &["path"],
         ),
         tool(
             TOOL_STATE_LOAD,
             "State load",
-            "Load cookies and storage state.",
+            "Load cookies and storage state, remembering imported origins for later localStorage collection.",
             json!({ "path": { "type": "string" } }),
             &["path"],
         ),
