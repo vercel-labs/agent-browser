@@ -327,6 +327,7 @@ Add `--human` to `click` or `drag` for curved, eased movement from the current c
 
 ```bash
 agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retina, e.g. 2)
+agent-browser set viewport reset      # Restore the default viewport
 agent-browser set device <name>       # Emulate device ("iPhone 14")
 agent-browser set geo <lat> <lng>     # Set geolocation
 agent-browser set offline [on|off]    # Toggle offline mode
