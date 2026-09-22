@@ -516,13 +516,8 @@ where
     Value::Object(body)
 }
 
-async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
-    let api_key = env::var("KERNEL_API_KEY").ok();
-    let endpoint =
-        env::var("KERNEL_ENDPOINT").unwrap_or_else(|_| "https://api.onkernel.com".to_string());
-
-    let url = format!("{}/browsers", endpoint.trim_end_matches('/'));
-
+/// Builds the `POST /browsers` body from the `KERNEL_*` environment.
+fn kernel_request_body() -> Value {
     let headless = env::var("KERNEL_HEADLESS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(true);
@@ -539,14 +534,52 @@ async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
         "stealth": stealth,
         "timeout_seconds": timeout_seconds,
     });
+    let fields = body.as_object_mut().unwrap();
 
-    if let Ok(profile) = env::var("KERNEL_PROFILE_NAME") {
-        if !profile.is_empty() {
-            body.as_object_mut()
-                .unwrap()
-                .insert("profile".to_string(), json!(profile));
+    // Kernel takes `profile` as an object keyed by either id or name, and only
+    // writes cookies and logins back to it when save_changes is set.
+    let profile_id = env::var("KERNEL_PROFILE_ID").unwrap_or_default();
+    let profile_name = env::var("KERNEL_PROFILE_NAME").unwrap_or_default();
+    if !profile_id.is_empty() || !profile_name.is_empty() {
+        let save_changes = env::var("KERNEL_PROFILE_SAVE_CHANGES")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let mut profile = json!({ "save_changes": save_changes });
+        if !profile_id.is_empty() {
+            profile["id"] = json!(profile_id);
+        } else {
+            profile["name"] = json!(profile_name);
         }
+        fields.insert("profile".to_string(), profile);
     }
+
+    let region = env::var("KERNEL_REGION").unwrap_or_default();
+    if !region.is_empty() {
+        fields.insert("region".to_string(), json!(region));
+    }
+
+    // `proxy` accepts exactly one of id, name, or mode.
+    let proxy_id = env::var("KERNEL_PROXY_ID").unwrap_or_default();
+    let proxy_name = env::var("KERNEL_PROXY_NAME").unwrap_or_default();
+    let proxy_mode = env::var("KERNEL_PROXY_MODE").unwrap_or_default();
+    if !proxy_id.is_empty() {
+        fields.insert("proxy".to_string(), json!({ "id": proxy_id }));
+    } else if !proxy_name.is_empty() {
+        fields.insert("proxy".to_string(), json!({ "name": proxy_name }));
+    } else if !proxy_mode.is_empty() {
+        fields.insert("proxy".to_string(), json!({ "mode": proxy_mode }));
+    }
+
+    body
+}
+
+async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
+    let api_key = env::var("KERNEL_API_KEY").ok();
+    let endpoint =
+        env::var("KERNEL_ENDPOINT").unwrap_or_else(|_| "https://api.onkernel.com".to_string());
+
+    let url = format!("{}/browsers", endpoint.trim_end_matches('/'));
+    let body = kernel_request_body();
 
     let client = reqwest::Client::new();
     let mut request = client.post(&url).header("Content-Type", "application/json");
@@ -1203,6 +1236,92 @@ mod tests {
         let result = rt.block_on(connect_provider("unknown-provider"));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Unknown provider"));
+    }
+
+    const KERNEL_BODY_VARS: &[&str] = &[
+        "KERNEL_HEADLESS",
+        "KERNEL_STEALTH",
+        "KERNEL_TIMEOUT_SECONDS",
+        "KERNEL_PROFILE_ID",
+        "KERNEL_PROFILE_NAME",
+        "KERNEL_PROFILE_SAVE_CHANGES",
+        "KERNEL_REGION",
+        "KERNEL_PROXY_ID",
+        "KERNEL_PROXY_NAME",
+        "KERNEL_PROXY_MODE",
+    ];
+
+    fn clear_kernel_env(guard: &EnvGuard<'_>) {
+        for name in KERNEL_BODY_VARS {
+            guard.remove(name);
+        }
+    }
+
+    #[test]
+    fn test_kernel_body_omits_unset_options() {
+        let guard = EnvGuard::new(KERNEL_BODY_VARS);
+        clear_kernel_env(&guard);
+
+        let body = kernel_request_body();
+
+        assert_eq!(body["headless"], json!(true));
+        assert_eq!(body["stealth"], json!(false));
+        assert_eq!(body["timeout_seconds"], json!(300));
+        assert!(body.get("profile").is_none());
+        assert!(body.get("region").is_none());
+        assert!(body.get("proxy").is_none());
+    }
+
+    #[test]
+    fn test_kernel_profile_is_sent_as_an_object() {
+        let guard = EnvGuard::new(KERNEL_BODY_VARS);
+        clear_kernel_env(&guard);
+        guard.set("KERNEL_PROFILE_NAME", "checkout-flow");
+
+        // Kernel rejects a bare string for `profile`, so the shape is the contract.
+        assert_eq!(
+            kernel_request_body()["profile"],
+            json!({ "name": "checkout-flow", "save_changes": false })
+        );
+
+        guard.set("KERNEL_PROFILE_SAVE_CHANGES", "true");
+        assert_eq!(
+            kernel_request_body()["profile"],
+            json!({ "name": "checkout-flow", "save_changes": true })
+        );
+
+        guard.set("KERNEL_PROFILE_ID", "profile_123");
+        assert_eq!(
+            kernel_request_body()["profile"],
+            json!({ "id": "profile_123", "save_changes": true })
+        );
+    }
+
+    #[test]
+    fn test_kernel_proxy_selection_is_exclusive() {
+        let guard = EnvGuard::new(KERNEL_BODY_VARS);
+        clear_kernel_env(&guard);
+
+        guard.set("KERNEL_PROXY_MODE", "direct");
+        assert_eq!(kernel_request_body()["proxy"], json!({ "mode": "direct" }));
+
+        guard.set("KERNEL_PROXY_NAME", "residential-us");
+        assert_eq!(
+            kernel_request_body()["proxy"],
+            json!({ "name": "residential-us" })
+        );
+
+        guard.set("KERNEL_PROXY_ID", "proxy_123");
+        assert_eq!(kernel_request_body()["proxy"], json!({ "id": "proxy_123" }));
+    }
+
+    #[test]
+    fn test_kernel_region_is_passed_through() {
+        let guard = EnvGuard::new(KERNEL_BODY_VARS);
+        clear_kernel_env(&guard);
+        guard.set("KERNEL_REGION", "eu-west");
+
+        assert_eq!(kernel_request_body()["region"], json!("eu-west"));
     }
 
     #[test]

@@ -1990,7 +1990,13 @@ Optional configuration via environment variables:
 | `KERNEL_HEADLESS`        | Run browser in headless mode (`true`/`false`)                                    | `true`  |
 | `KERNEL_STEALTH`         | Enable stealth mode to avoid bot detection (`true`/`false`)                      | `false` |
 | `KERNEL_TIMEOUT_SECONDS` | Session timeout in seconds                                                       | `300`   |
-| `KERNEL_PROFILE_NAME`    | Browser profile name for persistent cookies/logins (created if it doesn't exist) | (none)  |
+| `KERNEL_PROFILE_NAME`    | Name of an existing browser profile to load                                      | (none)  |
+| `KERNEL_PROFILE_ID`      | Profile ID to load, instead of a name                                            | (none)  |
+| `KERNEL_PROFILE_SAVE_CHANGES` | Save session changes back to the profile when the session ends              | `false` |
+| `KERNEL_REGION`          | Session region: `us-east`, `eu-west`, or `ap-southeast`                          | `us-east` |
+| `KERNEL_PROXY_NAME`      | Name of a proxy in the same project to route egress through                      | (none)  |
+| `KERNEL_PROXY_ID`        | Proxy ID, instead of a name                                                      | (none)  |
+| `KERNEL_PROXY_MODE`      | `direct` to force direct egress, or `default` for the stealth-derived default     | (none)  |
 
 When enabled, agent-browser connects to a Kernel cloud session instead of launching a local browser. All commands work identically.
 

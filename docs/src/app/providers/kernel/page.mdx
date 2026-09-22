@@ -30,11 +30,21 @@ The `-p` flag takes precedence over `AGENT_BROWSER_PROVIDER`.
     <tr><td><code>KERNEL_HEADLESS</code></td><td>Run browser in headless mode</td><td><code>true</code></td></tr>
     <tr><td><code>KERNEL_STEALTH</code></td><td>Enable stealth mode to avoid bot detection</td><td><code>false</code></td></tr>
     <tr><td><code>KERNEL_TIMEOUT_SECONDS</code></td><td>Session timeout in seconds</td><td><code>300</code></td></tr>
-    <tr><td><code>KERNEL_PROFILE_NAME</code></td><td>Browser profile name for persistent cookies/logins</td><td>(none)</td></tr>
+    <tr><td><code>KERNEL_PROFILE_NAME</code></td><td>Name of an existing browser profile to load</td><td>(none)</td></tr>
+    <tr><td><code>KERNEL_PROFILE_ID</code></td><td>Profile ID to load, instead of a name</td><td>(none)</td></tr>
+    <tr><td><code>KERNEL_PROFILE_SAVE_CHANGES</code></td><td>Save session changes back to the profile when the session ends</td><td><code>false</code></td></tr>
+    <tr><td><code>KERNEL_REGION</code></td><td>Region for the session: <code>us-east</code>, <code>eu-west</code>, or <code>ap-southeast</code></td><td><code>us-east</code></td></tr>
+    <tr><td><code>KERNEL_PROXY_NAME</code></td><td>Name of a proxy in the same project to route egress through</td><td>(none)</td></tr>
+    <tr><td><code>KERNEL_PROXY_ID</code></td><td>Proxy ID, instead of a name</td><td>(none)</td></tr>
+    <tr><td><code>KERNEL_PROXY_MODE</code></td><td><code>direct</code> to force direct egress, or <code>default</code> for the stealth-derived default</td><td>(none)</td></tr>
   </tbody>
 </table>
 
-**Profile persistence:** When `KERNEL_PROFILE_NAME` is set, the profile will be created if it doesn't already exist. Cookies, logins, and session data are automatically saved back to the profile when the browser session ends, making them available for future sessions.
+**Profiles:** profiles must be created in Kernel before use. The provider loads an existing profile and does not create one. Cookies and logins are only written back when `KERNEL_PROFILE_SAVE_CHANGES` is set, so a read-only run can reuse a profile without modifying it. Set either the name or the ID. If both are set, the ID is used.
+
+**Proxies:** set at most one of `KERNEL_PROXY_ID`, `KERNEL_PROXY_NAME`, or `KERNEL_PROXY_MODE`. Proxy selection changes egress only. It does not turn stealth or the CAPTCHA solver on or off. With none of them set, a stealth session uses Kernel's default stealth proxy and a non-stealth session uses direct egress.
+
+`KERNEL_REGION` requires a Start-Up or Enterprise plan, and the region is fixed once the session starts.
 
 When enabled, agent-browser connects to a Kernel cloud session instead of launching a local browser. All commands work identically.
 
