@@ -2188,7 +2188,13 @@ fn run_batch(
             continue;
         }
 
-        let mut parsed = match parse_command(cmd_args, flags) {
+        // Each item is a full command line, so it needs the same global-flag
+        // stripping the single-command path applies. Without it the value of a
+        // global flag survives as a positional, and a command that reads its
+        // URL as "the first argument that is not a flag" picks up that value
+        // instead: `batch "open --enable react-devtools"` navigated to
+        // https://react-devtools and failed with net::ERR_NAME_NOT_RESOLVED.
+        let mut parsed = match parse_command(&clean_args(cmd_args), flags) {
             Ok(c) => c,
             Err(e) => {
                 had_error = true;
@@ -2311,6 +2317,40 @@ mod tests {
         super::attach_input_mode(&mut command, &flags);
         assert_eq!(command["defaultInputMode"], "smooth");
         assert_eq!(command["inputMode"], "human");
+    }
+
+    #[test]
+    fn batch_items_are_cleaned_of_global_flag_values() {
+        // A batch item is a whole command line, so the value of a global flag
+        // must not survive into the positionals: `open` reads its URL as the
+        // first argument that is not a flag, and `react-devtools` is not a URL.
+        let item: Vec<String> = ["open", "--enable", "react-devtools"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let flags = crate::flags::parse_flags(&item);
+        let command =
+            crate::commands::parse_command(&crate::flags::clean_args(&item), &flags).unwrap();
+        assert_eq!(
+            command["action"], "launch",
+            "`open --enable react-devtools` must launch, not navigate to the feature name"
+        );
+
+        // With a URL present, the URL is still the one that gets navigated to.
+        let item: Vec<String> = [
+            "open",
+            "--init-script",
+            "probe.js",
+            "data:text/html,<h1>hi</h1>",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let flags = crate::flags::parse_flags(&item);
+        let command =
+            crate::commands::parse_command(&crate::flags::clean_args(&item), &flags).unwrap();
+        assert_eq!(command["action"], "navigate");
+        assert_eq!(command["url"], "data:text/html,<h1>hi</h1>");
     }
 
     use super::*;
