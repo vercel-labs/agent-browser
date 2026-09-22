@@ -26,6 +26,11 @@ struct DocumentRefs {
 pub struct RefMap {
     map: HashMap<String, RefEntry>,
     documents: HashMap<(String, Option<String>), DocumentRefs>,
+    /// CDP session id of a page -> the target that page IS. A page's documents
+    /// belong to its target, which outlives any one connection to the browser;
+    /// the session id is only the handle this connection happens to hold. See
+    /// `page_key`.
+    page_targets: HashMap<String, String>,
     next_ref: usize,
 }
 
@@ -34,8 +39,37 @@ impl RefMap {
         Self {
             map: HashMap::new(),
             documents: HashMap::new(),
+            page_targets: HashMap::new(),
             next_ref: 1,
         }
+    }
+
+    /// Name the target a page session belongs to, so the page's documents
+    /// survive a reconnect.
+    ///
+    /// `Target.attachToTarget` mints a fresh session id every time, so after a
+    /// reconnect to the same browser the same page arrives under a new session.
+    /// Keyed on the session, every document then looks new and every durable ref
+    /// is dropped, although the page, its DOM and its backendNodeIds never moved.
+    /// Keyed on the target, the page is the page.
+    ///
+    /// A caller that never binds keeps the previous behaviour exactly: the
+    /// session id is used as the key, as it was.
+    pub fn bind_page_target(&mut self, page_session: &str, target_id: &str) {
+        if page_session.is_empty() || target_id.is_empty() {
+            return;
+        }
+        self.page_targets
+            .insert(page_session.to_string(), target_id.to_string());
+    }
+
+    /// The stable identity of a page session: its target when one is bound,
+    /// else the session id itself.
+    fn page_key(&self, page_session: &str) -> String {
+        self.page_targets
+            .get(page_session)
+            .cloned()
+            .unwrap_or_else(|| page_session.to_string())
     }
 
     pub fn add(
@@ -127,6 +161,14 @@ impl RefMap {
 
     /// Observe the document behind a page/frame pair. Unknown documents never
     /// retain refs, while a changed session or loader replaces the prior bucket.
+    ///
+    /// Identity is the PAGE (its target, when one is bound with
+    /// `bind_page_target`) plus the frame, and it is retained on the loader plus
+    /// the frame's own effective session. A main-frame document therefore
+    /// survives a reconnect to the same browser, where only the page's session
+    /// id changes; an out-of-process child frame still loses its refs when its
+    /// effective session changes, because its backendNodeIds belong to that
+    /// renderer.
     pub fn observe_document(
         &mut self,
         page_session: &str,
@@ -134,7 +176,16 @@ impl RefMap {
         session: &str,
         loader: Option<&str>,
     ) -> bool {
-        let key = (page_session.to_string(), frame.map(str::to_string));
+        let page = self.page_key(page_session);
+        // The main frame's "effective session" IS the page's session, so it is
+        // read through the same binding; a child frame's own session is not.
+        let session = if frame.is_none() {
+            self.page_key(session)
+        } else {
+            session.to_string()
+        };
+        let session = session.as_str();
+        let key = (page.clone(), frame.map(str::to_string));
         let Some(loader) = loader.filter(|id| !id.is_empty()) else {
             self.invalidate_frame(page_session, frame);
             return false;
@@ -145,8 +196,7 @@ impl RefMap {
             .is_none_or(|document| document.session != session || document.loader != loader);
         if changed {
             if frame.is_none() {
-                self.documents
-                    .retain(|(entry_page, _), _| entry_page != page_session);
+                self.documents.retain(|(entry_page, _), _| *entry_page != page);
             }
             self.documents.insert(
                 key,
@@ -161,12 +211,12 @@ impl RefMap {
     }
 
     fn invalidate_frame(&mut self, page_session: &str, frame: Option<&str>) {
+        let page = self.page_key(page_session);
         if frame.is_none() {
-            self.documents
-                .retain(|(entry_page, _), _| entry_page != page_session);
+            self.documents.retain(|(entry_page, _), _| *entry_page != page);
         } else {
             self.documents
-                .remove(&(page_session.to_string(), frame.map(str::to_string)));
+                .remove(&(page, frame.map(str::to_string)));
         }
     }
 
@@ -177,7 +227,7 @@ impl RefMap {
         backend_node_id: i64,
     ) -> Option<&str> {
         self.documents
-            .get(&(page_session.to_string(), frame.map(str::to_string)))?
+            .get(&(self.page_key(page_session), frame.map(str::to_string)))?
             .refs
             .get(&backend_node_id)
             .map(String::as_str)
@@ -190,23 +240,25 @@ impl RefMap {
         backend_node_id: i64,
         ref_id: &str,
     ) {
+        let page = self.page_key(page_session);
         if let Some(document) = self
             .documents
-            .get_mut(&(page_session.to_string(), frame.map(str::to_string)))
+            .get_mut(&(page, frame.map(str::to_string)))
         {
             document.refs.insert(backend_node_id, ref_id.to_string());
         }
     }
 
     pub fn invalidate_page(&mut self, page_session: &str) {
-        self.documents
-            .retain(|(entry_page, _), _| entry_page != page_session);
+        let page = self.page_key(page_session);
+        self.documents.retain(|(entry_page, _), _| *entry_page != page);
         self.map.clear();
     }
 
     /// Drop all document identities while preserving the monotonic ref counter.
     pub fn invalidate_all_documents(&mut self) {
         self.documents.clear();
+        self.page_targets.clear();
         self.map.clear();
     }
 
@@ -1575,6 +1627,84 @@ mod tests {
         map.invalidate_page("page-a");
         assert_eq!(map.durable_ref("page-a", None, 42), None);
         assert_eq!(map.next_ref_num(), 1);
+    }
+
+    #[test]
+    fn durable_refs_survive_a_reconnect_to_the_same_page_target() {
+        // A reconnect re-attaches the same page and Chrome mints a new session
+        // id for it. The page is the page: its DOM never moved, so its
+        // backendNodeIds and the refs bound to them are still good.
+        let mut map = RefMap::new();
+        map.bind_page_target("session-1", "target-a");
+        assert!(map.observe_document("session-1", None, "session-1", Some("loader-a")));
+        map.remember_durable_ref("session-1", None, 42, "e1");
+        assert_eq!(map.durable_ref("session-1", None, 42), Some("e1"));
+
+        map.bind_page_target("session-2", "target-a");
+        assert!(map.observe_document("session-2", None, "session-2", Some("loader-a")));
+        assert_eq!(
+            map.durable_ref("session-2", None, 42),
+            Some("e1"),
+            "a reconnect to the same target and loader is the same document"
+        );
+    }
+
+    #[test]
+    fn a_navigation_still_drops_the_refs_of_a_bound_page() {
+        // The binding must not make a page immortal: a new loader is a new
+        // document, whatever session id carries it.
+        let mut map = RefMap::new();
+        map.bind_page_target("session-1", "target-a");
+        assert!(map.observe_document("session-1", None, "session-1", Some("loader-a")));
+        map.remember_durable_ref("session-1", None, 42, "e1");
+
+        assert!(map.observe_document("session-1", None, "session-1", Some("loader-b")));
+        assert_eq!(map.durable_ref("session-1", None, 42), None);
+    }
+
+    #[test]
+    fn two_bound_pages_never_share_a_document() {
+        let mut map = RefMap::new();
+        map.bind_page_target("session-1", "target-a");
+        map.bind_page_target("session-2", "target-b");
+        assert!(map.observe_document("session-1", None, "session-1", Some("loader-a")));
+        map.remember_durable_ref("session-1", None, 42, "e1");
+        assert!(map.observe_document("session-2", None, "session-2", Some("loader-a")));
+        map.remember_durable_ref("session-2", None, 42, "e2");
+
+        assert_eq!(map.durable_ref("session-1", None, 42), Some("e1"));
+        assert_eq!(map.durable_ref("session-2", None, 42), Some("e2"));
+
+        map.invalidate_page("session-2");
+        assert_eq!(map.durable_ref("session-1", None, 42), Some("e1"));
+        assert_eq!(map.durable_ref("session-2", None, 42), None);
+    }
+
+    #[test]
+    fn an_unbound_page_keys_on_its_session_exactly_as_before() {
+        // Nothing binds a target in a WebDriver or single-connection run, and
+        // that path must behave as it did: the session id IS the page key.
+        let mut map = RefMap::new();
+        assert!(map.observe_document("page-a", None, "page-a", Some("loader-a")));
+        map.remember_durable_ref("page-a", None, 42, "e1");
+        assert_eq!(map.durable_ref("page-a", None, 42), Some("e1"));
+        assert!(map.observe_document("page-b", None, "page-b", Some("loader-a")));
+        assert_eq!(map.durable_ref("page-b", None, 42), None);
+    }
+
+    #[test]
+    fn a_child_frames_refs_still_belong_to_its_own_session() {
+        // An out-of-process iframe's backendNodeIds belong to its renderer, so a
+        // changed effective session must still break its continuity. The page
+        // binding covers the page, never the frame.
+        let mut map = RefMap::new();
+        map.bind_page_target("session-1", "target-a");
+        assert!(map.observe_document("session-1", Some("frame-a"), "frame-session-1", Some("loader-f")));
+        map.remember_durable_ref("session-1", Some("frame-a"), 42, "e1");
+        assert_eq!(map.durable_ref("session-1", Some("frame-a"), 42), Some("e1"));
+
+        assert!(map.observe_document("session-1", Some("frame-a"), "frame-session-2", Some("loader-f")));
+        assert_eq!(map.durable_ref("session-1", Some("frame-a"), 42), None);
     }
 
     #[test]
