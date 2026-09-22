@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- AginxBrowser: a browser window with an AI spark inside. Agent's viewport. -->
+  <rect x="0" y="0" width="512" height="512" rx="116" fill="#0D1520"/>
+  <!-- browser window body -->
+  <rect x="100" y="136" width="312" height="240" rx="26" fill="#F2F6FA"/>
+  <!-- chrome bar -->
+  <path d="M 126 136 L 386 136 Q 412 136 412 162 L 412 188 L 100 188 L 100 162 Q 100 136 126 136 Z" fill="#E0EAF2"/>
+  <!-- traffic lights -->
+  <circle cx="130" cy="162" r="8" fill="#FF5F57"/>
+  <circle cx="154" cy="162" r="8" fill="#FEBC2E"/>
+  <circle cx="178" cy="162" r="8" fill="#28C840"/>
+  <!-- AI spark: big four-point star -->
+  <path d="M 246 222 Q 246 286 310 286 Q 246 286 246 350 Q 246 286 182 286 Q 246 286 246 222 Z" fill="#38B6E3"/>
+  <!-- AI spark: small companion -->
+  <path d="M 324 210 Q 324 236 350 236 Q 324 236 324 262 Q 324 236 298 236 Q 324 236 324 210 Z" fill="#38B6E3"/>
+</svg>

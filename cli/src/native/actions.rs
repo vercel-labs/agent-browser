@@ -634,7 +634,7 @@ pub struct DaemonState {
     /// Whether browser-level auto-attach has been enabled for the current
     /// browser so top-level popups pause before their first request.
     network_auto_attach_installed: bool,
-    /// Browser engine name (e.g. "chrome", "lightpanda") for observability.
+    /// Browser engine name (e.g. "chrome", "lightpanda", "aginxbrowser") for observability.
     pub engine: String,
     /// Default timeout for wait operations, from AGENT_BROWSER_DEFAULT_TIMEOUT env var.
     pub default_timeout_ms: u64,
