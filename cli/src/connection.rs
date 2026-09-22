@@ -600,6 +600,46 @@ fn daemon_config_fingerprint(opts: &DaemonOptions) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+/// Serialized daemon-affecting options written to `<session>.config`. The
+/// daemon reads these from env at startup, so a change requires a restart.
+fn daemon_config_json(opts: &DaemonOptions) -> String {
+    serde_json::json!({
+        "debug": opts.debug,
+        "action_policy": opts.action_policy,
+        "confirm_actions": opts.confirm_actions,
+        "idle_timeout": opts.idle_timeout,
+        "default_timeout": opts.default_timeout,
+        "no_auto_dialog": opts.no_auto_dialog,
+    })
+    .to_string()
+}
+
+/// True when the stored daemon config is compatible with what the current
+/// invocation asks for. Leaving an optional field unset defers to the value
+/// the running daemon was started with; restating the same value matches;
+/// a different explicit value requires a restart. Without this, a command
+/// like `open --idle-timeout 0` followed by a bare `get url` would restart
+/// the daemon (dropping the browser and the navigation) even though the
+/// bare command never asked for a different config.
+fn daemon_config_compatible(stored: &str, opts: &DaemonOptions) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(stored) else {
+        // Config written by an older CLI (16-hex-char hash): fall back to
+        // exact-hash equality, which keeps the old restart-on-any-difference
+        // behavior for daemons started before the JSON format.
+        return stored.trim() == daemon_config_fingerprint(opts);
+    };
+    let optional_field_matches = |key: &str, requested: Option<serde_json::Value>| match requested {
+        None => true,
+        Some(expected) => value.get(key) == Some(&expected),
+    };
+    optional_field_matches("action_policy", opts.action_policy.map(Into::into))
+        && optional_field_matches("confirm_actions", opts.confirm_actions.map(Into::into))
+        && optional_field_matches("idle_timeout", opts.idle_timeout.map(Into::into))
+        && optional_field_matches("default_timeout", opts.default_timeout.map(Into::into))
+        && value.get("debug") == Some(&serde_json::Value::Bool(opts.debug))
+        && value.get("no_auto_dialog") == Some(&serde_json::Value::Bool(opts.no_auto_dialog))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonConfigStatus {
     Matches,
@@ -608,9 +648,8 @@ enum DaemonConfigStatus {
 }
 
 fn daemon_config_status(session: &str, opts: &DaemonOptions) -> DaemonConfigStatus {
-    let expected = daemon_config_fingerprint(opts);
     match fs::read_to_string(get_config_path(session)) {
-        Ok(actual) if actual.trim() == expected => DaemonConfigStatus::Matches,
+        Ok(actual) if daemon_config_compatible(&actual, opts) => DaemonConfigStatus::Matches,
         Ok(_) => DaemonConfigStatus::Different,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => DaemonConfigStatus::Missing,
         Err(_) => DaemonConfigStatus::Different,
@@ -622,7 +661,7 @@ fn daemon_config_matches(session: &str, opts: &DaemonOptions) -> bool {
 }
 
 fn write_daemon_config(session: &str, opts: &DaemonOptions) {
-    let _ = fs::write(get_config_path(session), daemon_config_fingerprint(opts));
+    let _ = fs::write(get_config_path(session), daemon_config_json(opts));
 }
 
 fn daemon_pid_matches(session: &str, expected_pid: u32) -> bool {
@@ -1316,6 +1355,100 @@ mod tests {
             daemon_config_fingerprint(&domains_changed),
             "allowed domains are browser launch state, not daemon identity"
         );
+    }
+
+    #[test]
+    fn test_config_unset_option_defers_to_running_daemon() {
+        let started_with_idle_zero = test_daemon_options(Some("0"), false, None);
+        let bare_invocation = test_daemon_options(None, false, None);
+
+        let stored = daemon_config_json(&started_with_idle_zero);
+        assert!(daemon_config_compatible(&stored, &bare_invocation));
+        assert!(daemon_config_compatible(&stored, &started_with_idle_zero));
+    }
+
+    #[test]
+    fn test_config_conflicting_explicit_value_requires_restart() {
+        let started_with_idle_zero = test_daemon_options(Some("0"), false, None);
+        let wants_idle_60s = test_daemon_options(Some("60000"), false, None);
+
+        let stored = daemon_config_json(&started_with_idle_zero);
+        assert!(!daemon_config_compatible(&stored, &wants_idle_60s));
+    }
+
+    #[test]
+    fn test_config_bool_mismatch_requires_restart() {
+        let daemon_debug = test_daemon_options(None, false, None);
+        let mut debug_changed = test_daemon_options(None, false, None);
+        debug_changed.debug = true;
+        let stored = daemon_config_json(&daemon_debug);
+        assert!(daemon_config_compatible(&stored, &daemon_debug));
+        assert!(!daemon_config_compatible(&stored, &debug_changed));
+    }
+
+    #[test]
+    fn test_config_legacy_hash_still_matches() {
+        let opts = test_daemon_options(Some("1000"), false, None);
+        let stored = daemon_config_fingerprint(&opts);
+        assert!(daemon_config_compatible(&stored, &opts));
+
+        let other = test_daemon_options(Some("2000"), false, None);
+        assert!(!daemon_config_compatible(&stored, &other));
+    }
+
+    #[test]
+    fn test_env_derived_default_timeout_omission_does_not_restart() {
+        // Issue #1939: the CLI stamps opts.default_timeout from
+        // AGENT_BROWSER_DEFAULT_TIMEOUT. A follow-up command without the env
+        // var parses to None, which used to change the fingerprint and
+        // restart the daemon (dropping the browser mid-session). With the
+        // JSON config, an omitted optional field defers to the daemon.
+        let domains: Vec<String> = Vec::new();
+        let mk = |default_timeout: Option<u64>| DaemonOptions {
+            headed: false,
+            debug: false,
+            executable_path: None,
+            extensions: &[],
+            init_scripts: &[],
+            enable: &[],
+            args: None,
+            user_agent: None,
+            proxy: None,
+            proxy_bypass: None,
+            proxy_username: None,
+            proxy_password: None,
+            ignore_https_errors: false,
+            allow_file_access: false,
+            hide_scrollbars: true,
+            webgpu: false,
+            profile: None,
+            state: None,
+            provider: None,
+            device: None,
+            session_name: None,
+            restore_save: None,
+            restore_check_url: None,
+            restore_check_text: None,
+            restore_check_fn: None,
+            download_path: None,
+            allowed_domains: Some(&domains),
+            action_policy: None,
+            confirm_actions: None,
+            engine: None,
+            auto_connect: false,
+            pin_tab: false,
+            idle_timeout: None,
+            default_timeout,
+            cdp: None,
+            no_auto_dialog: false,
+            plugins: None,
+        };
+        let stored = daemon_config_json(&mk(Some(90_000)));
+
+        assert!(daemon_config_compatible(&stored, &mk(None)));
+
+        let changed_env = mk(Some(60_000));
+        assert!(!daemon_config_compatible(&stored, &changed_env));
     }
 
     #[test]
