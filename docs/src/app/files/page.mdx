@@ -12,6 +12,18 @@ agent-browser upload @e4 ./front.png ./back.png
 
 The selector must resolve to a file input. Multiple file paths are accepted for multi-file inputs.
 
+## Drop and paste files
+
+Not every target is an `<input type="file">`. Drop zones listen for `event.dataTransfer.files`, and image paste handlers read `event.clipboardData.items[i].getAsFile()`. `drop` and `paste` synthesize those events with real `File` objects so both reach native listeners:
+
+```bash
+agent-browser drop @e6 ./report.pdf
+agent-browser drop "#drop-zone" ./front.png ./back.png
+agent-browser paste "#editor" --file ./screenshot.png
+```
+
+The synthesized events carry `isTrusted: false`, which drop and paste handlers almost never read. `drop` dispatches `dragenter`, `dragover`, then `drop`; `paste` dispatches a single `paste` event. File bytes are read from disk by the daemon, so paths are not subject to per-argument size limits. Use `upload` when the target is a file input.
+
 ## Downloads
 
 ```bash

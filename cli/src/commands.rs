@@ -109,6 +109,8 @@ pub fn is_top_level_command(value: &str) -> bool {
             | "uncheck"
             | "select"
             | "drag"
+            | "drop"
+            | "paste"
             | "upload"
             | "download"
             | "press"
@@ -564,12 +566,58 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             }
             Ok(cmd)
         }
+        "drop" => {
+            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
+                context: "drop".to_string(),
+                usage: "drop <selector> <files...>",
+            })?;
+            if rest.len() < 2 {
+                return Err(ParseError::MissingArguments {
+                    context: "drop".to_string(),
+                    usage: "drop <selector> <files...>",
+                });
+            }
+            Ok(json!({ "id": id, "action": "drop", "selector": sel, "files": &rest[1..] }))
+        }
         "upload" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "upload".to_string(),
                 usage: "upload <selector> <files...>",
             })?;
             Ok(json!({ "id": id, "action": "upload", "selector": sel, "files": &rest[1..] }))
+        }
+        "paste" => {
+            let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
+                context: "paste".to_string(),
+                usage: "paste <selector> --file <path>",
+            })?;
+            let mut file: Option<&str> = None;
+            let mut i = 1;
+            while i < rest.len() {
+                match rest[i] {
+                    "--file" | "-f" => {
+                        file = rest.get(i + 1).copied();
+                        if file.is_none() {
+                            return Err(ParseError::MissingArguments {
+                                context: "paste --file".to_string(),
+                                usage: "paste <selector> --file <path>",
+                            });
+                        }
+                        i += 2;
+                    }
+                    value => {
+                        if file.is_none() {
+                            file = Some(value);
+                        }
+                        i += 1;
+                    }
+                }
+            }
+            let file = file.ok_or_else(|| ParseError::MissingArguments {
+                context: "paste".to_string(),
+                usage: "paste <selector> --file <path>",
+            })?;
+            Ok(json!({ "id": id, "action": "paste", "selector": sel, "file": file }))
         }
         "download" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -5653,6 +5701,81 @@ mod tests {
         assert_eq!(cmd["name"], "username");
         assert_eq!(cmd["exact"], true);
         assert_eq!(cmd["value"], "hello");
+    }
+
+    // === File Drop / Paste Tests ===
+
+    #[test]
+    fn test_drop() {
+        let cmd =
+            parse_command(&args("drop #drop-zone ./a.png ./b.pdf"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "drop");
+        assert_eq!(cmd["selector"], "#drop-zone");
+        assert_eq!(cmd["files"][0], "./a.png");
+        assert_eq!(cmd["files"][1], "./b.pdf");
+    }
+
+    #[test]
+    fn test_drop_with_ref() {
+        let cmd = parse_command(&args("drop @e4 ./image.png"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "drop");
+        assert_eq!(cmd["selector"], "@e4");
+        assert_eq!(cmd["files"][0], "./image.png");
+    }
+
+    #[test]
+    fn test_drop_missing_files() {
+        let result = parse_command(&args("drop #drop-zone"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_drop_missing_selector() {
+        let result = parse_command(&args("drop"), &default_flags());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_paste_with_file_flag() {
+        let cmd =
+            parse_command(&args("paste #editor --file ./clip.png"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "paste");
+        assert_eq!(cmd["selector"], "#editor");
+        assert_eq!(cmd["file"], "./clip.png");
+    }
+
+    #[test]
+    fn test_paste_with_short_file_flag() {
+        let cmd = parse_command(&args("paste @e7 -f ./clip.gif"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "paste");
+        assert_eq!(cmd["selector"], "@e7");
+        assert_eq!(cmd["file"], "./clip.gif");
+    }
+
+    #[test]
+    fn test_paste_missing_file() {
+        let result = parse_command(&args("paste #editor"), &default_flags());
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
+    }
+
+    #[test]
+    fn test_paste_missing_selector() {
+        let result = parse_command(&args("paste"), &default_flags());
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
     }
 
     // === Download Tests ===

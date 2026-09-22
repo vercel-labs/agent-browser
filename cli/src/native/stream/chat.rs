@@ -383,6 +383,8 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "uncheck",
     "select",
     "drag",
+    "drop",
+    "paste",
     "upload",
     "download",
     "press",
