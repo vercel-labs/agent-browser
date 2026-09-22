@@ -121,6 +121,18 @@ Runs 18 e2e tests that launch real headless Chrome instances and exercise the fu
 
 The e2e tests live in `cli/src/native/e2e_tests.rs` and cover: launch/close, navigation, snapshots, screenshots, form interaction, cookies, storage, tabs, element queries, viewport/emulation, domain filtering, diff, state management, error handling, and Phase 8 commands.
 
+### Obscura adapter
+
+From a source checkout:
+
+```bash
+cd cli
+cargo test --locked -j 2 obscura -- --test-threads=1
+OBSCURA_BIN=/absolute/path/to/obscura cargo test --locked -j 2 e2e_obscura -- --ignored --test-threads=1
+```
+
+The first command runs engine-independent regression tests and skips the two ignored E2E tests. The second explicitly verifies the binary: missing, empty, invalid, or unlaunchable `OBSCURA_BIN` fails rather than silently passing. The E2E tests use a loopback fixture, enable private-network access, isolate proxy settings, clear `AGENT_BROWSER_CDP`, `AGENT_BROWSER_AUTO_CONNECT`, and `AGENT_BROWSER_PROVIDER`, and require an owned Obscura process rather than an attached browser. Coverage includes explicit/automatic launch, navigation, JavaScript, a basic snapshot, and close, not full browser fidelity. A normal `cargo test` skips these ignored tests and is not evidence of real Obscura verification.
+
 ### Linting and Formatting
 
 ```bash

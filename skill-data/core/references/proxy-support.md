@@ -61,7 +61,9 @@ agent-browser open https://example.com
 
 ## Proxy Bypass
 
-Skip proxy for specific domains using `--proxy-bypass` or `NO_PROXY`:
+Skip proxy for specific domains using `--proxy-bypass` or `NO_PROXY`. The experimental Obscura engine rejects proxy bypass settings, including `proxyBypass` config, `AGENT_BROWSER_PROXY_BYPASS`, `NO_PROXY`, and `no_proxy`, even without a proxy. Use Chrome when bypass rules are required. Explicit `--engine obscura` launches use the current invocation's resolved bypass settings, even with an existing daemon. Removing bypass settings takes effect on the next explicit Obscura launch without restarting the daemon.
+
+Chrome example:
 
 ```bash
 # Via CLI flag
