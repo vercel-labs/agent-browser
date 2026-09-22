@@ -3452,6 +3452,7 @@ Snapshot Diff:
     -d, --depth <n>          Limit snapshot tree depth
 
   Without --baseline, compares against the last snapshot taken in this session.
+  Fails with guidance if no snapshot has been taken yet.
 
 Screenshot Diff:
 

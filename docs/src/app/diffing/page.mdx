@@ -35,7 +35,7 @@ agent-browser diff snapshot --baseline before.txt
 agent-browser diff snapshot --selector "#main" --compact
 ```
 
-Without `--baseline`, the command automatically compares against the most recent snapshot taken in the current session. This is the primary use case for agents verifying that an action had the intended effect.
+Without `--baseline`, the command automatically compares against the most recent snapshot taken in the current session. This is the primary use case for agents verifying that an action had the intended effect. If no snapshot has been taken in the session yet, the command fails with guidance instead of reporting the whole page as additions.
 
 ### Options
 
