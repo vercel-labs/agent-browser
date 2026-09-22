@@ -3492,10 +3492,25 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 
 fn parse_storage(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["local", "session"];
+    const OPS: &[&str] = &["get", "set", "clear"];
+    // Operation names that read as an intent storage does not implement. A bare word is
+    // otherwise a key (`storage local mykey`), so only these known-but-unsupported names
+    // are rejected -- without this they would silently degrade into a read.
+    const UNSUPPORTED_OPS: &[&str] = &["delete", "remove"];
 
     match rest.first().copied() {
         Some("local") | Some("session") => {
             let storage_type = rest.first().unwrap();
+            if let Some(op) = rest.get(1).filter(|op| UNSUPPORTED_OPS.contains(*op)) {
+                return Err(ParseError::UnknownSubcommand {
+                    subcommand: format!(
+                        "storage {} {} (deleting a single key is not supported; \
+                         use 'storage {} clear' or 'storage {} set <key> \"\"')",
+                        storage_type, op, storage_type, storage_type
+                    ),
+                    valid_options: OPS,
+                });
+            }
             let (op, key, value) = match rest.get(1) {
                 Some(&"get") => ("get", rest.get(2), rest.get(3)),
                 Some(&"set") => ("set", rest.get(2), rest.get(3)),
@@ -4162,6 +4177,52 @@ mod tests {
     fn test_storage_invalid_type() {
         let result = parse_command(&args("storage invalid"), &default_flags());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_storage_unsupported_operation_rejected() {
+        for cmd in [
+            "storage local delete mykey",
+            "storage local remove mykey",
+            "storage local delete",
+            "storage session delete mykey",
+            "storage session remove mykey",
+        ] {
+            let err = parse_command(&args(cmd), &default_flags()).unwrap_err();
+            match err {
+                ParseError::UnknownSubcommand {
+                    subcommand,
+                    valid_options,
+                } => {
+                    let op = cmd.split_whitespace().nth(2).unwrap();
+                    assert!(
+                        subcommand.contains(op),
+                        "should name the operation: {}",
+                        subcommand
+                    );
+                    assert!(
+                        subcommand.contains("clear"),
+                        "should suggest the supported form: {}",
+                        subcommand
+                    );
+                    assert_eq!(valid_options, &["get", "set", "clear"][..]);
+                }
+                other => panic!("expected UnknownSubcommand for '{}', got {:?}", cmd, other),
+            }
+        }
+    }
+
+    #[test]
+    fn test_storage_key_named_like_unsupported_operation() {
+        // An explicit `get` keeps treating the next word as a key.
+        let cmd = parse_command(&args("storage local get delete"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "storage_get");
+        assert_eq!(cmd["key"], "delete");
+
+        let cmd = parse_command(&args("storage local set remove v"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "storage_set");
+        assert_eq!(cmd["key"], "remove");
+        assert_eq!(cmd["value"], "v");
     }
 
     // === Navigation Tests ===
