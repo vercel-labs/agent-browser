@@ -414,3 +414,25 @@ Keep the plugin small and explicit:
 - Write exactly one JSON response to stdout
 - Keep secrets out of command-line arguments
 - Let agent-browser handle navigation, selectors, screenshots, state, and policy
+
+## Community plugins
+
+Plugins published outside this repository. Each one is installed with `plugin add` and follows the protocol above. Open a pull request to add yours.
+
+<table>
+  <thead>
+    <tr><th>Plugin</th><th>Capabilities</th><th>What it does</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><a href="https://www.npmjs.com/package/agent-browser-plugin-cloak">agent-browser-plugin-cloak</a></td>
+      <td><code>browser.provider</code></td>
+      <td>Connects to a CloakBrowser instance as the browser provider.</td>
+    </tr>
+    <tr>
+      <td><a href="https://github.com/yassiEmp/agent-browser-plugin-hands">agent-browser-plugin-hands</a></td>
+      <td><code>launch.mutate</code>, <code>command.run</code></td>
+      <td>Adds clean launch flags, and exposes human-rate mouse and keyboard verbs (Bezier paths, lognormal keystroke timing) through <a href="https://github.com/yassiEmp/agent-hands">agent-hands</a>, for sessions on accounts that score input behaviour.</td>
+    </tr>
+  </tbody>
+</table>
