@@ -130,8 +130,8 @@ agent-browser keydown <key>           # Hold key down
 agent-browser keyup <key>             # Release key
 agent-browser hover <sel>             # Hover element
 agent-browser select <sel> <val>      # Select dropdown by value or visible label
-agent-browser check <sel>             # Check checkbox
-agent-browser uncheck <sel>           # Uncheck checkbox
+agent-browser check <sel>             # Check checkbox (fails if not checkable or state not reached)
+agent-browser uncheck <sel>           # Uncheck checkbox (a checked radio cannot be unchecked)
 agent-browser scroll <dir> [px]       # Scroll (up/down/left/right, --selector <sel>)
 agent-browser scrollintoview <sel>    # Scroll element into view (alias: scrollinto)
 agent-browser drag <src> <tgt>        # Drag and drop
