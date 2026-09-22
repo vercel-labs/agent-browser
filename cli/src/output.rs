@@ -720,6 +720,14 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             print_with_boundaries(html, origin, opts);
             return;
         }
+        // Attributes map (get attr <selector> with no attribute name)
+        if let Some(attrs) = data.get("attributes").and_then(|v| v.as_object()) {
+            for (name, val) in attrs {
+                let val_str = val.as_str().map(|s| s.to_string()).unwrap_or_else(|| val.to_string());
+                println!("{}: {}", name, val_str);
+            }
+            return;
+        }
         // Value
         if let Some(value) = data.get("value").and_then(|v| v.as_str()) {
             println!("{}", value);
