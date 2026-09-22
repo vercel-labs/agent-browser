@@ -41,6 +41,8 @@ Read the port from `stream status --json` rather than assuming one; the OS-assig
 
 Connect a WebSocket client to `ws://127.0.0.1:<port>`. Frame delivery starts automatically once a client attaches, so there is no subscribe message. Browser clients must load from `localhost`, `127.0.0.1`, `::1` or `file://`. Any other origin gets a 403 on the upgrade and needs a proxy.
 
+The same port also serves the session preview UI and its `/api/` JSON routes (`tabs`, `status`, `sessions`, `models`, `chat`, `command`). They are same-origin only: a non-browser client may omit `Origin` and `Referer` on a `GET` as long as `Host` is loopback, while every `POST` needs a loopback-matching `Origin` or `Referer`. Anything else gets a 403, and no response carries a wildcard `Access-Control-Allow-Origin`.
+
 ## Messages from the server
 
 Every message is JSON text with a `type` field.
