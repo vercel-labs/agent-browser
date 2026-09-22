@@ -126,6 +126,63 @@ pub async fn hover(
     Ok((x + offset.0, y + offset.1))
 }
 
+/// Decide whether `fill` may clear and rewrite the probed element.
+///
+/// `probe` is the JSON returned by the focus/probe round trip in `fill`:
+/// `{ tag, formControl, disabled, readOnly, contentEditable }`. The decision is
+/// kept pure so it can be unit-tested without a live browser.
+fn ensure_fillable(selector: &str, probe: &Value) -> Result<(), String> {
+    let flag = |name: &str| probe.get(name).and_then(Value::as_bool).unwrap_or(false);
+    let tag = probe.get("tag").and_then(Value::as_str).unwrap_or("");
+
+    if flag("contentEditable") {
+        return Ok(());
+    }
+    if !flag("formControl") {
+        let tag_desc = if tag.is_empty() {
+            "element".to_string()
+        } else {
+            format!("<{}>", tag.to_lowercase())
+        };
+        return Err(format!(
+            "Element '{}' is not editable ({}): fill requires an input, textarea, \
+             or contenteditable element",
+            selector, tag_desc
+        ));
+    }
+    if flag("disabled") {
+        return Err(format!(
+            "Element '{}' is disabled and cannot be filled",
+            selector
+        ));
+    }
+    if flag("readOnly") {
+        return Err(format!(
+            "Element '{}' is readonly and cannot be filled",
+            selector
+        ));
+    }
+    Ok(())
+}
+
+/// Post-condition for `fill`: the element must actually hold the requested text.
+///
+/// `Input.insertText` silently drops characters the element refuses (a
+/// `maxlength` cap, a rejected `type=number` value), so a mismatch is reported
+/// rather than passed off as success. A page that normalises what it receives
+/// is reported the same way, with the stored value included so the caller can
+/// see what happened.
+fn ensure_fill_applied(selector: &str, requested: &str, actual: &str) -> Result<(), String> {
+    if actual == requested {
+        return Ok(());
+    }
+    Err(format!(
+        "Fill of '{}' did not take: requested {:?} but the element now holds {:?} \
+         (the page may enforce maxlength, an input mask, or reject the value)",
+        selector, requested, actual
+    ))
+}
+
 pub async fn fill(
     client: &CdpClient,
     session_id: &str,
@@ -143,12 +200,28 @@ pub async fn fill(
     )
     .await?;
 
-    // Focus the element
-    client
-        .send_command_typed::<_, Value>(
+    // Focus the element and probe its editability in the same round trip.
+    // Nothing may be cleared before that probe: clearing assigns `value = ''`
+    // from JS, which ignores `readonly`/`disabled`, while `Input.insertText`
+    // honours them - so filling a non-editable element would destroy the
+    // existing value and write nothing.
+    let probe: EvaluateResult = client
+        .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: "function() { this.focus(); }".to_string(),
+                function_declaration: r#"function() {
+                    var tag = this.tagName ? this.tagName.toUpperCase() : '';
+                    var formControl = tag === 'INPUT' || tag === 'TEXTAREA';
+                    this.focus && this.focus();
+                    return {
+                        tag: tag,
+                        formControl: formControl,
+                        disabled: !!this.disabled,
+                        readOnly: !!this.readOnly,
+                        contentEditable: !!this.isContentEditable
+                    };
+                }"#
+                .to_string(),
                 object_id: Some(object_id.clone()),
                 arguments: None,
                 return_by_value: Some(true),
@@ -157,6 +230,10 @@ pub async fn fill(
             Some(&effective_session_id),
         )
         .await?;
+    ensure_fillable(
+        selector_or_ref,
+        probe.result.value.as_ref().unwrap_or(&Value::Null),
+    )?;
 
     // Select all + delete to clear
     client
@@ -169,7 +246,7 @@ pub async fn fill(
                     this.dispatchEvent(new Event('input', { bubbles: true }));
                 }"#
                 .to_string(),
-                object_id: Some(object_id),
+                object_id: Some(object_id.clone()),
                 arguments: None,
                 return_by_value: Some(true),
                 await_promise: Some(false),
@@ -189,7 +266,34 @@ pub async fn fill(
         )
         .await?;
 
-    Ok(())
+    // Read the value back: insertText reports success even when the element
+    // refused or truncated the text.
+    let stored: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: r#"function() {
+                    if (this.value !== undefined && this.value !== null) {
+                        return String(this.value);
+                    }
+                    return this.textContent || '';
+                }"#
+                .to_string(),
+                object_id: Some(object_id),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(&effective_session_id),
+        )
+        .await?;
+    let actual = stored
+        .result
+        .value
+        .as_ref()
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    ensure_fill_applied(selector_or_ref, value, actual)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1275,6 +1379,122 @@ fn named_key_info(key: &str) -> (String, String, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    /// Shape of the probe `fill` runs against the resolved element.
+    fn probe(
+        tag: &str,
+        form_control: bool,
+        disabled: bool,
+        read_only: bool,
+        editable: bool,
+    ) -> Value {
+        json!({
+            "tag": tag,
+            "formControl": form_control,
+            "disabled": disabled,
+            "readOnly": read_only,
+            "contentEditable": editable
+        })
+    }
+
+    /// A readonly input must be rejected before anything is cleared: JS
+    /// `value = ''` ignores `readonly` while `Input.insertText` honours it, so
+    /// filling one used to destroy the value and report success.
+    #[test]
+    fn test_fill_rejects_readonly_input() {
+        let result = ensure_fillable("#ro", &probe("INPUT", true, false, true, false));
+        let err = result.expect_err("readonly input must be rejected");
+        assert!(
+            err.contains("#ro"),
+            "error should name the selector: {}",
+            err
+        );
+        assert!(
+            err.contains("readonly"),
+            "error should say the element is readonly: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_fill_rejects_disabled_input() {
+        let result = ensure_fillable("#dis", &probe("INPUT", true, true, false, false));
+        let err = result.expect_err("disabled input must be rejected");
+        assert!(
+            err.contains("#dis"),
+            "error should name the selector: {}",
+            err
+        );
+        assert!(
+            err.contains("disabled"),
+            "error should say the element is disabled: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_fill_accepts_text_input() {
+        assert!(ensure_fillable("#name", &probe("INPUT", true, false, false, false)).is_ok());
+    }
+
+    #[test]
+    fn test_fill_accepts_textarea() {
+        assert!(ensure_fillable("#bio", &probe("TEXTAREA", true, false, false, false)).is_ok());
+    }
+
+    #[test]
+    fn test_fill_accepts_contenteditable_element() {
+        // Not a form control, but `isContentEditable` makes it fillable.
+        assert!(ensure_fillable("#editor", &probe("DIV", false, false, false, true)).is_ok());
+    }
+
+    #[test]
+    fn test_fill_rejects_non_editable_div() {
+        let result = ensure_fillable("#panel", &probe("DIV", false, false, false, false));
+        let err = result.expect_err("plain div must be rejected");
+        assert!(
+            err.contains("#panel") && err.contains("not editable"),
+            "error should name the selector and say it is not editable: {}",
+            err
+        );
+        assert!(err.contains("<div>"), "error should name the tag: {}", err);
+    }
+
+    /// A probe that came back empty (element detached mid-fill) is not editable.
+    #[test]
+    fn test_fill_rejects_missing_probe() {
+        assert!(ensure_fillable("#gone", &Value::Null).is_err());
+    }
+
+    #[test]
+    fn test_fill_applied_accepts_exact_value() {
+        assert!(ensure_fill_applied("#name", "John Doe", "John Doe").is_ok());
+    }
+
+    /// maxlength truncation used to be reported as success.
+    #[test]
+    fn test_fill_applied_reports_truncated_value() {
+        let result = ensure_fill_applied("#short", "0123456789", "01234");
+        let err = result.expect_err("truncated fill must be reported");
+        assert!(
+            err.contains("#short") && err.contains("0123456789") && err.contains("01234"),
+            "error should name the selector, the requested and the actual value: {}",
+            err
+        );
+    }
+
+    /// A `type=number` input rejecting non-numeric text leaves it empty.
+    #[test]
+    fn test_fill_applied_reports_rejected_value() {
+        let result = ensure_fill_applied("#num", "abc", "");
+        let err = result.expect_err("rejected fill must be reported");
+        assert!(
+            err.contains("#num") && err.contains("abc"),
+            "error should name the selector and the requested value: {}",
+            err
+        );
+    }
 
     /// Verify that `char_to_key_info` returns the correct (key, code,
     /// windowsVirtualKeyCode) triple for every character in Playwright's
