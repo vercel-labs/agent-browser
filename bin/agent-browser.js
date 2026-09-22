@@ -57,6 +57,9 @@ function getBinaryName() {
     case 'aarch64':
       archKey = 'arm64';
       break;
+    case 'loong64':
+      archKey='loong64';
+      break;
     default:
       return null;
   }
