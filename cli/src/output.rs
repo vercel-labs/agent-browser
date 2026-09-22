@@ -2457,7 +2457,7 @@ Subcommands:
   move <x> <y>         Move mouse to coordinates
   down [button]        Press mouse button (left, right, middle)
   up [button]          Release mouse button
-  wheel <dy> [dx]      Scroll mouse wheel
+  wheel <dy> [dx]      Scroll mouse wheel at the cursor, or at --at <x> <y>
 
 Movement Options:
   --duration <ms>       Target total duration, including browser response time
@@ -2480,6 +2480,7 @@ Examples:
   agent-browser mouse down right
   agent-browser mouse wheel 100
   agent-browser mouse wheel -50 0
+  agent-browser mouse wheel -300 --at 420 180
 "##
         }
 
@@ -3853,7 +3854,7 @@ Find Elements:  agent-browser find <locator> <value> <action> [text]
   role, text, label, placeholder, alt, title, testid, first, last, nth
 
 Mouse:  agent-browser mouse <action> [args]
-  move <x> <y>, down [btn], up [btn], wheel <dy> [dx]
+  move <x> <y>, down [btn], up [btn], wheel <dy> [dx] [--at <x> <y>]
 
 Browser Settings:  agent-browser set <setting> [value]
   viewport <w> <h>, device <name>, geo <lat> <lng>

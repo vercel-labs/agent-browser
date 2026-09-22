@@ -161,7 +161,7 @@ agent-browser mouse move 600 400 --duration 250 --steps 24
 agent-browser mouse move 600 400 --human --seed 42
 agent-browser mouse down [button]     # Press button
 agent-browser mouse up [button]       # Release button
-agent-browser mouse wheel <dy> [dx]   # Scroll wheel
+agent-browser mouse wheel <dy> [dx] [--at <x> <y>]   # Scroll wheel at the cursor or at x,y
 ```
 
 Use `--human` with `click`, `drag`, or `mouse move` for curved, eased movement from the current cursor position. For `mouse move`, `--duration` sets the target total milliseconds including browser response time, `--steps` sets the number of events, and `--seed` makes the path reproducible. A slow browser can still extend the requested duration.
