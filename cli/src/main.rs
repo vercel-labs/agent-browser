@@ -1386,6 +1386,21 @@ fn main() {
             if print_command_help(cmd) {
                 return;
             }
+            // Not a real command: mirror the unknown-command error path
+            // instead of printing the top-level help and exiting 0, which
+            // makes typos look like success to scripts branching on exit
+            // status. Bare flag invocations (`agent-browser --help`) still
+            // fall through to the full help below.
+            if !cmd.starts_with('-') {
+                if let Err(e @ ParseError::UnknownCommand { .. }) = parse_command(&clean, &flags) {
+                    if flags.json {
+                        print_json_error_with_type(e.format(), "unknown_command");
+                    } else {
+                        eprintln!("{}", color::red(&e.format()));
+                    }
+                    exit(1);
+                }
+            }
         }
         print_help();
         return;

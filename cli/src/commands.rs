@@ -1558,7 +1558,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     Ok(json!({ "id": id, "action": "cookies_set", "cookies": [cookie] }))
                 }
                 "clear" => Ok(json!({ "id": id, "action": "cookies_clear" })),
-                _ => Ok(json!({ "id": id, "action": "cookies_get" })),
+                "get" => Ok(json!({ "id": id, "action": "cookies_get" })),
+                _ => Err(ParseError::UnknownSubcommand {
+                    subcommand: op.to_string(),
+                    valid_options: &["get", "set", "clear"],
+                }),
             }
         }
 
@@ -3676,6 +3680,13 @@ mod tests {
     fn test_cookies_get_explicit() {
         let cmd = parse_command(&args("cookies get"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "cookies_get");
+    }
+
+    #[test]
+    fn test_cookies_unknown_op_is_error() {
+        let err = parse_command(&args("cookies delete foo"), &default_flags()).unwrap_err();
+        assert!(matches!(err, ParseError::UnknownSubcommand { .. }));
+        assert!(err.format().contains("delete"));
     }
 
     #[test]
