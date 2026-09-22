@@ -5544,6 +5544,19 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
 // Phase 2 handlers
 // ---------------------------------------------------------------------------
 
+/// Cap for consecutive same-role siblings in rendered snapshots.
+/// The CLI/MCP layer already folds AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS into
+/// the command payload, so this only applies the explicit value or the
+/// default of 50. A value of 0 disables truncation.
+fn resolve_max_siblings(cmd: &Value) -> Option<usize> {
+    const DEFAULT_MAX_SIBLINGS: usize = 50;
+    match cmd.get("maxSiblings").and_then(|v| v.as_i64()) {
+        Some(n) if n > 0 => Some(n as usize),
+        Some(_) => None,
+        None => Some(DEFAULT_MAX_SIBLINGS),
+    }
+}
+
 async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -5566,6 +5579,7 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             .and_then(|v| v.as_u64())
             .map(|d| d as usize),
         urls: cmd.get("urls").and_then(|v| v.as_bool()).unwrap_or(false),
+        max_siblings: resolve_max_siblings(cmd),
     };
 
     let previous_refs = state.ref_map.ref_ids();
@@ -7090,6 +7104,7 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         compact,
         depth: max_depth,
         selector,
+        max_siblings: resolve_max_siblings(cmd),
         ..SnapshotOptions::default()
     };
     // Reuse the current document identities without committing a failed capture.

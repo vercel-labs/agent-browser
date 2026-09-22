@@ -2240,6 +2240,9 @@ Options:
   -c, --compact        Remove empty structural elements
   -d, --depth <n>      Limit tree depth
   -s, --selector <sel> Scope snapshot to CSS selector
+      --max-siblings <n> Cap consecutive same-role siblings (e.g. huge option lists)
+                       with a summary line; 0 disables. Defaults to 50, or
+                       AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS
       --delta          Return full state once, then unchanged or structural deltas
                        Deltas include ref changes and an exact treeChange line splice
       --full           Force full state and update the delta baseline
@@ -3990,6 +3993,8 @@ Snapshot Options:
   -c, --compact              Remove empty structural elements
   -d, --depth <n>            Limit tree depth
   -s, --selector <sel>       Scope to CSS selector
+      --max-siblings <n>     Cap consecutive same-role siblings (0 = show all,
+                             or AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS, default 50)
 
 Authentication:
   --profile <name|path>      Chrome profile name (e.g., Default) to reuse login state,
@@ -4148,6 +4153,8 @@ Environment:
   AGENT_BROWSER_IOS_UDID         Default iOS device UDID
   AGENT_BROWSER_CONTENT_BOUNDARIES Wrap page output in boundary markers
   AGENT_BROWSER_MAX_OUTPUT       Max characters for page output
+  AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS Max consecutive same-role siblings rendered in snapshots
+                                 before collapsing to an omission line (default: 50; 0 shows all)
   AGENT_BROWSER_ALLOWED_DOMAINS  Comma-separated allowed domain patterns; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins
   AGENT_BROWSER_ACTION_POLICY    Path to action policy JSON file
   AGENT_BROWSER_CONFIRM_ACTIONS  Action categories requiring confirmation

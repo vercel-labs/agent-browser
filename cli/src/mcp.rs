@@ -844,6 +844,7 @@ fn tools() -> Vec<Value> {
                 "selector": { "type": "string", "description": "Scope the snapshot to a CSS selector." },
                 "includeUrls": { "type": "boolean", "default": false, "description": "Include href URLs on links." },
                 "delta": { "type": "boolean", "default": false, "description": "Return full state once, then unchanged or bounded structural deltas. Apply changes to refs and treeChange (zero-based startLine, deleteCount, lines) to the previous tree." },
+                "maxSiblings": { "type": "integer", "minimum": 0, "description": "Cap consecutive same-role sibling lines (default 50, 0 disables truncation; env AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS). Prevents huge select/listbox dropdowns from flooding context." },
                 "full": { "type": "boolean", "default": false, "description": "Force full state while updating the delta baseline." }
             }),
             &[],
@@ -2649,6 +2650,10 @@ fn snapshot_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError
     }
     if optional_bool(arguments, "delta")?.unwrap_or(false) {
         args.push("--delta".to_string());
+    }
+    if let Some(n) = optional_u64(arguments, "maxSiblings")? {
+        args.push("--max-siblings".to_string());
+        args.push(n.to_string());
     }
     if optional_bool(arguments, "full")?.unwrap_or(false) {
         args.push("--full".to_string());

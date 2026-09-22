@@ -990,6 +990,7 @@ agent-browser snapshot -i --urls          # Interactive elements with link URLs
 agent-browser snapshot -c                 # Compact (remove empty structural elements)
 agent-browser snapshot -d 3               # Limit depth to 3 levels
 agent-browser snapshot -s "#main"         # Scope to CSS selector
+agent-browser snapshot --max-siblings 20  # Collapse long same-role sibling runs (0 = show all)
 agent-browser snapshot -i -c -d 5         # Combine options
 agent-browser snapshot --delta             # Full state, then bounded incremental updates
 agent-browser snapshot --delta --full      # Force full state and refresh the baseline
@@ -1002,6 +1003,7 @@ agent-browser snapshot --delta --full      # Force full state and refresh the ba
 | `-c, --compact`        | Remove empty structural elements                                        |
 | `-d, --depth <n>`      | Limit tree depth                                                        |
 | `-s, --selector <sel>` | Scope to CSS selector                                                   |
+| `--max-siblings <n>`   | Collapse runs of consecutive same-role siblings beyond `n` into a summary line (default 50, or `AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS`; `0` shows all) |
 | `--delta`              | Return full state once, then `unchanged` or a structural JSON delta     |
 | `--full`               | Force full state and update the delta baseline                          |
 

@@ -186,6 +186,12 @@ pub struct SnapshotOptions {
     pub compact: bool,
     pub depth: Option<usize>,
     pub urls: bool,
+    /// Cap consecutive rendered siblings that share the same role. Pages with
+    /// huge `<select>` dropdowns or long same-element lists can otherwise
+    /// flood the snapshot with thousands of identical-role lines and blow up
+    /// the LLM context. Refs of hidden siblings stay valid in the RefMap.
+    /// `None` or `Some(0)` disables truncation.
+    pub max_siblings: Option<usize>,
 }
 
 struct TreeNode {
@@ -704,6 +710,12 @@ pub async fn take_snapshot(
 
     if options.compact {
         output = compact_tree(&output, options.interactive);
+    }
+
+    if let Some(limit) = options.max_siblings {
+        if limit > 0 {
+            output = truncate_sibling_runs(&output, limit);
+        }
     }
 
     let trimmed = output.trim().to_string();
@@ -1390,6 +1402,142 @@ fn count_indent(line: &str) -> usize {
     (line.len() - trimmed.len()) / 2
 }
 
+/// Extract the role token from a rendered snapshot line (`  - role "name" [...]`).
+fn snapshot_line_role(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let rest = trimmed.strip_prefix("- ")?;
+    let role: String = rest.chars().take_while(|c| !c.is_whitespace() && *c != '[').collect();
+    if role.is_empty() {
+        None
+    } else {
+        Some(&rest[..role.len()])
+    }
+}
+
+struct SiblingRun {
+    role: String,
+    kept: usize,
+    omitted: usize,
+}
+
+/// Collapse runs of more than `max_siblings` consecutive rendered siblings
+/// sharing the same role under the same parent into the first `max_siblings`
+/// lines plus a single omission marker. Subtrees of hidden siblings are
+/// removed, but their refs stay valid in the RefMap.
+fn truncate_sibling_runs(tree: &str, max_siblings: usize) -> String {
+    if max_siblings == 0 {
+        return tree.to_string();
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    // Frames indexed by depth; each holds the current same-role run at that level.
+    let mut frames: Vec<Option<SiblingRun>> = Vec::new();
+    // When a run overflows, its remaining siblings keep arriving at `skip_depth`;
+    // everything deeper is the hidden subtree.
+    let mut skip_depth: Option<usize> = None;
+
+    fn omission_line(depth: usize, role: &str, omitted: usize) -> String {
+        format!(
+            "{}- … {} more \"{}\" siblings omitted (set --max-siblings 0 to show all)",
+            "  ".repeat(depth),
+            omitted,
+            role
+        )
+    }
+
+    let close_run = |frames: &mut Vec<Option<SiblingRun>>, out: &mut Vec<String>| {
+        if let Some(Some(run)) = frames.pop() {
+            if run.omitted > 0 {
+                out.push(omission_line(frames.len(), &run.role, run.omitted));
+            }
+        }
+    };
+
+    for line in tree.lines() {
+        let depth = count_indent(line);
+
+        // Skip hidden subtrees and overflowing siblings of a truncated run.
+        if let Some(sd) = skip_depth {
+            if depth > sd {
+                continue;
+            }
+            let role_matches = !frames.is_empty()
+                && frames.len() == sd + 1
+                && snapshot_line_role(line)
+                    .map(|r| {
+                        frames[sd]
+                            .as_ref()
+                            .map(|run| run.role == r)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+            if depth == sd && role_matches {
+                if let Some(run) = frames[sd].as_mut() {
+                    run.omitted += 1;
+                }
+                continue;
+            }
+            skip_depth = None;
+        }
+
+        // Close runs at deeper levels, emitting omission markers.
+        // The frame at index `depth` is the current sibling run at this level
+        // and must stay alive so the new line can extend it.
+        while frames.len() > depth + 1 {
+            close_run(&mut frames, &mut out);
+        }
+        while frames.len() < depth + 1 {
+            frames.push(None);
+        }
+
+        match snapshot_line_role(line) {
+            Some(role) => {
+                let same_run = frames[depth]
+                    .as_ref()
+                    .map(|run| run.role == role)
+                    .unwrap_or(false);
+                if same_run {
+                    let run = frames[depth].as_mut().unwrap();
+                    if run.kept < max_siblings {
+                        run.kept += 1;
+                        out.push(line.to_string());
+                    } else {
+                        run.omitted += 1;
+                        skip_depth = Some(depth);
+                    }
+                } else {
+                    if let Some(run) = frames[depth].take() {
+                        if run.omitted > 0 {
+                            out.push(omission_line(depth, &run.role, run.omitted));
+                        }
+                    }
+                    frames[depth] = Some(SiblingRun {
+                        role: role.to_string(),
+                        kept: 1,
+                        omitted: 0,
+                    });
+                    out.push(line.to_string());
+                }
+            }
+            None => {
+                if let Some(run) = frames[depth].take() {
+                    if run.omitted > 0 {
+                        out.push(omission_line(depth, &run.role, run.omitted));
+                    }
+                }
+                // Not a snapshot node line; pass through untouched.
+                out.push(line.to_string());
+            }
+        }
+    }
+    while !frames.is_empty() {
+        close_run(&mut frames, &mut out);
+    }
+
+    out.join("\n")
+}
+
+
 fn extract_ax_string(value: &Option<AXValue>) -> String {
     match value {
         Some(v) => match &v.value {
@@ -1502,6 +1650,79 @@ fn collect_backend_node_ids(node: &Value, ids: &mut std::collections::HashSet<i6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_truncate_sibling_runs_collapses_option_spam() {
+        let tree = "- heading \"Form\" [level=1, ref=e1]\n  - combobox [expanded=true, ref=e2]\n  - listbox\n    - option \"a\" [ref=e3]\n    - option \"b\" [ref=e4]\n    - option \"c\" [ref=e5]\n    - option \"d\" [ref=e6]\n    - option \"e\" [ref=e7]\n  - button \"OK\" [ref=e8]";
+        let out = truncate_sibling_runs(tree, 2);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "- heading \"Form\" [level=1, ref=e1]",
+                "  - combobox [expanded=true, ref=e2]",
+                "  - listbox",
+                "    - option \"a\" [ref=e3]",
+                "    - option \"b\" [ref=e4]",
+                "    - … 3 more \"option\" siblings omitted (set --max-siblings 0 to show all)",
+                "  - button \"OK\" [ref=e8]",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_truncate_sibling_runs_removes_hidden_subtrees() {
+        let tree = "- list\n  - listitem \"1\" [ref=e1]\n    - link \"x\" [ref=e10]\n  - listitem \"2\" [ref=e2]\n    - link \"y\" [ref=e11]\n  - listitem \"3\" [ref=e3]\n    - link \"z\" [ref=e12]";
+        let out = truncate_sibling_runs(tree, 1);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "- list",
+                "  - listitem \"1\" [ref=e1]",
+                "    - link \"x\" [ref=e10]",
+                "  - … 2 more \"listitem\" siblings omitted (set --max-siblings 0 to show all)",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_truncate_sibling_runs_keeps_different_roles_and_small_groups() {
+        let tree = "- container\n  - button \"a\" [ref=e1]\n  - button \"b\" [ref=e2]\n  - textbox [ref=e3]\n  - option \"x\" [ref=e4]\n  - option \"y\" [ref=e5]\n  - option \"z\" [ref=e6]";
+        let out = truncate_sibling_runs(tree, 3);
+        assert_eq!(out.lines().count(), 7);
+        assert!(!out.contains("omitted"));
+    }
+
+    #[test]
+    fn test_truncate_sibling_runs_zero_limit_disables() {
+        let tree = "- list\n  - option \"a\" [ref=e1]\n  - option \"b\" [ref=e2]";
+        assert_eq!(truncate_sibling_runs(tree, 0), tree);
+    }
+
+    #[test]
+    fn test_truncate_sibling_runs_handles_trailing_run_at_eof() {
+        let tree = "- heading \"t\" [level=1]\n- option \"a\" [ref=e1]\n- option \"b\" [ref=e2]\n- option \"c\" [ref=e3]";
+        let out = truncate_sibling_runs(tree, 2);
+        let last = out.lines().last().unwrap();
+        assert_eq!(
+            last,
+            "- … 1 more \"option\" siblings omitted (set --max-siblings 0 to show all)"
+        );
+    }
+
+    #[test]
+    fn test_snapshot_line_role_parses_tokens() {
+        assert_eq!(
+            snapshot_line_role("  - option \"name\" [ref=e9]"),
+            Some("option")
+        );
+        assert_eq!(
+            snapshot_line_role("- ListItem [cursor:pointer, ref=e1]"),
+            Some("ListItem")
+        );
+        assert_eq!(snapshot_line_role("(no interactive elements)"), None);
+    }
 
     #[test]
     fn test_normalize_snapshot_name_preserves_word_boundaries() {
