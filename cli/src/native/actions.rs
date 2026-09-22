@@ -4203,20 +4203,27 @@ fn string_array_from_command(cmd: &Value, key: &str) -> Option<Vec<String>> {
     })
 }
 
-fn allowed_domains_from_launch_command(cmd: &Value) -> Option<Vec<String>> {
-    let value = cmd.get("allowedDomains")?;
+/// Read an explicitly supplied allowlist from a launch command.
+///
+/// `Ok(None)` means the key was absent, so no containment was requested. A key
+/// that is present but parses to zero domains is rejected, because treating it
+/// as an empty list would silently disable containment.
+fn allowed_domains_from_launch_command(cmd: &Value) -> Result<Option<Vec<String>>, String> {
+    let Some(value) = cmd.get("allowedDomains") else {
+        return Ok(None);
+    };
     let raw_domains: Vec<&str> = match value {
         Value::String(domains) => domains.split(',').collect(),
         Value::Array(domains) => domains.iter().filter_map(Value::as_str).collect(),
         _ => Vec::new(),
     };
-    Some(
-        raw_domains
-            .into_iter()
-            .map(|domain| domain.trim().to_lowercase())
-            .filter(|domain| !domain.is_empty())
-            .collect(),
-    )
+    let domains: Vec<String> = raw_domains
+        .into_iter()
+        .map(|domain| domain.trim().to_lowercase())
+        .filter(|domain| !domain.is_empty())
+        .collect();
+    network::ensure_allowed_domains_not_empty(&domains)?;
+    Ok(Some(domains))
 }
 
 async fn apply_launch_init_scripts(
@@ -4733,7 +4740,7 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    let requested_allowed_domains = allowed_domains_from_launch_command(cmd);
+    let requested_allowed_domains = allowed_domains_from_launch_command(cmd)?;
     let previous_domain_filter = state.domain_filter.read().await.clone();
     let existing_allowed_domains = current_allowed_domains(state).await;
     let allowed_domains = requested_allowed_domains
@@ -4869,12 +4876,10 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     })?;
 
     if let Some(domains) = requested_allowed_domains {
+        // A requested allowlist always has at least one domain; a degenerate one
+        // was already rejected by allowed_domains_from_launch_command.
         let mut filter = state.domain_filter.write().await;
-        *filter = if domains.is_empty() {
-            None
-        } else {
-            Some(DomainFilter::new(&domains.join(",")))
-        };
+        *filter = Some(DomainFilter::new(&domains.join(",")));
     }
 
     let (connection_kind, connection_target) =
@@ -16091,18 +16096,33 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
 
     #[test]
     fn test_allowed_domains_from_launch_command_accepts_cli_array_and_legacy_string() {
+        let expected = vec!["example.com".to_string(), "*.example.org".to_string()];
+        let from_array = allowed_domains_from_launch_command(&json!({
+            "allowedDomains": ["Example.COM", " *.example.org "]
+        }));
+        assert_eq!(from_array, Ok(Some(expected.clone())));
+        let from_string = allowed_domains_from_launch_command(&json!({
+            "allowedDomains": "Example.COM, *.example.org"
+        }));
+        assert_eq!(from_string, Ok(Some(expected)));
+    }
+
+    #[test]
+    fn test_allowed_domains_from_launch_command_absent_key_means_no_containment() {
         assert_eq!(
-            allowed_domains_from_launch_command(&json!({
-                "allowedDomains": ["Example.COM", " *.example.org "]
-            })),
-            Some(vec!["example.com".to_string(), "*.example.org".to_string()])
+            allowed_domains_from_launch_command(&json!({ "action": "launch" })),
+            Ok(None)
         );
-        assert_eq!(
-            allowed_domains_from_launch_command(&json!({
-                "allowedDomains": "Example.COM, *.example.org"
-            })),
-            Some(vec!["example.com".to_string(), "*.example.org".to_string()])
-        );
+    }
+
+    #[test]
+    fn test_allowed_domains_from_launch_command_rejects_degenerate_allowlist() {
+        for value in [json!(""), json!(","), json!([]), json!(["", "  "])] {
+            let cmd = json!({ "allowedDomains": value });
+            let err = allowed_domains_from_launch_command(&cmd)
+                .expect_err("degenerate allowlist must be rejected");
+            assert_eq!(err, network::EMPTY_ALLOWED_DOMAINS_ERROR);
+        }
     }
 
     #[test]
