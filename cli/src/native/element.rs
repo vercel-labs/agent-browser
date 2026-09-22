@@ -462,7 +462,13 @@ pub async fn resolve_element_center(
                 },
                 Some(effective_session_id),
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                format!(
+                    "{} (element has no rendered box on screen; it may be hidden, outside layout, or an option inside a closed <select>. Options of a <select> cannot be clicked directly, use the select command instead.)",
+                    e
+                )
+            })?;
         let (x, y) = box_model_center(&result.model);
         check_node_interception(
             client,
