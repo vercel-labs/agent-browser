@@ -27,6 +27,7 @@ const TOOL_READ: &str = "agent_browser_read";
 const TOOL_BACK: &str = "agent_browser_back";
 const TOOL_FORWARD: &str = "agent_browser_forward";
 const TOOL_RELOAD: &str = "agent_browser_reload";
+const TOOL_BRINGTOFRONT: &str = "agent_browser_bringtofront";
 const TOOL_SNAPSHOT: &str = "agent_browser_snapshot";
 const TOOL_CLICK: &str = "agent_browser_click";
 const TOOL_DBLCLICK: &str = "agent_browser_dblclick";
@@ -344,6 +345,7 @@ const CORE_PROFILE_TOOLS: &[&str] = &[
     TOOL_BACK,
     TOOL_FORWARD,
     TOOL_RELOAD,
+    TOOL_BRINGTOFRONT,
     TOOL_CLICK,
     TOOL_FILL,
     TOOL_TYPE,
@@ -464,6 +466,7 @@ const TABS_PROFILE_TOOLS: &[&str] = &[
     TOOL_BACK,
     TOOL_FORWARD,
     TOOL_RELOAD,
+    TOOL_BRINGTOFRONT,
     TOOL_TAB_NEW,
     TOOL_TAB_LIST,
     TOOL_TAB_SWITCH,
@@ -978,6 +981,13 @@ fn parity_tools() -> Vec<Value> {
         tool(TOOL_BACK, "Back", "Navigate back.", json!({}), &[]),
         tool(TOOL_FORWARD, "Forward", "Navigate forward.", json!({}), &[]),
         tool(TOOL_RELOAD, "Reload", "Reload the page.", json!({}), &[]),
+        tool(
+            TOOL_BRINGTOFRONT,
+            "Bring to front",
+            "Raise the browser window for the active tab. Tab creation and switching never raise it.",
+            json!({}),
+            &[],
+        ),
         tool(
             TOOL_DBLCLICK,
             "Double-click element",
@@ -2215,6 +2225,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_BACK => call_literal(arguments, &["back"]),
         TOOL_FORWARD => call_literal(arguments, &["forward"]),
         TOOL_RELOAD => call_literal(arguments, &["reload"]),
+        TOOL_BRINGTOFRONT => call_literal(arguments, &["bringtofront"]),
         TOOL_DBLCLICK => call_simple_selector(arguments, "dblclick"),
         TOOL_FILL => call_fill(arguments),
         TOOL_TYPE => call_type(arguments),
