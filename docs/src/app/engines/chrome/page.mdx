@@ -75,6 +75,34 @@ export AGENT_BROWSER_EXECUTABLE_PATH=/path/to/chromium
 agent-browser open example.com
 ```
 
+## Headed mode and the New Tab Page
+
+When `--headed` is combined with a real Chrome binary (via `--executable-path`
+or `AGENT_BROWSER_EXECUTABLE_PATH`), agent-browser automatically passes
+`--no-startup-window` so Chrome does not open its own New Tab Page tab.
+Without this, the NTP tab would be filtered out of agent-browser's tracked
+targets and remain stranded in the window as a phantom tab on every
+`open <url>`.
+
+The injection only runs when all of the following hold:
+
+- `headless: false` (i.e. `--headed` is set)
+- A real binary path is configured (Chrome for Testing has no startup tab)
+- The user has not already passed `--no-startup-window` via `--args`
+
+If you want the NTP tab back, opt out with `AGENT_BROWSER_NO_STARTUP_WINDOW=0`,
+or pass `--args "--no-startup-window=false"`:
+
+```bash
+export AGENT_BROWSER_NO_STARTUP_WINDOW=0
+agent-browser open example.com --headed --executable-path /path/to/chrome
+```
+
+> Note: with the default-on behavior, the first command of a fresh session
+> must be `open <url>` (or another command that creates a tab). Pure
+> inspection commands such as `snapshot` will produce no window because
+> Chrome starts with zero tabs.
+
 ## Chrome-Specific Features
 
 These features are available only with Chrome:
