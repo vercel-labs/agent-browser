@@ -1,0 +1,69 @@
+# Panerelay
+
+[Panerelay](https://github.com/F-loat/panerelay) is an open-source local provider that connects agent-browser to explicitly authorized tabs in an already-running Chrome or Microsoft Edge session. Use it when automation must reuse the browser's existing signed-in state without copying the profile or opening a remote debugging endpoint.
+
+## Requirements
+
+- agent-browser 0.33.0 or newer
+- Node.js 20 or newer for Panerelay setup
+- The [Panerelay Chrome extension](https://chromewebstore.google.com/detail/panerelay/panplnkjlkoceaonlmpdekjphgmbggmi)
+
+Chrome is the verified browser baseline. Microsoft Edge uses the same Chromium integration path; see the [Panerelay compatibility records](https://github.com/F-loat/panerelay/tree/main/docs/compatibility) for the current evidence level.
+
+## Setup
+
+Install the local Native Host and agent-browser provider configuration:
+
+```bash
+npx --yes @panerelay/setup --agent-browser
+```
+
+Open the Panerelay extension and authorize the current tab for focused work or all supported web tabs for a cross-page workflow. Browser focus alone does not grant access.
+
+Verify the exposed tabs:
+
+```bash
+agent-browser -p panerelay tab list
+```
+
+An empty list means no eligible tab is currently authorized. It does not necessarily mean setup failed.
+
+## Run commands
+
+Use a stable agent-browser session and keep the provider explicit:
+
+```bash
+agent-browser --session research -p panerelay tab list
+agent-browser --session research -p panerelay snapshot -i
+agent-browser --session research -p panerelay click @e1
+```
+
+Normal agent-browser page commands keep their usual semantics. The provider handles attachment and routing while the extension owns tab authorization and visible active control.
+
+## Agent Skill
+
+Panerelay also publishes a Skill that can check the installed engine, configure the provider, run targeted diagnostics, and stop when user-owned tab authorization is required:
+
+```bash
+npx skills add F-loat/panerelay --skill panerelay-browser
+```
+
+The Skill does not grant browser access. The user still chooses the authorization scope in the extension.
+
+## Authorization and control
+
+Site permission, tab authorization, and active control are separate decisions. `tab list` exposes only eligible authorized tabs, and mutating commands require the current control lease. Active control remains visible in the extension and can be released without silently changing the selected authorization scope.
+
+## Limitations
+
+Panerelay connects to existing authorized tabs and does not own the browser process. It cannot provide isolated browser contexts, launch flags, profile or executable selection, launch-time proxy configuration, whole-profile cookie access, or browser-wide close. Use a managed or remote provider when those browser ownership features are required.
+
+## Troubleshooting
+
+Run the provider-specific diagnostics:
+
+```bash
+npx --yes @panerelay/setup doctor --agent-browser
+```
+
+If the provider configuration is missing, rerun setup with `--agent-browser`. If the extension is disconnected, reload the installed extension or repair the Native Host as directed by doctor. If `tab list` is empty after setup succeeds, authorize the intended scope in the extension rather than switching to another browser or connection mode.
