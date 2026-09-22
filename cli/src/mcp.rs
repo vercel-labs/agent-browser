@@ -1504,14 +1504,21 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_AUTH_LOGIN,
             "Auth login",
-            "Log in with a saved auth profile.",
+            "Log in with a saved auth profile or configured credential provider.",
             json!({
                 "name": { "type": "string" },
                 "noNavigate": {
                     "type": "boolean",
                     "default": false,
                     "description": "Use the active top-level page without performing the initial login navigation. The credential URL must match the page origin."
-                }
+                },
+                "credentialProvider": { "type": "string" },
+                "item": { "type": "string", "description": "Provider-specific vault item reference." },
+                "url": { "type": "string", "description": "Login URL override." },
+                "usernameSelector": { "type": "string" },
+                "passwordSelector": { "type": "string" },
+                "submitSelector": { "type": "string" },
+                "otpSelector": { "type": "string", "description": "OTP selector override for this login." }
             }),
             &["name"],
         ),
@@ -3234,6 +3241,22 @@ fn auth_login_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     if optional_bool(arguments, "noNavigate")?.unwrap_or(false) {
         args.push("--no-navigate".to_string());
     }
+    for (key, flag) in [
+        ("credentialProvider", "--credential-provider"),
+        ("item", "--item"),
+        ("url", "--url"),
+        ("usernameSelector", "--username-selector"),
+        ("passwordSelector", "--password-selector"),
+        ("submitSelector", "--submit-selector"),
+        ("otpSelector", "--otp-selector"),
+    ] {
+        if let Some(value) = optional_string(arguments, key)? {
+            if !value.is_empty() {
+                args.push(flag.to_string());
+                args.push(value);
+            }
+        }
+    }
     Ok(args)
 }
 
@@ -4270,6 +4293,54 @@ mod tests {
         assert!(names.contains(&TOOL_SESSION_INFO));
         assert!(!names.contains(&"agent_browser_frame_list"));
         assert!(names.iter().all(|name| name.starts_with("agent_browser_")));
+    }
+
+    #[test]
+    fn auth_login_forwards_the_optional_credential_provider() {
+        assert_eq!(
+            auth_login_args(&json!({
+                "name": "my-app",
+                "credentialProvider": "staged-vault",
+                "item": "Personal Xero",
+                "url": "https://login.xero.com/identity/user/login",
+                "usernameSelector": "#email",
+                "passwordSelector": "#password",
+                "submitSelector": "button[type=submit]",
+                "otpSelector": "#otp"
+            }))
+            .unwrap(),
+            vec![
+                "auth",
+                "login",
+                "my-app",
+                "--credential-provider",
+                "staged-vault",
+                "--item",
+                "Personal Xero",
+                "--url",
+                "https://login.xero.com/identity/user/login",
+                "--username-selector",
+                "#email",
+                "--password-selector",
+                "#password",
+                "--submit-selector",
+                "button[type=submit]",
+                "--otp-selector",
+                "#otp"
+            ]
+        );
+
+        let tools = tools();
+        let auth_login = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some(TOOL_AUTH_LOGIN))
+            .unwrap();
+        assert!(auth_login["inputSchema"]["properties"]
+            .get("otpSelector")
+            .is_some());
+        assert!(auth_login["inputSchema"]["properties"]
+            .get("item")
+            .is_some());
     }
 
     #[test]

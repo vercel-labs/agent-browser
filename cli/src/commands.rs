@@ -1106,7 +1106,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     Ok(cmd)
                 }
                 Some("login") => {
-                    const AUTH_LOGIN_USAGE: &str = "agent-browser auth login <name> [--no-navigate] [--credential-provider <plugin>] [--item <ref>] [--url <url>] [--username-selector <s>] [--password-selector <s>] [--submit-selector <s>]";
+                    const AUTH_LOGIN_USAGE: &str = "agent-browser auth login <name> [--no-navigate] [--credential-provider <plugin>] [--item <ref>] [--url <url>] [--username-selector <s>] [--password-selector <s>] [--submit-selector <s>] [--otp-selector <s>]";
                     let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "auth login".to_string(),
                         usage: AUTH_LOGIN_USAGE,
@@ -1118,6 +1118,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     let mut password_selector: Option<String> = None;
                     let mut submit_selector: Option<String> = None;
                     let mut no_navigate = false;
+                    let mut otp_selector: Option<String> = None;
 
                     let mut j = 2;
                     while j < rest.len() {
@@ -1201,6 +1202,17 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                 submit_selector = Some((*value).to_string());
                                 j += 1;
                             }
+                            "--otp-selector" => {
+                                let Some(value) = rest.get(j + 1).filter(|v| !v.starts_with("--"))
+                                else {
+                                    return Err(ParseError::MissingArguments {
+                                        context: "auth login --otp-selector".to_string(),
+                                        usage: AUTH_LOGIN_USAGE,
+                                    });
+                                };
+                                otp_selector = Some((*value).to_string());
+                                j += 1;
+                            }
                             other => {
                                 if other.starts_with("--") {
                                     return Err(ParseError::InvalidValue {
@@ -1236,6 +1248,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         // Invocation-only behavior. This is intentionally not
                         // stored in AuthProfile or credential provider data.
                         cmd["noNavigate"] = json!(true);
+                    }
+                    if let Some(otp) = otp_selector {
+                        cmd["otpSelector"] = json!(otp);
                     }
                     Ok(cmd)
                 }
@@ -6627,7 +6642,7 @@ mod tests {
     fn test_auth_login_credential_provider_flags() {
         let cmd = parse_command(
             &args(
-                "auth login github --credential-provider onepassword --item GitHub --url https://github.com/login --username-selector #login_field --password-selector #password --submit-selector input[type=submit]",
+                "auth login github --credential-provider onepassword --item GitHub --url https://github.com/login --username-selector #login_field --password-selector #password --submit-selector input[type=submit] --otp-selector #otp",
             ),
             &default_flags(),
         )
@@ -6640,6 +6655,7 @@ mod tests {
         assert_eq!(cmd["usernameSelector"], "#login_field");
         assert_eq!(cmd["passwordSelector"], "#password");
         assert_eq!(cmd["submitSelector"], "input[type=submit]");
+        assert_eq!(cmd["otpSelector"], "#otp");
         assert!(cmd.get("noNavigate").is_none());
     }
 

@@ -253,7 +253,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Capabilities declared by the plugin. Built-in capability names include credential.read, browser.provider, launch.mutate, and command.run; plugins may also declare custom names such as captcha.solve."
+            "description": "Capabilities declared by the plugin. Built-in capability names include credential.read, credential.challenge, browser.provider, launch.mutate, and command.run; plugins may also declare custom names such as captcha.solve."
           },
           "source": {
             "type": "string",
