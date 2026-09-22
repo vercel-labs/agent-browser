@@ -103,6 +103,7 @@ const DOCUMENTED_ACTIONS: &[&str] = &[
     "tab_switch",
     "tab_close",
     "viewport",
+    "position",
     "user_agent",
     "set_media",
     "download",
@@ -267,6 +268,10 @@ fn minimal_command(action: &str, id: &str) -> Value {
         "viewport" | "user_agent" | "set_media" | "timezone" | "locale" | "geolocation"
         | "permissions" | "device" => {
             obj.insert("value".to_string(), json!(null));
+        }
+        "position" => {
+            obj.insert("x".to_string(), json!(0));
+            obj.insert("y".to_string(), json!(0));
         }
         "headers" => {
             obj.insert("headers".to_string(), json!({}));

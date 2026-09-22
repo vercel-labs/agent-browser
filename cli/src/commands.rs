@@ -3242,6 +3242,7 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
 fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &[
         "viewport",
+        "position",
         "device",
         "geo",
         "geolocation",
@@ -3285,6 +3286,29 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 cmd["deviceScaleFactor"] = json!(scale);
             }
             Ok(cmd)
+        }
+        Some("position") => {
+            let x_str = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "set position".to_string(),
+                usage: "set position <x> <y>",
+            })?;
+            let y_str = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
+                context: "set position".to_string(),
+                usage: "set position <x> <y>",
+            })?;
+            let x = x_str
+                .parse::<i32>()
+                .map_err(|_| ParseError::MissingArguments {
+                    context: "set position".to_string(),
+                    usage: "set position <x> <y>",
+                })?;
+            let y = y_str
+                .parse::<i32>()
+                .map_err(|_| ParseError::MissingArguments {
+                    context: "set position".to_string(),
+                    usage: "set position <x> <y>",
+                })?;
+            Ok(json!({ "id": id, "action": "position", "x": x, "y": y }))
         }
         Some("device") => {
             let dev = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
@@ -5613,6 +5637,34 @@ mod tests {
     #[test]
     fn test_set_viewport_invalid_scale() {
         let result = parse_command(&args("set viewport 1920 1080 abc"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_position() {
+        let cmd = parse_command(&args("set position 100 200"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "position");
+        assert_eq!(cmd["x"], 100);
+        assert_eq!(cmd["y"], 200);
+    }
+
+    #[test]
+    fn test_set_position_negative_coordinates() {
+        let cmd = parse_command(&args("set position -10 -20"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "position");
+        assert_eq!(cmd["x"], -10);
+        assert_eq!(cmd["y"], -20);
+    }
+
+    #[test]
+    fn test_set_position_missing_y() {
+        let result = parse_command(&args("set position 100"), &default_flags());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_position_invalid_x() {
+        let result = parse_command(&args("set position abc 200"), &default_flags());
         assert!(result.is_err());
     }
 

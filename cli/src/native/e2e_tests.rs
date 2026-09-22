@@ -3114,6 +3114,35 @@ async fn e2e_viewport_emulation() {
 }
 
 // ---------------------------------------------------------------------------
+// Window position via CDP Browser.setWindowBounds
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_window_position() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "position", "x": 100, "y": 200 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["x"], 100);
+    assert_eq!(get_data(&resp)["y"], 200);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
 // Hover, scroll, press
 // ---------------------------------------------------------------------------
 
