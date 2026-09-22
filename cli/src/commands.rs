@@ -1402,6 +1402,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Cookies ===
         "cookies" => {
+            const COOKIES_SET_USAGE: &str = "cookies set <name> <value> [--url <url>] [--domain <domain>] [--path <path>] [--http-only] [--secure] [--same-site <Strict|Lax|None>] [--expires <timestamp>]\n  or:  cookies set --curl <file> [--domain <domain>] [--url <url>]";
             let op = rest.first().unwrap_or(&"get");
             match *op {
                 "set" => {
@@ -1454,11 +1455,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
                     let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "cookies set".to_string(),
-                        usage: "cookies set <name> <value> [--url <url>] [--domain <domain>] [--path <path>] [--httpOnly] [--secure] [--sameSite <Strict|Lax|None>] [--expires <timestamp>]\n  or:  cookies set --curl <file> [--domain <domain>] [--url <url>]",
+                        usage: COOKIES_SET_USAGE,
                     })?;
                     let value = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
                         context: "cookies set".to_string(),
-                        usage: "cookies set <name> <value> [--url <url>] [--domain <domain>] [--path <path>] [--httpOnly] [--secure] [--sameSite <Strict|Lax|None>] [--expires <timestamp>]\n  or:  cookies set --curl <file> [--domain <domain>] [--url <url>]",
+                        usage: COOKIES_SET_USAGE,
                     })?;
 
                     let mut cookie = json!({ "name": name, "value": value });
@@ -1500,7 +1501,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                     });
                                 }
                             }
-                            "--httpOnly" => {
+                            "--http-only" | "--httpOnly" => {
                                 cookie["httpOnly"] = json!(true);
                                 i += 1;
                             }
@@ -1508,7 +1509,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                 cookie["secure"] = json!(true);
                                 i += 1;
                             }
-                            "--sameSite" => {
+                            "--same-site" | "--sameSite" => {
                                 if let Some(same_site) = rest.get(i + 1) {
                                     // Validate sameSite value
                                     if *same_site == "Strict"
@@ -1519,14 +1520,14 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                         i += 2;
                                     } else {
                                         return Err(ParseError::MissingArguments {
-                                            context: "cookies set --sameSite".to_string(),
-                                            usage: "--sameSite <Strict|Lax|None>",
+                                            context: "cookies set --same-site".to_string(),
+                                            usage: "--same-site <Strict|Lax|None>",
                                         });
                                     }
                                 } else {
                                     return Err(ParseError::MissingArguments {
-                                        context: "cookies set --sameSite".to_string(),
-                                        usage: "--sameSite <Strict|Lax|None>",
+                                        context: "cookies set --same-site".to_string(),
+                                        usage: "--same-site <Strict|Lax|None>",
                                     });
                                 }
                             }
@@ -1548,9 +1549,20 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                     });
                                 }
                             }
-                            _ => {
-                                // Unknown flag, skip it (or could error)
-                                i += 1;
+                            other => {
+                                // Never silently drop an argument: a dropped
+                                // --secure or --http-only would downgrade the
+                                // cookie while still reporting success.
+                                let message = if other.starts_with("--") {
+                                    format!("cookies set: unknown flag '{}'", other)
+                                } else {
+                                    // Do not echo the token: it may be a value.
+                                    "cookies set: unexpected argument".to_string()
+                                };
+                                return Err(ParseError::InvalidValue {
+                                    message,
+                                    usage: COOKIES_SET_USAGE,
+                                });
                             }
                         }
                     }
@@ -4075,6 +4087,82 @@ mod tests {
             &default_flags(),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cookies_set_with_http_only_kebab_case() {
+        let cmd = parse_command(
+            &args("cookies set mycookie myvalue --http-only"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "cookies_set");
+        assert_eq!(cmd["cookies"][0]["httpOnly"], true);
+    }
+
+    #[test]
+    fn test_cookies_set_with_same_site_kebab_case() {
+        let cmd = parse_command(
+            &args("cookies set mycookie myvalue --same-site Strict"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "cookies_set");
+        assert_eq!(cmd["cookies"][0]["sameSite"], "Strict");
+    }
+
+    #[test]
+    fn test_cookies_set_kebab_case_matches_camel_case() {
+        // The kebab-case spellings are the documented form; they must parse
+        // identically to the legacy camelCase ones, including consuming the
+        // --same-site value so later flags are still seen.
+        let kebab = parse_command(
+            &args("cookies set mycookie myvalue --http-only --same-site Strict --secure"),
+            &default_flags(),
+        )
+        .unwrap();
+        let camel = parse_command(
+            &args("cookies set mycookie myvalue --httpOnly --sameSite Strict --secure"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(kebab["cookies"], camel["cookies"]);
+        assert_eq!(kebab["cookies"][0]["httpOnly"], true);
+        assert_eq!(kebab["cookies"][0]["sameSite"], "Strict");
+        assert_eq!(kebab["cookies"][0]["secure"], true);
+    }
+
+    #[test]
+    fn test_cookies_set_invalid_same_site_kebab_case() {
+        let result = parse_command(
+            &args("cookies set mycookie myvalue --same-site Invalid"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cookies_set_unknown_flag_errors() {
+        // Silently skipping an unrecognised flag would report success while
+        // dropping a security attribute the caller asked for.
+        let result = parse_command(
+            &args("cookies set mycookie myvalue --not-a-real-flag"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        let message = result.unwrap_err().format();
+        assert!(message.contains("--not-a-real-flag"), "{}", message);
+    }
+
+    #[test]
+    fn test_cookies_set_unexpected_argument_does_not_echo_value() {
+        let result = parse_command(
+            &args("cookies set mycookie myvalue supersecret"),
+            &default_flags(),
+        );
+        assert!(result.is_err());
+        let message = result.unwrap_err().format();
+        assert!(!message.contains("supersecret"), "{}", message);
     }
 
     // === Storage Tests ===

@@ -210,6 +210,23 @@ agent-browser storage local clear     # Clear all
 agent-browser storage session         # Same for sessionStorage
 ```
 
+`cookies set` accepts optional cookie attributes. Flags are kebab-case; the older `--httpOnly` and `--sameSite` spellings are still accepted, and any other unrecognized flag is an error rather than being silently ignored.
+
+<table>
+  <thead>
+    <tr><th>Option</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>--url &lt;url&gt;</code></td><td>URL for the cookie (allows setting it before page load)</td></tr>
+    <tr><td><code>--domain &lt;domain&gt;</code></td><td>Cookie domain, e.g. <code>.example.com</code></td></tr>
+    <tr><td><code>--path &lt;path&gt;</code></td><td>Cookie path, e.g. <code>/api</code></td></tr>
+    <tr><td><code>--http-only</code></td><td>Set the HttpOnly flag (prevents JavaScript access)</td></tr>
+    <tr><td><code>--secure</code></td><td>Set the Secure flag (HTTPS only)</td></tr>
+    <tr><td><code>--same-site &lt;Strict|Lax|None&gt;</code></td><td>SameSite policy</td></tr>
+    <tr><td><code>--expires &lt;timestamp&gt;</code></td><td>Expiration time (Unix timestamp in seconds)</td></tr>
+  </tbody>
+</table>
+
 ## Network
 
 ```bash
