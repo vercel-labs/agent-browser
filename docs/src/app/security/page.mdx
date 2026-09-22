@@ -76,7 +76,7 @@ agent-browser auth save myapp \
   --submit-selector "button.login"
 ```
 
-Profiles are stored in `~/.agent-browser/auth/` and always encrypted with AES-256-GCM. If `AGENT_BROWSER_ENCRYPTION_KEY` is not set, a key is auto-generated at `~/.agent-browser/.encryption-key` on first use. Back up this file or set the environment variable explicitly for portability.
+Profiles are stored in `~/.agent-browser/auth/` and always encrypted with AES-256-GCM. If `AGENT_BROWSER_ENCRYPTION_KEY` is not set, a key is auto-generated at `~/.agent-browser/.encryption-key` on first use. Back up this file or set the environment variable explicitly for portability. A key that is configured but malformed is an error, not a reason to generate a new one: when `AGENT_BROWSER_ENCRYPTION_KEY` is set to anything other than a 64-character hex string, or the existing key file is unreadable, `auth save` fails with the same message `auth show` reports rather than writing a profile that can never be read back.
 
 File permissions are enforced on both Unix (`chmod 600`/`700`) and Windows (`icacls` restricted to the current user) to prevent other users from reading encryption keys or auth profiles.
 
