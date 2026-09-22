@@ -78,6 +78,24 @@ The server sends frame messages with base64-encoded images:
 
 `metadata.timestamp` is the capture time in epoch milliseconds. Comparing it against the clock when the frame is drawn gives the age of what is on screen, which is the number worth watching on a constrained link.
 
+### Cursor messages
+
+The server sends cursor updates for mouse input dispatched by the agent or dashboard:
+
+```json
+{
+  "type": "cursor",
+  "seq": 86,
+  "x": 100,
+  "y": 200,
+  "buttons": 1,
+  "pressed": true,
+  "timestamp": 1785038682242
+}
+```
+
+Coordinates use the session viewport coordinate space. `buttons` is the CDP button bitmask. `pressed` is true only for the event that starts a press, so a renderer can preserve a click animation even when press and release messages arrive between frames. The built-in dashboard uses these messages to draw its synthetic pointer and click ripple without modifying the page.
+
 ### URL messages
 
 On Chrome, the server sends URL updates for full-document, History API, and fragment navigation in the active tab's main frame:

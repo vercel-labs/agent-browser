@@ -1637,6 +1637,22 @@ Connect to `ws://localhost:9223` to receive frames and send input:
 
 `seq` is a monotonic frame id, echoed back in an `ack` message under ack pacing. `metadata.timestamp` is the capture time in epoch milliseconds, so a client can tell how old a frame is by the time it draws it.
 
+**Receive cursor updates:**
+
+```json
+{
+  "type": "cursor",
+  "seq": 86,
+  "x": 100,
+  "y": 200,
+  "buttons": 1,
+  "pressed": true,
+  "timestamp": 1785038682242
+}
+```
+
+Cursor coordinates use the session viewport coordinate space. `pressed` is true only for the event that starts a press, so clients can render a click ripple even when the corresponding release arrives before the next frame. The built-in dashboard renders these updates as a synthetic pointer and click ripple for agent and dashboard input.
+
 **Receive URL updates:**
 
 ```json

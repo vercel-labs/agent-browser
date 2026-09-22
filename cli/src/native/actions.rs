@@ -6135,18 +6135,32 @@ fn record_click_animation(
     result: &interaction::ClickResult,
     mouse: &mut MouseState,
     history: &recording::SharedRecordingCursor,
+    stream_server: Option<&Arc<StreamServer>>,
 ) {
     mouse.x = result.x;
     mouse.y = result.y;
     mouse.buttons = i32::from(result.pending_release.is_some());
-    if let Ok(mut cursor) = history.lock() {
-        cursor.record(result.x, result.y, 0);
-        if result.button_pressed {
-            cursor.record(result.x, result.y, 1);
-            if result.pending_release.is_none() {
-                cursor.record(result.x, result.y, 0);
-            }
+    record_cursor(history, stream_server, result.x, result.y, 0);
+    if result.button_pressed {
+        record_cursor(history, stream_server, result.x, result.y, 1);
+        if result.pending_release.is_none() {
+            record_cursor(history, stream_server, result.x, result.y, 0);
         }
+    }
+}
+
+fn record_cursor(
+    history: &recording::SharedRecordingCursor,
+    stream_server: Option<&Arc<StreamServer>>,
+    x: f64,
+    y: f64,
+    buttons: i32,
+) {
+    if let Ok(mut cursor) = history.lock() {
+        cursor.record(x, y, buttons);
+    }
+    if let Some(server) = stream_server {
+        server.broadcast_cursor(x, y, buttons);
     }
 }
 
@@ -6275,6 +6289,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             0,
             offset,
             &state.recording_state.shared_cursor,
+            state.stream_server.as_ref(),
         )
         .await?;
     }
@@ -6293,6 +6308,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         &result,
         &mut state.mouse_state,
         &state.recording_state.shared_cursor,
+        state.stream_server.as_ref(),
     );
 
     if result.dialog_opened {
@@ -6322,6 +6338,7 @@ async fn handle_dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         &result,
         &mut state.mouse_state,
         &state.recording_state.shared_cursor,
+        state.stream_server.as_ref(),
     );
     if result.dialog_opened {
         state.pending_pointer_release = result.pending_release;
@@ -6462,9 +6479,13 @@ async fn handle_hover(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     )
     .await?;
     (state.mouse_state.x, state.mouse_state.y) = position;
-    if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-        cursor.record(position.0, position.1, state.mouse_state.buttons);
-    }
+    record_cursor(
+        &state.recording_state.shared_cursor,
+        state.stream_server.as_ref(),
+        position.0,
+        position.1,
+        state.mouse_state.buttons,
+    );
     Ok(json!({ "hovered": selector }))
 }
 
@@ -6553,9 +6574,13 @@ async fn handle_check(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     .await?
     {
         (state.mouse_state.x, state.mouse_state.y) = position;
-        if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-            cursor.record(position.0, position.1, state.mouse_state.buttons);
-        }
+        record_cursor(
+            &state.recording_state.shared_cursor,
+            state.stream_server.as_ref(),
+            position.0,
+            position.1,
+            state.mouse_state.buttons,
+        );
     }
     Ok(json!({ "checked": selector }))
 }
@@ -6578,9 +6603,13 @@ async fn handle_uncheck(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     .await?
     {
         (state.mouse_state.x, state.mouse_state.y) = position;
-        if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-            cursor.record(position.0, position.1, state.mouse_state.buttons);
-        }
+        record_cursor(
+            &state.recording_state.shared_cursor,
+            state.stream_server.as_ref(),
+            position.0,
+            position.1,
+            state.mouse_state.buttons,
+        );
     }
     Ok(json!({ "unchecked": selector }))
 }
@@ -7439,10 +7468,17 @@ async fn handle_mouse(cmd: &Value, state: &DaemonState) -> Result<Value, String>
             Some(&session_id),
         )
         .await?;
-    if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-        let buttons = i32::from(event_type == "mousePressed");
-        cursor.record(x, y, buttons);
-    }
+    record_cursor(
+        &state.recording_state.shared_cursor,
+        state.stream_server.as_ref(),
+        x,
+        y,
+        if event_type == "mousePressed" {
+            mouse_button_mask(button)
+        } else {
+            0
+        },
+    );
 
     Ok(json!({ "dispatched": event_type }))
 }
@@ -7784,6 +7820,7 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         &result,
         &mut state.mouse_state,
         &state.recording_state.shared_cursor,
+        state.stream_server.as_ref(),
     );
 
     // Wait for download to complete
@@ -8543,9 +8580,13 @@ async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             let _ = interaction::dispatch_pending_release(&mgr.client, &release).await;
         }
         state.mouse_state.buttons = 0;
-        if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-            cursor.record(state.mouse_state.x, state.mouse_state.y, 0);
-        }
+        record_cursor(
+            &state.recording_state.shared_cursor,
+            state.stream_server.as_ref(),
+            state.mouse_state.x,
+            state.mouse_state.y,
+            0,
+        );
     }
     Ok(json!({ "handled": true, "accepted": accept }))
 }
@@ -9096,6 +9137,14 @@ async fn handle_wheel(cmd: &Value, state: &DaemonState) -> Result<Value, String>
             Some(&session_id),
         )
         .await?;
+
+    record_cursor(
+        &state.recording_state.shared_cursor,
+        state.stream_server.as_ref(),
+        x,
+        y,
+        state.mouse_state.buttons,
+    );
 
     Ok(json!({ "scrolled": true, "deltaX": delta_x, "deltaY": delta_y }))
 }
@@ -9999,6 +10048,7 @@ async fn execute_subaction(
                 &result,
                 &mut state.mouse_state,
                 &state.recording_state.shared_cursor,
+                state.stream_server.as_ref(),
             );
             if result.dialog_opened {
                 state.pending_pointer_release = result.pending_release;
@@ -10033,9 +10083,13 @@ async fn execute_subaction(
             .await?
             {
                 (state.mouse_state.x, state.mouse_state.y) = position;
-                if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-                    cursor.record(position.0, position.1, state.mouse_state.buttons);
-                }
+                record_cursor(
+                    &state.recording_state.shared_cursor,
+                    state.stream_server.as_ref(),
+                    position.0,
+                    position.1,
+                    state.mouse_state.buttons,
+                );
             }
             Ok(json!({ "checked": selector }))
         }
@@ -10049,9 +10103,13 @@ async fn execute_subaction(
             )
             .await?;
             (state.mouse_state.x, state.mouse_state.y) = position;
-            if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-                cursor.record(position.0, position.1, state.mouse_state.buttons);
-            }
+            record_cursor(
+                &state.recording_state.shared_cursor,
+                state.stream_server.as_ref(),
+                position.0,
+                position.1,
+                state.mouse_state.buttons,
+            );
             Ok(json!({ "hovered": selector }))
         }
         "text" => {
@@ -10801,6 +10859,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         0,
         source_offset,
         &state.recording_state.shared_cursor,
+        state.stream_server.as_ref(),
     )
     .await?;
     mgr.client
@@ -10810,9 +10869,13 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
             Some(&source_session_id),
         )
         .await?;
-    if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-        cursor.record(sx + source_offset.0, sy + source_offset.1, 1);
-    }
+    record_cursor(
+        &state.recording_state.shared_cursor,
+        state.stream_server.as_ref(),
+        sx + source_offset.0,
+        sy + source_offset.1,
+        1,
+    );
 
     // Move in steps to target, keeping the left button held (buttons: 1) so
     // that the browser sees a drag rather than a plain pointer move.
@@ -10832,6 +10895,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         1,
         target_offset,
         &state.recording_state.shared_cursor,
+        state.stream_server.as_ref(),
     )
     .await?;
 
@@ -10844,9 +10908,13 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         )
         .await?;
     state.mouse_state.buttons = 0;
-    if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-        cursor.record(tx + target_offset.0, ty + target_offset.1, 0);
-    }
+    record_cursor(
+        &state.recording_state.shared_cursor,
+        state.stream_server.as_ref(),
+        tx + target_offset.0,
+        ty + target_offset.1,
+        0,
+    );
 
     Ok(json!({ "dragged": true, "source": source, "target": target }))
 }
@@ -12710,6 +12778,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         &result,
         &mut state.mouse_state,
         &state.recording_state.shared_cursor,
+        state.stream_server.as_ref(),
     );
 
     // Wait for navigation after submit (with fallback timeout)
@@ -13036,13 +13105,13 @@ async fn handle_input_mouse(cmd: &Value, state: &mut DaemonState) -> Result<Valu
     mgr.client
         .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
-    if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-        cursor.record(
-            state.mouse_state.x,
-            state.mouse_state.y,
-            state.mouse_state.buttons,
-        );
-    }
+    record_cursor(
+        &state.recording_state.shared_cursor,
+        state.stream_server.as_ref(),
+        state.mouse_state.x,
+        state.mouse_state.y,
+        state.mouse_state.buttons,
+    );
     Ok(json!({ "dispatched": event_type }))
 }
 
@@ -13161,6 +13230,7 @@ async fn move_mouse_interpolated(
     buttons: i32,
     viewport_offset: (f64, f64),
     recording_cursor: &recording::SharedRecordingCursor,
+    stream_server: Option<&Arc<StreamServer>>,
 ) -> Result<(), String> {
     // Cursor state stays in page coordinates even when dispatching to an OOPIF.
     let start_x = mouse_state.x - viewport_offset.0;
@@ -13218,9 +13288,13 @@ async fn move_mouse_interpolated(
             .await?;
         mouse_state.x = x + viewport_offset.0;
         mouse_state.y = y + viewport_offset.1;
-        if let Ok(mut cursor) = recording_cursor.lock() {
-            cursor.record(mouse_state.x, mouse_state.y, buttons);
-        }
+        record_cursor(
+            recording_cursor,
+            stream_server,
+            mouse_state.x,
+            mouse_state.y,
+            buttons,
+        );
         if let Some((started, duration)) = schedule {
             tokio::time::sleep_until(started + duration.mul_f64(i as f64 / steps as f64)).await;
         }
@@ -13300,6 +13374,7 @@ async fn handle_mousemove(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         buttons,
         (0.0, 0.0),
         &state.recording_state.shared_cursor,
+        state.stream_server.as_ref(),
     )
     .await?;
     Ok(json!({ "moved": true, "x": x, "y": y }))
@@ -13325,13 +13400,13 @@ async fn handle_mousedown(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     mgr.client
         .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
-    if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-        cursor.record(
-            state.mouse_state.x,
-            state.mouse_state.y,
-            state.mouse_state.buttons,
-        );
-    }
+    record_cursor(
+        &state.recording_state.shared_cursor,
+        state.stream_server.as_ref(),
+        state.mouse_state.x,
+        state.mouse_state.y,
+        state.mouse_state.buttons,
+    );
     Ok(json!({ "pressed": true }))
 }
 
@@ -13355,13 +13430,13 @@ async fn handle_mouseup(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     mgr.client
         .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
-    if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-        cursor.record(
-            state.mouse_state.x,
-            state.mouse_state.y,
-            state.mouse_state.buttons,
-        );
-    }
+    record_cursor(
+        &state.recording_state.shared_cursor,
+        state.stream_server.as_ref(),
+        state.mouse_state.x,
+        state.mouse_state.y,
+        state.mouse_state.buttons,
+    );
     Ok(json!({ "released": true }))
 }
 
@@ -15768,6 +15843,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             1,
             (0.0, 0.0),
             &history,
+            None,
         )
         .await
         .unwrap();

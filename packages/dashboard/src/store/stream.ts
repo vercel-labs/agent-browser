@@ -6,6 +6,7 @@ import { useSetAtom } from "jotai/react";
 import type {
   ActivityEvent,
   ConsoleEntry,
+  CursorMessage,
   StreamMessage,
   TabInfo,
 } from "@/types";
@@ -30,6 +31,8 @@ export const consoleLogsAtom = atom<ConsoleEntry[]>([]);
 export const streamTabsAtom = atom<TabInfo[]>([]);
 export const streamEngineAtom = atom("");
 export const wsRefAtom = atom<WebSocket | null>(null);
+export const cursorAtom = atom<CursorMessage | null>(null);
+export const cursorClickAtom = atom<CursorMessage | null>(null);
 
 // ---------------------------------------------------------------------------
 // Derived atoms
@@ -86,6 +89,8 @@ export function useStreamSync(port: number) {
   const setTabs = useSetAtom(streamTabsAtom);
   const setEngine = useSetAtom(streamEngineAtom);
   const setWsRef = useSetAtom(wsRefAtom);
+  const setCursor = useSetAtom(cursorAtom);
+  const setCursorClick = useSetAtom(cursorClickAtom);
   const setTabCache = useSetAtom(tabCacheAtom);
   const setEngineCache = useSetAtom(engineCacheAtom);
 
@@ -113,8 +118,10 @@ export function useStreamSync(port: number) {
       setConsoleLogs([]);
       setTabs([]);
       setEngine("");
+      setCursor(null);
+      setCursorClick(null);
     }
-  }, [port, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine]);
+  }, [port, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine, setCursor, setCursorClick]);
 
   const connect = useCallback(() => {
     if (port <= 0) return;
@@ -151,6 +158,11 @@ export function useStreamSync(port: number) {
       switch (msg.type) {
         case "frame":
           setFrame(msg.data);
+          break;
+
+        case "cursor":
+          setCursor(msg);
+          if (msg.pressed) setCursorClick(msg);
           break;
 
         case "status":
@@ -218,7 +230,7 @@ export function useStreamSync(port: number) {
           break;
       }
     };
-  }, [port, setWsRef, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine, setTabCache, setEngineCache]);
+  }, [port, setWsRef, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine, setCursor, setCursorClick, setTabCache, setEngineCache]);
 
   useEffect(() => {
     connect();
