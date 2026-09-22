@@ -187,6 +187,17 @@ agent-browser click "button.primary"
 
 Rule of thumb: snapshot + `@eN` refs are fastest and most reliable for AI agents. `find role/text/label` is next best and doesn't require a prior snapshot. Raw CSS is a fallback when the others fail.
 
+### Hand a multi-step goal to `goal`
+
+When the path is routine navigation (fill a form, walk a wizard, open the right result) and you would otherwise snapshot and click five times, give the open page one goal and let an evaluation model pick each element:
+
+```bash
+agent-browser goal "Find one-way flights from Zurich to London on 20 September for one adult. Stop when flight options are visible."
+agent-browser --json goal "Accept the cookie banner and open the pricing page"
+```
+
+It needs `AI_GATEWAY_API_KEY`. On every step the model sees the current snapshot as a numbered element table and returns an operation (`CLICK`, `TYPE_TEXT`, `SCROLL_UP`, `SCROLL_DOWN`, `WAIT`, `DONE`, `BLOCKED`) plus an element index; the CLI maps the index back to a `@ref` and runs the normal command, so policies and confirmations still apply. Say in the goal when to stop. Exit code `0` means the model said `DONE`, which is its opinion: verify with `snapshot -i`, `get url`, or a screenshot before you report success. Log in first with `auth login`; never put a password in a goal. It cannot see into iframes, shadow roots, or canvas, so fall back to refs there.
+
 ## Waiting (read this)
 
 Agents fail more often from bad waits than from bad selectors. Pick the right wait for the situation:

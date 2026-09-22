@@ -394,6 +394,18 @@ agent-browser dashboard stop
 
 Loopback origins are allowed by default over IPv4 and IPv6 without an access token. Set `--allowed-origins` or `AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS` to a comma-separated list of exact HTTPS reverse-proxied origins. Every origin must be valid, and custom ports must be integers from 1 to 65535. Unknown options, missing values, invalid ports, and malformed origins fail without starting the server. The command prints private tokenized access URLs only for external origins; open the matching URL once to establish the browser session and do not share it. Open `http://localhost:<port>` directly for local access. Repeated starts reuse the running dashboard only when the port and allowed origins match; stop it before changing either setting.
 
+## Goal Mode
+
+```bash
+agent-browser goal "<goal>"                                  # Evaluation model picks each operation and element
+agent-browser goal --max-steps 10 --timeout 60000 "<goal>"   # Budgets (defaults: 40 steps, 120000 ms)
+agent-browser goal --eval-model typesafe-ai/jev --text-model inception/mercury-2.5 "<goal>"
+agent-browser -v goal "<goal>"                               # Probability, confidence, page change per step
+agent-browser --json goal "<goal>"                           # {status, url, elapsedMs, steps[...]} for agents
+```
+
+Requires `AI_GATEWAY_API_KEY`. Each step sends the current `snapshot -c` as a numbered element table plus the visible text and recent actions to the evaluation model, which answers two typed questions in one request: the next operation (`CLICK`, `TYPE_TEXT`, `SCROLL_UP`, `SCROLL_DOWN`, `WAIT`, `DONE`, `BLOCKED`) and the element index for it. Indices map back to `@eN` refs and run as `click`, `fill`, `scroll`, or `wait` through the normal pipeline. `TYPE_TEXT` asks the text model for the value, which must come from the goal; a missing value stops the run as `blocked`. Stops on `DONE`, `BLOCKED`, budgets, or three unchanged pages in a row. Exit `0` only on `DONE`. Verify the result yourself.
+
 ## MCP Server
 
 ```bash
@@ -411,7 +423,7 @@ Profiles:
 - `core` - Default. Navigation, snapshots, interaction, waits, reads, screenshots, JavaScript eval, close, tab basics, and profile discovery
 - `network` - Network routes, request inspection, HAR, headers, credentials, offline
 - `state` - Cookies, storage, auth, saved state, sessions, profiles, skills
-- `debug` - Console/errors, tracing, profiling, recording, a11y audit, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
+- `debug` - Console/errors, tracing, profiling, recording, a11y audit, clipboard, plugins, doctor, dashboard, install, upgrade, chat, goal, diff, batch, confirm/deny
 - `tabs` - Back/forward/reload, tabs, windows, frames, dialogs
 - `react` - React tree/inspect/renders/suspense, vitals, pushstate
 - `mobile` - Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
@@ -558,6 +570,8 @@ AGENT_BROWSER_STREAM_PORT="9223"             # Override WebSocket streaming port
 AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS="https://dashboard.example.com" # Trusted HTTPS reverse-proxied dashboard origins
 AGENT_BROWSER_CONFIG="./agent-browser.json"  # Custom config file
 AGENT_BROWSER_CDP="9222"                     # Connect daemon to CDP port or WebSocket URL
+AGENT_BROWSER_GOAL_MODEL="typesafe-ai/jev"   # Evaluation model for goal (or --eval-model)
+AGENT_BROWSER_GOAL_TEXT_MODEL="inception/mercury-2.5" # Text model for goal TYPE_TEXT (or --text-model)
 AGENT_BROWSER_ALLOWED_DOMAINS="example.com"  # Restrict network domains; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins
 AGENT_BROWSER_PLUGINS='[{"name":"vault","command":"agent-browser-plugin-vault","capabilities":["credential.read"]},{"name":"stealth","command":"agent-browser-plugin-stealth","capabilities":["launch.mutate"]}]'
 ```

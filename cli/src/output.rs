@@ -3611,6 +3611,55 @@ Examples:
 "##
         }
 
+        "goal" => {
+            r##"
+agent-browser goal - Goal-driven browsing with an evaluation model
+
+Usage:
+  agent-browser goal <text> [--max-steps <n>] [--timeout <ms>]
+                     [--eval-model <model>] [--text-model <model>]
+
+Gives one natural-language goal to a System One evaluation model (Jev on the
+Vercel AI Gateway by default). On every step the model receives the current
+accessibility snapshot as a numbered element table and answers two typed
+questions in one request: which operation comes next (CLICK, TYPE_TEXT,
+SCROLL_UP, SCROLL_DOWN, WAIT, DONE, BLOCKED) and which element index that
+operation targets. Only observed elements are offered, so the model never
+produces a selector, URL, or script. When it picks TYPE_TEXT, a small text
+model writes the field value from the goal.
+
+Actions run through the normal command pipeline (click @eN, fill @eN, scroll,
+wait), so action policies, --confirm-actions, --allowed-domains, and session
+isolation apply unchanged. The run stops on DONE, BLOCKED, the step budget,
+the time budget, or three consecutive actions that do not change the page.
+DONE is the model's opinion: verify the outcome with snapshot or get url.
+
+Requires AI_GATEWAY_API_KEY. Start from a page that is already open in the
+session; goal does not navigate on its own.
+
+Goal Options:
+  --max-steps <n>        Action budget (default: 40)
+  --timeout <ms>         Time budget in milliseconds (default: 120000)
+  --eval-model <model>   Evaluation model (or AGENT_BROWSER_GOAL_MODEL env, default: typesafe-ai/jev)
+  --text-model <model>   Text model for TYPE_TEXT (or AGENT_BROWSER_GOAL_TEXT_MODEL env, default: inception/mercury-2.5)
+  -v, --verbose          Show probability, confidence, and page-change per step
+  -q, --quiet            Print only the final result
+  --debug                Also write every model request and reply to stderr
+
+Global Options:
+  --json                 Structured output with every step, probabilities, and timings
+  --session <name>       Target session for commands
+
+Exit status is 0 only when the model reports DONE.
+
+Examples:
+  agent-browser open https://www.google.com/travel/flights
+  agent-browser goal "Find one-way flights from Zurich to London on 20 September for one adult. Stop when flight options are visible."
+  agent-browser goal --max-steps 10 "Open the pricing page"
+  agent-browser --json goal "Accept the cookie banner"
+"##
+        }
+
         "mcp" => {
             r##"
 agent-browser mcp - Start an MCP stdio server
@@ -3633,8 +3682,8 @@ Tool profiles:
   network    Network routes, request inspection, HAR, headers, credentials, offline
   state      Cookies, storage, auth, saved state, sessions, profiles, skills
   debug      Console/errors, tracing, profiling, recording, accessibility audits,
-             clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff,
-             batch, confirm/deny
+             clipboard, plugins, doctor, dashboard, install, upgrade, chat, goal,
+             diff, batch, confirm/deny
   tabs       Back/forward/reload, tabs, windows, frames, dialogs
   react      React tree/inspect/renders/suspense, vitals, pushstate
   mobile     Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
@@ -3970,6 +4019,10 @@ Chat (AI):
   chat                       Start interactive chat (REPL mode when stdin is a TTY)
   Options: --model <name>, -v/--verbose, -q/--quiet
 
+Goal (AI):
+  goal <text>                Drive the open page toward one goal with an evaluation model
+  Options: --max-steps <n>, --timeout <ms>, --eval-model <model>, --text-model <model>
+
 Dashboard:
   dashboard [start]          Start the dashboard server (default port: 4848)
   dashboard start --port <n> Start on a specific port
@@ -4169,8 +4222,10 @@ Environment:
   AGENT_BROWSER_SCREENSHOT_QUALITY JPEG quality 0-100
   AGENT_BROWSER_SCREENSHOT_FORMAT Screenshot format: png, jpeg
   AI_GATEWAY_URL                 Vercel AI Gateway base URL (default: https://ai-gateway.vercel.sh)
-  AI_GATEWAY_API_KEY             API key for the AI Gateway (enables chat command and dashboard AI chat)
+  AI_GATEWAY_API_KEY             API key for the AI Gateway (enables chat and goal commands and dashboard AI chat)
   AI_GATEWAY_MODEL               Default AI model (default: anthropic/claude-sonnet-4.6, or --model flag)
+  AGENT_BROWSER_GOAL_MODEL       Evaluation model for goal (default: typesafe-ai/jev, or --eval-model)
+  AGENT_BROWSER_GOAL_TEXT_MODEL  Text model for goal TYPE_TEXT (default: inception/mercury-2.5, or --text-model)
 
 Install:
   npm install -g agent-browser           # npm
@@ -4203,6 +4258,7 @@ Examples:
   agent-browser chat "open google.com and search for cats"  # AI chat (single-shot)
   agent-browser chat                                        # AI chat (interactive REPL)
   agent-browser -q chat "summarize this page"               # Quiet mode (text only)
+  agent-browser goal "Open the pricing page"                # Goal mode (evaluation model picks each action)
 
 Command Chaining:
   Chain commands with && in a single shell call (browser persists via daemon):

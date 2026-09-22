@@ -175,6 +175,7 @@ pub fn is_top_level_command(value: &str) -> bool {
             | "plugin"
             | "plugins"
             | "chat"
+            | "goal"
             | "webmcp"
     )
 }
@@ -1975,6 +1976,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             Ok(cmd)
         }
 
+        // === Goal (evaluation-model driven browsing; runs in the CLI, see goal.rs) ===
+        "goal" => parse_goal(&rest, &id),
+
         // === React (requires `open --enable react-devtools`) ===
         "react" => parse_react(&rest, &id),
 
@@ -2533,6 +2537,71 @@ fn parse_record_take(
     if let Some(threshold) = contact_sheet_threshold {
         cmd["contactSheetThreshold"] = json!(threshold);
     }
+    Ok(cmd)
+}
+
+const GOAL_USAGE: &str =
+    "goal <text> [--max-steps <n>] [--timeout <ms>] [--eval-model <model>] [--text-model <model>]";
+
+/// Parse `goal <text> [--max-steps n] [--timeout ms] [--eval-model m] [--text-model m]`.
+///
+/// Every word that is not one of the local flags belongs to the goal sentence,
+/// so both `goal "Open the pricing page"` and `goal Open the pricing page` work.
+fn parse_goal(rest: &[&str], id: &str) -> Result<Value, ParseError> {
+    let mut cmd = json!({ "id": id, "action": "goal" });
+    let mut goal_words: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        let arg = rest[i];
+        let value = |name: &str| -> Result<&str, ParseError> {
+            rest.get(i + 1)
+                .copied()
+                .ok_or_else(|| ParseError::MissingArguments {
+                    context: format!("goal {}", name),
+                    usage: GOAL_USAGE,
+                })
+        };
+        let number = |name: &str| -> Result<u64, ParseError> {
+            let raw = value(name)?;
+            raw.parse::<u64>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| ParseError::InvalidValue {
+                    message: format!("{} expects a positive number, got '{}'", name, raw),
+                    usage: GOAL_USAGE,
+                })
+        };
+        match arg {
+            "--max-steps" => {
+                cmd["maxSteps"] = json!(number("--max-steps")?);
+                i += 2;
+            }
+            "--timeout" => {
+                cmd["timeoutMs"] = json!(number("--timeout")?);
+                i += 2;
+            }
+            "--eval-model" => {
+                cmd["model"] = json!(value("--eval-model")?);
+                i += 2;
+            }
+            "--text-model" => {
+                cmd["textModel"] = json!(value("--text-model")?);
+                i += 2;
+            }
+            _ => {
+                goal_words.push(arg);
+                i += 1;
+            }
+        }
+    }
+    let goal = goal_words.join(" ").trim().to_string();
+    if goal.is_empty() {
+        return Err(ParseError::MissingArguments {
+            context: "goal".to_string(),
+            usage: GOAL_USAGE,
+        });
+    }
+    cmd["goal"] = json!(goal);
     Ok(cmd)
 }
 
