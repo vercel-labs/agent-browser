@@ -41,6 +41,9 @@ jobs:
       - name: Run launcher tests
         run: pnpm run test:launcher
 
+      - name: Run postinstall tests
+        run: pnpm run test:postinstall
+
   rust:
     name: Rust
     runs-on: ubuntu-latest

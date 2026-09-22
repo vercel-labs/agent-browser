@@ -31,6 +31,7 @@
     "release": "npm run version:sync && npm run build:all-platforms && npm publish",
     "postinstall": "node scripts/postinstall.js",
     "test:launcher": "node --test test/launcher.test.mjs",
+    "test:postinstall": "node --test test/postinstall.test.mjs",
     "build:dashboard": "cd packages/dashboard && pnpm build"
   },
   "keywords": [

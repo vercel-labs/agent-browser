@@ -59,6 +59,7 @@ async function downloadFile(url, dest) {
       get(url, (response) => {
         // Handle redirects
         if (response.statusCode === 301 || response.statusCode === 302) {
+          response.resume();
           request(response.headers.location);
           return;
         }
