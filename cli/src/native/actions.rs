@@ -357,6 +357,18 @@ fn launch_connection_is_external(
     launch_connection_identity(cdp_url, cdp_port, auto_connect, provider_name).0 != "local"
 }
 
+fn reusable_webdriver_launch(
+    state: &DaemonState,
+    provider_name: Option<&str>,
+    new_hash: u64,
+) -> bool {
+    state.webdriver_backend.is_some()
+        && state.launch_hash == Some(new_hash)
+        && provider_name.is_some_and(|provider| {
+            provider.eq_ignore_ascii_case("safari") || provider.eq_ignore_ascii_case("ios")
+        })
+}
+
 fn validate_ca_cert_launch_mode(
     options: &LaunchOptions,
     engine: Option<&str>,
@@ -5067,7 +5079,9 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
     // Hash comparison and fast process-exit check are evaluated before the
     // async is_connection_alive to skip the expensive CDP liveness probe
     // when a relaunch is already certain.
-    let needs_relaunch = if let Some(ref mut mgr) = state.browser {
+    let needs_relaunch = if reusable_webdriver_launch(state, provider_name, new_hash) {
+        false
+    } else if let Some(ref mut mgr) = state.browser {
         let is_external =
             launch_connection_is_external(cdp_url, cdp_port, auto_connect, provider_name);
         let was_external = mgr.is_cdp_connection();
@@ -5082,8 +5096,12 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         true
     };
 
-    let had_browser_before_launch =
-        state.browser.is_some() || state.active_provider_session.is_some();
+    let had_webdriver_before_launch = state.webdriver_backend.is_some()
+        || state.appium.is_some()
+        || state.safari_driver.is_some();
+    let had_browser_before_launch = state.browser.is_some()
+        || state.active_provider_session.is_some()
+        || had_webdriver_before_launch;
 
     if needs_relaunch {
         if local_launch {
@@ -5093,7 +5111,11 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         }
         if had_browser_before_launch {
             let _ = auto_save_restore_state(state).await;
-            close_current_browser(state).await?;
+            if had_webdriver_before_launch {
+                close_all_browser_backends(state).await?;
+            } else {
+                close_current_browser(state).await?;
+            }
         }
     } else {
         load_storage_state(state, &storage_state_owned).await?;
@@ -5186,6 +5208,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
             "ios" => {
                 let result = launch_ios(cmd, state).await;
                 if result.is_ok() {
+                    state.launch_hash = Some(new_hash);
                     state.effective_ca_cert = effective_ca_cert;
                 }
                 return result;
@@ -5193,6 +5216,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
             "safari" => {
                 let result = launch_safari(cmd, state).await;
                 if result.is_ok() {
+                    state.launch_hash = Some(new_hash);
                     state.effective_ca_cert = effective_ca_cert;
                 }
                 return result;
@@ -16288,6 +16312,71 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             launch_hash(&base, &[], &[], &[], &[], Some("chrome"), "local", None),
             launch_hash(&no_xvfb, &[], &[], &[], &[], Some("chrome"), "local", None)
         );
+    }
+
+    #[tokio::test]
+    async fn test_repeated_safari_launch_reuses_webdriver_session() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_CA_CERT",
+            "AGENT_BROWSER_ENGINE",
+            "AGENT_BROWSER_EXECUTABLE_PATH",
+            "AGENT_BROWSER_PROXY_PASSWORD",
+            "AGENT_BROWSER_PROXY_USERNAME",
+        ]);
+        for key in [
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_CA_CERT",
+            "AGENT_BROWSER_ENGINE",
+            "AGENT_BROWSER_EXECUTABLE_PATH",
+            "AGENT_BROWSER_PROXY_PASSWORD",
+            "AGENT_BROWSER_PROXY_USERNAME",
+        ] {
+            guard.remove(key);
+        }
+
+        let mut state = DaemonState::new();
+        state.backend_type = BackendType::WebDriver;
+        state.engine = "safari".to_string();
+        state.webdriver_backend = Some(WebDriverBackend::new(
+            crate::native::webdriver::client::WebDriverClient::new_with_session(
+                4444,
+                "existing-safari-session".to_string(),
+            ),
+        ));
+        let hash = launch_hash(
+            &LaunchOptions::default(),
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+            "provider",
+            Some("safari"),
+        );
+        state.launch_hash = Some(hash);
+        let cmd = json!({
+            "action": "launch",
+            "provider": "safari",
+            "headless": true,
+            "hideScrollbars": true,
+            "webgpu": false,
+            "webmcp": true,
+            "noXvfb": false,
+            "allowFileAccess": false,
+            "args": [],
+            "enable": [],
+            "initScripts": []
+        });
+
+        let result = handle_launch(&cmd, &mut state)
+            .await
+            .expect("the existing Safari session should be reused");
+
+        assert_eq!(result["reused"], true);
+        assert_eq!(result["relaunchedBrowser"], false);
+        assert!(state.webdriver_backend.is_some());
+        assert_eq!(state.launch_hash, Some(hash));
     }
 
     #[test]
