@@ -1831,7 +1831,7 @@ impl BrowserManager {
                 if let Some(window_id) = window_info.get("windowId").and_then(|v| v.as_i64()) {
                     if let Err(e) = self
                         .client
-                        .send_command(
+                        .send_command_no_wait(
                             "Browser.setContentsSize",
                             Some(json!({
                                 "windowId": window_id,
