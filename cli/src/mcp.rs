@@ -2530,6 +2530,9 @@ fn open_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     args.push("open".to_string());
     if let Some(url) = optional_string(arguments, "url")? {
         if !url.is_empty() {
+            if url.starts_with('-') {
+                args.push("--".to_string());
+            }
             args.push(url);
         }
     }
@@ -2810,11 +2813,16 @@ fn screenshot_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolErr
     }
 
     args.push("screenshot".to_string());
-    if let Some(selector) = optional_string(arguments, "selector")? {
-        args.push(selector);
-    }
-    if let Some(path) = optional_string(arguments, "path")? {
-        args.push(path);
+    let positionals: Vec<String> = [
+        optional_string(arguments, "selector")?,
+        optional_string(arguments, "path")?,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let needs_separator = positionals.iter().any(|value| value.starts_with('-'));
+    if !needs_separator {
+        args.extend(positionals.iter().cloned());
     }
     if optional_bool(arguments, "fullPage")?.unwrap_or(false) {
         args.push("--full".to_string());
@@ -2825,6 +2833,10 @@ fn screenshot_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolErr
     if let Some(threshold) = optional_number_string(arguments, "threshold")? {
         args.push("--threshold".to_string());
         args.push(threshold);
+    }
+    if needs_separator {
+        args.push("--".to_string());
+        args.extend(positionals);
     }
     Ok(args)
 }
@@ -4157,6 +4169,27 @@ fn write_json_line(stdout: &mut io::Stdout, value: &Value) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dash_prefixed_navigation_and_screenshot_inputs_use_cli_separator() {
+        let open = open_args(&json!({"url": "-example.com"})).unwrap();
+        let flags = crate::flags::parse_flags(&open);
+        let command =
+            crate::commands::parse_command(&crate::flags::clean_args(&open), &flags).unwrap();
+        assert_eq!(command["url"], "https://-example.com");
+
+        let args = screenshot_command_args(&json!({
+            "path": "--full-page", "fullPage": true, "threshold": 0.1
+        }))
+        .unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        let command =
+            crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+        assert_eq!(command["path"], "--full-page");
+        assert_eq!(command["fullPage"], true);
+        assert_eq!(command["ifChanged"], true);
+        assert_eq!(command["threshold"], 0.1);
+    }
+
     #[test]
     fn recording_timeline_options_use_cli_parser() {
         for operation in ["start", "restart"] {
