@@ -109,7 +109,7 @@ agent-browser record start ./checkout.webm --contact-sheet
 agent-browser record start ./checkout.webm --contact-sheet-threshold 0.02
 ```
 
-The threshold accepts values from `0` to `1` and defaults to `0.05`. Passing `--contact-sheet-threshold` implies `--contact-sheet`. At most 100 frames are included.
+The threshold accepts values from `0` to `1` and defaults to `0.05`. Passing `--contact-sheet-threshold` implies `--contact-sheet`. Candidate frames are sampled at the rate set by `--fps`. At rates below 60 fps, brief UI states between samples may not appear. The final captured frame is always considered. At most 100 frames are included.
 
 ## Use Cases
 

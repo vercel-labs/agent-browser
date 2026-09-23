@@ -386,7 +386,7 @@ agent-browser click @e3
 agent-browser record stop
 ```
 
-Recording uses the active tab. Use `--cursor` for an animated pointer, `--contact-sheet` for a visual summary, and `--fps 60` for motion-heavy recordings. The cursor renders with the page so drags stay synchronized. Its inert overlay is hidden from accessibility snapshots, included in screenshots while recording, and removed on stop.
+Recording uses the active tab. Use `--cursor` for an animated pointer, `--contact-sheet` for a visual summary, and `--fps 60` for motion-heavy recordings. The cursor renders with the page so drags stay synchronized. Its inert overlay is hidden from accessibility snapshots, included in screenshots while recording, and removed on stop. Contact sheets sample candidate frames at the rate set by `--fps`. At rates below 60 fps, brief UI states between samples may not appear. The final captured frame is always considered.
 
 See [references/video-recording.md](references/video-recording.md) for frame rate guidance, codec options, and more.
 

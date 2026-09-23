@@ -2942,6 +2942,10 @@ With --cursor, an inert overlay renders the pointer and page together so
 drags stay synchronized. It is hidden from accessibility snapshots and
 removed on stop. Screenshots taken while recording include the overlay.
 
+Contact sheets sample candidates at the requested recording rate. At rates
+below 60 fps, brief UI states between samples may not appear; the final
+captured frame is always considered.
+
 Operations:
   start <path> [url]     Start recording the active page (navigates first if url given)
   stop                   Stop recording and save video
