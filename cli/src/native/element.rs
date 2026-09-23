@@ -394,6 +394,71 @@ async fn resolve_object_in_same_process_frame(
         .ok_or_else(|| format!("Element not found in the selected frame: {}", selector))
 }
 
+/// Rounds of "wait two frames, measure again" before giving up on an element
+/// settling and using its latest position.
+const MAX_STABILITY_CHECKS: usize = 5;
+
+/// Pages react to a scroll a frame or more after it happens: a sticky header
+/// or a collapsing table of contents observes the scroll and reflows the
+/// content under it. Measuring straight after `resolve_element_center`
+/// scrolls can therefore return a point the element leaves before the input
+/// arrives, and the click lands on whatever moved there instead. So measure
+/// again after two animation frames and repeat until the point holds still.
+/// An element that never settles (an infinite animation) is clicked at its
+/// latest position, as before.
+pub async fn resolve_stable_element_center(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(f64, f64, String), String> {
+    let mut previous = resolve_element_center(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+    for _ in 0..MAX_STABILITY_CHECKS {
+        wait_for_two_frames(client, &previous.2).await;
+        let current = resolve_element_center(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            iframe_sessions,
+        )
+        .await?;
+        let settled = current.2 == previous.2
+            && (current.0 - previous.0).abs() < 0.5
+            && (current.1 - previous.1).abs() < 0.5;
+        previous = current;
+        if settled {
+            break;
+        }
+    }
+    Ok(previous)
+}
+
+/// Two animation frames is how long a scroll-driven observer takes to run and
+/// its layout to land. A page that is not rendering (a background tab) never
+/// fires `requestAnimationFrame`, so a timer bounds the wait.
+async fn wait_for_two_frames(client: &CdpClient, session_id: &str) {
+    let _ = client
+        .send_command(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": "new Promise((resolve) => { requestAnimationFrame(() => requestAnimationFrame(resolve)); setTimeout(resolve, 100); })",
+                "awaitPromise": true,
+                "returnByValue": true,
+            })),
+            Some(session_id),
+        )
+        .await;
+}
+
 pub async fn resolve_element_center(
     client: &CdpClient,
     session_id: &str,
