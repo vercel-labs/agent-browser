@@ -19,7 +19,12 @@ use tokio_tungstenite::Connector;
 
 use super::types::{CdpCommand, CdpError, CdpEvent, CdpMessage};
 
-type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<CdpMessage>>>>;
+struct PendingCommand {
+    session_id: Option<String>,
+    tx: oneshot::Sender<CdpMessage>,
+}
+
+type PendingMap = Arc<Mutex<HashMap<u64, PendingCommand>>>;
 type WsTx = Arc<
     Mutex<
         futures_util::stream::SplitSink<
@@ -320,8 +325,8 @@ impl CdpClient {
                             Err(error) => {
                                 if let Some(id) = extract_command_id(candidate) {
                                     let waiter = pending_clone.lock().await.remove(&id);
-                                    if let Some(tx) = waiter {
-                                        let _ = tx.send(CdpMessage {
+                                    if let Some(waiter) = waiter {
+                                        let _ = waiter.tx.send(CdpMessage {
                                             id: Some(id),
                                             result: None,
                                             error: Some(CdpError {
@@ -347,8 +352,8 @@ impl CdpClient {
                 if let Some(id) = parsed.id {
                     // Response to a command
                     let mut pending = pending_clone.lock().await;
-                    if let Some(tx) = pending.remove(&id) {
-                        let _ = tx.send(parsed);
+                    if let Some(waiter) = pending.remove(&id) {
+                        let _ = waiter.tx.send(parsed);
                     }
                 } else if let Some(ref method) = parsed.method {
                     // Event
@@ -357,6 +362,37 @@ impl CdpClient {
                         params: parsed.params.clone().unwrap_or(Value::Null),
                         session_id: parsed.session_id.clone(),
                     };
+                    if method == "Target.detachedFromTarget" {
+                        if let Some(session_id) = event.params["sessionId"].as_str() {
+                            let mut pending = pending_clone.lock().await;
+                            let detached_ids: Vec<u64> = pending
+                                .iter()
+                                .filter_map(|(id, command)| {
+                                    (command.session_id.as_deref() == Some(session_id))
+                                        .then_some(*id)
+                                })
+                                .collect();
+                            for id in detached_ids {
+                                if let Some(command) = pending.remove(&id) {
+                                    let _ = command.tx.send(CdpMessage {
+                                        id: Some(id),
+                                        result: None,
+                                        error: Some(CdpError {
+                                            code: None,
+                                            message: format!(
+                                                "Target closed: session {} detached",
+                                                session_id
+                                            ),
+                                            data: None,
+                                        }),
+                                        method: None,
+                                        params: None,
+                                        session_id: Some(session_id.to_string()),
+                                    });
+                                }
+                            }
+                        }
+                    }
                     let routed = event.session_id.as_deref().is_some_and(|sid| {
                         let mut routes = private_clone.lock().unwrap_or_else(|e| e.into_inner());
                         match routes.get(sid) {
@@ -495,7 +531,13 @@ impl CdpClient {
             let mut ws_tx = self.ws_tx.lock().await;
             self.ensure_open()?;
             let mut pending = self.pending.lock().await;
-            pending.insert(id, tx);
+            pending.insert(
+                id,
+                PendingCommand {
+                    session_id: cmd.session_id.clone(),
+                    tx,
+                },
+            );
             drop(pending);
             if let Err(error) = ws_tx.send(Message::Text(json)).await {
                 self.pending.lock().await.remove(&id);
@@ -864,6 +906,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["value"], "still-open");
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn detached_session_releases_its_pending_commands() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let first = ws.next().await.unwrap().unwrap().into_text().unwrap();
+            let second = ws.next().await.unwrap().unwrap().into_text().unwrap();
+            let commands: Vec<Value> = [first, second]
+                .iter()
+                .map(|command| serde_json::from_str(command).unwrap())
+                .collect();
+            let other = commands
+                .iter()
+                .find(|command| command["sessionId"] == "S-OTHER")
+                .unwrap();
+            ws.send(Message::Text(
+                json!({
+                    "method": "Target.detachedFromTarget",
+                    "params": { "sessionId": "S-PAGE" }
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            ws.send(Message::Text(
+                json!({"id": other["id"], "result": {"value": "still-open"}}).to_string(),
+            ))
+            .await
+            .unwrap();
+            let _ = ws.next().await;
+        });
+
+        let client = Arc::new(CdpClient::connect(&url).await.unwrap());
+        let detached_client = client.clone();
+        let detached = tokio::spawn(async move {
+            detached_client
+                .send_command_no_params("Runtime.evaluate", Some("S-PAGE"))
+                .await
+        });
+        let other_client = client.clone();
+        let other = tokio::spawn(async move {
+            other_client
+                .send_command_no_params("Runtime.evaluate", Some("S-OTHER"))
+                .await
+        });
+        let error = tokio::time::timeout(Duration::from_secs(1), detached)
+            .await
+            .expect("detached session should release the command immediately")
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("Target closed: session S-PAGE detached"), "{error}");
+        let result = tokio::time::timeout(Duration::from_secs(1), other)
+            .await
+            .expect("another session's pending command should remain active")
+            .unwrap()
+            .unwrap();
+        assert_eq!(result["value"], "still-open");
+        assert_eq!(client.pending_len().await, 0);
 
         client.close().await;
         server.await.unwrap();
