@@ -48,7 +48,7 @@ test("deployment explicitly uses Corepack for frozen installs and builds", async
 });
 
 test("baseline pins all 38 routes and the original metadata, slugger and converter sources", () => {
-  assert.equal(baseline.commit, "aff6125c023b810ea3f2e5deec5379e9a4270bdc");
+  assert.equal(baseline.commit, "d01253d9db28d75080e36da3c1c31ef89454731e");
   assert.equal(pages.length, 38);
   assert.equal(new Set(pages.map((page) => page.path)).size, 38);
   for (const path of [

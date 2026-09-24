@@ -2,7 +2,7 @@
 
 ## Fixture provenance
 
-`fixtures/docs-baseline.json` is pinned to `aff6125c023b810ea3f2e5deec5379e9a4270bdc`. The capture script reads git objects at that commit, not migrated application code or content. It preserves all 38 original `docs/src/app/**/page.mdx` files, their layouts, root metadata, `mdx-components.tsx`, `page-metadata.ts`, `page-titles.ts`, navigation, search implementation, and `mdx-to-markdown.ts`: 84 complete source files with SHA-256 hashes. Public resources and favicon are pinned by byte length and SHA-256.
+`fixtures/docs-baseline.json` is pinned to `d01253d9db28d75080e36da3c1c31ef89454731e`. The capture script reads git objects at that commit, not migrated application code or content. It preserves all 38 original `docs/src/app/**/page.mdx` files, their layouts, root metadata, `mdx-components.tsx`, `page-metadata.ts`, `page-titles.ts`, navigation, search implementation, and `mdx-to-markdown.ts`: 84 complete source files with SHA-256 hashes. Public resources and favicon are pinned by byte length and SHA-256.
 
 Each page records its complete source hash, original H1 insertion position, metadata, heading levels/text/IDs, prose paragraphs, table cells, code examples, links, legacy Markdown and new Markdown derived from the original source. The H1 insertion position preserves imports before the title, as on `/diffing`.
 
