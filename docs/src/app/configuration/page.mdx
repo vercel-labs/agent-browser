@@ -266,7 +266,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_PROXY_PASSWORD</code></td><td>Proxy password when credentials are supplied separately.</td><td>(none)</td></tr>
     <tr><td><code>HTTP_PROXY</code> / <code>HTTPS_PROXY</code> / <code>ALL_PROXY</code></td><td>Standard proxy fallback variables.</td><td>(none)</td></tr>
     <tr><td><code>NO_PROXY</code></td><td>Standard proxy bypass fallback.</td><td>(none)</td></tr>
-    <tr><td><code>AGENT_BROWSER_ARGS</code></td><td>Comma or newline separated browser launch arguments.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_ARGS</code></td><td>Comma or newline separated browser launch arguments. Repeated <code>--disable-features</code> entries merge with the built-in <code>Translate</code> opt-out. On Linux, a custom <code>--use-angle</code> that conflicts with <code>--webgpu</code> causes a launch error.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_USER_AGENT</code></td><td>Custom User-Agent string.</td><td>(browser default)</td></tr>
     <tr><td><code>AGENT_BROWSER_PROVIDER</code></td><td>Browser provider such as <code>ios</code>, <code>browserbase</code>, <code>kernel</code>, <code>browseruse</code>, <code>browserless</code>, <code>agentcore</code>, or a configured <code>browser.provider</code> plugin name.</td><td>(local browser)</td></tr>
     <tr><td><code>AGENT_BROWSER_HIDE_SCROLLBARS</code></td><td>Hide native scrollbars in headless Chromium screenshots.</td><td><code>true</code></td></tr>

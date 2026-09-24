@@ -429,7 +429,27 @@ struct ChromeArgs {
     temp_user_data_dir: Option<PathBuf>,
 }
 
+/// Reject an ANGLE override that would silently replace the Linux WebGPU
+/// preset's backend. This is pure so callers can check final plugin-mutated
+/// options before closing an existing browser for a relaunch.
+pub(crate) fn validate_webgpu_angle_args(options: &LaunchOptions) -> Result<(), String> {
+    if options.webgpu && cfg!(target_os = "linux") {
+        for arg in &options.args {
+            if (arg == "--use-angle" || arg.starts_with("--use-angle="))
+                && arg != "--use-angle=vulkan"
+            {
+                return Err(format!(
+                    "Cannot use --webgpu with {} on Linux: the WebGPU preset requires --use-angle=vulkan. Remove the custom ANGLE switch or pass --webgpu false",
+                    arg
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
+    validate_webgpu_angle_args(options)?;
     // Chrome only honors the last --enable-features switch on the command
     // line, so every feature must be collected into a single flag.
     let mut enable_features: Vec<String> = vec![
@@ -444,11 +464,10 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         enable_features.push("Vulkan".to_string());
     }
 
-    // User-supplied --enable-features values are merged into that single
-    // flag too: appending them as a second switch would silently clobber
-    // the preset's features (e.g. drop the WebGPU preset's Vulkan). To turn
-    // a preset feature off, pass --disable-features=<name>, which Chrome
-    // resolves as disabled.
+    // Chrome honors only the last switch of each feature list. Merge user
+    // entries with the built-in lists so they cannot silently replace a
+    // preset feature or the default Translate opt-out.
+    let mut disable_features = vec!["Translate".to_string()];
     let mut user_args: Vec<String> = Vec::new();
     for arg in &options.args {
         if let Some(values) = arg.strip_prefix("--enable-features=") {
@@ -457,6 +476,17 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
                     enable_features.push(feature.to_string());
                 }
             }
+        } else if let Some(values) = arg.strip_prefix("--disable-features=") {
+            for feature in values.split(',').map(str::trim).filter(|f| !f.is_empty()) {
+                if !disable_features.iter().any(|f| f == feature) {
+                    disable_features.push(feature.to_string());
+                }
+            }
+        } else if options.webgpu
+            && cfg!(target_os = "linux")
+            && (arg == "--use-angle" || arg.starts_with("--use-angle="))
+        {
+            // The matching explicit switch is already supplied by the preset.
         } else {
             user_args.push(arg.clone());
         }
@@ -474,7 +504,7 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "--disable-popup-blocking".to_string(),
         "--disable-prompt-on-repost".to_string(),
         "--disable-sync".to_string(),
-        "--disable-features=Translate".to_string(),
+        format!("--disable-features={}", disable_features.join(",")),
         format!("--enable-features={}", enable_features.join(",")),
         "--metrics-recording-only".to_string(),
     ];
@@ -486,9 +516,10 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         if cfg!(target_os = "linux") {
             // Route WebGPU through SwiftShader's software Vulkan and disable
             // Vulkan surface presentation (software compositing). This
-            // combination produces real pixels in GPU-less containers and CI;
-            // hardware-Vulkan users can override via --args (later switches
-            // win). macOS and Windows use the hardware Metal/D3D backends.
+            // combination produces real pixels in GPU-less containers and CI.
+            // A conflicting user --use-angle is rejected above; users can
+            // still select a native Vulkan driver and WebGPU adapter via
+            // --args. macOS and Windows use hardware Metal/D3D backends.
             args.push("--use-angle=vulkan".to_string());
             args.push("--use-vulkan=swiftshader".to_string());
             args.push("--use-webgpu-adapter=swiftshader".to_string());
@@ -2067,6 +2098,81 @@ mod tests {
             .args
             .iter()
             .any(|a| a.contains("--disable-features") && a.contains("Translate")));
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_merges_user_disabled_features_with_translate() {
+        let opts = LaunchOptions {
+            args: vec![
+                "--disable-features=Foo".to_string(),
+                "--some-other-flag".to_string(),
+                "--disable-features=Bar,Translate".to_string(),
+            ],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        let disabled: Vec<&str> = result
+            .args
+            .iter()
+            .filter(|arg| arg.starts_with("--disable-features="))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(disabled, vec!["--disable-features=Translate,Foo,Bar"]);
+        assert!(result.args.iter().any(|arg| arg == "--some-other-flag"));
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_build_args_webgpu_rejects_conflicting_angle_backend() {
+        let opts = LaunchOptions {
+            webgpu: true,
+            args: vec!["--use-angle=swiftshader".to_string()],
+            ..Default::default()
+        };
+        let error = build_chrome_args(&opts).err().expect("conflict must fail");
+        assert!(error.contains("--use-angle=swiftshader"));
+        assert!(error.contains("--webgpu"));
+        assert!(error.contains("--use-angle=vulkan"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_build_args_webgpu_allows_matching_angle_backend_once() {
+        let opts = LaunchOptions {
+            webgpu: true,
+            args: vec!["--use-angle=vulkan".to_string()],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        let angle: Vec<&str> = result
+            .args
+            .iter()
+            .filter(|arg| arg.starts_with("--use-angle="))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(angle, vec!["--use-angle=vulkan"]);
+        if let Some(ref dir) = result.temp_user_data_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_build_args_allows_custom_angle_without_webgpu() {
+        let opts = LaunchOptions {
+            args: vec!["--use-angle=swiftshader".to_string()],
+            ..Default::default()
+        };
+        let result = build_chrome_args(&opts).unwrap();
+        assert!(result
+            .args
+            .iter()
+            .any(|arg| arg == "--use-angle=swiftshader"));
         if let Some(ref dir) = result.temp_user_data_dir {
             let _ = std::fs::remove_dir_all(dir);
         }

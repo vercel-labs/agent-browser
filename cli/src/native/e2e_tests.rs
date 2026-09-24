@@ -7168,6 +7168,53 @@ async fn e2e_relaunch_on_options_change() {
     assert_success(&resp);
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore]
+async fn e2e_webgpu_angle_conflict_preserves_running_browser() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<title>original-session</title>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "launch",
+            "headless": true,
+            "webgpu": true,
+            "args": ["--use-angle=swiftshader"]
+        }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false);
+    assert!(resp["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("--use-angle=swiftshader")));
+    assert!(
+        state.browser.is_some(),
+        "rejected launch must keep the browser"
+    );
+
+    let resp = execute_command(&json!({ "id": "4", "action": "title" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["title"], "original-session");
+
+    let resp = execute_command(&json!({ "id": "5", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Stream: URL events follow active main-frame navigation
 // ---------------------------------------------------------------------------

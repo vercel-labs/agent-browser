@@ -16,7 +16,7 @@ use crate::validation::{is_valid_session_name, session_name_error};
 use super::a11y;
 use super::auth;
 use super::browser::{should_track_target, BrowserManager, WaitUntil};
-use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
+use super::cdp::chrome::{prepare_nss_home, validate_webgpu_angle_args, LaunchOptions};
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AttachToTargetParams, AttachToTargetResult, CdpEvent, DispatchMouseEventParams,
@@ -4053,13 +4053,40 @@ async fn auto_launch_inner(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
 ) -> Result<(), String> {
+    let mut options = launch_options_from_env();
+    let engine = env::var("AGENT_BROWSER_ENGINE").ok();
+    let cdp = env::var("AGENT_BROWSER_CDP").ok();
+    let auto_connect = env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok();
+    let provider = env::var("AGENT_BROWSER_PROVIDER").ok();
+    let local_chrome = cdp.is_none()
+        && !auto_connect
+        && provider.as_deref().is_none_or(|p| {
+            p.is_empty() || p.eq_ignore_ascii_case("ios") || p.eq_ignore_ascii_case("safari")
+        })
+        && engine.as_deref().unwrap_or("chrome") == "chrome";
+    let preflight_webgpu = local_chrome && options.webgpu && cfg!(target_os = "linux");
+    if preflight_webgpu {
+        // A failed implicit relaunch must not discard a usable browser. Run
+        // plugins once so this checks their final args before closing it.
+        let previous_scripts = std::mem::take(&mut state.plugin_init_scripts);
+        if let Err(error) = apply_launch_mutator_plugins(state, &mut options, plugins.clone()).await
+        {
+            state.plugin_init_scripts = previous_scripts;
+            return Err(error);
+        }
+        if let Err(error) = validate_webgpu_angle_args(&options) {
+            state.plugin_init_scripts = previous_scripts;
+            return Err(error);
+        }
+    }
     if has_active_browser_session(state) {
         close_before_implicit_relaunch(state).await?;
     }
-    let mut options = launch_options_from_env();
     let effective_ca_cert = state.effective_ca_cert.clone();
     apply_effective_ca_cert(&mut options, &effective_ca_cert);
-    state.plugin_init_scripts.clear();
+    if !preflight_webgpu {
+        state.plugin_init_scripts.clear();
+    }
     state.session_setup = SessionSetup::default();
 
     // Use the stream server's viewport dimensions for --window-size so the
@@ -4067,10 +4094,6 @@ async fn auto_launch_inner(
     if let Some(ref server) = state.stream_server {
         options.viewport_size = Some(server.viewport().await);
     }
-    let engine = env::var("AGENT_BROWSER_ENGINE").ok();
-    let cdp = env::var("AGENT_BROWSER_CDP").ok();
-    let auto_connect = env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok();
-    let provider = env::var("AGENT_BROWSER_PROVIDER").ok();
     validate_ca_cert_launch_mode(
         &options,
         engine.as_deref(),
@@ -4259,7 +4282,9 @@ async fn auto_launch_inner(
         storage_state,
     })?;
 
-    apply_launch_mutator_plugins(state, &mut options, plugins).await?;
+    if !preflight_webgpu {
+        apply_launch_mutator_plugins(state, &mut options, plugins).await?;
+    }
     validate_ca_cert_launch_mode(&options, engine.as_deref(), false)?;
     ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
         allowed_domains: &allowed_domains,
@@ -5022,6 +5047,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         cdp_url.is_some() || cdp_port.is_some() || auto_connect || provider_name.is_some();
     validate_ca_cert_launch_mode(&launch_options, engine.as_deref(), external_launch)?;
 
+    let previous_plugin_init_scripts = state.plugin_init_scripts.clone();
     state.plugin_init_scripts.clear();
     let local_launch =
         cdp_url.is_none() && cdp_port.is_none() && !auto_connect && provider_name.is_none();
@@ -5029,6 +5055,12 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         apply_launch_mutator_plugins(state, &mut launch_options, plugins_from_command_or_env(cmd))
             .await?;
         validate_ca_cert_launch_mode(&launch_options, engine.as_deref(), false)?;
+        if engine.as_deref().unwrap_or("chrome") == "chrome" {
+            if let Err(error) = validate_webgpu_angle_args(&launch_options) {
+                state.plugin_init_scripts = previous_plugin_init_scripts;
+                return Err(error);
+            }
+        }
     }
     ensure_allowed_domains_supported_for_launch(AllowedDomainsLaunchSupport {
         allowed_domains: &allowed_domains,
@@ -17010,6 +17042,124 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"launch":{"arg
             state.browser.is_none(),
             "plugin args should be rejected before launching Chrome"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_webgpu_rejects_angle_added_by_launch_plugin() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_path = dir.path().join("angle-mutator");
+        fs::write(
+            &plugin_path,
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"launch":{"args":["--use-angle=swiftshader"]}}'
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&plugin_path, perms).unwrap();
+
+        let mut state = DaemonState::new();
+        state.plugin_init_scripts = vec!["previous-script".to_string()];
+        let error = handle_launch(
+            &json!({
+                "action": "launch",
+                "webgpu": true,
+                "plugins": [{
+                    "name": "angle-mutator",
+                    "command": plugin_path.to_string_lossy(),
+                    "capabilities": ["launch.mutate"]
+                }]
+            }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("--use-angle=swiftshader"), "got: {error}");
+        assert!(state.browser.is_none());
+        assert_eq!(state.plugin_init_scripts, vec!["previous-script"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_auto_launch_webgpu_angle_conflict_preserves_browser() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_WEBGPU",
+            "AGENT_BROWSER_ARGS",
+            "AGENT_BROWSER_PROVIDER",
+            "AGENT_BROWSER_CDP",
+            "AGENT_BROWSER_AUTO_CONNECT",
+        ]);
+        guard.remove("AGENT_BROWSER_WEBGPU");
+        guard.remove("AGENT_BROWSER_ARGS");
+        guard.remove("AGENT_BROWSER_PROVIDER");
+        guard.remove("AGENT_BROWSER_CDP");
+        guard.remove("AGENT_BROWSER_AUTO_CONNECT");
+
+        let mut state = DaemonState::new();
+        handle_launch(&json!({"action": "launch", "headless": true}), &mut state)
+            .await
+            .expect("initial browser should launch");
+        handle_navigate(
+            &json!({"action": "navigate", "url": "data:text/html,<title>original-session</title>"}),
+            &mut state,
+        )
+        .await
+        .expect("initial page should navigate");
+
+        guard.set("AGENT_BROWSER_WEBGPU", "1");
+        guard.set("AGENT_BROWSER_ARGS", "--use-angle=swiftshader");
+        let error = auto_launch(&mut state, Vec::new()).await.unwrap_err();
+        assert!(error.contains("--use-angle=swiftshader"), "got: {error}");
+        assert!(
+            state.browser.is_some(),
+            "rejected launch must keep the browser"
+        );
+        assert_eq!(
+            handle_title(&state).await.unwrap()["title"],
+            "original-session"
+        );
+
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_path = dir.path().join("init-script-mutator");
+        fs::write(
+            &plugin_path,
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"launch":{"initScripts":["window.__newScript = true;"]}}'
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&plugin_path, perms).unwrap();
+        state.plugin_init_scripts = vec!["previous-script".to_string()];
+        guard.remove("AGENT_BROWSER_ARGS");
+        auto_launch(
+            &mut state,
+            vec![crate::plugins::PluginConfig {
+                name: "init-script-mutator".to_string(),
+                command: plugin_path.to_string_lossy().to_string(),
+                capabilities: vec!["launch.mutate".to_string()],
+                ..Default::default()
+            }],
+        )
+        .await
+        .expect("valid WebGPU launch should replace the browser");
+        assert!(state.browser.is_some());
+        assert_eq!(
+            state.plugin_init_scripts,
+            vec!["window.__newScript = true;"]
+        );
+
+        close_current_browser(&mut state).await.unwrap();
     }
 
     #[cfg(unix)]

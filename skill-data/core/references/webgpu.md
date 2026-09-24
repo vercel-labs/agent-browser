@@ -15,6 +15,8 @@ agent-browser screenshot app.png
 - everywhere: `--enable-unsafe-webgpu` (WebGPU is hidden in headless/blocklisted environments by default)
 - Linux only: `--enable-features=Vulkan --use-angle=vulkan --use-vulkan=swiftshader --use-webgpu-adapter=swiftshader --disable-vulkan-surface` — routes WebGPU through SwiftShader's software Vulkan, so it works with no GPU (containers, CI)
 
+On Linux, a custom `--use-angle` with a different backend conflicts with `--webgpu` and produces a launch error. The matching `--use-angle=vulkan` is accepted. Remove the custom switch to use the preset or pass `--webgpu false` to choose another ANGLE backend. Repeated user `--disable-features` switches merge with the built-in `Translate` opt-out, including when supplied through `AGENT_BROWSER_ARGS`.
+
 macOS uses the hardware Metal backend; Windows uses D3D. Nothing extra to install on either.
 
 ## Platform matrix (verified)
