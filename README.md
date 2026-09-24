@@ -1920,7 +1920,7 @@ Get your API key from the [Browserbase Dashboard](https://browserbase.com/overvi
 
 ### Browser Use
 
-[Browser Use](https://browser-use.com) provides cloud browser infrastructure for AI agents. Use it when running agent-browser in environments where a local browser isn't available (serverless, CI/CD, etc.).
+[Browser Use](https://browser-use.com) is an open-source browser automation project for AI agents with [over 100,000 GitHub stars](https://github.com/browser-use/browser-use), plus a managed Cloud browser service. Browser Use Cloud is useful when running agent-browser in environments where a local browser isn't available, such as serverless and CI environments.
 
 To enable Browser Use, use the `-p` flag:
 
@@ -1937,9 +1937,32 @@ export BROWSER_USE_API_KEY="your-api-key"
 agent-browser open https://example.com
 ```
 
-When enabled, agent-browser connects to a Browser Use cloud session instead of launching a local browser. All commands work identically.
+Optional Browser Use Cloud settings:
 
-Get your API key from the [Browser Use Cloud Dashboard](https://cloud.browser-use.com/settings?tab=api-keys). Free credits are available to get started, with pay-as-you-go pricing after.
+| Variable                       | Description                                                |
+| ------------------------------ | ---------------------------------------------------------- |
+| `BROWSER_USE_PROFILE_ID`       | Profile UUID for persistent cookies and logins             |
+| `BROWSER_USE_PROXY_COUNTRY`    | Managed proxy country, or `none`/`direct` to disable proxy |
+| `BROWSER_USE_ENABLE_RECORDING` | Record the Cloud browser session                           |
+
+```bash
+export BROWSER_USE_PROFILE_ID="your-profile-uuid"
+export BROWSER_USE_PROXY_COUNTRY="de"
+export BROWSER_USE_ENABLE_RECORDING="true"
+agent-browser -p browseruse open https://example.com
+```
+
+When enabled, agent-browser creates a Browser Use Cloud V4 session and connects to its CDP endpoint. Browser Use setup is limited to 18 seconds, with up to 4 more seconds for cleanup if setup times out. Within setup, creation waits up to 10 seconds and CDP attachment up to 8 seconds; each stop request waits up to 4 seconds. Navigation and other page commands keep their existing timeouts. If creation fails before a browser id is returned, the outcome is unknown; inspect the Browser Use Cloud dashboard before retrying, since a browser may still have been created.
+
+The Cloud browser stays active between commands. Run `agent-browser close` when the task finishes. The daemon also attempts cleanup on exit, including its default one-hour idle timeout; a failed stop can leave the Cloud browser running.
+
+`close` succeeds only after Browser Use acknowledges the browser as stopped. On a failed stop, `close` returns an error and keeps the session id, so running `agent-browser close` again retries the same browser, and a new launch is blocked until the pending browser is released.
+
+If the daemon exits before a stop succeeds, inspect the Browser Use Cloud dashboard and stop the browser there.
+
+If a stop keeps returning 404, verify the browser status in Browser Use Cloud. After confirming it has stopped, use a new `--session` name to continue; agent-browser does not treat 404 as proof of a successful stop.
+
+Get your API key from the [Browser Use Cloud Dashboard](https://cloud.browser-use.com/settings?tab=api-keys).
 
 ### Kernel
 
