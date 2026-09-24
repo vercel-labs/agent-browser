@@ -182,6 +182,18 @@ fn platform_key() -> &'static str {
     }
 }
 
+fn macos_version() -> Option<(u32, u32)> {
+    let output = Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+        .ok()?;
+    let version_str = String::from_utf8_lossy(&output.stdout);
+    let mut parts = version_str.trim().split('.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    Some((major, minor))
+}
+
 async fn fetch_download_url() -> Result<(String, String), String> {
     let client = http_client()?;
     let resp = client
@@ -207,6 +219,19 @@ async fn fetch_download_url() -> Result<(String, String), String> {
         .to_string();
 
     let platform = platform_key();
+
+    if platform == "mac-arm64" || platform == "mac-x64" {
+        if let Some((major, minor)) = macos_version() {
+            if major < 13 {
+                return Err(format!(
+                    "Chrome for Testing builds require macOS 13 or later (you have macOS {}.{}). \
+                    Please upgrade macOS, or install Chrome manually from https://dl.google.com/chrome/mac/.",
+                    major,
+                    minor
+                ));
+            }
+        }
+    }
 
     let url = channel
         .get("downloads")
@@ -1063,5 +1088,19 @@ mod tests {
             "expected 'connection refused' in error, got: {}",
             err
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_version_returns_some_on_macos() {
+        assert!(macos_version().is_some());
+        let (major, _minor) = macos_version().unwrap();
+        assert!(major >= 11, "expected macOS 11+, got {}", major);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn macos_version_returns_none_on_non_macos() {
+        assert!(macos_version().is_none());
     }
 }
