@@ -22,7 +22,7 @@ When adding or changing user-facing features (new flags, commands, behaviors, en
 1. `cli/src/output.rs` — `--help` output (flags list, examples, environment variables)
 2. `README.md` — Options table, relevant feature sections, examples
 3. `skill-data/core/SKILL.md` (and its `references/`) — so AI agents know about the feature when they load the core skill. Edit `skill-data/core/SKILL.md` for overview/workflow changes; edit `skill-data/core/references/*.md` for detailed reference content. Do **not** put feature content in `skills/agent-browser/SKILL.md` — that file is an intentionally thin discovery stub for `npx skills add` and exists only to redirect agents to `agent-browser skills get core`.
-4. `docs/src/app/` — the Next.js docs site (MDX pages)
+4. `docs/content/docs/` — the Geistdocs site (MDX pages); routing and API handlers live in `docs/src/app/`
 5. Inline doc comments in the relevant source files
 
 This applies to changes that either human users or AI agents would need to know about. Do not skip any of these locations.
@@ -31,7 +31,11 @@ This applies to changes that either human users or AI agents would need to know 
 
 When adding or changing any CLI command, flag, behavior, output, environment variable, or parser semantics, update the MCP server in `cli/src/mcp.rs` in the same change. MCP tools should stay in sync with canonical CLI behavior by delegating through the normal CLI parser where possible. If a CLI command has no dedicated MCP tool, add one or document why it is intentionally omitted. Add or update tests that prove the CLI and MCP surfaces remain aligned.
 
-In the `docs/src/app/` MDX files, always use HTML `<table>` syntax for tables (not markdown pipe tables). This matches the existing convention across the docs site.
+In the `docs/content/docs/` MDX files, always use HTML `<table>` syntax for tables (not markdown pipe tables). This matches the existing convention across the docs site. Page titles and descriptions live in frontmatter; do not duplicate the title as an H1 in the body.
+
+For documentation changes, run `pnpm --filter docs test`, `pnpm --filter docs type-check`, `pnpm --filter docs build`, and `pnpm --filter docs test:routes`. The route suite starts its own production server. Its frozen migration fixtures cover the original public routes, metadata, content, anchors, and API contracts; only update affected fixtures when deliberately changing that contract.
+
+The Vercel docs project uses `docs` as its Root Directory and must enable **Include source files outside of the Root Directory in the Build Step** (`sourceFilesOutsideRootDirectory`). Installation requires the repository's `pnpm-workspace.yaml`, root `pnpm-lock.yaml`, and `patches/`. Keep the docs `packageManager` pin aligned with the root and use the Corepack commands in `docs/vercel.json`; do not create a separate docs lockfile or disable frozen installs.
 
 ## Dashboard (packages/dashboard)
 
@@ -48,7 +52,7 @@ To prepare a release:
 2. Bump `version` in `package.json`
 3. Run `pnpm version:sync` to update `cli/Cargo.toml`, `cli/Cargo.lock`, and `packages/dashboard/package.json`
 4. Write the changelog entry in `CHANGELOG.md` at the top, under a new `## <version>` heading, wrapped in `<!-- release:start -->` and `<!-- release:end -->` markers. Remove the `<!-- release:start -->` and `<!-- release:end -->` markers from the previous release entry so only the new release has markers.
-5. Add a matching entry to `docs/src/app/changelog/page.mdx` at the top (below the `# Changelog` heading)
+5. Add a matching entry to `docs/content/docs/changelog.mdx` at the top (below the frontmatter)
 6. Open a PR and merge to `main`
 
 When the PR merges, CI compares `package.json` version to what's on npm. If it differs, it builds all 7 platform binaries, publishes to npm, and creates the GitHub release automatically. The GitHub release body is extracted from the content between the `<!-- release:start -->` and `<!-- release:end -->` markers in `CHANGELOG.md`.
@@ -85,7 +89,7 @@ Do not prefix entries with commit hashes. Do not use the changesets `### Patch C
 
 ### Docs changelog
 
-The docs changelog at `docs/src/app/changelog/page.mdx` mirrors `CHANGELOG.md` but uses a slightly different format. Each entry uses:
+The docs changelog at `docs/content/docs/changelog.mdx` mirrors `CHANGELOG.md` but uses a slightly different format. Each entry uses:
 
 - A `v` prefix on the version (e.g. `## v0.24.0`)
 - A date line with the full date: `<p className="text-[#888] text-sm">March 30, 2026</p>`
