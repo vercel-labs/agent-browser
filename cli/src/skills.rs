@@ -65,7 +65,6 @@ fn find_package_root() -> Option<PathBuf> {
 
 /// Collect all skill directories to search, respecting the env var override.
 fn find_skills_dirs() -> Vec<PathBuf> {
-    // Env var override: single directory, used as-is
     if let Ok(dir) = env::var("AGENT_BROWSER_SKILLS_DIR") {
         let p = PathBuf::from(dir);
         if p.is_dir() {
@@ -74,7 +73,12 @@ fn find_skills_dirs() -> Vec<PathBuf> {
     }
 
     let Some(root) = find_package_root() else {
-        return vec![];
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        return SKILL_DIRS
+            .iter()
+            .map(|d| home.join(".agent-browser").join(d))
+            .filter(|p| p.is_dir())
+            .collect();
     };
 
     SKILL_DIRS
@@ -433,13 +437,13 @@ pub fn run_skills(args: &[String], json_mode: bool) {
                 "{}",
                 serde_json::to_string(&json!({
                     "success": false,
-                    "error": "Skills directory not found. Set AGENT_BROWSER_SKILLS_DIR or reinstall via npm.",
+                    "error": "Skills directory not found. Set AGENT_BROWSER_SKILLS_DIR, set up ~/.agent-browser/skill-data/, or reinstall via npm.",
                 }))
                 .unwrap_or_default()
             );
         } else {
             eprintln!(
-                "{} Skills directory not found. Set AGENT_BROWSER_SKILLS_DIR or reinstall via npm.",
+                "{} Skills directory not found. Set AGENT_BROWSER_SKILLS_DIR, set up ~/.agent-browser/skill-data/, or reinstall via npm.",
                 color::error_indicator()
             );
         }
