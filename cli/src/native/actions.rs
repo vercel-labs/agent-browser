@@ -4225,6 +4225,7 @@ async fn auto_launch_inner(
                     state.reset_input_state();
                     state.browser = Some(mgr);
                     state.launch_hash = Some(hash);
+                    apply_tab_binding_on_attach_or_rollback(state).await?;
                     state.subscribe_to_browser_events();
                     state.start_fetch_handler();
                     state.start_dialog_handler();
@@ -5229,6 +5230,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
                         state.reset_input_state();
                         state.browser = Some(mgr);
                         state.launch_hash = Some(new_hash);
+                        apply_tab_binding_on_attach_or_rollback(state).await?;
                         state.subscribe_to_browser_events();
                         state.start_fetch_handler();
                         state.start_dialog_handler();
@@ -17065,6 +17067,101 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             state.browser.is_none(),
             "direct-page provider should be rejected before CDP connect"
         );
+    }
+
+    /// Provider-plugin launches must apply the same persisted pin-tab binding
+    /// as direct CDP and auto-connect launches. Force-red: omit the binding
+    /// attach after storing the provider manager and the live manager remains
+    /// unpinned even though the session state and binding are pinned.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_provider_plugin_launch_applies_persisted_pin_tab_binding() {
+        use futures_util::{SinkExt, StreamExt};
+        use std::os::unix::fs::PermissionsExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_SOCKET_DIR",
+            "XDG_RUNTIME_DIR",
+        ]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        guard.remove("XDG_RUNTIME_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(message) = ws.next().await {
+                let Ok(message) = message else {
+                    break;
+                };
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let command: Value = serde_json::from_str(&text).unwrap();
+                if ws
+                    .send(Message::Text(
+                        json!({ "id": command["id"], "result": {} }).to_string(),
+                    ))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        let plugin_path = dir.path().join("mock-pinned-provider");
+        fs::write(
+            &plugin_path,
+            format!(
+                r#"#!/bin/sh
+cat >/dev/null
+printf '%s' '{{"protocol":"agent-browser.plugin.v1","success":true,"browser":{{"cdpUrl":"{ws_url}","directPage":true}}}}'
+"#
+            ),
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&plugin_path, perms).unwrap();
+
+        let mut state = DaemonState::new();
+        state.pin_tab = true;
+        super::tab_binding::save(
+            &state.session_id,
+            &super::tab_binding::TabBinding {
+                target_id: "provider-page".to_string(),
+                url: String::new(),
+                pinned: true,
+            },
+        )
+        .unwrap();
+
+        handle_launch(
+            &json!({
+                "action": "launch",
+                "provider": "pinned-provider",
+                "plugins": [
+                    {
+                        "name": "pinned-provider",
+                        "command": plugin_path.to_string_lossy(),
+                        "capabilities": ["browser.provider"]
+                    }
+                ]
+            }),
+            &mut state,
+        )
+        .await
+        .unwrap();
+
+        assert!(state.browser.as_ref().unwrap().pin_tab());
+        close_current_browser(&mut state).await.unwrap();
+        server.await.unwrap();
     }
 
     #[test]
