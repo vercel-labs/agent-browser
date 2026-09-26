@@ -6038,6 +6038,89 @@ async fn start_stateful_auth_login_server(
     (base_url, document_requests, handle)
 }
 
+#[derive(Clone, Copy)]
+enum DuplicateAuthControl {
+    Username,
+    Password,
+    Submit,
+}
+
+/// Starts a login page with a hidden duplicate before one visible auth control.
+async fn start_duplicate_auth_login_server(
+    duplicate: DuplicateAuthControl,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{}", port);
+
+    let handle = tokio::spawn(async move {
+        for _ in 0..100 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let _ = stream.read(&mut buf).await;
+                let controls = match duplicate {
+                    DuplicateAuthControl::Username => {
+                        r#"
+      <div style="display:none">
+        <input id="hidden-user" type="email" autocomplete="username" />
+      </div>
+      <input id="visible-user" type="email" autocomplete="username webauthn" />
+      <input id="visible-pass" type="password" />
+      <button id="visible-submit" type="submit" onclick="window.__visibleClicked = true">Sign in</button>"#
+                    }
+                    DuplicateAuthControl::Password => {
+                        r#"
+      <input id="visible-user" type="email" autocomplete="username webauthn" />
+      <div style="display:none">
+        <input id="hidden-pass" type="password" />
+      </div>
+      <input id="visible-pass" type="password" />
+      <button id="visible-submit" type="submit" onclick="window.__visibleClicked = true">Sign in</button>"#
+                    }
+                    DuplicateAuthControl::Submit => {
+                        r#"
+      <input id="visible-user" type="email" autocomplete="username webauthn" />
+      <input id="visible-pass" type="password" />
+      <div style="display:none">
+        <button id="hidden-submit" type="submit" onclick="window.__hiddenClicked = true">Sign in</button>
+      </div>
+      <button id="visible-submit" type="submit" onclick="window.__visibleClicked = true">Sign in</button>"#
+                    }
+                };
+                let body = format!(
+                    r#"<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>Duplicate Login</title><link rel="icon" href="data:," /></head>
+  <body>
+    <form id="visible-login">
+      {controls}
+    </form>
+    <script>
+      document.getElementById('visible-login').addEventListener('submit', (event) => {{
+        event.preventDefault();
+        window.__submitted = true;
+      }});
+    </script>
+  </body>
+</html>"#,
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    (base_url, handle)
+}
+
 fn unique_auth_profile_name(suffix: &str) -> String {
     format!(
         "e2e-auth-login-{}-{}",
@@ -6135,6 +6218,100 @@ async fn e2e_auth_login_no_navigate_preserves_active_page_state() {
     )
     .await;
     assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+async fn assert_auth_login_uses_visible_duplicate(duplicate: DuplicateAuthControl, suffix: &str) {
+    let (base_url, _server) = start_duplicate_auth_login_server(duplicate).await;
+    let mut state = DaemonState::new();
+    let profile_name = unique_auth_profile_name(suffix);
+
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": format!("{}/login", base_url) }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({
+                "id": "3",
+                "action": "auth_save",
+                "name": profile_name.clone(),
+                "url": format!("{}/login", base_url),
+                "username": "visible-user@example.com",
+                "password": "visible-password-secret",
+            }),
+            &mut state,
+        )
+        .await,
+    );
+
+    let login = execute_command(
+        &json!({
+            "id": "4",
+            "action": "auth_login",
+            "name": profile_name.clone(),
+            "noNavigate": true,
+            "timeout": 1_000,
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&login);
+
+    let verify = execute_command(
+        &json!({
+            "id": "5",
+            "action": "evaluate",
+            "script": "({ hiddenUser: document.querySelector('#hidden-user')?.value ?? '', hiddenPass: document.querySelector('#hidden-pass')?.value ?? '', hiddenClicked: !!window.__hiddenClicked, visibleUser: document.querySelector('#visible-user').value, visiblePass: document.querySelector('#visible-pass').value, visibleClicked: !!window.__visibleClicked, submitted: !!window.__submitted })",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&verify);
+    let result = &get_data(&verify)["result"];
+    assert_eq!(result["hiddenUser"], "");
+    assert_eq!(result["hiddenPass"], "");
+    assert_eq!(result["hiddenClicked"], false);
+    assert_eq!(result["visibleUser"], "visible-user@example.com");
+    assert_eq!(result["visiblePass"], "visible-password-secret");
+    assert_eq!(result["visibleClicked"], true);
+    assert_eq!(result["submitted"], true);
+
+    let _ = execute_command(
+        &json!({ "id": "6", "action": "auth_delete", "name": profile_name }),
+        &mut state,
+    )
+    .await;
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_uses_visible_duplicate_username() {
+    assert_auth_login_uses_visible_duplicate(DuplicateAuthControl::Username, "visible-username")
+        .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_uses_visible_duplicate_password() {
+    assert_auth_login_uses_visible_duplicate(DuplicateAuthControl::Password, "visible-password")
+        .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_uses_visible_duplicate_submit() {
+    assert_auth_login_uses_visible_duplicate(DuplicateAuthControl::Submit, "visible-submit").await;
 }
 
 #[cfg(unix)]

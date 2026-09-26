@@ -13,6 +13,7 @@ pub struct RefEntry {
     pub nth: Option<usize>,
     pub selector: Option<String>,
     pub frame_id: Option<String>,
+    allow_role_fallback: bool,
 }
 
 #[derive(Clone)]
@@ -67,6 +68,25 @@ impl RefMap {
                 nth,
                 selector: None,
                 frame_id: frame_id.map(|s| s.to_string()),
+                allow_role_fallback: true,
+            },
+        );
+    }
+
+    /// Add a ref that must keep resolving to this exact backend node. This is
+    /// used for actions that select a concrete DOM node before interacting;
+    /// falling back by role/name could silently target a different element.
+    pub fn add_exact_backend_node(&mut self, ref_id: String, backend_node_id: i64) {
+        self.map.insert(
+            ref_id,
+            RefEntry {
+                backend_node_id: Some(backend_node_id),
+                role: String::new(),
+                name: String::new(),
+                nth: None,
+                selector: None,
+                frame_id: None,
+                allow_role_fallback: false,
             },
         );
     }
@@ -88,6 +108,7 @@ impl RefMap {
                 nth,
                 selector: Some(selector),
                 frame_id: None,
+                allow_role_fallback: true,
             },
         );
     }
@@ -437,6 +458,9 @@ pub async fn resolve_element_center(
                 .await?;
                 return Ok((x, y, effective_session_id.to_string()));
             }
+            if !entry.allow_role_fallback {
+                return Err(format!("Element ref {ref_id} is stale"));
+            }
             // backend_node_id is stale; re-query the accessibility tree below
         }
 
@@ -677,6 +701,9 @@ pub async fn resolve_element_object_id(
                 if let Some(object_id) = r.object.object_id {
                     return Ok((object_id, effective_session_id.to_string()));
                 }
+            }
+            if !entry.allow_role_fallback {
+                return Err(format!("Element ref {ref_id} is stale"));
             }
             // backend_node_id is stale; re-query the accessibility tree below
         }
