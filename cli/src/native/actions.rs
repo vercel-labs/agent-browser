@@ -63,6 +63,10 @@ const AUTH_LOGIN_SELECTOR_POLL_INTERVAL_MS: u64 = 100;
 /// fallback selectors are allowed.
 const AUTH_LOGIN_PREFERRED_SELECTOR_WINDOW_MS: u64 = 5_000;
 
+/// Local snapshot ref used to keep the auth element selected during detection
+/// bound to the exact DOM node used by the subsequent interaction.
+const AUTH_LOGIN_ELEMENT_REF: &str = "e1";
+
 const AUTH_LOGIN_NO_NAVIGATE_PAGE_ERROR: &str = "auth login --no-navigate requires an existing active HTTP(S) browser page; open the login page first";
 
 pub struct PendingConfirmation {
@@ -12222,7 +12226,12 @@ async fn handle_http_credentials(cmd: &Value, state: &mut DaemonState) -> Result
 // Auth handlers
 // ---------------------------------------------------------------------------
 
-/// Wait for any selector in `selectors` to appear and return the first match.
+struct AuthLoginElement {
+    ref_map: RefMap,
+}
+
+/// Wait for any selector in `selectors` to match a usable element and retain
+/// that element's stable backend node identity for the subsequent interaction.
 ///
 /// This is used by `auth_login` auto-detection so SPA login forms can render
 /// after initial navigation without requiring global network-idle.
@@ -12231,33 +12240,29 @@ async fn wait_for_any_selector(
     session_id: &str,
     selectors: &[&str],
     timeout_ms: u64,
-) -> Result<String, String> {
+) -> Result<AuthLoginElement, String> {
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
 
     loop {
         for selector in selectors {
             let expression = format!(
                 r#"(() => {{
-                    const el = document.querySelector({sel});
-                    if (!el) return false;
+                    return Array.from(document.querySelectorAll({sel})).find((el) => {{
+                        const r = el.getBoundingClientRect();
+                        const s = window.getComputedStyle(el);
+                        const opacity = parseFloat(s.opacity || '1');
+                        const isVisible =
+                            r.width > 0 &&
+                            r.height > 0 &&
+                            s.visibility !== 'hidden' &&
+                            s.display !== 'none' &&
+                            (!Number.isFinite(opacity) || opacity > 0);
 
-                    const r = el.getBoundingClientRect();
-                    const s = window.getComputedStyle(el);
-                    const opacity = parseFloat(s.opacity || '1');
-                    const isVisible =
-                        r.width > 0 &&
-                        r.height > 0 &&
-                        s.visibility !== 'hidden' &&
-                        s.display !== 'none' &&
-                        (!Number.isFinite(opacity) || opacity > 0);
-
-                    if (!isVisible) return false;
-                    if (el.matches(':disabled')) return false;
-
-                    if (el instanceof HTMLInputElement && el.type === 'hidden') return false;
-                    if ((el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && el.readOnly) return false;
-
-                    return true;
+                        if (!isVisible || el.matches(':disabled')) return false;
+                        if (el instanceof HTMLInputElement && el.type === 'hidden') return false;
+                        if ((el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && el.readOnly) return false;
+                        return true;
+                    }}) || null;
                 }})()"#,
                 sel = serde_json::to_string(selector).unwrap_or_default()
             );
@@ -12267,22 +12272,48 @@ async fn wait_for_any_selector(
                     "Runtime.evaluate",
                     &super::cdp::types::EvaluateParams {
                         expression,
-                        return_by_value: Some(true),
+                        return_by_value: Some(false),
                         await_promise: Some(true),
                     },
                     Some(session_id),
                 )
                 .await?;
 
-            if result
-                .result
-                .value
-                .as_ref()
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
+            if result.exception_details.is_some()
+                || result.result.subtype.as_deref() != Some("node")
             {
-                return Ok((*selector).to_string());
+                continue;
             }
+
+            let Some(object_id) = result.result.object_id else {
+                continue;
+            };
+            let describe = client
+                .send_command(
+                    "DOM.describeNode",
+                    Some(json!({ "objectId": object_id })),
+                    Some(session_id),
+                )
+                .await;
+            let _ = client
+                .send_command(
+                    "Runtime.releaseObject",
+                    Some(json!({ "objectId": object_id })),
+                    Some(session_id),
+                )
+                .await;
+            let Ok(describe) = describe else {
+                continue;
+            };
+            let Some(backend_node_id) = describe
+                .pointer("/node/backendNodeId")
+                .and_then(Value::as_i64)
+            else {
+                continue;
+            };
+            let mut ref_map = RefMap::new();
+            ref_map.add_exact_backend_node(AUTH_LOGIN_ELEMENT_REF.to_string(), backend_node_id);
+            return Ok(AuthLoginElement { ref_map });
         }
 
         if tokio::time::Instant::now() >= deadline {
@@ -12589,11 +12620,10 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .or(stored_submit_selector);
 
     // Find and fill username
-    let user_sel = if let Some(s) = username_sel {
-        wait_for_selector(&mgr.client, &session_id, &s, "visible", auth_timeout_ms)
+    let user_element = if let Some(s) = username_sel {
+        wait_for_any_selector(&mgr.client, &session_id, &[s.as_str()], auth_timeout_ms)
             .await
-            .map_err(|_| format!("Timed out waiting for username selector '{}'", s))?;
-        s
+            .map_err(|_| format!("Timed out waiting for username selector '{}'", s))?
     } else {
         let preferred_window_ms = auth_timeout_ms.min(AUTH_LOGIN_PREFERRED_SELECTOR_WINDOW_MS);
         let fallback_window_ms = auth_timeout_ms.saturating_sub(preferred_window_ms);
@@ -12641,8 +12671,8 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     interaction::fill(
         &mgr.client,
         &session_id,
-        &state.ref_map,
-        &user_sel,
+        &user_element.ref_map,
+        AUTH_LOGIN_ELEMENT_REF,
         &username,
         &state.iframe_sessions,
     )
@@ -12650,11 +12680,10 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
 
     // Find and fill password
     let pass_sel = password_sel.unwrap_or_else(|| "input[type=password]".to_string());
-    wait_for_selector(
+    let pass_element = wait_for_any_selector(
         &mgr.client,
         &session_id,
-        &pass_sel,
-        "visible",
+        &[pass_sel.as_str()],
         auth_timeout_ms,
     )
     .await
@@ -12665,19 +12694,18 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     interaction::fill(
         &mgr.client,
         &session_id,
-        &state.ref_map,
-        &pass_sel,
+        &pass_element.ref_map,
+        AUTH_LOGIN_ELEMENT_REF,
         &password,
         &state.iframe_sessions,
     )
     .await?;
 
     // Find and click submit
-    let sub_sel = if let Some(s) = submit_sel {
-        wait_for_selector(&mgr.client, &session_id, &s, "visible", auth_timeout_ms)
+    let submit_element = if let Some(s) = submit_sel {
+        wait_for_any_selector(&mgr.client, &session_id, &[s.as_str()], auth_timeout_ms)
             .await
-            .map_err(|_| format!("Timed out waiting for submit selector '{}'", s))?;
-        s
+            .map_err(|_| format!("Timed out waiting for submit selector '{}'", s))?
     } else {
         wait_for_any_selector(
             &mgr.client,
@@ -12699,8 +12727,8 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     let result = interaction::click(
         &mgr.client,
         &session_id,
-        &state.ref_map,
-        &sub_sel,
+        &submit_element.ref_map,
+        AUTH_LOGIN_ELEMENT_REF,
         "left",
         1,
         &state.iframe_sessions,
