@@ -5696,6 +5696,55 @@ async fn e2e_snapshot_cursor_many_elements() {
     assert_success(&resp);
 }
 
+/// Test that a selector-scoped snapshot of a web component includes the
+/// content of its shadow root.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_selector_includes_shadow_root() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<my-card><span>Slotted</span></my-card><script>\
+        customElements.define('my-card', class extends HTMLElement { constructor() { \
+        super(); this.attachShadow({ mode: 'open' }).innerHTML = \
+        '<button>Inside shadow</button><slot></slot>'; } });</script>";
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "selector": "my-card" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    assert!(
+        snapshot.contains("button \"Inside shadow\""),
+        "Snapshot should contain the shadow root button: {}",
+        snapshot
+    );
+    assert!(
+        snapshot.contains("Slotted"),
+        "Snapshot should contain the slotted text: {}",
+        snapshot
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// Test that InlineTextBox nodes are filtered from snapshot output while preserving
 /// the actual text content from parent elements.
 #[tokio::test]
@@ -5749,6 +5798,53 @@ async fn e2e_snapshot_continuous_static_text() {
         "snapshot with InlineTextBox filtering took {:?}, expected < 5s",
         elapsed,
     );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Test that a selector-scoped snapshot renders each element once when plain
+/// wrapper elements (ignored in the AX tree) sit between the matched element
+/// and its descendants.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_selector_no_duplicates() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<main><div><div><button>Save</button></div></div>\
+        <select><option>Small</option><option>Large</option></select></main>";
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "selector": "main" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    for name in ["button \"Save\"", "option \"Small\"", "option \"Large\""] {
+        assert_eq!(
+            snapshot.matches(name).count(),
+            1,
+            "{} should appear once: {}",
+            name,
+            snapshot
+        );
+    }
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
