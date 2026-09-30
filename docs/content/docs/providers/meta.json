@@ -1,0 +1,11 @@
+{
+  "title": "Providers",
+  "pages": [
+    "agentcore",
+    "browser-use",
+    "browserbase",
+    "browserless",
+    "kernel",
+    "remote-agent-browser"
+  ]
+}
