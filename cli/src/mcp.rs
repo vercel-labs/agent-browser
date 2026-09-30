@@ -2042,7 +2042,7 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         json!({
             "type": "array",
             "items": { "type": "string" },
-            "description": "Advanced: extra CLI arguments for this command, preserving full CLI parity."
+            "description": "Advanced: extra CLI arguments, including --engine chrome|lightpanda|obscura and --executable-path, preserving full CLI parity. Obscura is experimental and rejects --proxy-bypass (including resolved config/environment settings). Explicit Obscura launches send this invocation's resolved bypass setting even to an existing daemon."
         }),
     );
     props.insert(
@@ -4714,6 +4714,40 @@ mod tests {
         let payload: Value = serde_json::from_str(&args[5]).unwrap();
         assert_eq!(payload["siteKey"], "abc");
         assert_eq!(payload["url"], "https://example.com");
+    }
+
+    #[test]
+    fn obscura_extra_args_use_the_canonical_cli_parser() {
+        let arguments = json!({"extraArgs": [
+            "--engine", "obscura", "--executable-path", "/tmp/obscura",
+            "--proxy-bypass", "localhost"
+        ]});
+        let mut args = vec!["open".to_string(), "https://example.com".to_string()];
+        args.extend(
+            optional_string_array(&arguments, "extraArgs")
+                .unwrap()
+                .unwrap(),
+        );
+        let flags = crate::flags::parse_flags(&args);
+        assert_eq!(flags.engine.as_deref(), Some("obscura"));
+        assert_eq!(flags.executable_path.as_deref(), Some("/tmp/obscura"));
+        assert_eq!(flags.proxy_bypass.as_deref(), Some("localhost"));
+        let mut launch = json!({"action": "launch"});
+        crate::attach_obscura_proxy_bypass(&mut launch, &flags);
+        assert_eq!(launch["proxyBypass"], "localhost");
+        assert!(launch.get("proxy").is_none());
+
+        let mut flags = flags;
+        flags.proxy_bypass = None;
+        crate::attach_obscura_proxy_bypass(&mut launch, &flags);
+        assert_eq!(launch.get("proxyBypass"), Some(&Value::Null));
+        for engine in [None, Some("chrome"), Some("lightpanda")] {
+            flags.engine = engine.map(String::from);
+            flags.proxy_bypass = Some("localhost".into());
+            let mut launch = json!({"action": "launch"});
+            crate::attach_obscura_proxy_bypass(&mut launch, &flags);
+            assert_eq!(launch, json!({"action": "launch"}));
+        }
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! Check the Chrome install: binary path, version, cache dirs, user-data
-//! dir, and the optional lightpanda engine.
+//! dir, and the optional lightpanda and obscura engines.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -108,6 +108,27 @@ pub(super) fn check(checks: &mut Vec<Check>) {
                         "AGENT_BROWSER_ENGINE=lightpanda but no lightpanda binary on PATH",
                     )
                     .with_fix("install lightpanda or unset AGENT_BROWSER_ENGINE"),
+                );
+            }
+        } else if engine == "obscura" {
+            // Same lookup as launch, so doctor and launch agree on where the
+            // binary is.
+            if crate::native::cdp::obscura::find_obscura().is_some() {
+                checks.push(Check::new(
+                    "chrome.engine_obscura",
+                    category,
+                    Status::Pass,
+                    "Obscura binary found",
+                ));
+            } else {
+                checks.push(
+                    Check::new(
+                        "chrome.engine_obscura",
+                        category,
+                        Status::Fail,
+                        "AGENT_BROWSER_ENGINE=obscura but no obscura binary found",
+                    )
+                    .with_fix("install obscura or unset AGENT_BROWSER_ENGINE"),
                 );
             }
         }
