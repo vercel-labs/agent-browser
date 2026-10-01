@@ -33,6 +33,54 @@ fn get_data(resp: &Value) -> &Value {
     resp.get("data").expect("Missing 'data' in response")
 }
 
+fn webmcp_output(resp: &Value) -> Value {
+    let output = &get_data(resp)["output"];
+    // CDP versions may serialize object tool results as JSON strings.
+    output
+        .as_str()
+        .and_then(|text| serde_json::from_str(text).ok())
+        .unwrap_or_else(|| output.clone())
+}
+
+async fn assert_chat_webmcp_workflow(state: &mut DaemonState, frame_id: &str) {
+    let parse_chat = |command: &str| {
+        let args = super::stream::chat::chat_command_args("webmcp-e2e", command).unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        let parsed =
+            crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+        (flags, parsed)
+    };
+    let (flags, schema_command) = parse_chat(&format!(
+        "agent-browser webmcp list set_message --frame {frame_id} --json"
+    ));
+    assert!(flags.json, "Chat must request complete JSON metadata");
+    let resp = execute_command(&schema_command, state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        get_data(&resp)["tools"][0]["inputSchema"]["required"],
+        json!(["message"])
+    );
+    assert_eq!(get_data(&resp)["tools"][0]["frameId"], frame_id);
+
+    let message = "Chat preserves café; punctuation && \"quotes\"";
+    let params = json!({"message": message});
+    let (_, invoke_command) = parse_chat(&format!(
+        "agent-browser webmcp invoke set_message --frame {frame_id} --params '{params}'"
+    ));
+    let resp = execute_command(&invoke_command, state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["status"], "completed", "{resp}");
+    assert_eq!(webmcp_output(&resp)["message"], message, "{resp}");
+    assert_evaluate(
+        state,
+        "chat-message",
+        "document.getElementById('result').textContent",
+        json!(message),
+    )
+    .await;
+}
+
 async fn select_values(
     state: &mut DaemonState,
     id: &str,
@@ -168,6 +216,9 @@ async fn e2e_webmcp_discovery_invocation_and_cancellation() {
         .unwrap()
         .to_string();
 
+    // Box the extra workflow to keep this large async test's stack bounded.
+    Box::pin(assert_chat_webmcp_workflow(&mut state, main_frame_id)).await;
+
     let resp = execute_command(
         &json!({
             "id": "3b",
@@ -180,20 +231,17 @@ async fn e2e_webmcp_discovery_invocation_and_cancellation() {
     .await;
     assert_error_code(&resp, "webmcp_ambiguous_tool");
 
-    let resp = execute_command(
-        &json!({
-            "id": "3c",
-            "action": "webmcp_invoke",
-            "tool": "duplicate_tool",
-            "frameId": child_frame_id,
-            "params": {},
-            "timeout": 5000
-        }),
-        &mut state,
+    let child_args = super::stream::chat::chat_command_args("webmcp-e2e", &format!(
+        "agent-browser webmcp invoke duplicate_tool --frame {child_frame_id} --params '{{}}' --timeout 5000"
+    )).unwrap();
+    let child_command = crate::commands::parse_command(
+        &crate::flags::clean_args(&child_args),
+        &crate::flags::parse_flags(&child_args),
     )
-    .await;
+    .unwrap();
+    let resp = execute_command(&child_command, &mut state).await;
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["output"]["scope"], "frame");
+    assert_eq!(webmcp_output(&resp)["scope"], "frame");
 
     let resp = execute_command(
         &json!({
@@ -208,7 +256,7 @@ async fn e2e_webmcp_discovery_invocation_and_cancellation() {
     .await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["status"], "completed");
-    assert_eq!(get_data(&resp)["output"]["message"], "WebMCP works");
+    assert_eq!(webmcp_output(&resp)["message"], "WebMCP works");
 
     let resp = execute_command(
         &json!({

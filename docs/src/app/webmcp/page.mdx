@@ -27,8 +27,8 @@ Browser responses automatically announce WebMCP tools on first discovery and whe
 
 ```bash
 agent-browser open https://example.com  # Announces brief tool summary
-agent-browser webmcp list search --json # Fetch only the selected schema
-agent-browser webmcp invoke search --params '{"query":"browser agents"}'
+agent-browser webmcp list search --frame <frame-id> --json # Fetch only the selected schema
+agent-browser webmcp invoke search --frame <frame-id> --params '{"query":"browser agents"}'
 agent-browser webmcp invoke slow_tool --params @input.json --detach
 agent-browser webmcp result <invocation-id>
 agent-browser webmcp cancel <invocation-id>
@@ -41,6 +41,8 @@ Automatic summaries are limited to 16 tools and 4 KiB of JSON, with descriptions
 The daemon subscribes to CDP WebMCP events once per page session and reads its event cache after browser actions. There is no per-action discovery polling or registration grace period. Initial subscription is bounded to one second; unsupported sessions are not repeatedly probed. Explicit `webmcp list` can retry discovery. Asynchronous registrations appear on the next normal browser response after the event arrives. This describes agent-browser's active tab and frames, not a separately opened preview iframe.
 
 Use `--frame <frame-id>` with `webmcp invoke` when multiple frames register the same tool name. `webmcp list` returns the required frame ID, page origin, input schema, and page-provided annotations.
+
+CLI and dashboard [Chat](/dashboard#ai-chat) can run WebMCP commands and load bundled instructions with `agent-browser skills get core`. Chat is instructed to prefer a relevant advertised page tool over `eval`, retrieve its complete schema with `webmcp list <tool> --frame <frame-id> --json`, and retain the same frame ID on invocation. The text listing omits the input schema. Use one command per tool call and quote `--params` JSON; `;` and `&&` inside quoted or escaped values are preserved.
 
 With `--no-webmcp`, compatible Chrome builds return an empty tool list because page tools are disabled. Attached browsers, remote providers, Lightpanda, Safari, iOS, and older Chrome builds may not expose the experimental CDP WebMCP domain. In that case the command returns an actionable `webmcp_unsupported` error.
 

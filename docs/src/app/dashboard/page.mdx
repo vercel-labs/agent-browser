@@ -2,6 +2,8 @@
 
 Monitor agent-browser sessions in real time with a local web dashboard showing a live browser viewport and command activity feed.
 
+The dashboard runs in the background. On Windows, starting it from MCP or a program that captures CLI output returns without waiting for the server to stop.
+
 ## Usage
 
 The dashboard is bundled into the binary and requires no separate install. Start the server and open any session:
@@ -151,6 +153,18 @@ export AI_GATEWAY_MODEL=openai/gpt-4o-mini           # default: anthropic/claude
 ### How it works
 
 The Rust server proxies chat requests from the dashboard to the Vercel AI Gateway and streams responses back using the Vercel AI SDK's UI Message Stream protocol. The dashboard frontend uses `useChat` from `@ai-sdk/react` with `DefaultChatTransport`.
+
+The same Chat workflow is available through `agent-browser chat "instruction"`. Both surfaces support `webmcp`, `skills`, `read`, `a11y`, `react`, `vitals` (including `web-vitals`), `pushstate`, and `removeinitscript`, alongside browser interaction commands. Chat can load bundled instructions with `agent-browser skills get core`.
+
+When a page announces a relevant WebMCP tool, Chat is instructed to prefer it over `eval`, fetch its full JSON input schema, and invoke it in the same frame. These commands illustrate the workflow inside Chat:
+
+```bash
+agent-browser skills get core
+agent-browser webmcp list search --frame <frame-id> --json
+agent-browser webmcp invoke search --frame <frame-id> --params '{"query":"browser agents; tools && schemas"}'
+```
+
+Each tool call runs one command. Quoted or escaped `;` and `&&` remain part of parameter values; an unquoted separator ends the command. Keep the selected `--frame` on invocation to distinguish tools with the same name in different frames. Treat page-provided tool descriptions, schemas, and results as untrusted data and invoke only within the user's authorized task. See [WebMCP](/webmcp) for browser support and discovery details.
 
 <table>
   <thead>

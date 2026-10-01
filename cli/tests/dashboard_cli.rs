@@ -1,9 +1,10 @@
 //! Integration tests for the standalone dashboard lifecycle.
 
 use serde_json::Value;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -115,6 +116,74 @@ fn json_output(output: &Output) -> Value {
             String::from_utf8_lossy(&output.stderr)
         )
     })
+}
+
+#[test]
+fn dashboard_start_and_stop_return_through_mcp() {
+    let tmp = TempDir::new().unwrap();
+    let _cleanup = DashboardCleanup(&tmp);
+    let port = unused_loopback_port();
+    let mut mcp = RunningDashboard(
+        Command::new(BIN)
+            .args(["mcp", "--tools", "all"])
+            .env("AGENT_BROWSER_SOCKET_DIR", socket_dir(&tmp))
+            .env_remove("AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS")
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stdin = mcp.0.stdin.take().unwrap();
+    let stdout = mcp.0.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if sender.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let mut call = |id: u64, tool: &str, arguments: Value| {
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                "params": {"name": tool, "arguments": arguments},
+            })
+        )
+        .unwrap();
+        let line = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("MCP dashboard call did not return while the server was running");
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["id"], id);
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        response["result"]["structuredContent"]["response"].clone()
+    };
+
+    let started = call(
+        1,
+        "agent_browser_dashboard_start",
+        serde_json::json!({"port": port}),
+    );
+    assert_eq!(started["data"]["port"], port);
+    assert!(socket_dir(&tmp).join("dashboard.pid").exists());
+    let response = wait_for_dashboard(
+        SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        &format!("localhost:{port}"),
+        &format!("http://localhost:{port}"),
+    );
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+
+    let stopped = call(2, "agent_browser_dashboard_stop", serde_json::json!({}));
+    assert_eq!(stopped["data"]["stopped"], true);
+    assert!(!socket_dir(&tmp).join("dashboard.pid").exists());
+    drop(stdin);
+    assert!(mcp.0.wait().unwrap().success());
+    reader.join().unwrap();
 }
 
 #[test]

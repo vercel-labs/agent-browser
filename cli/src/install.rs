@@ -1044,24 +1044,35 @@ mod tests {
         );
     }
 
-    #[test]
-    fn download_bytes_connection_refused_includes_details() {
-        // Use a port that nothing is listening on
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
+    #[tokio::test]
+    async fn reqwest_error_format_includes_connection_refused_details() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+
+        // Bypass ambient proxies so the error comes from the local OS.
+        let error = reqwest::Client::builder()
+            .no_proxy()
             .build()
-            .unwrap();
-        let result = rt.block_on(download_bytes("http://127.0.0.1:1/test.zip"));
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        // The new code should include the root cause (connection refused)
-        // not just the vague "error sending request for url"
+            .unwrap()
+            .get(format!("http://{address}/test.zip"))
+            .send()
+            .await
+            .unwrap_err();
+        let mut cause: &dyn std::error::Error = &error;
+        let io_error = loop {
+            if let Some(io_error) = cause.downcast_ref::<std::io::Error>() {
+                break io_error;
+            }
+            cause = cause.source().expect("missing underlying IO error");
+        };
+        assert_eq!(io_error.kind(), std::io::ErrorKind::ConnectionRefused);
+        let formatted = format_reqwest_error(&error);
+        // OS messages may be localized. Verify the actual cause is included
+        // rather than assuming the English text for a refused connection.
         assert!(
-            err.contains("Connection refused")
-                || err.contains("connection refused")
-                || err.contains("actively refused it"),
-            "expected 'connection refused' in error, got: {}",
-            err
+            formatted.contains(&io_error.to_string()),
+            "expected underlying IO error in: {formatted}"
         );
     }
 }

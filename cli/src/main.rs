@@ -1339,8 +1339,23 @@ fn main() {
     // Prevent MSYS/Git Bash path translation from mangling arguments
     #[cfg(windows)]
     {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
+
         env::set_var("MSYS_NO_PATHCONV", "1");
         env::set_var("MSYS2_ARG_CONV_EXCL", "*");
+
+        // Do not let background daemons keep the caller's capture pipes open.
+        // Command duplicates handles when a child explicitly inherits stdio.
+        for handle in [
+            std::io::stdin().as_raw_handle(),
+            std::io::stdout().as_raw_handle(),
+            std::io::stderr().as_raw_handle(),
+        ] {
+            unsafe {
+                SetHandleInformation(handle as isize, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
     }
 
     // Native daemon mode: when AGENT_BROWSER_DAEMON is set, run as the daemon process

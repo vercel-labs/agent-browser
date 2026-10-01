@@ -1,3 +1,4 @@
+use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -27,10 +28,26 @@ impl TestServer {
             while !server_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let mut request = [0u8; 2048];
-                        let read = stream.read(&mut request).unwrap_or(0);
-                        let request = String::from_utf8_lossy(&request[..read]);
+                        // Windows sockets accepted by a nonblocking listener
+                        // can also be nonblocking. Read all headers before
+                        // closing, so unread bytes cannot reset the connection.
+                        stream.set_nonblocking(false).unwrap();
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .unwrap();
+                        let mut request = Vec::new();
+                        let mut chunk = [0u8; 2048];
+                        while request.len() < 8192
+                            && !request.windows(4).any(|bytes| bytes == b"\r\n\r\n")
+                        {
+                            match stream.read(&mut chunk) {
+                                Ok(0) | Err(_) => break,
+                                Ok(read) => request.extend_from_slice(&chunk[..read]),
+                            }
+                        }
+                        let request = String::from_utf8_lossy(&request);
                         let path = request.split_whitespace().nth(1).unwrap_or("/");
+                        let path = path.split('?').next().unwrap();
                         let body = match path {
                             "/shared" => "shared",
                             "/mine" => "mine",
@@ -239,14 +256,45 @@ fn tab_gone_exposes_safe_recovery_data_in_cli_and_batch() {
     let target_id = binding["targetId"].as_str().unwrap();
     assert_eq!(binding["url"], safe_url);
 
-    sessions.run_json(host, &["tab", "close", target_id]);
+    // Close the target externally so this tests recovery independently of
+    // another daemon's asynchronously updated tab catalog.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(ws_url).await.unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                serde_json::json!({
+                    "id": 1, "method": "Target.closeTarget",
+                    "params": {"targetId": target_id},
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let message = socket.next().await.unwrap().unwrap();
+                let response: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+                if response["id"] == 1 {
+                    break response;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(response["result"]["success"], true, "{response}");
+    });
 
-    let single = sessions.run_json_failure(victim, &["get", "url"]);
+    let single = sessions.run_json_failure(victim, &["--cdp", ws_url, "--pin-tab", "get", "url"]);
     assert_eq!(single["code"], "tab_gone");
     assert_eq!(single["data"]["targetId"], target_id);
     assert_eq!(single["data"]["lastUrl"], safe_url);
 
-    let batch = sessions.run_json_failure(victim, &["batch", "get url"]);
+    let batch =
+        sessions.run_json_failure(victim, &["--cdp", ws_url, "--pin-tab", "batch", "get url"]);
     assert_eq!(batch[0]["code"], "tab_gone");
     assert_eq!(batch[0]["result"]["targetId"], target_id);
     assert_eq!(batch[0]["result"]["lastUrl"], safe_url);

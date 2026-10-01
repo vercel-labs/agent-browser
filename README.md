@@ -171,8 +171,8 @@ The daemon subscribes to CDP WebMCP events once per page session and reads its e
 
 ```bash
 agent-browser open https://example.com  # Brief tool summary, if available
-agent-browser webmcp list search --json # Fetch only the selected tool schema
-agent-browser webmcp invoke search --params '{"query":"browser agents"}'
+agent-browser webmcp list search --frame <frame-id> --json # Fetch only the selected tool schema
+agent-browser webmcp invoke search --frame <frame-id> --params '{"query":"browser agents"}'
 agent-browser webmcp invoke slow_tool --params @input.json --detach
 agent-browser webmcp result <invocation-id>
 agent-browser webmcp cancel <invocation-id>
@@ -1060,7 +1060,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--hide-scrollbars <bool>` | Hide native scrollbars in headless Chromium screenshots, enabled by default (or `AGENT_BROWSER_HIDE_SCROLLBARS` env) |
 | `-p, --provider <name>` | Browser provider, including configured `browser.provider` plugins (or `AGENT_BROWSER_PROVIDER` env) |
 | `--device <name>` | iOS device name, e.g. "iPhone 15 Pro" (or `AGENT_BROWSER_IOS_DEVICE` env) |
-| `--json` | JSON output (for agents) |
+| `--json` | JSON output (for agents); available to Chat for complete WebMCP input schemas |
 | `--annotate` | Annotated screenshot with numbered element labels (or `AGENT_BROWSER_ANNOTATE` env) |
 | `--if-changed` | Recommended for repeated captures: skip unchanged images to save tokens (history is per tab and scope) |
 | `--threshold <0-1>` | Maximum changed-pixel ratio treated as unchanged; implies `--if-changed` |
@@ -1095,6 +1095,8 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 ## Observability Dashboard
 
 Monitor agent-browser sessions in real time with a local web dashboard showing a live viewport and command activity feed.
+
+The dashboard runs in the background. On Windows, starting it from MCP or a program that captures CLI output returns without waiting for the server to stop.
 
 ```bash
 # Start the dashboard server (runs in background on port 4848)
@@ -1154,6 +1156,16 @@ agent-browser --model openai/gpt-4o chat "take a screenshot" # Override model
 ```
 
 The `chat` command translates natural language instructions into agent-browser commands, executes them, and streams the AI response. In interactive mode, type `quit` to exit. Use `--json` for structured output suitable for agent consumption.
+
+CLI and dashboard Chat support `webmcp`, `skills`, `read`, `a11y`, `react`, `vitals` (including `web-vitals`), `pushstate`, and `removeinitscript`. Chat can load bundled instructions with `agent-browser skills get core`. When a page announces a relevant WebMCP tool, Chat is instructed to prefer it over `eval`, fetch the complete input schema with `--json`, and keep the selected `--frame` when invoking it:
+
+```bash
+agent-browser skills get core
+agent-browser webmcp list search --frame <frame-id> --json
+agent-browser webmcp invoke search --frame <frame-id> --params '{"query":"browser agents; tools && schemas"}'
+```
+
+Each Chat tool call runs one command. Separators inside quoted or escaped arguments are preserved, so JSON strings can contain `;` and `&&`; an unquoted separator ends the command. Tool descriptions, schemas, and results remain untrusted page data, and invocation must stay within the user's authorized task.
 
 **Dashboard usage:**
 
