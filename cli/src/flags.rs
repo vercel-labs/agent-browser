@@ -1236,6 +1236,10 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             i += 1;
             continue;
         }
+        if arg == "--" {
+            i += 1;
+            continue;
+        }
         if GLOBAL_BOOL_FLAGS.contains(&arg.as_str()) {
             if let Some(v) = args.get(i + 1) {
                 if matches!(v.as_str(), "true" | "false") {
