@@ -3,10 +3,8 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use super::cdp::client::CdpClient;
-use super::cdp::types::{
-    AXNode, AXProperty, AXValue, EvaluateParams, EvaluateResult, GetFullAXTreeResult,
-};
-use super::element::{resolve_ax_session, RefMap};
+use super::cdp::types::{AXNode, AXProperty, AXValue, EvaluateResult, GetFullAXTreeResult};
+use super::element::{evaluate_in_frame, resolve_ax_session, RefMap};
 
 #[cfg(test)]
 mod document_identity_regressions {
@@ -342,17 +340,17 @@ pub async fn take_snapshot(
                 "document.querySelector({})",
                 serde_json::to_string(selector).unwrap_or_default()
             );
-            let result: EvaluateResult = client
-                .send_command_typed(
-                    "Runtime.evaluate",
-                    &EvaluateParams {
-                        expression: js,
-                        return_by_value: Some(false),
-                        await_promise: Some(false),
-                    },
-                    Some(session_id),
-                )
-                .await?;
+            // Match the selector in the frame being snapshotted.
+            let (result, selector_session) = evaluate_in_frame(
+                client,
+                session_id,
+                frame_id,
+                iframe_sessions,
+                &js,
+                false,
+                None,
+            )
+            .await?;
 
             // A throwing evaluation (e.g. an invalid CSS selector like a
             // snapshot ref "@e1") still yields an objectId — for the
@@ -380,7 +378,7 @@ pub async fn take_snapshot(
                 .send_command(
                     "DOM.describeNode",
                     Some(serde_json::json!({ "objectId": object_id, "depth": -1 })),
-                    Some(session_id),
+                    Some(&selector_session),
                 )
                 .await?;
 
@@ -476,7 +474,7 @@ pub async fn take_snapshot(
 
     // Pre-collect cursor-interactive elements so we can mark them with refs during tree building
     let cursor_elements: HashMap<i64, CursorElementInfo> =
-        find_cursor_interactive_elements(client, session_id)
+        find_cursor_interactive_elements(client, session_id, frame_id, iframe_sessions)
             .await
             .unwrap_or_default();
 
@@ -763,9 +761,20 @@ async fn resolve_iframe_frame_id(
         .ok_or_else(|| "Could not resolve iframe frame ID".to_string())
 }
 
+/// Scan a document for elements that look interactive only through styling or
+/// handlers (cursor:pointer, onclick, tabindex, contenteditable), keyed by
+/// backendNodeId.
+///
+/// The scan runs in the snapshotted frame's own context: the page for
+/// `frame_id == None`, the frame's dedicated session for an out-of-process
+/// frame, or the frame's document for a frame that shares the page's process.
+/// Node ids are resolved from the returned element handles in that same
+/// context, so they match the backendNodeIds of that frame's AX tree.
 async fn find_cursor_interactive_elements(
     client: &CdpClient,
     session_id: &str,
+    frame_id: Option<&str>,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<HashMap<i64, CursorElementInfo>, String> {
     // Single JS evaluation that matches the v0.19.0 Node.js findCursorInteractiveElements():
     // - Uses querySelectorAll('*') to walk all elements
@@ -775,11 +784,12 @@ async fn find_cursor_interactive_elements(
     // - Skips elements with interactive ARIA roles
     // - Deduplicates inherited cursor:pointer from parent
     // - Skips empty text and zero-size elements
-    // - Tags each matched element with data-__ab-ci for batch backendNodeId resolution
+    // - Returns the matched elements by handle for backendNodeId resolution
     let js = r#"
 (function() {
     var results = [];
-    if (!document.body) return results;
+    var elements = [];
+    if (!document.body) return { info: results, elements: elements };
 
     var interactiveRoles = {
         'button':1, 'link':1, 'textbox':1, 'checkbox':1, 'radio':1, 'combobox':1, 'listbox':1,
@@ -840,7 +850,7 @@ async fn find_cursor_interactive_elements(
             }
         }
 
-        el.setAttribute('data-__ab-ci', String(results.length));
+        elements.push(el);
         results.push({
             text: text,
             tagName: tagName,
@@ -852,122 +862,29 @@ async fn find_cursor_interactive_elements(
             hiddenInputChecked: hiddenInputChecked
         });
     }
-    return results;
+    return { info: results, elements: elements };
 })()
 "#;
 
-    let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: js.to_string(),
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(session_id),
-        )
-        .await?;
-
-    let elements: Vec<Value> = result
-        .result
-        .value
-        .and_then(|v| serde_json::from_value::<Vec<Value>>(v).ok())
-        .unwrap_or_default();
-
-    if elements.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    // Batch-resolve backendNodeIds: use DOM.getDocument to get the root nodeId,
-    // then DOM.querySelectorAll to get all tagged elements in a single call.
-    let doc: Value = client
+    let (scan, scan_session) = evaluate_in_frame(
+        client,
+        session_id,
+        frame_id,
+        iframe_sessions,
+        js,
+        false,
+        Some(CURSOR_SCAN_OBJECT_GROUP),
+    )
+    .await?;
+    let result = resolve_cursor_scan(client, &scan_session, scan).await;
+    let _ = client
         .send_command(
-            "DOM.getDocument",
-            Some(serde_json::json!({ "depth": 0 })),
-            Some(session_id),
+            "Runtime.releaseObjectGroup",
+            Some(serde_json::json!({ "objectGroup": CURSOR_SCAN_OBJECT_GROUP })),
+            Some(&scan_session),
         )
-        .await?;
-
-    let root_node_id = doc
-        .get("root")
-        .and_then(|r| r.get("nodeId"))
-        .and_then(|v| v.as_i64())
-        .ok_or("DOM.getDocument did not return root nodeId")?;
-
-    let query_result: Value = client
-        .send_command(
-            "DOM.querySelectorAll",
-            Some(serde_json::json!({
-                "nodeId": root_node_id,
-                "selector": "[data-__ab-ci]"
-            })),
-            Some(session_id),
-        )
-        .await?;
-
-    let node_ids: Vec<i64> = query_result
-        .get("nodeIds")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect())
-        .unwrap_or_default();
-
-    // Resolve backendNodeIds for each DOM node using concurrent CDP calls.
-    let describe_futures: Vec<_> = node_ids
-        .iter()
-        .map(|&node_id| {
-            client.send_command(
-                "DOM.describeNode",
-                Some(serde_json::json!({ "nodeId": node_id })),
-                Some(session_id),
-            )
-        })
-        .collect();
-
-    let describe_results = futures_util::future::join_all(describe_futures).await;
-
-    // Build a map from data-__ab-ci index to backendNodeId.
-    let mut idx_to_backend: HashMap<usize, i64> = HashMap::new();
-    for desc in describe_results.into_iter().flatten() {
-        let backend_id = desc
-            .get("node")
-            .and_then(|n| n.get("backendNodeId"))
-            .and_then(|v| v.as_i64());
-        let ci_attr = desc
-            .get("node")
-            .and_then(|n| n.get("attributes"))
-            .and_then(|a| a.as_array())
-            .and_then(|attrs| {
-                // attributes is a flat array: [name, value, name, value, ...]
-                attrs
-                    .iter()
-                    .enumerate()
-                    .find(|(_, v)| v.as_str() == Some("data-__ab-ci"))
-                    .and_then(|(i, _)| attrs.get(i + 1))
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<usize>().ok())
-            });
-        if let (Some(bid), Some(idx)) = (backend_id, ci_attr) {
-            idx_to_backend.insert(idx, bid);
-        }
-    }
-
-    // Clean up the data attributes we injected for backendNodeId resolution.
-    let cleanup_js =
-        r#"(function(){ var els = document.querySelectorAll('[data-__ab-ci]'); for (var i = 0; i < els.length; i++) els[i].removeAttribute('data-__ab-ci'); return els.length; })()"#.to_string();
-    if let Err(e) = client
-        .send_command_typed::<EvaluateParams, EvaluateResult>(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: cleanup_js,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(session_id),
-        )
-        .await
-    {
-        eprintln!("[agent-browser] Warning: failed to clean up data-__ab-ci attributes: {e}");
-    }
+        .await;
+    let (elements, idx_to_backend) = result?;
 
     // Build the map
     let mut map: HashMap<i64, CursorElementInfo> = HashMap::new();
@@ -1046,6 +963,110 @@ async fn find_cursor_interactive_elements(
     }
 
     Ok(map)
+}
+
+const CURSOR_SCAN_OBJECT_GROUP: &str = "agent-browser-cursor-scan";
+
+/// Read the cursor scan result (`{ info, elements }`): the per-element info by
+/// value, and a map from each element's index to its backendNodeId, resolved
+/// with DOM.describeNode on the element handles in the scan's own session.
+async fn resolve_cursor_scan(
+    client: &CdpClient,
+    session_id: &str,
+    scan: EvaluateResult,
+) -> Result<(Vec<Value>, HashMap<usize, i64>), String> {
+    if let Some(exception) = scan.exception_details {
+        return Err(format!(
+            "Cursor-interactive scan failed: {}",
+            exception.text
+        ));
+    }
+    let scan_object_id = scan
+        .result
+        .object_id
+        .ok_or("Cursor-interactive scan returned no result")?;
+
+    let info = client
+        .send_command(
+            "Runtime.callFunctionOn",
+            Some(serde_json::json!({
+                "objectId": scan_object_id,
+                "functionDeclaration": "function() { return this.info; }",
+                "returnByValue": true,
+            })),
+            Some(session_id),
+        )
+        .await?;
+    let elements: Vec<Value> = info
+        .pointer("/result/value")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    if elements.is_empty() {
+        return Ok((elements, HashMap::new()));
+    }
+
+    let handles = client
+        .send_command(
+            "Runtime.callFunctionOn",
+            Some(serde_json::json!({
+                "objectId": scan_object_id,
+                "functionDeclaration": "function() { return this.elements; }",
+                "returnByValue": false,
+                "objectGroup": CURSOR_SCAN_OBJECT_GROUP,
+            })),
+            Some(session_id),
+        )
+        .await?;
+    let handles_object_id = handles
+        .pointer("/result/objectId")
+        .and_then(|v| v.as_str())
+        .ok_or("Cursor-interactive scan returned no element handles")?;
+    let properties = client
+        .send_command(
+            "Runtime.getProperties",
+            Some(serde_json::json!({
+                "objectId": handles_object_id,
+                "ownProperties": true,
+            })),
+            Some(session_id),
+        )
+        .await?;
+    let indexed_handles: Vec<(usize, String)> = properties
+        .get("result")
+        .and_then(|v| v.as_array())
+        .map(|props| {
+            props
+                .iter()
+                .filter_map(|prop| {
+                    let idx = prop.get("name")?.as_str()?.parse::<usize>().ok()?;
+                    let object_id = prop.pointer("/value/objectId")?.as_str()?;
+                    Some((idx, object_id.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // CDP has no batch describe, so resolve the handles concurrently.
+    let describe_futures = indexed_handles.iter().map(|(idx, object_id)| async move {
+        let described = client
+            .send_command(
+                "DOM.describeNode",
+                Some(serde_json::json!({ "objectId": object_id })),
+                Some(session_id),
+            )
+            .await
+            .ok()?;
+        let backend_node_id = described.pointer("/node/backendNodeId")?.as_i64()?;
+        Some((*idx, backend_node_id))
+    });
+    let idx_to_backend = futures_util::future::join_all(describe_futures)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+
+    Ok((elements, idx_to_backend))
 }
 
 /// Promote LabelText/generic nodes that wrap a hidden radio/checkbox input.
