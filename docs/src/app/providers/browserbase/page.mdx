@@ -1,6 +1,15 @@
 # Browserbase
 
-[Browserbase](https://browserbase.com) provides remote browser infrastructure to make deployment of agentic browsing agents easy. Use it when running agent-browser in environments where a local browser isn't feasible.
+[Browserbase](https://browserbase.com) provides managed, remote browser infrastructure purpose-built for AI agents. It handles browser lifecycle, session recording, proxy rotation, and captcha solving so your agent can focus on the task at hand. Use it when running agent-browser in serverless environments, CI/CD pipelines, or anywhere a local browser isn't feasible.
+
+Key capabilities when paired with agent-browser:
+
+- **Persistent context** — save and restore cookies, localStorage, and login state across sessions
+- **Stealth mode** — advanced anti-detection to avoid bot fingerprinting
+- **Built-in proxies** — route traffic through Browserbase's residential proxy network to avoid IP-based blocking
+- **Session recording** — every session is recorded and viewable in the Browserbase Dashboard for debugging
+- **Captcha solving** — automatic captcha interception enabled by default
+- **Keep-alive sessions** — keep a browser session running after disconnect for multi-step workflows
 
 ## Setup
 
@@ -19,6 +28,86 @@ agent-browser open https://example.com
 
 The `-p` flag takes precedence over `AGENT_BROWSER_PROVIDER`.
 
-When enabled, agent-browser connects to a Browserbase session instead of launching a local browser. All commands work identically.
+When enabled, agent-browser connects to a Browserbase cloud session instead of launching a local browser. All commands work identically.
 
 Get your API key from the [Browserbase Dashboard](https://browserbase.com/overview).
+
+## Configuration
+
+<table>
+  <thead>
+    <tr><th>Variable</th><th>Description</th><th>Default</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>BROWSERBASE_API_KEY</code></td><td>API key (required)</td><td></td></tr>
+    <tr><td><code>BROWSERBASE_CONTEXT_ID</code></td><td>Context ID for persistent cookies, localStorage, and logins</td><td>(none)</td></tr>
+    <tr><td><code>BROWSERBASE_CONTEXT_PERSIST</code></td><td>Save context changes back after session ends</td><td><code>true</code> when context ID is set</td></tr>
+    <tr><td><code>BROWSERBASE_STEALTH</code></td><td>Enable advanced stealth mode to avoid bot detection</td><td><code>false</code></td></tr>
+    <tr><td><code>BROWSERBASE_TIMEOUT</code></td><td>Session timeout in seconds (60–21600)</td><td>Browserbase default</td></tr>
+    <tr><td><code>BROWSERBASE_PROXY</code></td><td>Enable Browserbase residential proxies</td><td><code>false</code></td></tr>
+    <tr><td><code>BROWSERBASE_KEEP_ALIVE</code></td><td>Keep session alive after disconnect for resumption</td><td><code>false</code></td></tr>
+  </tbody>
+</table>
+
+## Persistent Context
+
+Use `BROWSERBASE_CONTEXT_ID` to persist browser state (cookies, localStorage, logins) across sessions. When a context ID is set, changes are automatically saved back when the session ends — set `BROWSERBASE_CONTEXT_PERSIST=false` to load state without saving changes.
+
+```bash
+# First session: log in and save state
+BROWSERBASE_CONTEXT_ID=my-context agent-browser -p browserbase open https://example.com
+
+# Later session: reuse the saved login
+BROWSERBASE_CONTEXT_ID=my-context agent-browser -p browserbase open https://example.com
+```
+
+## Stealth Mode
+
+Set `BROWSERBASE_STEALTH=true` to enable advanced anti-detection measures that reduce bot fingerprinting:
+
+```bash
+BROWSERBASE_STEALTH=true agent-browser -p browserbase open https://example.com
+```
+
+## Session Recording
+
+Every Browserbase session is automatically recorded. After a session ends, view the recording in the [Browserbase Dashboard](https://browserbase.com/overview) to inspect what the agent did, debug failures, or audit behavior. No additional configuration is needed.
+
+## Proxies
+
+Set `BROWSERBASE_PROXY=true` to route browser traffic through Browserbase's residential proxy network. This helps avoid IP-based rate limiting and geo-restrictions:
+
+```bash
+BROWSERBASE_PROXY=true agent-browser -p browserbase open https://example.com
+```
+
+## Keep-Alive Sessions
+
+By default, a Browserbase session ends when agent-browser disconnects. Set `BROWSERBASE_KEEP_ALIVE=true` to keep the session running so you can reconnect later — useful for long-running workflows that span multiple agent invocations:
+
+```bash
+BROWSERBASE_KEEP_ALIVE=true agent-browser -p browserbase open https://example.com
+```
+
+## Examples
+
+```bash
+# Basic usage
+agent-browser -p browserbase open https://example.com
+
+# Persistent login with stealth mode
+BROWSERBASE_CONTEXT_ID=my-app BROWSERBASE_STEALTH=true \
+  agent-browser -p browserbase open https://example.com
+
+# Long-running session with proxy
+BROWSERBASE_TIMEOUT=3600 BROWSERBASE_PROXY=true BROWSERBASE_KEEP_ALIVE=true \
+  agent-browser -p browserbase open https://example.com
+
+# CI environment with all options
+export AGENT_BROWSER_PROVIDER=browserbase
+export BROWSERBASE_API_KEY="your-key"
+export BROWSERBASE_CONTEXT_ID=ci-context
+export BROWSERBASE_STEALTH=true
+export BROWSERBASE_PROXY=true
+agent-browser open https://example.com
+```
