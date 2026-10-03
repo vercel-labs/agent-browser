@@ -2065,12 +2065,23 @@ fn main() {
     // Handle batch command: from args or stdin
     if cmd.get("action").and_then(|v| v.as_str()) == Some("batch") {
         let bail = cmd.get("bail").and_then(|v| v.as_bool()).unwrap_or(false);
-        let arg_commands = cmd.get("commands").and_then(|v| v.as_array()).map(|arr| {
+        let arg_commands = match cmd.get("commands").and_then(|v| v.as_array()).map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str())
                 .map(commands::shell_words_split)
-                .collect::<Vec<Vec<String>>>()
-        });
+                .collect::<Result<Vec<Vec<String>>, String>>()
+        }) {
+            Some(Ok(cmds)) => Some(cmds),
+            Some(Err(e)) => {
+                if flags.json {
+                    print_json_error(e);
+                } else {
+                    eprintln!("{} {}", color::error_indicator(), e);
+                }
+                exit(1);
+            }
+            None => None,
+        };
         run_batch(&flags, &daemon_opts, bail, arg_commands);
         return;
     }

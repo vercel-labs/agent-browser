@@ -3541,36 +3541,79 @@ fn parse_storage(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     }
 }
 
-/// Split a string into arguments respecting shell quoting (double/single quotes, backslash escapes).
-pub fn shell_words_split(s: &str) -> Vec<String> {
+fn unterminated_quote_error(quote: &str, s: &str) -> String {
+    format!(
+        "Unterminated {} quote in command: {}\nWrap text containing an apostrophe in double quotes \
+         (\"It's here\"), or pass commands as JSON on stdin: agent-browser batch --json",
+        quote, s
+    )
+}
+
+/// Split a string into arguments using POSIX-style quoting.
+///
+/// Rules:
+/// - Whitespace separates arguments.
+/// - Single quotes preserve their contents literally, backslashes included.
+/// - Double quotes preserve their contents except `\"` and `\\`, which escape
+///   the quote and the backslash; any other backslash stays literal.
+/// - Outside quotes a backslash is an ordinary character, so Windows paths
+///   such as `C:\Users\dwin` survive unchanged.
+/// - A quoted section yields an argument even when empty, so `""` is passed
+///   through instead of silently shifting later positional arguments.
+/// - An unterminated quote is an error instead of being stripped, so text is
+///   never silently corrupted.
+pub fn shell_words_split(s: &str) -> Result<Vec<String>, String> {
     let mut args = Vec::new();
     let mut current = String::new();
-    let mut in_double = false;
-    let mut in_single = false;
-    let mut chars = s.chars().peekable();
+    let mut has_token = false;
+    let mut chars = s.chars();
 
     while let Some(c) = chars.next() {
         match c {
-            '\\' if !in_single => {
-                if let Some(&next) = chars.peek() {
-                    chars.next();
-                    current.push(next);
+            '\'' => {
+                has_token = true;
+                loop {
+                    match chars.next() {
+                        Some('\'') => break,
+                        Some(ch) => current.push(ch),
+                        None => return Err(unterminated_quote_error("single", s)),
+                    }
                 }
             }
-            '"' if !in_single => in_double = !in_double,
-            '\'' if !in_double => in_single = !in_single,
-            ' ' if !in_double && !in_single => {
-                if !current.is_empty() {
+            '"' => {
+                has_token = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        Some('\\') => match chars.next() {
+                            Some(ch) if ch == '"' || ch == '\\' => current.push(ch),
+                            Some(ch) => {
+                                current.push('\\');
+                                current.push(ch);
+                            }
+                            None => return Err(unterminated_quote_error("double", s)),
+                        },
+                        Some(ch) => current.push(ch),
+                        None => return Err(unterminated_quote_error("double", s)),
+                    }
+                }
+            }
+            c if c.is_whitespace() => {
+                if has_token {
                     args.push(std::mem::take(&mut current));
+                    has_token = false;
                 }
             }
-            _ => current.push(c),
+            c => {
+                has_token = true;
+                current.push(c);
+            }
         }
     }
-    if !current.is_empty() {
+    if has_token {
         args.push(current);
     }
-    args
+    Ok(args)
 }
 
 #[cfg(test)]
@@ -6621,6 +6664,57 @@ mod tests {
     fn test_batch_no_args_no_commands_field() {
         let cmd = parse_command(&args("batch"), &default_flags()).unwrap();
         assert!(cmd.get("commands").is_none());
+    }
+
+    // === Batch argument splitting (shell_words_split) ===
+
+    #[test]
+    fn test_shell_words_split_multi_word_quoted_value() {
+        let parts = shell_words_split("fill #name \"Ada Lovelace\"").unwrap();
+        assert_eq!(parts, vec!["fill", "#name", "Ada Lovelace"]);
+    }
+
+    #[test]
+    fn test_shell_words_split_apostrophe_survives_in_double_quotes() {
+        let parts = shell_words_split("fill #t \"It's here\"").unwrap();
+        assert_eq!(parts, vec!["fill", "#t", "It's here"]);
+    }
+
+    #[test]
+    fn test_shell_words_split_bare_apostrophe_is_an_error() {
+        // Previously this silently produced "Its here"; it must now fail loudly.
+        let err = shell_words_split("fill #t It's here").unwrap_err();
+        assert!(err.contains("Unterminated single quote"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_shell_words_split_preserves_backslashes() {
+        let parts = shell_words_split("fill #path C:\\Users\\dwin").unwrap();
+        assert_eq!(parts, vec!["fill", "#path", "C:\\Users\\dwin"]);
+    }
+
+    #[test]
+    fn test_shell_words_split_embedded_double_quotes() {
+        let parts = shell_words_split("fill #t \"say \\\"hi\\\" now\"").unwrap();
+        assert_eq!(parts, vec!["fill", "#t", "say \"hi\" now"]);
+    }
+
+    #[test]
+    fn test_shell_words_split_single_quotes_are_literal() {
+        let parts = shell_words_split("fill #t 'C:\\Users\\dwin'").unwrap();
+        assert_eq!(parts, vec!["fill", "#t", "C:\\Users\\dwin"]);
+    }
+
+    #[test]
+    fn test_shell_words_split_keeps_empty_quoted_argument() {
+        let parts = shell_words_split("fill #t \"\"").unwrap();
+        assert_eq!(parts, vec!["fill", "#t", ""]);
+    }
+
+    #[test]
+    fn test_shell_words_split_unterminated_double_quote_is_an_error() {
+        let err = shell_words_split("fill #t \"unclosed").unwrap_err();
+        assert!(err.contains("Unterminated double quote"), "got: {}", err);
     }
 
     #[test]

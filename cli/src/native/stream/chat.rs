@@ -497,7 +497,10 @@ fn first_chat_command(command: &str) -> &str {
 fn chat_command_args(session: &str, command: &str) -> Result<Vec<String>, String> {
     let single = first_chat_command(command);
     let stripped = single.strip_prefix("agent-browser ").unwrap_or(single);
-    let words = crate::commands::shell_words_split(stripped);
+    let words = match crate::commands::shell_words_split(stripped) {
+        Ok(words) => words,
+        Err(e) => return e,
+    };
 
     let mut global_flags: Vec<String> = Vec::new();
     let mut cmd_words: Vec<String> = Vec::new();
