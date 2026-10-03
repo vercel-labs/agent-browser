@@ -469,6 +469,8 @@ agent-browser state clean --older-than <days>  # Delete old states
 
 With recording `--cursor`, the pointer and click ripple render with the page, keeping drags synchronized in every captured frame. The temporary overlay is inert, hidden from accessibility snapshots, and removed when recording stops. Screenshots taken during the recording include it.
 
+Contact sheets sample candidate frames at the rate set by `--fps`. At rates below 60 fps, brief UI states between samples may not appear. The final captured frame is always considered.
+
 ### Navigation
 
 ```bash

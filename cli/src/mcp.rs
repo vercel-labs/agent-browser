@@ -1396,7 +1396,7 @@ fn parity_tools() -> Vec<Value> {
                     "description": "Capture rate in frames per second (default 30, max 60).",
                 },
                 "cursor": { "type": "boolean", "description": "Render a pointer and click ripple with the page so drags stay synchronized. The inert overlay is hidden from accessibility snapshots, included in screenshots while recording, and removed on stop." },
-                "contactSheet": { "type": "boolean", "description": "Export first, changed, and final frames as a timestamped PNG beside the video." },
+                "contactSheet": { "type": "boolean", "description": "Export first, changed, and final frames as a timestamped PNG beside the video. Candidate frames are sampled at fps. Below 60 fps, brief UI states between samples may not appear. The final captured frame is always considered." },
                 "contactSheetThreshold": { "type": "number", "minimum": 0, "maximum": 1, "description": "Changed-pixel ratio required to select a contact-sheet frame (default 0.05). Implies contactSheet." },
             }),
             &["path"],
@@ -1425,7 +1425,7 @@ fn parity_tools() -> Vec<Value> {
                     "description": "Capture rate in frames per second (default 30, max 60).",
                 },
                 "cursor": { "type": "boolean", "description": "Render a pointer and click ripple with the page so drags stay synchronized. The inert overlay is hidden from accessibility snapshots, included in screenshots while recording, and removed on stop." },
-                "contactSheet": { "type": "boolean", "description": "Export first, changed, and final frames as a timestamped PNG beside the video." },
+                "contactSheet": { "type": "boolean", "description": "Export first, changed, and final frames as a timestamped PNG beside the video. Candidate frames are sampled at fps. Below 60 fps, brief UI states between samples may not appear. The final captured frame is always considered." },
                 "contactSheetThreshold": { "type": "number", "minimum": 0, "maximum": 1, "description": "Changed-pixel ratio required to select a contact-sheet frame (default 0.05). Implies contactSheet." },
             }),
             &["path"],
@@ -4913,6 +4913,19 @@ mod tests {
                 tool["inputSchema"]["properties"]["contactSheet"]["type"],
                 "boolean"
             );
+            let contact_sheet_description = tool["inputSchema"]["properties"]["contactSheet"]
+                ["description"]
+                .as_str()
+                .unwrap();
+            for needle in ["sampled at fps", "final captured frame"] {
+                assert!(
+                    contact_sheet_description.contains(needle),
+                    "{} contact-sheet description should mention {}: {}",
+                    name,
+                    needle,
+                    contact_sheet_description
+                );
+            }
             let threshold = &tool["inputSchema"]["properties"]["contactSheetThreshold"];
             assert_eq!(threshold["minimum"], json!(0));
             assert_eq!(threshold["maximum"], json!(1));
