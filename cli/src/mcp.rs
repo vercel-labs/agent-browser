@@ -1504,7 +1504,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_AUTH_LOGIN,
             "Auth login",
-            "Log in with a saved auth profile. Control selection checks layout size, computed visibility and opacity, and disabled/readonly state. Replaced or focus-redirected credential fields fail without submitting.",
+            "Log in with a saved auth profile. Control selection checks layout size, computed visibility and opacity, and disabled/readonly state. Replaced or focus-redirected credential fields fail without submitting. Submit waits until enabled (including aria-disabled, inert, and pointer-events: none). Without a submit selector it tries button[type=submit], input[type=submit], a control after the password field labelled Log in / Sign in / Submit / Continue / Next, then button:not([type]), preferring the password field's form (untyped buttons last) and never using another form or, on formless pages, a nav or page header/footer. Success means submit was clicked, not that the login was accepted.",
             json!({
                 "name": { "type": "string" },
                 "noNavigate": {

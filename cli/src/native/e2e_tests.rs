@@ -6715,6 +6715,561 @@ async fn e2e_auth_login_waits_for_delayed_spa_form_render() {
     assert_success(&close);
 }
 
+/// Serves the same login page for every path. The page records what was
+/// clicked in `window.__submitted` / `window.__wrong` / `window.__early` so a
+/// test can tell a real submit from a click that landed on the wrong element
+/// or on a submit that was still disabled.
+async fn start_static_login_server(body: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{}", port);
+
+    let handle = tokio::spawn(async move {
+        for _ in 0..100 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let _ = stream.read(&mut buf).await;
+                let html = format!(
+                    "<!doctype html><html><head><meta charset=\"utf-8\"><title>Login</title></head><body>{}</body></html>",
+                    body
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    html.len(),
+                    html,
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    (base_url, handle)
+}
+
+/// Saves a throwaway profile for `page`, runs `auth_login`, and returns the
+/// login response plus the page's click bookkeeping.
+async fn run_auth_login_against(
+    page: &'static str,
+    submit_selector: Option<&str>,
+) -> (Value, Value) {
+    let (base_url, _server) = start_static_login_server(page).await;
+    let mut state = DaemonState::new();
+    let profile_name = format!(
+        "e2e-auth-submit-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_else(|_| std::time::Duration::from_secs(0))
+            .as_nanos()
+    );
+
+    let launch = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&launch);
+
+    let mut save_cmd = json!({
+        "id": "2",
+        "action": "auth_save",
+        "name": profile_name.clone(),
+        "url": format!("{}/login", base_url),
+        "username": "user@example.com",
+        "password": "super-secret",
+    });
+    if let Some(sel) = submit_selector {
+        save_cmd["submitSelector"] = json!(sel);
+    }
+    let save = execute_command(&save_cmd, &mut state).await;
+    assert_success(&save);
+
+    let login = execute_command(
+        &json!({ "id": "3", "action": "auth_login", "name": profile_name.clone(), "timeout": 5000 }),
+        &mut state,
+    )
+    .await;
+
+    let verify = execute_command(
+        &json!({
+            "id": "4",
+            "action": "evaluate",
+            "script": "({ submitted: !!window.__submitted, wrong: !!window.__wrong, early: !!window.__early })",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&verify);
+    let marks = get_data(&verify)["result"].clone();
+
+    let _ = execute_command(
+        &json!({ "id": "5", "action": "auth_delete", "name": profile_name }),
+        &mut state,
+    )
+    .await;
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+
+    (login, marks)
+}
+
+/// Component libraries often render the submit as a plain element with a
+/// click handler (this is the shape of an Angular `<app-button>`), so there is
+/// no `<button>` or `[type=submit]` on the page at all.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_clicks_non_button_submit() {
+    let (login, marks) = run_auth_login_against(
+        r#"<form>
+             <input type="email" /><input type="password" />
+             <div class="login-btn"><div class="button" id="go" style="cursor:pointer;padding:8px">Login</div></div>
+           </form>
+           <script>document.getElementById('go').addEventListener('click', () => { window.__submitted = true; });</script>"#,
+        None,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(marks["submitted"], true);
+}
+
+/// A submit with an explicit ARIA role is found even though it is not a button.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_clicks_role_button_submit() {
+    let (login, marks) = run_auth_login_against(
+        r#"<form>
+             <input type="email" /><input type="password" />
+             <span role="button" id="go" style="display:inline-block;padding:8px">Continue</span>
+           </form>
+           <script>document.getElementById('go').addEventListener('click', () => { window.__submitted = true; });</script>"#,
+        None,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(marks["submitted"], true);
+}
+
+/// Text-matched submits are looked for inside the password field's form, so a
+/// "Log in" element after the form, outside any page chrome, is not clicked
+/// instead.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_text_submit_is_scoped_to_password_form() {
+    let (login, marks) = run_auth_login_against(
+        r#"<form>
+             <input type="email" /><input type="password" />
+             <div id="go" style="cursor:pointer;padding:8px">Sign in</div>
+           </form>
+           <div><span id="other" style="cursor:pointer;padding:8px">Log in</span></div>
+           <script>
+             document.getElementById('other').addEventListener('click', () => { window.__wrong = true; });
+             document.getElementById('go').addEventListener('click', () => { window.__submitted = true; });
+           </script>"#,
+        None,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(marks["submitted"], true);
+    assert_eq!(marks["wrong"], false);
+}
+
+/// An explicit submit selector (from `--submit-selector` or the stored
+/// profile) is waited on until enabled, not merely until visible. Forms that
+/// validate on input enable their submit a moment after the fields are filled.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_explicit_submit_waits_until_enabled() {
+    let (login, marks) = run_auth_login_against(
+        r#"<form>
+             <input type="email" /><input type="password" id="pw" />
+             <button type="button" id="go" disabled>Sign in</button>
+           </form>
+           <script>
+             const go = document.getElementById('go');
+             document.getElementById('pw').addEventListener('input', () => setTimeout(() => { go.disabled = false; }, 400));
+             go.addEventListener('click', () => { window.__submitted = true; });
+           </script>"#,
+        Some("#go"),
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(marks["submitted"], true);
+}
+
+/// `aria-disabled="true"` counts as disabled. Some design systems keep the
+/// submit focusable and signal "not yet" only through ARIA.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_waits_for_aria_disabled_submit() {
+    let (login, marks) = run_auth_login_against(
+        r#"<form id="f">
+             <input type="email" /><input type="password" id="pw" />
+             <button type="submit" id="go" aria-disabled="true">Sign in</button>
+           </form>
+           <script>
+             const go = document.getElementById('go');
+             document.getElementById('pw').addEventListener('input', () => setTimeout(() => go.setAttribute('aria-disabled', 'false'), 400));
+             document.getElementById('f').addEventListener('submit', (e) => {
+               e.preventDefault();
+               if (go.getAttribute('aria-disabled') === 'true') window.__early = true; else window.__submitted = true;
+             });
+           </script>"#,
+        None,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(marks["early"], false);
+    assert_eq!(marks["submitted"], true);
+}
+
+/// When a selector matches several visible elements in the login form, an
+/// enabled one is preferred over an earlier disabled one, so the disabled one
+/// is not waited on.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_prefers_enabled_submit_among_matches() {
+    let (login, marks) = run_auth_login_against(
+        r#"<form id="f">
+             <input type="email" /><input type="password" />
+             <button type="submit" id="passkey" disabled>Use a passkey</button>
+             <button type="submit" id="go">Sign in</button>
+           </form>
+           <script>
+             document.getElementById('f').addEventListener('submit', (e) => {
+               e.preventDefault();
+               if (e.submitter && e.submitter.id === 'go') window.__submitted = true; else window.__wrong = true;
+             });
+           </script>"#,
+        None,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(marks["submitted"], true);
+    assert_eq!(marks["wrong"], false);
+}
+
+/// While the real submit is disabled, auto-detection must wait for it rather
+/// than fall through to another visible button, such as an untyped
+/// show-password toggle that also matches `button:not([type])`.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_does_not_click_other_button_while_submit_disabled() {
+    let (login, marks) = run_auth_login_against(
+        r#"<form id="f">
+             <input type="email" /><input type="password" id="pw" />
+             <button id="eye">Show</button>
+             <button type="submit" id="go" disabled>Sign in</button>
+           </form>
+           <script>
+             const go = document.getElementById('go');
+             document.getElementById('pw').addEventListener('input', () => setTimeout(() => { go.disabled = false; }, 400));
+             document.getElementById('eye').addEventListener('click', (e) => { e.preventDefault(); window.__wrong = true; });
+             document.getElementById('f').addEventListener('submit', (e) => { e.preventDefault(); window.__submitted = true; });
+           </script>"#,
+        None,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(marks["wrong"], false);
+    assert_eq!(marks["submitted"], true);
+}
+
+/// On a page with no `<form>`, the fallback search must not reach the page
+/// chrome: neither the nav's "Log in" link nor its untyped menu button is
+/// clicked, only the labelled element after the password field.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_formless_submit_skips_page_chrome() {
+    let (login, marks) = run_auth_login_against(
+        r#"<nav>
+             <button id="menu">Menu</button>
+             <span id="nav" style="cursor:pointer;padding:8px">Log in</span>
+           </nav>
+           <div class="card">
+             <input type="email" /><input type="password" />
+             <div id="go" style="padding:8px">Login</div>
+           </div>
+           <script>
+             for (const id of ['menu', 'nav']) document.getElementById(id).addEventListener('click', () => { window.__wrong = true; });
+             document.getElementById('go').addEventListener('click', () => { window.__submitted = true; });
+           </script>"#,
+        None,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(marks["wrong"], false);
+    assert_eq!(marks["submitted"], true);
+}
+
+/// A formless page whose only submit-like labels are in the nav, in the
+/// footer, or on a navigating link fails rather than clicking one of them and
+/// reporting success.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_formless_page_without_submit_fails() {
+    let (login, marks) = run_auth_login_against(
+        r#"<nav><span id="nav" style="cursor:pointer;padding:8px">Log in</span></nav>
+           <div class="card">
+             <input type="email" /><input type="password" />
+             <a id="link" href="/signin">Sign in</a>
+           </div>
+           <footer><span id="foot" style="cursor:pointer;padding:8px">Sign in</span></footer>
+           <script>
+             for (const id of ['nav', 'link', 'foot']) document.getElementById(id).addEventListener('click', (e) => { e.preventDefault(); window.__wrong = true; });
+           </script>"#,
+        None,
+    )
+    .await;
+    assert_eq!(login["success"], false, "{login}");
+    assert_eq!(marks["wrong"], false);
+}
+
+/// A `[role=button]` is a candidate only when its text or `aria-label` is a
+/// submit label, so a show-password icon with that role does not beat the
+/// labelled submit after it. A "Sign in" heading above the fields is not a
+/// candidate either.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_labelled_submit_beats_icon_role_button() {
+    let (login, marks) = run_auth_login_against(
+        r#"<form>
+             <h2 id="title">Sign in</h2>
+             <input type="email" />
+             <div class="field"><input type="password" /><span role="button" id="eye" aria-label="Show password" style="display:inline-block;width:16px;height:16px"></span></div>
+             <div id="go" style="cursor:pointer;padding:8px">Sign in</div>
+           </form>
+           <script>
+             for (const id of ['title', 'eye']) document.getElementById(id).addEventListener('click', () => { window.__wrong = true; });
+             document.getElementById('go').addEventListener('click', () => { window.__submitted = true; });
+           </script>"#,
+        None,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(marks["wrong"], false);
+    assert_eq!(marks["submitted"], true);
+}
+
+/// A disabled submit in another form is not waited on; the login form's own
+/// submit is used even though it matches a later selector.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_ignores_disabled_submit_in_other_form() {
+    let (login, marks) = run_auth_login_against(
+        r#"<form><input type="email" /><button type="submit" disabled>Subscribe</button></form>
+           <form id="f">
+             <input type="email" /><input type="password" />
+             <button id="go">Sign in</button>
+           </form>
+           <script>
+             document.getElementById('f').addEventListener('submit', (e) => { e.preventDefault(); window.__submitted = true; });
+           </script>"#,
+        None,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(marks["submitted"], true);
+}
+
+/// An enabled submit in another form is not clicked while the login form's
+/// own submit is still disabled; the login submit is waited on instead.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_waits_for_own_submit_over_other_form() {
+    let (login, marks) = run_auth_login_against(
+        r#"<form id="news"><input type="email" /><button type="submit">Subscribe</button></form>
+           <form id="f">
+             <input type="email" /><input type="password" id="pw" />
+             <button type="submit" id="go" disabled>Sign in</button>
+           </form>
+           <script>
+             const go = document.getElementById('go');
+             document.getElementById('pw').addEventListener('input', () => setTimeout(() => { go.disabled = false; }, 400));
+             document.getElementById('news').addEventListener('submit', (e) => { e.preventDefault(); window.__wrong = true; });
+             document.getElementById('f').addEventListener('submit', (e) => { e.preventDefault(); window.__submitted = true; });
+           </script>"#,
+        None,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(marks["wrong"], false);
+    assert_eq!(marks["submitted"], true);
+}
+
+/// Text inside a disabled native button belongs to that button: the button is
+/// waited on until enabled, rather than the inner span being clicked at once
+/// (which the browser drops) and login reported as successful.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_waits_for_disabled_button_around_label() {
+    let (login, marks) = run_auth_login_against(
+        r#"<form>
+             <input type="email" /><input type="password" id="pw" />
+             <button type="button" id="go" disabled><span>Log in</span></button>
+           </form>
+           <script>
+             const go = document.getElementById('go');
+             document.getElementById('pw').addEventListener('input', () => setTimeout(() => { go.disabled = false; }, 400));
+             go.addEventListener('click', () => { window.__submitted = true; });
+           </script>"#,
+        None,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(marks["submitted"], true);
+}
+
+/// A button's `aria-label` is matched, so an icon-only labelled submit is found.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_matches_submit_by_aria_label() {
+    let (login, marks) = run_auth_login_against(
+        r#"<form>
+             <input type="email" /><input type="password" />
+             <button type="button" id="go" aria-label="Sign in"><svg width="16" height="16"></svg></button>
+           </form>
+           <script>document.getElementById('go').addEventListener('click', () => { window.__submitted = true; });</script>"#,
+        None,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(marks["submitted"], true);
+}
+
+/// A `<header>` or `<footer>` inside a section is part of that section, not
+/// page chrome, so a formless login card's footer button is found.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_finds_submit_in_card_footer() {
+    let (login, marks) = run_auth_login_against(
+        r#"<section class="card">
+             <header>Welcome</header>
+             <div><input type="email" /><input type="password" /></div>
+             <footer><button id="go">Log in</button></footer>
+           </section>
+           <script>document.getElementById('go').addEventListener('click', () => { window.__submitted = true; });</script>"#,
+        None,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(marks["submitted"], true);
+}
+
+/// Any candidate inside the login form, from any rung, beats a formless button
+/// after it, such as a cookie banner's untyped "Accept" button.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_in_form_submit_beats_formless_button() {
+    let (login, marks) = run_auth_login_against(
+        r#"<form>
+             <input type="email" /><input type="password" />
+             <button type="button" id="go">Sign in</button>
+           </form>
+           <div class="cookie"><button id="cookie">Accept</button></div>
+           <script>
+             document.getElementById('cookie').addEventListener('click', () => { window.__wrong = true; });
+             document.getElementById('go').addEventListener('click', () => { window.__submitted = true; });
+           </script>"#,
+        None,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(marks["wrong"], false);
+    assert_eq!(marks["submitted"], true);
+}
+
+/// A labelled submit beats an untyped icon button in the same form, such as a
+/// show-password toggle with no text.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_labelled_submit_beats_unlabelled_untyped_button() {
+    let (login, marks) = run_auth_login_against(
+        r#"<form>
+             <input type="email" />
+             <div class="field"><input type="password" /><button id="eye"><svg width="16" height="16"></svg></button></div>
+             <div id="go" style="cursor:pointer;padding:8px">Login</div>
+           </form>
+           <script>
+             document.getElementById('eye').addEventListener('click', (e) => { e.preventDefault(); window.__wrong = true; });
+             document.getElementById('go').addEventListener('click', () => { window.__submitted = true; });
+           </script>"#,
+        None,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(marks["wrong"], false);
+    assert_eq!(marks["submitted"], true);
+}
+
+/// The submit is looked for around the password field that was filled, which
+/// skips readonly fields, not around an earlier readonly password field.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_anchors_submit_on_filled_password_field() {
+    let (login, marks) = run_auth_login_against(
+        r#"<form id="other">
+             <input type="password" readonly value="locked" />
+             <button type="submit">Unlock</button>
+           </form>
+           <form id="f">
+             <input type="email" /><input type="password" />
+             <button type="submit">Sign in</button>
+           </form>
+           <script>
+             document.getElementById('other').addEventListener('submit', (e) => { e.preventDefault(); window.__wrong = true; });
+             document.getElementById('f').addEventListener('submit', (e) => { e.preventDefault(); window.__submitted = true; });
+           </script>"#,
+        None,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(marks["wrong"], false);
+    assert_eq!(marks["submitted"], true);
+}
+
+/// A label span with its own `pointer-events: none` passes clicks to its
+/// parent, so the parent is the submit and is not treated as disabled.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_label_with_pointer_events_none_uses_parent() {
+    let (login, marks) = run_auth_login_against(
+        r#"<form>
+             <input type="email" /><input type="password" />
+             <div class="button" id="go" style="cursor:pointer;padding:8px"><span style="pointer-events:none">Login</span></div>
+           </form>
+           <script>document.getElementById('go').addEventListener('click', () => { window.__submitted = true; });</script>"#,
+        None,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(marks["submitted"], true);
+}
+
+/// A submit button outside the login form beats an untyped, unlabelled icon
+/// button inside it: untyped buttons are the last rung everywhere.
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_formless_submit_beats_in_form_icon_button() {
+    let (login, marks) = run_auth_login_against(
+        r#"<form id="f">
+             <input type="email" />
+             <div><input type="password" /><button id="eye"><svg width="16" height="16"></svg></button></div>
+           </form>
+           <div class="modal-foot"><button type="submit" id="go">Continue to account</button></div>
+           <script>
+             document.getElementById('f').addEventListener('submit', (e) => { e.preventDefault(); window.__wrong = true; });
+             document.getElementById('go').addEventListener('click', () => { window.__submitted = true; });
+           </script>"#,
+        None,
+    )
+    .await;
+    assert_success(&login);
+    assert_eq!(marks["wrong"], false);
+    assert_eq!(marks["submitted"], true);
+}
+
 // ---------------------------------------------------------------------------
 // Origin-scoped --headers tests
 // ---------------------------------------------------------------------------

@@ -59,6 +59,159 @@ pub const AUTH_LOGIN_WAIT_UNTIL: WaitUntil = WaitUntil::Load;
 /// Poll interval used while waiting for auth form selectors to appear.
 const AUTH_LOGIN_SELECTOR_POLL_INTERVAL_MS: u64 = 100;
 
+/// Resolves the login submit. Returns the element itself when it is ready to
+/// click, or a string: `disabled:<how>` when the chosen submit is not yet
+/// enabled, `none` when nothing qualifies.
+///
+/// With an explicit selector, a visible match anywhere on the page is used.
+/// Otherwise candidates come from four rungs, in order: `button[type=submit]`,
+/// `input[type=submit]`, a labelled control, and `button:not([type])`. A
+/// labelled control is one whose `aria-label`, text, or (for inputs) value is
+/// a submit label ("Log in", "Sign in", "Submit", "Continue", "Next"): a
+/// button, an `input[type=button|submit]`, a `[role=button]`, a link, or a
+/// plain element with no child elements. Text inside a control belongs to
+/// that control, so a disabled `<button><span>Log in</span></button>` is
+/// waited on rather than its span clicked, and a plain label element with its
+/// own `pointer-events: none` stands for its parent, which gets the click. This rung covers component
+/// libraries that render the submit as a plain element with a click handler,
+/// and it comes before untyped buttons so a labelled submit beats an
+/// unlabelled icon button. An unlabelled `[role=button]` is never a candidate.
+///
+/// The password field anchoring the search is the first one that is visible,
+/// enabled, and not readonly, the same rule used to pick the field to fill. A
+/// candidate in another form is never used. When the password field has a
+/// form, labelled controls must be inside it, and the search order is: the
+/// form's submit buttons and labelled controls, then formless submit buttons,
+/// then untyped buttons (the form's first). So a stray formless button never
+/// beats the form's own submit, and an untyped icon button in the form never
+/// beats a real submit button just outside it. A formless candidate
+/// must come after the password field and sit outside any page-level nav,
+/// header, or footer that does not also contain it; a `<header>` or
+/// `<footer>` within a section, article, aside, main, or dialog is not page
+/// chrome. A labelled candidate must always come after the password field (so
+/// a "Sign in" heading above it is ignored) and must not be a link that
+/// navigates. Within a rung, the candidates nearest the password field in the
+/// DOM come first.
+///
+/// Within the chosen rung an enabled candidate is preferred, but a rung whose
+/// candidates are all disabled still wins over later rungs, so a submit that
+/// is disabled while the form validates is waited on rather than skipped in
+/// favour of some other button. Disabled means `:disabled`,
+/// `aria-disabled="true"` on the element or an ancestor, an `inert` ancestor,
+/// or `pointer-events: none`.
+const AUTH_LOGIN_SUBMIT_RESOLVER: &str = r#"((explicit, passwordSelector) => {
+  const visible = (el) => {
+    const r = el.getBoundingClientRect();
+    const s = window.getComputedStyle(el);
+    const o = parseFloat(s.opacity || '1');
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && (!Number.isFinite(o) || o > 0);
+  };
+  const enabled = (el) =>
+    !el.matches(':disabled') &&
+    !el.closest('[aria-disabled="true"]') &&
+    !el.closest('[inert]') &&
+    window.getComputedStyle(el).pointerEvents !== 'none';
+  const settle = (el, how) => (!el ? 'none' : enabled(el) ? el : 'disabled:' + how);
+
+  if (explicit) {
+    const shown = Array.from(document.querySelectorAll(explicit)).filter(visible);
+    return settle(shown.find(enabled) || shown[0], explicit);
+  }
+
+  const pw = Array.from(document.querySelectorAll(passwordSelector)).find(
+    (el) => visible(el) && !el.matches(':disabled') && !el.readOnly && el.type !== 'hidden'
+  );
+  if (!pw) return 'none';
+  const ownerForm = (el) => el.form || el.closest('form');
+  const pwForm = ownerForm(pw);
+  const pwDepth = new Map();
+  for (let n = pw, d = 0; n; n = n.parentElement, d++) pwDepth.set(n, d);
+  const distance = (el) => {
+    let n = el;
+    while (n && !pwDepth.has(n)) n = n.parentElement;
+    return n ? pwDepth.get(n) : Infinity;
+  };
+  const sectioning =
+    'article, aside, main, nav, section, dialog, [role=article], [role=complementary], [role=main], [role=navigation], [role=region], [role=dialog]';
+  const chromeOf = (el) => {
+    for (let n = el; n; n = n.parentElement) {
+      if (n.matches('nav, [role=navigation], [role=banner], [role=contentinfo]')) return n;
+      if (n.matches('header, footer') && !(n.parentElement && n.parentElement.closest(sectioning))) return n;
+    }
+    return null;
+  };
+  const follows = (el) => !!(pw.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+  const eligible = (el, labelRung) => {
+    const form = ownerForm(el);
+    if (form && form !== pwForm) return false;
+    if (!form && pwForm && labelRung) return false;
+    if ((!form || labelRung) && !follows(el)) return false;
+    const chrome = form ? null : chromeOf(el);
+    return !chrome || chrome.contains(pw);
+  };
+  const matching = (sel) =>
+    Array.from(document.querySelectorAll(sel)).filter((el) => eligible(el, false) && visible(el));
+
+  const label = /^(log ?in|sign ?in|submit|continue|next)$/i;
+  const control = 'button, input[type=button], input[type=submit], [role=button], a[href]';
+  const name = (el) =>
+    (el.getAttribute('aria-label') || (el instanceof HTMLInputElement ? el.value : el.textContent) || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  const navigates = (el) => {
+    const a = el.closest('a[href]');
+    return !!a && !/^\s*(#|javascript:)/i.test(a.getAttribute('href'));
+  };
+  const pointerEvents = (el) => window.getComputedStyle(el).pointerEvents;
+  const labelled = () => {
+    const controls = new Set();
+    for (const el of (pwForm || document.body).querySelectorAll('*')) {
+      let c = el.matches(control) ? el : el.children.length === 0 ? el.closest(control) : null;
+      if (!c && el.children.length === 0 && label.test(name(el))) {
+        // A label whose own pointer-events: none (not inherited from a
+        // disabled parent) passes clicks through to its parent.
+        const p = el.parentElement;
+        c = p && pointerEvents(el) === 'none' && pointerEvents(p) !== 'none' ? p : el;
+      }
+      if (c) controls.add(c);
+    }
+    return Array.from(controls).filter(
+      (el) => label.test(name(el)) && eligible(el, true) && !navigates(el) && visible(el)
+    );
+  };
+
+  const rungs = {
+    'button[type=submit]': () => matching('button[type=submit]'),
+    'input[type=submit]': () => matching('input[type=submit]'),
+    labelled,
+    'button:not([type])': () => matching('button:not([type])'),
+  };
+  const cache = {};
+  const inForm = (el) => !!pwForm && ownerForm(el) === pwForm;
+  const passes = pwForm
+    ? [
+        ['button[type=submit]', true],
+        ['input[type=submit]', true],
+        ['labelled', true],
+        ['button[type=submit]', false],
+        ['input[type=submit]', false],
+        ['button:not([type])', true],
+        ['button:not([type])', false],
+      ]
+    : Object.keys(rungs).map((how) => [how, false]);
+  for (const [how, wantInForm] of passes) {
+    const group = (cache[how] = cache[how] || rungs[how]())
+      .filter((el) => inForm(el) === wantInForm)
+      .map((el, i) => ({ el, i, d: distance(el) }))
+      .sort((a, b) => (a.d - b.d) || (a.i - b.i))
+      .map((c) => c.el);
+    if (!group.length) continue;
+    const pick = group.find(enabled) || group[0];
+    return settle(pick, how === 'labelled' ? 'text "' + name(pick) + '"' : how);
+  }
+  return 'none';
+})"#;
+
 /// Time spent trying targeted username selectors before broad text-input
 /// fallback selectors are allowed.
 const AUTH_LOGIN_PREFERRED_SELECTOR_WINDOW_MS: u64 = 5_000;
@@ -12330,6 +12483,37 @@ impl AuthLoginElement {
     }
 }
 
+/// Pins the DOM node behind `object_id` by backend node id, so a later
+/// interaction targets exactly that node, and releases the remote object.
+/// Returns `None` if the node can no longer be described.
+async fn pin_auth_login_element(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    object_id: String,
+) -> Option<AuthLoginElement> {
+    let describe = client
+        .send_command(
+            "DOM.describeNode",
+            Some(json!({ "objectId": object_id })),
+            Some(session_id),
+        )
+        .await;
+    let _ = client
+        .send_command(
+            "Runtime.releaseObject",
+            Some(json!({ "objectId": object_id })),
+            Some(session_id),
+        )
+        .await;
+    let backend_node_id = describe
+        .ok()?
+        .pointer("/node/backendNodeId")
+        .and_then(Value::as_i64)?;
+    let mut ref_map = RefMap::new();
+    ref_map.add_exact_backend_node(AUTH_LOGIN_ELEMENT_REF.to_string(), backend_node_id);
+    Some(AuthLoginElement { ref_map })
+}
+
 /// Wait for any selector in `selectors` to match a usable element and retain
 /// that element's stable backend node identity for the subsequent interaction.
 ///
@@ -12405,13 +12589,59 @@ async fn wait_for_any_selector(
             let Some(object_id) = result.result.object_id else {
                 continue;
             };
-            let describe = client
-                .send_command(
-                    "DOM.describeNode",
-                    Some(json!({ "objectId": object_id })),
-                    Some(session_id),
-                )
-                .await;
+            if let Some(element) = pin_auth_login_element(client, session_id, object_id).await {
+                return Ok(element);
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!("Wait timed out after {}ms", timeout_ms));
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(
+            AUTH_LOGIN_SELECTOR_POLL_INTERVAL_MS,
+        ))
+        .await;
+    }
+}
+
+/// Waits until `auth login`'s submit exists, is visible, and is enabled, then
+/// returns that exact element. See [`AUTH_LOGIN_SUBMIT_RESOLVER`] for how the
+/// element is chosen. The resolver runs on every poll so a form that
+/// re-renders is followed, not lost, and it never modifies the page.
+async fn wait_for_auth_submit(
+    client: &super::cdp::client::CdpClient,
+    session_id: &str,
+    explicit: Option<&str>,
+    password_selector: &str,
+    timeout_ms: u64,
+) -> Result<AuthLoginElement, String> {
+    let expression = format!(
+        "{}({}, {})",
+        AUTH_LOGIN_SUBMIT_RESOLVER,
+        serde_json::to_string(&explicit).unwrap_or_else(|_| "null".into()),
+        serde_json::to_string(password_selector).unwrap_or_default(),
+    );
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
+    let mut last = String::from("none");
+
+    loop {
+        let result: super::cdp::types::EvaluateResult = client
+            .send_command_typed(
+                "Runtime.evaluate",
+                &super::cdp::types::EvaluateParams {
+                    expression: expression.clone(),
+                    return_by_value: Some(false),
+                    await_promise: Some(false),
+                },
+                Some(session_id),
+            )
+            .await?;
+        let exception_object_id = result
+            .exception_details
+            .and_then(|details| details.exception)
+            .and_then(|exception| exception.object_id);
+        if let Some(object_id) = exception_object_id {
             let _ = client
                 .send_command(
                     "Runtime.releaseObject",
@@ -12419,22 +12649,36 @@ async fn wait_for_any_selector(
                     Some(session_id),
                 )
                 .await;
-            let Ok(describe) = describe else {
-                continue;
-            };
-            let Some(backend_node_id) = describe
-                .pointer("/node/backendNodeId")
-                .and_then(Value::as_i64)
-            else {
-                continue;
-            };
-            let mut ref_map = RefMap::new();
-            ref_map.add_exact_backend_node(AUTH_LOGIN_ELEMENT_REF.to_string(), backend_node_id);
-            return Ok(AuthLoginElement { ref_map });
+        }
+        if let Some(status) = result.result.value.as_ref().and_then(|v| v.as_str()) {
+            last = status.to_string();
+        } else if let Some(object_id) = result.result.object_id {
+            // Only a ready submit comes back as an object. If the node went
+            // away before it could be pinned, the next poll resolves again.
+            if result.result.subtype.as_deref() == Some("node") {
+                if let Some(element) = pin_auth_login_element(client, session_id, object_id).await {
+                    return Ok(element);
+                }
+            } else {
+                let _ = client
+                    .send_command(
+                        "Runtime.releaseObject",
+                        Some(json!({ "objectId": object_id })),
+                        Some(session_id),
+                    )
+                    .await;
+            }
         }
 
         if tokio::time::Instant::now() >= deadline {
-            return Err(format!("Wait timed out after {}ms", timeout_ms));
+            return Err(match (last.strip_prefix("disabled:"), explicit) {
+                (Some(how), _) => format!(
+                    "Submit button ({}) was found but stayed disabled for {}ms; the form may still be rejecting the input",
+                    how, timeout_ms
+                ),
+                (None, Some(s)) => format!("Timed out waiting for submit selector '{}'", s),
+                (None, None) => "Timed out waiting for submit button (tried button[type=submit], input[type=submit], a control labelled Log in / Sign in / Submit / Continue / Next, then button:not([type]), in the password field's form or after it outside any form); pass --submit-selector".to_string(),
+            });
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(
@@ -12714,12 +12958,6 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         "input[type=text][autocomplete=username]",
     ];
     let fallback_user_selectors = ["input[type=text]", "input:not([type])"];
-    let auto_submit_selectors = [
-        "button[type=submit]",
-        "input[type=submit]",
-        "button:not([type])",
-    ];
-
     let username_sel = cmd
         .get("usernameSelector")
         .and_then(|v| v.as_str())
@@ -12806,26 +13044,15 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .fill(&mgr.client, &session_id, &password)
         .await?;
 
-    // Find and click submit
-    let submit_element = if let Some(s) = submit_sel {
-        wait_for_any_selector(&mgr.client, &session_id, &[s.as_str()], auth_timeout_ms)
-            .await
-            .map_err(|_| format!("Timed out waiting for submit selector '{}'", s))?
-    } else {
-        wait_for_any_selector(
-            &mgr.client,
-            &session_id,
-            &auto_submit_selectors,
-            auth_timeout_ms,
-        )
-        .await
-        .map_err(|_| {
-            format!(
-                "Timed out waiting for submit button (tried selectors: {})",
-                auto_submit_selectors.join(", ")
-            )
-        })?
-    };
+    // Find the submit, wait until it is enabled, and click it
+    let submit_element = wait_for_auth_submit(
+        &mgr.client,
+        &session_id,
+        submit_sel.as_deref(),
+        &pass_sel,
+        auth_timeout_ms,
+    )
+    .await?;
     if let (Some(bound_page), Some(expected_origin)) = (&bound_page, &expected_origin) {
         validate_auth_login_active_page(mgr, bound_page, expected_origin).await?;
     }
