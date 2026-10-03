@@ -125,7 +125,7 @@ impl DomainFilter {
     }
 }
 
-fn parse_domain_list(input: &str) -> Vec<String> {
+pub(crate) fn parse_domain_list(input: &str) -> Vec<String> {
     input
         .split(',')
         .map(|s| s.trim().to_lowercase())

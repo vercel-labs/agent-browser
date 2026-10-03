@@ -33,6 +33,8 @@ pub mod recording;
 #[allow(dead_code)]
 pub mod screenshot;
 #[allow(dead_code)]
+pub mod session_allowlist;
+#[allow(dead_code)]
 pub mod snapshot;
 #[allow(dead_code)]
 pub mod state;
