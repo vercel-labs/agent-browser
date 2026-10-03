@@ -1817,7 +1817,12 @@ impl BrowserManager {
             .await?;
 
         // Screencast captures the actual content area, not the emulated CSS
-        // viewport, so resize the content area to match.
+        // viewport, so resize the content area to match. Only do this for a
+        // browser we launched: resizing an externally connected browser's
+        // window would resize every tab in the user's own window.
+        if self.browser_process.is_none() {
+            return Ok(());
+        }
         if let Ok(target_id) = self.active_target_id() {
             if let Ok(window_info) = self
                 .client
@@ -3170,6 +3175,7 @@ mod tests {
                                     "Target.getTargets" => json!({"targetInfos": []}),
                                     "Target.createTarget" => json!({"targetId": "page-1"}),
                                     "Target.attachToTarget" => json!({"sessionId": "session-1"}),
+                                    "Browser.getWindowForTarget" => json!({"windowId": 1}),
                                     "Runtime.evaluate" => {
                                         json!({"result": {"type": "number", "value": 1}})
                                     }
@@ -3403,6 +3409,40 @@ mod tests {
         let observed = server.await.unwrap();
         assert!(!observed[0].iter().any(|method| method == "Browser.close"));
         assert!(observed[1].iter().any(|method| method == "Browser.close"));
+        assert_initialization_process_reaped(dir.path());
+    }
+
+    #[tokio::test]
+    async fn test_set_viewport_external_browser_does_not_resize_window() {
+        let (url, server) = initialization_server("", true, 1, false).await;
+        let mut manager = BrowserManager::connect_cdp(&url).await.unwrap();
+        manager.set_viewport(393, 852, 3.0, true).await.unwrap();
+        manager.close().await.unwrap();
+        let observed = server.await.unwrap();
+        assert!(observed[0]
+            .iter()
+            .any(|method| method == "Emulation.setDeviceMetricsOverride"));
+        assert!(!observed[0]
+            .iter()
+            .any(|method| method == "Browser.getWindowForTarget"
+                || method == "Browser.setContentsSize"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_set_viewport_launched_browser_resizes_window() {
+        let (url, server) = initialization_server("", false, 1, false).await;
+        let (dir, options) = initialization_process(&url);
+        let mut manager = BrowserManager::launch(options, None).await.unwrap();
+        manager.set_viewport(393, 852, 3.0, true).await.unwrap();
+        manager.close().await.unwrap();
+        let observed = server.await.unwrap();
+        assert!(observed[0]
+            .iter()
+            .any(|method| method == "Emulation.setDeviceMetricsOverride"));
+        assert!(observed[0]
+            .iter()
+            .any(|method| method == "Browser.setContentsSize"));
         assert_initialization_process_reaped(dir.path());
     }
 
