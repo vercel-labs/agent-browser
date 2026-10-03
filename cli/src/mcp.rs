@@ -836,7 +836,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_SNAPSHOT,
             "Snapshot page",
-            "Return an accessibility-tree snapshot with reusable element refs.",
+            "Return an accessibility-tree snapshot with reusable element refs. Cursor-interactive detection preserves the page DOM and its attributes.",
             json!({
                 "interactive": { "type": "boolean", "default": true, "description": "Only include interactive elements." },
                 "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements." },
@@ -4208,6 +4208,11 @@ mod tests {
 
     #[test]
     fn snapshot_observations_use_canonical_cli_command() {
+        let snapshot = tools()
+            .into_iter()
+            .find(|tool| tool["name"] == TOOL_SNAPSHOT)
+            .unwrap();
+        assert_eq!(snapshot["annotations"]["readOnlyHint"], true);
         for arguments in [
             json!({}),
             json!({"interactive": false, "selector": "#content"}),

@@ -981,6 +981,8 @@ Do not put vault tokens or passwords in plugin command args. Use the vault vendo
 
 ## Snapshot Options
 
+Snapshot cursor-interactive detection reads the page without adding or removing DOM attributes, so observing custom controls does not trigger attribute MutationObservers or overwrite page-owned markers.
+
 Surviving DOM elements keep their refs across snapshots. Take a fresh snapshot after page or iframe navigation.
 
 Use filters to reduce snapshot output:

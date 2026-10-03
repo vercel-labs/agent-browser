@@ -1366,6 +1366,94 @@ async fn e2e_snapshot_and_click_ref() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_snapshot_preserves_dom_and_cursor_refs() {
+    let mut state = DaemonState::new();
+    for command in [
+        json!({"action": "launch", "headless": true}),
+        json!({"action": "navigate", "url": "about:blank"}),
+        json!({"action": "setcontent", "html": r#"
+            <div id="card" data-__ab-ci="page-owned" style="cursor:pointer"
+                 onclick="window.clicked = true">Choose plan</div>
+            <div tabindex="0">Focus field</div>
+            <div contenteditable="true">Editable note</div>
+            <label style="cursor:pointer"><input type="checkbox" checked style="display:none">Keep history</label>
+            <span data-__ab-ci="unrelated">Page-owned marker</span>
+        "#}),
+        json!({"action": "evaluate", "script": r#"
+            window.mutations = [];
+            window.before = document.body.outerHTML;
+            new MutationObserver(records => window.mutations.push(...records.map(r => r.attributeName)))
+                .observe(document.body, {attributes:true, childList:true, subtree:true});
+        "#}),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+
+    let first = execute_command(
+        &json!({"action": "snapshot", "interactive": true}),
+        &mut state,
+    )
+    .await;
+    assert_success(&first);
+    let second = execute_command(
+        &json!({"action": "snapshot", "interactive": true}),
+        &mut state,
+    )
+    .await;
+    assert_success(&second);
+    let snapshot = get_data(&second)["snapshot"].as_str().unwrap();
+    let card_ref = snapshot
+        .lines()
+        .find(|line| line.contains("\"Choose plan\""))
+        .and_then(|line| line.split("[ref=").nth(1))
+        .and_then(|rest| rest.split(']').next())
+        .expect("cursor:pointer element needs a ref");
+    assert!(get_data(&second)["refs"].get(card_ref).is_some());
+    assert!(get_data(&first)["snapshot"]
+        .as_str()
+        .unwrap()
+        .contains(&format!("[ref={card_ref}]")));
+    for name in ["Focus field", "Editable note", "Keep history"] {
+        assert!(
+            snapshot
+                .lines()
+                .any(|line| line.contains(name) && line.contains("ref=")),
+            "missing ref for {name}: {second}"
+        );
+    }
+    assert_success(
+        &execute_command(
+            &json!({"action": "click", "selector": format!("@{card_ref}")}),
+            &mut state,
+        )
+        .await,
+    );
+    let observed = execute_command(
+        &json!({"action": "evaluate", "script": r#"({
+        mutations: window.mutations,
+        sameDOM: document.body.outerHTML === window.before,
+        marker: document.getElementById('card').getAttribute('data-__ab-ci'),
+        clicked: window.clicked === true
+    })"#}),
+        &mut state,
+    )
+    .await;
+    assert_success(&observed);
+    assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
+
+    let observed = &get_data(&observed)["result"];
+    assert_eq!(
+        observed["mutations"],
+        json!([]),
+        "snapshot must not trigger DOM observers"
+    );
+    assert_eq!(observed["sameDOM"], true);
+    assert_eq!(observed["marker"], "page-owned");
+    assert_eq!(observed["clicked"], true);
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_snapshot_refs_survive_dom_updates_and_never_recycle() {
     let mut state = DaemonState::new();
     assert_success(

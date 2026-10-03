@@ -9,6 +9,129 @@ use super::cdp::types::{
 use super::element::{resolve_ax_session, RefMap};
 
 #[cfg(test)]
+mod cursor_scan_regressions {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+    use tokio_tungstenite::tungstenite::Message;
+
+    async fn scan_with_fake_cdp(
+        failing_method: Option<&'static str>,
+        empty: bool,
+    ) -> (Result<HashMap<i64, CursorElementInfo>, String>, Vec<Value>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                recorded.lock().unwrap().push(request.clone());
+                let method = request["method"].as_str().unwrap();
+                let response = if Some(method) == failing_method {
+                    json!({"id": request["id"], "error": {"code": -32000, "message": "scan failed"}})
+                } else {
+                    let result = match method {
+                        "Runtime.evaluate" if empty => json!({"result": {
+                            "type": "object", "subtype": "null", "value": null
+                        }}),
+                        "Runtime.evaluate" => json!({"result": {"objectId": "scan"}}),
+                        "Runtime.callFunctionOn" if request["params"]["returnByValue"] == true => {
+                            let metadata = if empty {
+                                json!([])
+                            } else {
+                                json!([
+                                    {"text": "First", "hasCursorPointer": true},
+                                    {"text": "Second", "isEditable": true}
+                                ])
+                            };
+                            json!({"result": {"value": metadata}})
+                        }
+                        "Runtime.callFunctionOn" => json!({"result": {"objectId": "elements"}}),
+                        // CDP property order need not match array order, and
+                        // length/prototype properties are not DOM elements.
+                        "Runtime.getProperties" => json!({"result": [
+                            {"name": "1", "value": {"objectId": "second"}},
+                            {"name": "length", "value": {"value": 2}},
+                            {"name": "0", "value": {"objectId": "first"}}
+                        ]}),
+                        "DOM.describeNode" => json!({"node": {"backendNodeId":
+                            if request["params"]["objectId"] == "first" {41} else {42}
+                        }}),
+                        "Runtime.releaseObjectGroup" => json!({}),
+                        _ => panic!("unexpected cursor scan request: {request}"),
+                    };
+                    json!({"id": request["id"], "result": result})
+                };
+                ws.send(Message::Text(response.to_string())).await.unwrap();
+            }
+        });
+        let client = CdpClient::connect(&url).await.unwrap();
+        let result = find_cursor_interactive_elements(&client, "page-session").await;
+        client.close().await;
+        server.await.unwrap();
+        let requests = requests.lock().unwrap().clone();
+        (result, requests)
+    }
+
+    fn assert_group_released(requests: &[Value]) {
+        let first = requests.first().unwrap();
+        let last = requests.last().unwrap();
+        assert_eq!(last["method"], "Runtime.releaseObjectGroup");
+        assert_eq!(
+            last["params"]["objectGroup"],
+            first["params"]["objectGroup"]
+        );
+        assert!(requests
+            .iter()
+            .all(|request| request["sessionId"] == "page-session"));
+    }
+
+    #[tokio::test]
+    async fn cursor_scan_keeps_metadata_matched_to_object_identity() {
+        let (result, requests) = scan_with_fake_cdp(None, false).await;
+        let elements = result.unwrap();
+        assert_eq!(elements.len(), 2);
+        assert_eq!(elements[&41].text, "First");
+        assert_eq!(elements[&41].kind, "clickable");
+        assert_eq!(elements[&42].text, "Second");
+        assert_eq!(elements[&42].kind, "editable");
+        assert_group_released(&requests);
+    }
+
+    #[tokio::test]
+    async fn cursor_scan_releases_objects_after_intermediate_failure() {
+        for method in [
+            "Runtime.evaluate",
+            "Runtime.callFunctionOn",
+            "Runtime.getProperties",
+        ] {
+            let (result, requests) = scan_with_fake_cdp(Some(method), false).await;
+            assert!(result
+                .err()
+                .expect("scan should fail")
+                .contains("scan failed"));
+            assert_group_released(&requests);
+        }
+    }
+
+    #[tokio::test]
+    async fn cursor_scan_skips_object_resolution_when_no_elements_match() {
+        let (result, requests) = scan_with_fake_cdp(None, true).await;
+        assert!(result.unwrap().is_empty());
+        assert_eq!(
+            requests.len(),
+            1,
+            "empty scans need only one CDP round trip"
+        );
+        assert_eq!(requests[0]["method"], "Runtime.evaluate");
+    }
+}
+
+#[cfg(test)]
 mod document_identity_regressions {
     use super::*;
     use futures_util::{SinkExt, StreamExt};
@@ -781,11 +904,12 @@ async fn find_cursor_interactive_elements(
     // - Skips elements with interactive ARIA roles
     // - Deduplicates inherited cursor:pointer from parent
     // - Skips empty text and zero-size elements
-    // - Tags each matched element with data-__ab-ci for batch backendNodeId resolution
+    // - Keeps element references in a temporary remote object, without DOM writes
     let js = r#"
 (function() {
     var results = [];
-    if (!document.body) return results;
+    var elements = [];
+    if (!document.body) return null;
 
     var interactiveRoles = {
         'button':1, 'link':1, 'textbox':1, 'checkbox':1, 'radio':1, 'combobox':1, 'listbox':1,
@@ -846,7 +970,7 @@ async fn find_cursor_interactive_elements(
             }
         }
 
-        el.setAttribute('data-__ab-ci', String(results.length));
+        elements.push(el);
         results.push({
             text: text,
             tagName: tagName,
@@ -858,122 +982,47 @@ async fn find_cursor_interactive_elements(
             hiddenInputChecked: hiddenInputChecked
         });
     }
-    return results;
+    return elements.length ? {elements: elements, metadata: results} : null;
 })()
 "#;
 
-    let result: EvaluateResult = client
-        .send_command_typed(
+    // A distinct group keeps concurrent scans independent and releases all
+    // retained DOM references on both success and intermediate CDP failures.
+    let object_group = format!("agent-browser-cursor-{}", uuid::Uuid::new_v4());
+    let evaluated = client
+        .send_command(
             "Runtime.evaluate",
-            &EvaluateParams {
-                expression: js.to_string(),
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(session_id),
-        )
-        .await?;
-
-    let elements: Vec<Value> = result
-        .result
-        .value
-        .and_then(|v| serde_json::from_value::<Vec<Value>>(v).ok())
-        .unwrap_or_default();
-
-    if elements.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    // Batch-resolve backendNodeIds: use DOM.getDocument to get the root nodeId,
-    // then DOM.querySelectorAll to get all tagged elements in a single call.
-    let doc: Value = client
-        .send_command(
-            "DOM.getDocument",
-            Some(serde_json::json!({ "depth": 0 })),
-            Some(session_id),
-        )
-        .await?;
-
-    let root_node_id = doc
-        .get("root")
-        .and_then(|r| r.get("nodeId"))
-        .and_then(|v| v.as_i64())
-        .ok_or("DOM.getDocument did not return root nodeId")?;
-
-    let query_result: Value = client
-        .send_command(
-            "DOM.querySelectorAll",
             Some(serde_json::json!({
-                "nodeId": root_node_id,
-                "selector": "[data-__ab-ci]"
+                "expression": js,
+                "returnByValue": false,
+                "awaitPromise": false,
+                "objectGroup": object_group
             })),
             Some(session_id),
         )
-        .await?;
-
-    let node_ids: Vec<i64> = query_result
-        .get("nodeIds")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect())
-        .unwrap_or_default();
-
-    // Resolve backendNodeIds for each DOM node using concurrent CDP calls.
-    let describe_futures: Vec<_> = node_ids
-        .iter()
-        .map(|&node_id| {
-            client.send_command(
-                "DOM.describeNode",
-                Some(serde_json::json!({ "nodeId": node_id })),
-                Some(session_id),
-            )
-        })
-        .collect();
-
-    let describe_results = futures_util::future::join_all(describe_futures).await;
-
-    // Build a map from data-__ab-ci index to backendNodeId.
-    let mut idx_to_backend: HashMap<usize, i64> = HashMap::new();
-    for desc in describe_results.into_iter().flatten() {
-        let backend_id = desc
-            .get("node")
-            .and_then(|n| n.get("backendNodeId"))
-            .and_then(|v| v.as_i64());
-        let ci_attr = desc
-            .get("node")
-            .and_then(|n| n.get("attributes"))
-            .and_then(|a| a.as_array())
-            .and_then(|attrs| {
-                // attributes is a flat array: [name, value, name, value, ...]
-                attrs
-                    .iter()
-                    .enumerate()
-                    .find(|(_, v)| v.as_str() == Some("data-__ab-ci"))
-                    .and_then(|(i, _)| attrs.get(i + 1))
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<usize>().ok())
-            });
-        if let (Some(bid), Some(idx)) = (backend_id, ci_attr) {
-            idx_to_backend.insert(idx, bid);
+        .await;
+    if let Ok(result) = &evaluated {
+        // Returning null retains no remote objects. Preserve the single CDP
+        // round trip for pages containing only standard interactive controls.
+        if result["result"]["subtype"] == "null" && result.get("exceptionDetails").is_none() {
+            return Ok(HashMap::new());
         }
     }
-
-    // Clean up the data attributes we injected for backendNodeId resolution.
-    let cleanup_js =
-        r#"(function(){ var els = document.querySelectorAll('[data-__ab-ci]'); for (var i = 0; i < els.length; i++) els[i].removeAttribute('data-__ab-ci'); return els.length; })()"#.to_string();
+    let scan = match evaluated {
+        Ok(result) => resolve_cursor_elements(client, session_id, &result, &object_group).await,
+        Err(error) => Err(error),
+    };
     if let Err(e) = client
-        .send_command_typed::<EvaluateParams, EvaluateResult>(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: cleanup_js,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
+        .send_command(
+            "Runtime.releaseObjectGroup",
+            Some(serde_json::json!({ "objectGroup": object_group })),
             Some(session_id),
         )
         .await
     {
-        eprintln!("[agent-browser] Warning: failed to clean up data-__ab-ci attributes: {e}");
+        eprintln!("[agent-browser] Warning: failed to release cursor scan objects: {e}");
     }
+    let (elements, idx_to_backend) = scan?;
 
     // Build the map
     let mut map: HashMap<i64, CursorElementInfo> = HashMap::new();
@@ -1052,6 +1101,88 @@ async fn find_cursor_interactive_elements(
     }
 
     Ok(map)
+}
+
+/// Resolve the scan's retained elements directly through CDP object identities.
+/// Metadata and DOM references share array indices, so page-owned attributes
+/// cannot collide with the scan and MutationObservers see no temporary tags.
+async fn resolve_cursor_elements(
+    client: &CdpClient,
+    session_id: &str,
+    result: &Value,
+    object_group: &str,
+) -> Result<(Vec<Value>, HashMap<usize, i64>), String> {
+    let object_id = result["result"]["objectId"]
+        .as_str()
+        .ok_or("Cursor scan did not return an objectId")?;
+
+    // These independent reads share one round trip even over a remote CDP.
+    let (metadata, elements) = tokio::join!(
+        client.send_command(
+            "Runtime.callFunctionOn",
+            Some(serde_json::json!({
+                "objectId": object_id,
+                "functionDeclaration": "function() { return this.metadata; }",
+                "returnByValue": true
+            })),
+            Some(session_id),
+        ),
+        client.send_command(
+            "Runtime.callFunctionOn",
+            Some(serde_json::json!({
+                "objectId": object_id,
+                "functionDeclaration": "function() { return this.elements; }",
+                "returnByValue": false,
+                "objectGroup": object_group
+            })),
+            Some(session_id),
+        )
+    );
+    let metadata = metadata?["result"]["value"]
+        .as_array()
+        .cloned()
+        .ok_or("Cursor scan did not return metadata")?;
+    if metadata.is_empty() {
+        return Ok((metadata, HashMap::new()));
+    }
+    let elements = elements?;
+    let object_id = elements["result"]["objectId"]
+        .as_str()
+        .ok_or("Cursor scan did not return element references")?;
+    let properties = client
+        .send_command(
+            "Runtime.getProperties",
+            Some(serde_json::json!({ "objectId": object_id, "ownProperties": true })),
+            Some(session_id),
+        )
+        .await?;
+    let properties = properties["result"]
+        .as_array()
+        .ok_or("Cursor scan did not return element properties")?;
+    let descriptions = properties
+        .iter()
+        .filter_map(|property| {
+            let index = property["name"].as_str()?.parse::<usize>().ok()?;
+            let object_id = property["value"]["objectId"].as_str()?;
+            (index < metadata.len()).then_some((index, object_id))
+        })
+        .map(|(index, object_id)| async move {
+            let result = client
+                .send_command(
+                    "DOM.describeNode",
+                    Some(serde_json::json!({ "objectId": object_id })),
+                    Some(session_id),
+                )
+                .await
+                .ok()?;
+            Some((index, result["node"]["backendNodeId"].as_i64()?))
+        });
+    let indices = futures_util::future::join_all(descriptions)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+    Ok((metadata, indices))
 }
 
 /// Promote LabelText/generic nodes that wrap a hidden radio/checkbox input.

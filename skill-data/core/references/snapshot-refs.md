@@ -2,6 +2,8 @@
 
 Compact element references that reduce context usage dramatically for AI agents.
 
+Cursor-interactive detection preserves DOM attributes. Taking a snapshot does not add temporary element markers or remove page-owned attributes, so custom controls remain observable without triggering attribute MutationObservers.
+
 **Related**: [commands.md](commands.md) for full command reference, [SKILL.md](../SKILL.md) for quick start.
 
 ## Contents
