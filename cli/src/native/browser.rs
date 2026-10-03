@@ -1344,6 +1344,11 @@ impl BrowserManager {
         self.default_timeout_ms
     }
 
+    /// Number of tabs this session currently tracks.
+    pub fn tab_count(&self) -> usize {
+        self.pages.len()
+    }
+
     /// Checks if the CDP connection is alive by sending a simple command.
     /// Returns false if the command times out or fails.
     pub async fn is_connection_alive(&self) -> bool {

@@ -227,6 +227,7 @@ pub(super) fn check(checks: &mut Vec<Check>, opts: &DoctorOptions) {
         engine: Some("chrome"),
         auto_connect: false,
         idle_timeout: None,
+        max_tabs: None,
         default_timeout: None,
         cdp: None,
         no_auto_dialog: false,

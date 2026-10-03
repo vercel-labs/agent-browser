@@ -273,6 +273,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_COLOR_SCHEME</code></td><td>Color scheme preference (<code>dark</code>, <code>light</code>, <code>no-preference</code>).</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_DOWNLOAD_PATH</code></td><td>Default directory for browser downloads.</td><td>(temp directory)</td></tr>
     <tr><td><code>AGENT_BROWSER_DEFAULT_TIMEOUT</code></td><td>Default timeout in ms. Keep below 30000 to avoid IPC timeouts.</td><td><code>25000</code></td></tr>
+    <tr><td><code>AGENT_BROWSER_MAX_TABS</code></td><td>Cap on open tabs per session; tab creation refuses with guidance when hit. <code>0</code> disables the cap.</td><td>(unlimited)</td></tr>
     <tr><td><code>AGENT_BROWSER_NAMESPACE</code></td><td>Namespace for daemon sockets and restore-state directories.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_RESTORE</code></td><td>Auto-save/load state persistence key.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_RESTORE_SAVE</code></td><td>Restore save policy: <code>auto</code>, <code>always</code>, or <code>never</code>.</td><td><code>auto</code></td></tr>
