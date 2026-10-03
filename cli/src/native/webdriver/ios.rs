@@ -10,6 +10,7 @@ pub struct IosDevice {
     pub is_real: bool,
 }
 
+/// List simulators eligible for selection, excluding unavailable Xcode runtimes.
 pub fn list_simulators() -> Result<Vec<IosDevice>, String> {
     let output = Command::new("xcrun")
         .args(["simctl", "list", "devices", "--json"])
@@ -24,11 +25,18 @@ pub fn list_simulators() -> Result<Vec<IosDevice>, String> {
     let parsed: Value =
         serde_json::from_str(&json_str).map_err(|e| format!("Failed to parse simctl: {}", e))?;
 
+    Ok(parse_simulators(&parsed))
+}
+
+fn parse_simulators(parsed: &Value) -> Vec<IosDevice> {
     let mut devices = Vec::new();
     if let Some(device_map) = parsed.get("devices").and_then(|v| v.as_object()) {
         for (runtime, device_list) in device_map {
             if let Some(arr) = device_list.as_array() {
                 for device in arr {
+                    if device.get("isAvailable").and_then(Value::as_bool) == Some(false) {
+                        continue;
+                    }
                     let name = device
                         .get("name")
                         .and_then(|v| v.as_str())
@@ -55,7 +63,7 @@ pub fn list_simulators() -> Result<Vec<IosDevice>, String> {
             }
         }
     }
-    Ok(devices)
+    devices
 }
 
 pub fn list_real_devices() -> Result<Vec<IosDevice>, String> {
@@ -206,6 +214,61 @@ pub fn to_device_json(devices: &[IosDevice]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_simulators_excludes_unavailable_runtimes() {
+        let devices = parse_simulators(&json!({
+            "devices": {
+                "com.apple.CoreSimulator.SimRuntime.iOS-17-0": [{
+                    "name": "iPhone 15 Pro",
+                    "udid": "unavailable-device",
+                    "state": "Shutdown",
+                    "isAvailable": false,
+                    "availabilityError": "runtime profile not found"
+                }],
+                "com.apple.CoreSimulator.SimRuntime.iOS-18-0": [{
+                    "name": "iPhone 16",
+                    "udid": "available-device",
+                    "state": "Booted",
+                    "isAvailable": true
+                }]
+            }
+        }));
+
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].udid, "available-device");
+    }
+
+    #[test]
+    fn test_parse_simulators_with_only_unavailable_devices_is_empty() {
+        let devices = parse_simulators(&json!({
+            "devices": {
+                "com.apple.CoreSimulator.SimRuntime.iOS-17-0": [{
+                    "name": "iPhone 15 Pro",
+                    "udid": "unavailable-device",
+                    "state": "Shutdown",
+                    "isAvailable": false
+                }]
+            }
+        }));
+
+        assert!(devices.is_empty());
+    }
+
+    #[test]
+    fn test_parse_simulators_preserves_devices_without_availability_metadata() {
+        let devices = parse_simulators(&json!({
+            "devices": {
+                "com.apple.CoreSimulator.SimRuntime.iOS-18-0": [{
+                    "name": "iPhone 16",
+                    "udid": "legacy-device",
+                    "state": "Shutdown"
+                }]
+            }
+        }));
+
+        assert_eq!(devices[0].udid, "legacy-device");
+    }
 
     #[test]
     fn test_ios_device_struct() {

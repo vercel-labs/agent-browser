@@ -2,6 +2,10 @@
 
 Complete reference for all agent-browser commands. For quick start and common patterns, see SKILL.md.
 
+## Native iOS devices
+
+For native iOS Safari, use `agent-browser device list` to discover available simulators. Simulators marked unavailable by Xcode are excluded from listing and selection, including default device selection.
+
 ## Navigation
 
 ```bash

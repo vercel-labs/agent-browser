@@ -1602,7 +1602,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_DEVICE,
             "Device",
-            "List available iOS simulators.",
+            "List available iOS simulators, excluding devices with unavailable runtimes.",
             json!({ "action": { "type": "string", "enum": ["list"], "default": "list" } }),
             &[],
         ),
@@ -4834,6 +4834,21 @@ mod tests {
             open["inputSchema"]["properties"]["idleTimeout"]["type"],
             "string"
         );
+    }
+
+    #[test]
+    fn device_list_delegates_to_cli_device_list() {
+        let args = cli_tool_args(
+            &json!({}),
+            vec!["device".to_string(), "list".to_string()],
+            None,
+        )
+        .unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        let command =
+            crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+
+        assert_eq!(command["action"], "device_list");
     }
 
     #[test]
