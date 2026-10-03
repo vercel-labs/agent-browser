@@ -122,7 +122,7 @@ agent-browser click <sel>             # Click element (--new-tab to open in new 
 agent-browser dblclick <sel>          # Double-click element
 agent-browser focus <sel>             # Focus element
 agent-browser type <sel> <text>       # Type into element
-agent-browser fill <sel> <text>       # Clear and fill
+agent-browser fill <sel> <text>       # Clear and fill (errors if not editable)
 agent-browser press <key>             # Press key (Enter, Tab, Control+a) (alias: key)
 agent-browser keyboard type <text>    # Type with real keystrokes (no selector, current focus)
 agent-browser keyboard inserttext <text>  # Insert text without key events (no selector)
