@@ -19,11 +19,18 @@ getrandom = "0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "process"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false }
-rustls-pemfile = "2"
+# PEM decoding for --ca-cert. Used instead of rustls-pemfile (unmaintained,
+# RUSTSEC-2025-0134): rustls already depends on rustls-pki-types, and its
+# `PemObject::pem_reader_iter` covers the same preamble-skipping PEM parse.
+rustls-pki-types = { version = "1", features = ["std"] }
 futures-util = "0.3"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
-image = "0.25"
+# Only the codecs agent-browser actually decodes/encodes: PNG and JPEG
+# screenshots, plus WebP for CDP frames that arrive in that format. Disabling
+# default features drops avif (ravif -> rav1e -> libfuzzer-sys, NCSA-licensed)
+# and exr (pulp -> paste, unmaintained, RUSTSEC-2024-0436) from the tree.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots", "stream"] }
 sha2 = "0.10"
 aes-gcm = "0.10"

@@ -538,6 +538,17 @@ impl SessionSetup {
     }
 }
 
+/// All state the command dispatcher needs for one browser session: the
+/// running browser and driver processes, snapshot and screenshot caches,
+/// policy and confirmation configuration, and everything else a command
+/// handler in [`execute_command`] reads or mutates.
+///
+/// The daemon owns one of these per session and builds it with
+/// [`DaemonState::new`], which reads its configuration from the
+/// `AGENT_BROWSER_*` environment. A process embedding the engine instead
+/// builds one with [`DaemonState::with_options`] from an explicit
+/// [`StateOptions`], so its configuration never depends on the environment
+/// of the process that hosts it.
 pub struct DaemonState {
     pub browser: Option<BrowserManager>,
     pub appium: Option<AppiumManager>,
@@ -675,10 +686,71 @@ fn default_idle_shutdown_is_blocked(
     is_webdriver || (!provider_owned && browser_blocks_shutdown)
 }
 
-impl DaemonState {
-    pub fn new() -> Self {
-        let session_id =
-            env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string());
+/// Settings a [`DaemonState`] starts from.
+///
+/// The daemon reads them from the `AGENT_BROWSER_*` environment with
+/// [`StateOptions::from_env`]. A process embedding the engine builds them
+/// directly, so two embedded sessions never share configuration through the
+/// environment of the process that hosts them.
+#[derive(Debug, Clone)]
+pub struct StateOptions {
+    /// Session identifier; scopes tab bindings and saved state.
+    pub session_id: String,
+    /// Name under which session state is saved and restored, if any.
+    pub session_name: Option<String>,
+    /// Comma-separated domain patterns navigation is restricted to.
+    pub allowed_domains: Option<String>,
+    /// Strict session-to-tab binding.
+    pub pin_tab: bool,
+    /// Accept `alert` and dismiss `beforeunload` dialogs automatically.
+    pub auto_dialog: bool,
+    /// Browser engine name, such as `chrome` or `lightpanda`.
+    pub engine: String,
+    /// Default timeout for wait operations, in milliseconds.
+    pub default_timeout_ms: u64,
+    /// Action categories that require confirmation before they run.
+    pub confirm_actions: Option<ConfirmActions>,
+    /// Allow and deny rules for actions.
+    pub policy: Option<ActionPolicy>,
+    /// When session state is saved: `auto`, `always`, or `never`.
+    pub restore_save: String,
+    /// URL a restored session must reach to count as valid.
+    pub restore_check_url: Option<String>,
+    /// Text a restored session must show to count as valid.
+    pub restore_check_text: Option<String>,
+    /// Script a restored session must satisfy to count as valid.
+    pub restore_check_fn: Option<String>,
+}
+
+impl Default for StateOptions {
+    fn default() -> Self {
+        Self {
+            session_id: "default".to_string(),
+            session_name: None,
+            allowed_domains: None,
+            pin_tab: false,
+            auto_dialog: true,
+            engine: "chrome".to_string(),
+            // README documents 25s, intentionally below the CLI's 30s IPC
+            // read timeout so the daemon reports a proper timeout error
+            // instead of the client dying with EAGAIN and retrying.
+            default_timeout_ms: 25_000,
+            confirm_actions: None,
+            policy: None,
+            restore_save: "auto".to_string(),
+            restore_check_url: None,
+            restore_check_text: None,
+            restore_check_fn: None,
+        }
+    }
+}
+
+impl StateOptions {
+    /// Read the options from the `AGENT_BROWSER_*` environment, the policy
+    /// file, and the session's persisted tab binding, as the daemon does.
+    pub fn from_env() -> Self {
+        let defaults = Self::default();
+        let session_id = env::var("AGENT_BROWSER_SESSION").unwrap_or(defaults.session_id);
         // A corrupt binding file is surfaced later, on attach; it does not
         // enable pinning here because its pinned state is unknowable.
         let pin_tab = matches!(
@@ -689,6 +761,49 @@ impl DaemonState {
             .flatten()
             .is_some_and(|b| b.pinned);
         Self {
+            session_name: env::var("AGENT_BROWSER_SESSION_NAME").ok(),
+            allowed_domains: env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            pin_tab,
+            auto_dialog: !matches!(
+                env::var("AGENT_BROWSER_NO_AUTO_DIALOG").as_deref(),
+                Ok("1" | "true" | "yes")
+            ),
+            engine: env::var("AGENT_BROWSER_ENGINE").unwrap_or(defaults.engine),
+            default_timeout_ms: env::var("AGENT_BROWSER_DEFAULT_TIMEOUT")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(defaults.default_timeout_ms),
+            confirm_actions: ConfirmActions::from_env(),
+            policy: ActionPolicy::load_if_exists(),
+            restore_save: env::var("AGENT_BROWSER_RESTORE_SAVE")
+                .ok()
+                .unwrap_or(defaults.restore_save),
+            restore_check_url: env::var("AGENT_BROWSER_RESTORE_CHECK_URL").ok(),
+            restore_check_text: env::var("AGENT_BROWSER_RESTORE_CHECK_TEXT").ok(),
+            restore_check_fn: env::var("AGENT_BROWSER_RESTORE_CHECK_FN").ok(),
+            session_id,
+        }
+    }
+}
+
+impl Default for DaemonState {
+    /// Same as [`DaemonState::new`]: configured from the environment.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DaemonState {
+    /// Create state configured from the `AGENT_BROWSER_*` environment.
+    pub fn new() -> Self {
+        Self::with_options(StateOptions::from_env())
+    }
+
+    /// Create state from explicit options, reading no environment variables.
+    pub fn with_options(options: StateOptions) -> Self {
+        Self {
             browser: None,
             appium: None,
             safari_driver: None,
@@ -698,19 +813,18 @@ impl DaemonState {
             snapshot_revisions: HashMap::new(),
             screenshot_observations: HashMap::new(),
             domain_filter: Arc::new(RwLock::new(
-                env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
-                    .ok()
+                options
+                    .allowed_domains
+                    .as_deref()
                     .filter(|s| !s.trim().is_empty())
-                    .map(|s| DomainFilter::new(&s)),
+                    .map(DomainFilter::new),
             )),
             event_tracker: EventTracker::new(),
-            session_name: env::var("AGENT_BROWSER_SESSION_NAME").ok(),
-            restore_save: env::var("AGENT_BROWSER_RESTORE_SAVE")
-                .ok()
-                .unwrap_or_else(|| "auto".to_string()),
-            restore_check_url: env::var("AGENT_BROWSER_RESTORE_CHECK_URL").ok(),
-            restore_check_text: env::var("AGENT_BROWSER_RESTORE_CHECK_TEXT").ok(),
-            restore_check_fn: env::var("AGENT_BROWSER_RESTORE_CHECK_FN").ok(),
+            session_name: options.session_name,
+            restore_save: options.restore_save,
+            restore_check_url: options.restore_check_url,
+            restore_check_text: options.restore_check_text,
+            restore_check_fn: options.restore_check_fn,
             restore_status: "not_configured".to_string(),
             restore_status_detail: None,
             restore_loaded_path: None,
@@ -720,20 +834,20 @@ impl DaemonState {
             restore_saved_path: None,
             last_command_finished: None,
             last_autosave_attempt: None,
-            session_id,
+            session_id: options.session_id,
             tracing_state: TracingState::new(),
             recording_state: RecordingState::new(),
             event_rx: None,
             webmcp: webmcp::RuntimeState::default(),
             webmcp_enabled: false,
             screencasting: false,
-            policy: ActionPolicy::load_if_exists(),
+            policy: options.policy,
             pending_confirmation: None,
             har_recording: false,
             har_entries: Vec::new(),
             har_content_mode: HarContentMode::default(),
             har_body_total_bytes: 0,
-            confirm_actions: ConfirmActions::from_env(),
+            confirm_actions: options.confirm_actions,
             inspect_server: None,
             routes: Arc::new(RwLock::new(Vec::new())),
             tracked_requests: Vec::new(),
@@ -749,31 +863,22 @@ impl DaemonState {
             input_mode: "instant".to_string(),
             pending_dialog: None,
             pending_pointer_release: None,
-            auto_dialog: !matches!(
-                env::var("AGENT_BROWSER_NO_AUTO_DIALOG").as_deref(),
-                Ok("1" | "true" | "yes")
-            ),
+            auto_dialog: options.auto_dialog,
             stream_client: None,
             stream_server: None,
             idle_activity: Arc::new(IdleActivity::new()),
             launch_hash: None,
             effective_ca_cert: None,
             network_auto_attach_installed: false,
-            engine: env::var("AGENT_BROWSER_ENGINE").unwrap_or_else(|_| "chrome".to_string()),
-            // README documents 25s, intentionally below the CLI's 30s IPC
-            // read timeout so the daemon reports a proper timeout error
-            // instead of the client dying with EAGAIN and retrying.
-            default_timeout_ms: env::var("AGENT_BROWSER_DEFAULT_TIMEOUT")
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(25_000),
+            engine: options.engine,
+            default_timeout_ms: options.default_timeout_ms,
             viewport: None,
             session_setup: SessionSetup::default(),
             plugin_init_scripts: Vec::new(),
             active_provider_session: None,
             active_provider_connection: false,
             confirmed_policy_actions: HashSet::new(),
-            pin_tab,
+            pin_tab: options.pin_tab,
             last_persisted_binding: None,
         }
     }
@@ -2658,6 +2763,14 @@ fn policy_actions_for_command(
     actions
 }
 
+/// Run one command against `state` and return its JSON response.
+///
+/// This is the single dispatcher both the CLI's daemon and an embedding host
+/// call: `cmd` is the same `{"id", "action", ...}` shape the daemon reads
+/// from its socket, and the returned [`Value`] is the same response shape a
+/// socket client receives. A host embedding the engine builds `state` with
+/// [`DaemonState::with_options`] and calls this directly, with no daemon
+/// process or socket involved.
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     // Unlike normal auth login, no-navigation mode must never launch a
@@ -13685,6 +13798,73 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    const STATE_ENV: &[&str] = &[
+        "AGENT_BROWSER_SESSION",
+        "AGENT_BROWSER_SESSION_NAME",
+        "AGENT_BROWSER_ALLOWED_DOMAINS",
+        "AGENT_BROWSER_ENGINE",
+        "AGENT_BROWSER_DEFAULT_TIMEOUT",
+        "AGENT_BROWSER_NO_AUTO_DIALOG",
+        "AGENT_BROWSER_RESTORE_SAVE",
+    ];
+
+    #[test]
+    fn with_options_applies_explicit_options() {
+        let state = super::DaemonState::with_options(super::StateOptions {
+            session_id: "embedded".to_string(),
+            session_name: Some("trip".to_string()),
+            allowed_domains: Some("example.com".to_string()),
+            auto_dialog: false,
+            engine: "lightpanda".to_string(),
+            default_timeout_ms: 5_000,
+            restore_save: "never".to_string(),
+            ..super::StateOptions::default()
+        });
+        assert_eq!(state.session_id, "embedded");
+        assert_eq!(state.session_name.as_deref(), Some("trip"));
+        assert!(state.domain_filter.try_read().unwrap().is_some());
+        assert!(!state.auto_dialog);
+        assert_eq!(state.engine, "lightpanda");
+        assert_eq!(state.default_timeout_ms, 5_000);
+        assert_eq!(state.restore_save, "never");
+    }
+
+    #[test]
+    fn with_options_ignores_the_environment() {
+        let guard = crate::test_utils::EnvGuard::new(STATE_ENV);
+        guard.set("AGENT_BROWSER_SESSION", "from-env");
+        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", "example.com");
+        guard.set("AGENT_BROWSER_ENGINE", "lightpanda");
+        guard.set("AGENT_BROWSER_DEFAULT_TIMEOUT", "1");
+        guard.set("AGENT_BROWSER_NO_AUTO_DIALOG", "1");
+        let state = super::DaemonState::with_options(super::StateOptions::default());
+        assert_eq!(state.session_id, "default");
+        assert!(state.domain_filter.try_read().unwrap().is_none());
+        assert_eq!(state.engine, "chrome");
+        assert_eq!(state.default_timeout_ms, 25_000);
+        assert!(state.auto_dialog);
+    }
+
+    #[test]
+    fn new_still_reads_the_environment() {
+        let guard = crate::test_utils::EnvGuard::new(STATE_ENV);
+        guard.set("AGENT_BROWSER_SESSION", "from-env");
+        guard.set("AGENT_BROWSER_SESSION_NAME", "named");
+        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", "example.com");
+        guard.set("AGENT_BROWSER_ENGINE", "lightpanda");
+        guard.set("AGENT_BROWSER_DEFAULT_TIMEOUT", "1234");
+        guard.set("AGENT_BROWSER_NO_AUTO_DIALOG", "1");
+        guard.set("AGENT_BROWSER_RESTORE_SAVE", "always");
+        let state = super::DaemonState::new();
+        assert_eq!(state.session_id, "from-env");
+        assert_eq!(state.session_name.as_deref(), Some("named"));
+        assert!(state.domain_filter.try_read().unwrap().is_some());
+        assert_eq!(state.engine, "lightpanda");
+        assert_eq!(state.default_timeout_ms, 1234);
+        assert!(!state.auto_dialog);
+        assert_eq!(state.restore_save, "always");
+    }
+
     #[tokio::test]
     async fn test_auth_login_releases_remote_objects_after_failures() {
         use futures_util::{SinkExt, StreamExt};

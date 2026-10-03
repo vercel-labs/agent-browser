@@ -1709,6 +1709,32 @@ The daemon starts automatically on first command and persists between commands f
 
 **Browser Engine:** Uses Chrome (from Chrome for Testing) by default. The `--engine` flag selects between `chrome` and `lightpanda`. Supported browsers: Chromium/Chrome (via CDP) and Safari (via WebDriver for iOS).
 
+## Embedding as a Library
+
+The `agent-browser` crate is also a library, for a host process that wants to drive the browser engine in-process instead of spawning the CLI and talking to its daemon over a socket. This is the same dispatcher the CLI's daemon uses internally, so behavior does not diverge between the two.
+
+```rust
+use agent_browser::{execute_command, DaemonState, StateOptions};
+use serde_json::json;
+
+let mut state = DaemonState::with_options(StateOptions {
+    session_id: "embedded".to_string(),
+    ..StateOptions::default()
+});
+
+let reply = execute_command(
+    &json!({ "id": "1", "action": "navigate", "url": "https://example.com" }),
+    &mut state,
+)
+.await;
+```
+
+`StateOptions` is the configuration a host builds directly, field by field, instead of `DaemonState::new()` reading it from the `AGENT_BROWSER_*` environment. That distinction matters for embedding: a process hosting multiple embedded sessions never has them reading and clobbering each other's configuration through shared environment variables. `DaemonState::new()` and `Default::default()` still read the environment, so the CLI's daemon is unaffected.
+
+`execute_command` takes the same JSON command shape the daemon reads from its socket and returns the same JSON response shape, documented under [Commands](#commands) above. There is no separate library API to learn beyond `StateOptions`, `DaemonState`, and `execute_command`; everything else about a command's request and response is exactly what the CLI already documents.
+
+The CLI and MCP surfaces are unchanged by this. The library exposes the daemon's existing command dispatcher; it does not add commands or change existing behavior.
+
 ## Platforms
 
 | Platform    | Binary      |

@@ -12705,3 +12705,46 @@ async fn e2e_mouse_interpolation_starts_at_last_element_interaction() {
     }
     assert_success(&execute_command(&json!({"id": "99", "action": "close"}), &mut state).await);
 }
+
+#[tokio::test]
+#[ignore]
+async fn e2e_embedded_state_launches_navigates_and_snapshots() {
+    // Proves the library surface a host embeds: build state from
+    // `StateOptions` directly, with no `AGENT_BROWSER_*` environment and no
+    // daemon socket, and drive it through `execute_command` exactly as the
+    // CLI's daemon does.
+    let mut state = DaemonState::with_options(super::actions::StateOptions {
+        session_id: "embedded-e2e".to_string(),
+        ..super::actions::StateOptions::default()
+    });
+
+    // Respect an explicit executable path the same way other e2e tests
+    // respect `LIGHTPANDA_BIN`: environments whose Chromium install this
+    // crate's own discovery does not recognize (for example Playwright's
+    // Linux/arm64 layout) can still run this test.
+    let mut launch_cmd = json!({ "id": "1", "action": "launch", "headless": true });
+    if let Ok(path) = std::env::var("AGENT_BROWSER_EXECUTABLE_PATH") {
+        launch_cmd["executablePath"] = json!(path);
+    }
+    let resp = execute_command(&launch_cmd, &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["launched"], true);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<h1>Embedded</h1><a href='#'>go</a>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(
+        snapshot.contains("ref=e"),
+        "snapshot should carry an element ref: {snapshot}"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}

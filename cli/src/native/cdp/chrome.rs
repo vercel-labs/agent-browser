@@ -382,11 +382,7 @@ impl LaunchOptions {
     /// Extensions force headed mode because Chrome does not inject their
     /// content scripts under `--headless=new`.
     pub(crate) fn effectively_headless(&self) -> bool {
-        self.headless
-            && !self
-                .extensions
-                .as_ref()
-                .is_some_and(|exts| !exts.is_empty())
+        self.headless && self.extensions.as_ref().is_none_or(|exts| exts.is_empty())
     }
 }
 

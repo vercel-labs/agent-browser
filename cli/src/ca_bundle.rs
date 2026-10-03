@@ -7,9 +7,10 @@
 //! Two encodings are accepted, the two an operator is likely to have on hand:
 //! a PEM bundle of one or more certificates, and a single raw DER certificate
 //! (what Windows exports as `.cer`). PEM is tried first because
-//! `rustls_pemfile` skips any preamble, so an `openssl x509 -text` dump with
-//! its human-readable header still loads.
+//! `CertificateDer::pem_reader_iter` skips any preamble, so an
+//! `openssl x509 -text` dump with its human-readable header still loads.
 
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::CertificateDer;
 use rustls::RootCertStore;
 use sha2::{Digest, Sha256};
@@ -43,7 +44,7 @@ pub fn load(path: &str) -> Result<CaBundle, String> {
 
     let mut reader = std::io::BufReader::new(data.as_slice());
     let mut certs: Vec<CertificateDer<'static>> = Vec::new();
-    for cert in rustls_pemfile::certs(&mut reader) {
+    for cert in CertificateDer::pem_reader_iter(&mut reader) {
         certs.push(cert.map_err(|e| format!("Failed to parse CA certificate '{path}': {e}"))?);
     }
 
@@ -160,7 +161,7 @@ JtnWOCSAT+dNsAXmz4ebm7kp9OnpLLKjvrNEUNPA20J5S+BXTtPv7x/koRwSX35M\n\
 
     #[test]
     fn a_pem_bundle_behind_a_text_preamble_still_loads() {
-        // openssl prints subject/issuer above the block; rustls_pemfile skips
+        // openssl prints subject/issuer above the block; the PEM reader skips
         // it. A prefix check on "-----BEGIN" would send this to the DER branch.
         let body = format!("subject=CN=test-ca\nissuer=CN=test-ca\n{}", pem());
         let path = write("ca.pem", body.as_bytes());
@@ -175,7 +176,10 @@ JtnWOCSAT+dNsAXmz4ebm7kp9OnpLLKjvrNEUNPA20J5S+BXTtPv7x/koRwSX35M\n\
     fn a_der_certificate_loads() {
         let der = {
             let mut reader = std::io::BufReader::new(pem().as_bytes());
-            let first = rustls_pemfile::certs(&mut reader).next().unwrap().unwrap();
+            let first = CertificateDer::pem_reader_iter(&mut reader)
+                .next()
+                .unwrap()
+                .unwrap();
             first.to_vec()
         };
         let path = write("ca.der", &der);

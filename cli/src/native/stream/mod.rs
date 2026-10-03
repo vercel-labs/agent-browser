@@ -123,7 +123,7 @@ fn seq_in_serialized_frame(frame: &str) -> Option<u64> {
 /// The timestamp lets the idle-shutdown path re-check activity after waiting
 /// for a command to release the daemon state lock. The notification wakes the
 /// timer promptly for ordinary command and dashboard activity.
-pub(crate) struct IdleActivity {
+pub struct IdleActivity {
     last: std::sync::Mutex<Instant>,
     notify: Notify,
 }
