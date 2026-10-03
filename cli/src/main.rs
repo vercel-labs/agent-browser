@@ -36,7 +36,7 @@ use connection::{
     cleanup_stale_files, daemon_unreachable, ensure_daemon, get_socket_dir, is_pid_alive,
     send_command, walk_daemons, DaemonOptions, Response,
 };
-use flags::{clean_args, parse_flags, Flags};
+use flags::{clean_args, parse_flags, split_browser_args, Flags};
 use install::run_install;
 use output::{
     print_command_help, print_help, print_response_with_opts, print_version, OutputOptions,
@@ -1970,13 +1970,7 @@ fn main() {
         }
 
         if let Some(ref a) = flags.args {
-            // Parse args (comma or newline separated)
-            let args_vec: Vec<String> = a
-                .split(&[',', '\n'][..])
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            cmd_obj.insert("args".to_string(), json!(args_vec));
+            cmd_obj.insert("args".to_string(), json!(split_browser_args(a)));
         }
 
         if !flags.extensions.is_empty() {

@@ -486,6 +486,7 @@ EOF
 --session <name>        # isolated browser session
 --json                  # JSON output (for machine parsing)
 --headed                # show the window (default is headless)
+--args <args>           # Chrome launch args (comma/newline separated; commas inside --flag=value stay intact)
 --webgpu                # enable WebGPU (software Vulkan on Linux, no GPU needed)
 --auto-connect          # connect to an already-running Chrome
 --cdp <port|url>        # connect to a CDP port or WebSocket URL; root query slash is optional
