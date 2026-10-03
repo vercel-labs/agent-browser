@@ -12,6 +12,8 @@ Most normal web tasks (navigate, read, click, fill, extract, screenshot) are cov
 
 ## The core loop
 
+Navigation and screenshot commands reject unknown options. Use `screenshot --full` for full-page capture. Put `--` before dash-prefixed literal URLs or paths, such as `screenshot -- --capture.png`; place all options before that separator.
+
 Open the page and check the response for a WebMCP summary. If an advertised tool directly matches the authorized task, prefer that tool to reconstructing the same operation with DOM interactions. Fetch only its metadata, check the input schema and intended effect against the user request, then invoke it:
 
 ```bash

@@ -2,6 +2,8 @@
 
 ## Core
 
+`open`, `goto`, `navigate`, and `screenshot` reject unknown options. Use `--full` for full-page screenshots. To pass a dash-prefixed URL or output path literally, put `--` before it, for example `agent-browser screenshot -- --capture.png`. All options must precede the separator.
+
 ```bash
 agent-browser open                    # Launch browser (no nav); stays on about:blank
 agent-browser open <url>              # Launch + navigate (aliases: goto, navigate)

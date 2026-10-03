@@ -102,6 +102,8 @@ Clicks fail early when another element covers the target's click point, for exam
 
 Headless Chromium screenshots hide native scrollbars for consistent image output. Pass `--hide-scrollbars false` when launching to keep native scrollbars visible.
 
+`open`, `goto`, `navigate`, and `screenshot` reject unknown options. Use `--full`, not `--full-page`, for full-page screenshots. Place `--` before a dash-prefixed URL or output path to treat it as literal input, for example `agent-browser screenshot -- --capture.png`.
+
 ### Traditional Selectors (also supported)
 
 ```bash

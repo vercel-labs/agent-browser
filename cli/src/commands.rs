@@ -386,9 +386,26 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             // scripts before the first real navigation (see `batch`).
             // `goto` and `navigate` still require a URL since those verbs
             // imply the navigation itself.
-            let first_url = rest.iter().find(|a| !a.starts_with("--"));
+            let mut first_url = None;
+            let mut options_ended = false;
+            for arg in &rest {
+                if !options_ended && *arg == "--" {
+                    options_ended = true;
+                } else if !options_ended && arg.starts_with('-') {
+                    return Err(ParseError::InvalidValue {
+                        message: format!("Unknown option '{}' for {}", arg, cmd),
+                        usage: if cmd == "open" {
+                            "open [url]"
+                        } else {
+                            "goto <url>"
+                        },
+                    });
+                } else if first_url.is_none() {
+                    first_url = Some(*arg);
+                }
+            }
             let url = match first_url {
-                Some(u) => *u,
+                Some(u) => u,
                 None if cmd == "open" => {
                     return Ok(json!({ "id": id, "action": "launch", "headless": !flags.headed }));
                 }
@@ -816,10 +833,17 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             let mut full_page = false;
             let mut if_changed = false;
             let mut threshold = None;
+            let mut options_ended = false;
             let mut positional = Vec::new();
             let mut i = 0;
             while i < rest.len() {
+                if options_ended {
+                    positional.push((rest[i], true));
+                    i += 1;
+                    continue;
+                }
                 match rest[i] {
+                    "--" => options_ended = true,
                     "--full" | "-f" => full_page = true,
                     "--if-changed" => if_changed = true,
                     "--threshold" => {
@@ -845,17 +869,24 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         if_changed = true;
                         i += 1;
                     }
-                    arg => positional.push(arg),
+                    arg if arg.starts_with('-') => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unknown option '{}' for screenshot", arg),
+                            usage: "screenshot [selector] [path] [--full/-f] [--if-changed] [--threshold <0-1>]",
+                        });
+                    }
+                    arg => positional.push((arg, false)),
                 }
                 i += 1;
             }
             let (selector, path) = match (positional.first(), positional.get(1)) {
                 (Some(first), Some(second)) => {
                     // Two args: first is selector, second is path
-                    (Some(*first), Some(*second))
+                    (Some(first.0), Some(second.0))
                 }
                 (Some(first), None) => {
                     // One arg: determine if it's a selector or a path
+                    let (first, escaped) = *first;
                     let is_relative_path = first.starts_with("./") || first.starts_with("../");
                     let is_selector = !is_relative_path
                         && (first.starts_with('.')
@@ -865,11 +896,12 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         || first.ends_with(".jpg")
                         || first.ends_with(".jpeg")
                         || first.ends_with(".webp");
-                    let is_path = is_relative_path || first.contains('/') || has_path_extension;
+                    let is_path =
+                        escaped || is_relative_path || first.contains('/') || has_path_extension;
                     if is_selector || !is_path {
-                        (Some(*first), None)
+                        (Some(first), None)
                     } else {
-                        (None, Some(*first))
+                        (None, Some(first))
                     }
                 }
                 _ => (None, None),
@@ -4203,6 +4235,23 @@ mod tests {
     }
 
     #[test]
+    fn test_open_rejects_unknown_option() {
+        let result = parse_command(
+            &args("open --totally-bogus-flag https://example.com"),
+            &default_flags(),
+        );
+        let error = result.unwrap_err().format();
+        assert!(error.contains("Unknown option '--totally-bogus-flag' for open"));
+    }
+
+    #[test]
+    fn test_open_accepts_dash_prefixed_url_after_double_dash() {
+        let cmd = parse_command(&args("open -- --totally-bogus-flag"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "navigate");
+        assert_eq!(cmd["url"], "https://--totally-bogus-flag");
+    }
+
+    #[test]
     fn test_read_command() {
         let cmd = parse_command(&args("read example.com/docs"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "read");
@@ -4861,9 +4910,29 @@ mod tests {
     }
 
     #[test]
+    fn test_screenshot_rejects_unknown_option() {
+        let result = parse_command(&args("screenshot --full-page"), &default_flags());
+        let error = result.unwrap_err().format();
+        assert!(error.contains("Unknown option '--full-page' for screenshot"));
+    }
+
+    #[test]
+    fn test_screenshot_rejects_unknown_option_after_selector() {
+        let result = parse_command(&args("screenshot body --full-page"), &default_flags());
+        assert!(matches!(result, Err(ParseError::InvalidValue { .. })));
+    }
+
+    #[test]
     fn test_screenshot_threshold_requires_value() {
         let result = parse_command(&args("screenshot --threshold"), &default_flags());
         assert!(matches!(result, Err(ParseError::MissingArguments { .. })));
+    }
+
+    #[test]
+    fn test_screenshot_accepts_dash_prefixed_path_after_double_dash() {
+        let cmd = parse_command(&args("screenshot -- --full-page"), &default_flags()).unwrap();
+        assert_eq!(cmd["selector"], serde_json::Value::Null);
+        assert_eq!(cmd["path"], "--full-page");
     }
 
     // === Snapshot ===

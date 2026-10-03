@@ -1592,6 +1592,8 @@ agent-browser open - Launch the browser, optionally navigate
 
 Usage: agent-browser open [url]
 
+Unknown options are rejected. Use -- before a dash-prefixed literal URL.
+
 Without a URL, launches the browser but stays on about:blank. This lets
 you stage state (network routes, cookies, init scripts) before the first
 real navigation — useful for SSR debug, auth setup, and capturing fresh
@@ -2165,6 +2167,9 @@ Examples:
 agent-browser screenshot - Take a screenshot
 
 Usage: agent-browser screenshot [selector] [path]
+
+Unknown options are rejected. Use --full, not --full-page, for full-page capture.
+Put -- before a dash-prefixed literal path, after all options.
 
 Captures a screenshot of the current page. If no path is provided,
 saves to a temporary directory with a generated filename.
