@@ -932,11 +932,11 @@ fn tools() -> Vec<Value> {
             "Take screenshot",
             "Capture a screenshot and return the saved path. Small PNG/JPEG screenshots are also returned as image content.",
             json!({
-                "path": { "type": "string", "description": "Optional output path." },
+                "path": { "type": "string", "description": "Optional output path. A .png, .jpg, or .jpeg extension selects the encoder; .webp is rejected." },
                 "selector": { "type": "string", "description": "Optional @ref or CSS selector to capture." },
                 "fullPage": { "type": "boolean", "default": false },
                 "annotate": { "type": "boolean", "default": false, "description": "Number visible elements in the screenshot." },
-                "format": { "type": "string", "enum": ["png", "jpeg"], "description": "Screenshot format." },
+                "format": { "type": "string", "enum": ["png", "jpeg"], "description": "Screenshot format. Used only when path has no .png/.jpg/.jpeg extension." },
                 "quality": { "type": "integer", "minimum": 0, "maximum": 100, "description": "JPEG quality." },
                 "screenshotDir": { "type": "string", "description": "Default output directory when path is omitted." },
                 "ifChanged": { "type": "boolean", "default": false, "description": "Recommended for repeated captures to save tokens: return image content only when pixels changed." },

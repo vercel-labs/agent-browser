@@ -113,8 +113,11 @@ agent-browser screenshot path.png # Save to specific path
 agent-browser screenshot --full   # Full page
 agent-browser screenshot --if-changed # Recommended: skip unchanged images to save tokens
 agent-browser screenshot --threshold 0.01 # Ignore changes affecting at most 1% of pixels
+agent-browser screenshot path.jpg # JPEG, chosen by the .jpg extension
 agent-browser pdf output.pdf      # Save as PDF
 ```
+
+The output path extension picks the encoder: `.png` writes PNG, `.jpg` or `.jpeg` writes JPEG. `--screenshot-format` applies only when the path has no such extension, or when no path is given; a conflicting flag is ignored with a warning so the bytes always match the extension. `.webp` paths are rejected because the encoder cannot produce WebP.
 
 `--threshold <0-1>` implies `--if-changed`. Conditional history is isolated by tab and capture scope. JSON responses include `changed`, `revision`, `pixelChangeRatio`, and `threshold`; `path` is present only when the change exceeds the threshold. The first capture for a scope is always changed.
 

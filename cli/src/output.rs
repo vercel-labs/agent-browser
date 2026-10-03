@@ -2168,6 +2168,9 @@ Usage: agent-browser screenshot [selector] [path]
 
 Captures a screenshot of the current page. If no path is provided,
 saves to a temporary directory with a generated filename.
+The output path extension picks the encoder: .png writes PNG, .jpg or
+.jpeg writes JPEG. A conflicting --screenshot-format is ignored with a
+warning so the bytes always match the extension; .webp is rejected.
 Headless Chromium screenshots hide native scrollbars for consistent image output.
 Pass --hide-scrollbars false when launching to keep native scrollbars visible.
 
@@ -2185,8 +2188,9 @@ Options:
                        (or AGENT_BROWSER_SCREENSHOT_DIR env)
   --screenshot-quality <0-100>  JPEG quality (0-100, only applies to jpeg format)
                        (or AGENT_BROWSER_SCREENSHOT_QUALITY env)
-  --screenshot-format <fmt>  Image format: png (default) or jpeg
-                       (or AGENT_BROWSER_SCREENSHOT_FORMAT env)
+  --screenshot-format <fmt>  Image format: png (default) or jpeg.
+                       Used only when the path has no .png/.jpg/.jpeg
+                       extension (or AGENT_BROWSER_SCREENSHOT_FORMAT env)
 
 Global Options:
   --json               Output as JSON
@@ -2202,6 +2206,7 @@ Examples:
   agent-browser screenshot --annotate ./page.png   # Save annotated screenshot
   agent-browser screenshot --annotate --json       # JSON output with annotations
   agent-browser screenshot --screenshot-dir ./shots # Save to custom directory
+  agent-browser screenshot ./shot.jpg              # JPEG, chosen by extension
   agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
 "##
         }

@@ -36,9 +36,12 @@ agent-browser screenshot ./page.png
 agent-browser screenshot --full ./page-full.png
 agent-browser screenshot --if-changed
 agent-browser screenshot --threshold 0.01
-agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80 ./page.jpg
+agent-browser screenshot ./page.jpg
+agent-browser screenshot --screenshot-quality 80 ./page.jpg
 agent-browser pdf ./page.pdf
 ```
+
+The output path extension picks the encoder, so the bytes always match the file name: `.png` writes PNG, `.jpg` and `.jpeg` write JPEG, and a `.webp` path is rejected because the encoder cannot produce WebP. `--screenshot-format` applies only when the path has no image extension, or when no path is given; a conflicting flag is ignored with a warning.
 
 Prefer `--if-changed` for repeated captures: skipping unchanged images is the most token-efficient option. History is per tab and capture scope. The first capture returns a path; later unchanged captures omit it. JSON includes `changed`, `revision`, and `pixelChangeRatio`. `--threshold <0-1>` implies `--if-changed` and treats changes at or below that ratio as unchanged.
 
@@ -50,7 +53,7 @@ Screenshot defaults can also be configured with:
   </thead>
   <tbody>
     <tr><td><code>--screenshot-dir</code> / <code>AGENT_BROWSER_SCREENSHOT_DIR</code></td><td>Default screenshot output directory</td></tr>
-    <tr><td><code>--screenshot-format</code> / <code>AGENT_BROWSER_SCREENSHOT_FORMAT</code></td><td><code>png</code> or <code>jpeg</code></td></tr>
+    <tr><td><code>--screenshot-format</code> / <code>AGENT_BROWSER_SCREENSHOT_FORMAT</code></td><td><code>png</code> or <code>jpeg</code>, used only when the output path has no image extension</td></tr>
     <tr><td><code>--screenshot-quality</code> / <code>AGENT_BROWSER_SCREENSHOT_QUALITY</code></td><td>JPEG quality from 0 to 100</td></tr>
   </tbody>
 </table>
