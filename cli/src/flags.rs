@@ -51,6 +51,32 @@ fn parse_idle_timeout_value(value: Option<String>, source: &str) -> Option<Strin
     })
 }
 
+/// Parse a max output budget: a plain, non-negative character count.
+fn parse_max_output(s: &str) -> Result<usize, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("Empty max output".to_string());
+    }
+
+    s.parse::<usize>()
+        .map_err(|_| format!("must be a non-negative number of chars, got '{}'", s))
+}
+
+fn parse_max_output_value(value: Option<String>, source: &str) -> Option<usize> {
+    value.and_then(|raw| match parse_max_output(&raw) {
+        Ok(n) => Some(n),
+        Err(e) => {
+            eprintln!(
+                "{} invalid max output from {}: {}",
+                color::warning_indicator(),
+                source,
+                e
+            );
+            None
+        }
+    })
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
@@ -613,10 +639,11 @@ pub fn parse_flags(args: &[String]) -> Flags {
             .or(config.download_path),
         content_boundaries: env_var_is_truthy("AGENT_BROWSER_CONTENT_BOUNDARIES")
             || config.content_boundaries.unwrap_or(false),
-        max_output: env::var("AGENT_BROWSER_MAX_OUTPUT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .or(config.max_output),
+        max_output: parse_max_output_value(
+            env::var("AGENT_BROWSER_MAX_OUTPUT").ok(),
+            "AGENT_BROWSER_MAX_OUTPUT",
+        )
+        .or(config.max_output),
         allowed_domains: env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
             .ok()
             .map(|s| {
@@ -1008,8 +1035,11 @@ pub fn parse_flags(args: &[String]) -> Flags {
             }
             "--max-output" => {
                 if let Some(s) = args.get(i + 1) {
-                    if let Ok(n) = s.parse::<usize>() {
-                        flags.max_output = Some(n);
+                    match parse_max_output(s) {
+                        Ok(n) => flags.max_output = Some(n),
+                        Err(e) => {
+                            eprintln!("{} Invalid --max-output: {}", color::warning_indicator(), e)
+                        }
                     }
                     i += 1;
                 }
@@ -1297,6 +1327,74 @@ mod tests {
     #[test]
     fn test_parse_idle_timeout_rejects_unknown_unit() {
         assert!(parse_idle_timeout("10x").is_err());
+    }
+
+    #[test]
+    fn test_parse_max_output_accepts_valid_values() {
+        assert_eq!(parse_max_output("0").unwrap(), 0);
+        assert_eq!(parse_max_output("20").unwrap(), 20);
+        assert_eq!(parse_max_output("1000000").unwrap(), 1_000_000);
+    }
+
+    #[test]
+    fn test_parse_max_output_rejects_non_numeric() {
+        assert!(parse_max_output("abc").is_err());
+    }
+
+    #[test]
+    fn test_parse_max_output_rejects_negative() {
+        assert!(parse_max_output("-1").is_err());
+    }
+
+    #[test]
+    fn test_parse_max_output_rejects_out_of_range() {
+        assert!(parse_max_output("99999999999999999999").is_err());
+    }
+
+    #[test]
+    fn test_parse_max_output_rejects_empty() {
+        assert!(parse_max_output("").is_err());
+    }
+
+    #[test]
+    fn test_parse_max_output_flag_accepts_valid_value() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_MAX_OUTPUT"]);
+        guard.remove("AGENT_BROWSER_MAX_OUTPUT");
+        let flags = parse_flags(&args("get text #big --max-output 20"));
+        assert_eq!(flags.max_output, Some(20));
+    }
+
+    #[test]
+    fn test_parse_max_output_flag_rejects_invalid_value() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_MAX_OUTPUT"]);
+        guard.remove("AGENT_BROWSER_MAX_OUTPUT");
+        // Malformed values are rejected (and warned about) rather than silently
+        // parsed into an unintended budget.
+        for bad in ["abc", "-1", "99999999999999999999"] {
+            let flags = parse_flags(&args(&format!("get text #big --max-output {}", bad)));
+            assert_eq!(flags.max_output, None, "expected {} to be rejected", bad);
+        }
+    }
+
+    #[test]
+    fn test_parse_max_output_env_rejects_invalid_value() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_MAX_OUTPUT"]);
+        guard.set("AGENT_BROWSER_MAX_OUTPUT", "abc");
+        assert_eq!(
+            parse_max_output_value(
+                env::var("AGENT_BROWSER_MAX_OUTPUT").ok(),
+                "AGENT_BROWSER_MAX_OUTPUT"
+            ),
+            None
+        );
+        guard.set("AGENT_BROWSER_MAX_OUTPUT", "512");
+        assert_eq!(
+            parse_max_output_value(
+                env::var("AGENT_BROWSER_MAX_OUTPUT").ok(),
+                "AGENT_BROWSER_MAX_OUTPUT"
+            ),
+            Some(512)
+        );
     }
 
     #[test]
