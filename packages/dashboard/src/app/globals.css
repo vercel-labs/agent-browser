@@ -205,3 +205,47 @@ button {
   -webkit-text-fill-color: transparent;
   animation: shimmer 2s ease-in-out infinite;
 }
+
+@keyframes dashboard-cursor-ripple {
+  0% {
+    opacity: 0.8;
+    transform: translate(-50%, -50%) scale(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+.dashboard-cursor-pointer {
+  position: absolute;
+  z-index: 2;
+  width: 28px;
+  height: 28px;
+  overflow: visible;
+  filter: drop-shadow(0 1px 1px rgb(0 0 0 / 0.53));
+  transform-origin: 0 0;
+}
+
+.dashboard-cursor-pointer path {
+  fill: white;
+  stroke: black;
+  stroke-linejoin: round;
+  stroke-width: 1.5;
+}
+
+.dashboard-cursor-pointer-pressed {
+  transform: scale(0.8);
+}
+
+.dashboard-cursor-ripple {
+  position: absolute;
+  z-index: 1;
+  width: 64px;
+  height: 64px;
+  border: 2px solid #60a5fa;
+  border-radius: 9999px;
+  background: rgb(96 165 250 / 0.5);
+  box-sizing: border-box;
+  animation: dashboard-cursor-ripple 400ms linear forwards;
+}

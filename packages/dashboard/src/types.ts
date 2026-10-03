@@ -85,6 +85,18 @@ export interface TabsMessage {
   timestamp: number;
 }
 
+export interface CursorMessage {
+  type: "cursor";
+  /** Monotonic input event id, independent of screencast frame ids. */
+  seq: number;
+  x: number;
+  y: number;
+  buttons: number;
+  /** True only when this event starts a press, used to trigger a click ripple. */
+  pressed: boolean;
+  timestamp: number;
+}
+
 export type StreamMessage =
   | FrameMessage
   | StatusMessage
@@ -94,7 +106,8 @@ export type StreamMessage =
   | PageErrorMessage
   | ErrorMessage
   | UrlMessage
-  | TabsMessage;
+  | TabsMessage
+  | CursorMessage;
 
 export type ActivityEvent = CommandMessage | ResultMessage | ConsoleMessage;
 export type ConsoleEntry = ConsoleMessage | PageErrorMessage;

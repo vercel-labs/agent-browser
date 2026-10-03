@@ -14,7 +14,7 @@ use tokio_tungstenite::WebSocketStream;
 use crate::native::cdp::client::CdpClient;
 
 use super::http::handle_http_request;
-use super::{is_allowed_origin, timestamp_ms, IdleActivity, StreamFrame};
+use super::{cursor_message, is_allowed_origin, timestamp_ms, IdleActivity, StreamFrame};
 
 /// Highest per-client frame rate a client may request via the `config` message.
 const MAX_CONFIGURABLE_FPS: u32 = 120;
@@ -252,6 +252,7 @@ async fn handle_connection(
             stream,
             addr,
             initial_config,
+            frame_tx.clone(),
             frame_rx,
             frame_watch,
             client_count,
@@ -282,6 +283,7 @@ async fn handle_ws_client(
     stream: TcpStream,
     _addr: SocketAddr,
     initial_config: ClientConfig,
+    broadcast_tx: broadcast::Sender<String>,
     mut broadcast_rx: broadcast::Receiver<String>,
     mut frame_watch: watch::Receiver<Option<Arc<StreamFrame>>>,
     client_count: Arc<Mutex<usize>>,
@@ -342,6 +344,7 @@ async fn handle_ws_client(
         config_tx,
         ack_tx,
         idle_activity.clone(),
+        broadcast_tx,
     )));
 
     {
@@ -502,7 +505,9 @@ async fn reader_loop(
     config: watch::Sender<ClientConfig>,
     ack: watch::Sender<u64>,
     idle_activity: Arc<IdleActivity>,
+    broadcast_tx: broadcast::Sender<String>,
 ) {
+    let mut cursor_buttons = 0;
     while let Some(msg) = ws_rx.next().await {
         match msg {
             Ok(Message::Text(text)) => {
@@ -547,7 +552,15 @@ async fn reader_loop(
                         idle_activity.mark();
                     }
                     let sid = cdp_session_id.read().await;
-                    dispatch_input(msg_type, &parsed, client.as_ref(), sid.as_deref()).await;
+                    dispatch_input(
+                        msg_type,
+                        &parsed,
+                        client.as_ref(),
+                        sid.as_deref(),
+                        &broadcast_tx,
+                        &mut cursor_buttons,
+                    )
+                    .await;
                 }
             }
             Ok(Message::Close(_)) | Err(_) => break,
@@ -618,6 +631,8 @@ async fn dispatch_input(
     parsed: &Value,
     client: &CdpClient,
     session_id: Option<&str>,
+    broadcast_tx: &broadcast::Sender<String>,
+    cursor_buttons: &mut i32,
 ) {
     match msg_type {
         "input_mouse" => {
@@ -637,6 +652,28 @@ async fn dispatch_input(
                     session_id,
                 )
                 .await;
+            let event_type = parsed
+                .get("eventType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("mouseMoved");
+            let previous_buttons = *cursor_buttons;
+            let buttons = parsed
+                .get("buttons")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as i32)
+                .unwrap_or_else(|| match event_type {
+                    "mousePressed" => previous_buttons | mouse_button_mask(parsed.get("button")),
+                    "mouseReleased" => previous_buttons & !mouse_button_mask(parsed.get("button")),
+                    _ => previous_buttons,
+                });
+            *cursor_buttons = buttons;
+            let cursor = cursor_message(
+                parsed.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                parsed.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                buttons,
+                previous_buttons == 0 && buttons != 0,
+            );
+            let _ = broadcast_tx.send(cursor);
         }
         "input_keyboard" => {
             let _ = client
@@ -662,6 +699,17 @@ async fn dispatch_input(
         }
         "status" => {}
         _ => {}
+    }
+}
+
+fn mouse_button_mask(button: Option<&Value>) -> i32 {
+    match button.and_then(Value::as_str).unwrap_or("left") {
+        "left" => 1,
+        "right" => 2,
+        "middle" => 4,
+        "back" => 8,
+        "forward" => 16,
+        _ => 0,
     }
 }
 
@@ -863,9 +911,19 @@ mod tests {
                 json!({ "eventType": "keyDown", "key": "a", "text": "a" }),
             ),
         ];
+        let (broadcast_tx, _) = broadcast::channel(8);
+        let mut cursor_buttons = 0;
         let dispatched = tokio::time::timeout(Duration::from_secs(5), async {
             for (kind, payload) in &events {
-                dispatch_input(kind, payload, &client, None).await;
+                dispatch_input(
+                    kind,
+                    payload,
+                    &client,
+                    None,
+                    &broadcast_tx,
+                    &mut cursor_buttons,
+                )
+                .await;
             }
         })
         .await;
@@ -873,6 +931,7 @@ mod tests {
             dispatched.is_ok(),
             "dispatch blocked on a CDP reply that never comes"
         );
+        assert_eq!(cursor_buttons, 1);
 
         // The commands still reach CDP, in the order they were dispatched.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);

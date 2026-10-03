@@ -39,6 +39,8 @@ import {
   recordingAtom,
   streamEngineAtom,
   activeUrlAtom,
+  cursorAtom,
+  cursorClickAtom,
   sendInputAtom,
 } from "@/store/stream";
 import { activeSessionNameAtom, activePortAtom } from "@/store/sessions";
@@ -130,6 +132,8 @@ export function Viewport() {
   const recording = useAtomValue(recordingAtom);
   const engine = useAtomValue(streamEngineAtom);
   const url = useAtomValue(activeUrlAtom);
+  const cursor = useAtomValue(cursorAtom);
+  const cursorClick = useAtomValue(cursorClickAtom);
   const sessionName = useAtomValue(activeSessionNameAtom);
   const streamPort = useAtomValue(activePortAtom);
   const sendInput = useSetAtom(sendInputAtom);
@@ -331,6 +335,7 @@ export function Viewport() {
         x: pos.x,
         y: pos.y,
         button: cdpButton(e.button),
+        buttons: e.buttons,
         clickCount: eventType === "mousePressed" ? 1 : 0,
         modifiers: cdpModifiers(e),
       });
@@ -356,6 +361,21 @@ export function Viewport() {
     },
     [toViewport, sendInput],
   );
+
+  const cursorOverlayBounds = (() => {
+    const canvas = canvasRef.current;
+    const area = canvasAreaRef.current;
+    if (!canvas || !area || !frame) return null;
+    const canvasRect = canvas.getBoundingClientRect();
+    const areaRect = area.getBoundingClientRect();
+    if (canvasRect.width === 0 || canvasRect.height === 0) return null;
+    return {
+      left: canvasRect.left - areaRect.left,
+      top: canvasRect.top - areaRect.top,
+      width: canvasRect.width,
+      height: canvasRect.height,
+    };
+  })();
 
   const dispatchKey = useCallback(
     (e: KeyboardEvent, eventType: string) => {
@@ -508,21 +528,57 @@ export function Viewport() {
         </>
       )}
 
-      <div ref={canvasAreaRef} className="flex min-h-0 flex-1 items-center justify-center">
+      <div ref={canvasAreaRef} className="relative flex min-h-0 flex-1 items-center justify-center">
         {frame ? (
-          <canvas
-            ref={canvasRef}
-            tabIndex={0}
-            className="max-h-full max-w-full object-contain outline-none"
-            onMouseMove={(e) => handleMouseEvent(e, "mouseMoved")}
-            onMouseDown={(e) => {
-              canvasRef.current?.focus();
-              handleMouseEvent(e, "mousePressed");
-            }}
-            onMouseUp={(e) => handleMouseEvent(e, "mouseReleased")}
-            onWheel={handleWheel}
-            onContextMenu={(e) => e.preventDefault()}
-          />
+          <>
+            <canvas
+              ref={canvasRef}
+              tabIndex={0}
+              className={cn(
+                "max-h-full max-w-full object-contain outline-none",
+                cursor && "cursor-none",
+              )}
+              onMouseMove={(e) => handleMouseEvent(e, "mouseMoved")}
+              onMouseDown={(e) => {
+                canvasRef.current?.focus();
+                handleMouseEvent(e, "mousePressed");
+              }}
+              onMouseUp={(e) => handleMouseEvent(e, "mouseReleased")}
+              onWheel={handleWheel}
+              onContextMenu={(e) => e.preventDefault()}
+            />
+            {cursor && cursorOverlayBounds && (
+              <div
+                className="pointer-events-none absolute overflow-hidden"
+                style={cursorOverlayBounds}
+                aria-hidden="true"
+              >
+                {cursorClick && (
+                  <span
+                    key={cursorClick.seq}
+                    className="dashboard-cursor-ripple"
+                    style={{
+                      left: `${(cursorClick.x / viewportWidth) * 100}%`,
+                      top: `${(cursorClick.y / viewportHeight) * 100}%`,
+                    }}
+                  />
+                )}
+                <svg
+                  viewBox="0 0 24 24"
+                  className={cn(
+                    "dashboard-cursor-pointer",
+                    cursor.buttons !== 0 && "dashboard-cursor-pointer-pressed",
+                  )}
+                  style={{
+                    left: `${(cursor.x / viewportWidth) * 100}%`,
+                    top: `${(cursor.y / viewportHeight) * 100}%`,
+                  }}
+                >
+                  <path d="M0 0L14 8.5L7.5 10L4 16Z" />
+                </svg>
+              </div>
+            )}
+          </>
         ) : (
           <div className="text-center text-sm text-muted-foreground">
             {browserConnected

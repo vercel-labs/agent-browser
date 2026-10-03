@@ -11,6 +11,7 @@ pub use dashboard::{
 };
 
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -94,9 +95,23 @@ impl ScreencastConfig {
 /// counter restarts on browser relaunch, and an ack pacing client that banked a
 /// higher id would never receive another frame.
 static FRAME_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CURSOR_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub(super) fn next_frame_seq() -> u64 {
     FRAME_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
+pub(crate) fn cursor_message(x: f64, y: f64, buttons: i32, pressed: bool) -> String {
+    json!({
+        "type": "cursor",
+        "seq": CURSOR_SEQ.fetch_add(1, Ordering::Relaxed) + 1,
+        "x": x,
+        "y": y,
+        "buttons": buttons,
+        "pressed": pressed,
+        "timestamp": timestamp_ms(),
+    })
+    .to_string()
 }
 
 /// A serialized frame plus the id ack pacing waits on.
@@ -200,6 +215,7 @@ pub struct StreamServer {
     last_tabs: Arc<RwLock<Vec<Value>>>,
     last_engine: Arc<RwLock<String>>,
     recording: Arc<Mutex<bool>>,
+    cursor_buttons: AtomicI32,
     shutdown_tx: watch::Sender<bool>,
     accept_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     cdp_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -431,6 +447,7 @@ impl StreamServer {
                 last_tabs,
                 last_engine,
                 recording,
+                cursor_buttons: AtomicI32::new(0),
                 shutdown_tx,
                 accept_task: Mutex::new(Some(accept_task)),
                 cdp_task: Mutex::new(Some(cdp_task)),
@@ -474,6 +491,17 @@ impl StreamServer {
             seq: Some(seq),
             json: msg.to_string(),
         })));
+    }
+
+    /// Broadcast the pointer state after the daemon dispatches a mouse event.
+    ///
+    /// The event sequence is independent of frame ids. Dashboard clients use
+    /// it to preserve rapid press and release events even when React batches
+    /// state updates between screencast frames.
+    pub fn broadcast_cursor(&self, x: f64, y: f64, buttons: i32) {
+        let previous_buttons = self.cursor_buttons.swap(buttons, Ordering::Relaxed);
+        let msg = cursor_message(x, y, buttons, previous_buttons == 0 && buttons != 0);
+        let _ = self.frame_tx.send(msg);
     }
 
     /// Broadcast a status message to all connected clients.
@@ -739,6 +767,34 @@ mod tests {
         assert_eq!(meta.device_width, 1280);
         assert_eq!(meta.device_height, 720);
         assert_eq!(meta.page_scale_factor, 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_cursor_press_is_marked_once_until_release() {
+        let (server, _slot) = StreamServer::start_without_client(
+            0,
+            "cursor-test".to_string(),
+            true,
+            Arc::new(IdleActivity::new()),
+        )
+        .await
+        .expect("server start");
+        let mut cursor_rx = server.frame_tx.subscribe();
+
+        server.broadcast_cursor(10.0, 20.0, 1);
+        server.broadcast_cursor(12.0, 22.0, 1);
+        server.broadcast_cursor(12.0, 22.0, 0);
+
+        let first: Value = serde_json::from_str(&cursor_rx.recv().await.unwrap()).unwrap();
+        let moved: Value = serde_json::from_str(&cursor_rx.recv().await.unwrap()).unwrap();
+        let released: Value = serde_json::from_str(&cursor_rx.recv().await.unwrap()).unwrap();
+        assert_eq!(first["type"], "cursor");
+        assert_eq!(first["pressed"], true);
+        assert_eq!(moved["pressed"], false);
+        assert_eq!(released["pressed"], false);
+        assert!(first["seq"].as_u64() < moved["seq"].as_u64());
+
+        server.shutdown().await;
     }
 
     use futures_util::{SinkExt, StreamExt};
