@@ -51,10 +51,14 @@ const HIGH_FPS_ENCODER_THREADS: &str = "4";
 /// VP8 budget chosen for readable UI text and thin drawing strokes.
 const WEBM_BITRATE_KBPS: u32 = 8000;
 
-/// Captured frames may wait briefly for compositing, but overload must fail
-/// the recording instead of silently degrading it into held frames.
-const ENCODER_FRAME_BUFFER: usize = 16;
-const MAX_ENCODER_LAG: Duration = Duration::from_millis(500);
+const ENCODER_FRAME_BUFFER: usize = 32;
+
+/// When the encoder falls behind, the producer blocks via `send()` rather than
+/// aborting.  Chrome's screencast naturally slows to the encoder's throughput.
+/// At high resolution (e.g. 1920x1080) the encoder may temporarily lag by
+/// more than 500 ms; allow 2 s so back-pressure can take effect before abort.
+const MAX_ENCODER_LAG_MS: u64 = 2000;
+const MAX_ENCODER_LAG: Duration = Duration::from_millis(MAX_ENCODER_LAG_MS);
 const ENCODER_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Upper bound on waiting for Chrome to acknowledge screencast teardown.
@@ -1674,12 +1678,8 @@ async fn collect_frames(
                         };
                         sequence += 1;
                         shared_captured.fetch_add(1, Ordering::Relaxed);
-                        frame_tx.try_send(frame.clone()).map_err(|error| match error {
-                            mpsc::error::TrySendError::Full(_) => format!(
-                                "Recording encoder fell behind by more than {} buffered frames",
-                                ENCODER_FRAME_BUFFER
-                            ),
-                            mpsc::error::TrySendError::Closed(_) => {
+                        frame_tx.send(frame.clone()).await.map_err(|error| match error {
+                            mpsc::error::SendError(_) => {
                                 "Recording encoder stopped unexpectedly".to_string()
                             }
                         })?;
@@ -1831,7 +1831,7 @@ async fn encode_stream(
             frame = frames.recv() => {
                 let Some(frame) = frame else { break };
                 if frame.captured_at.elapsed() > MAX_ENCODER_LAG {
-                    return Err("Recording encoder fell more than 500 ms behind capture".to_string());
+                    return Err(format!("Recording encoder fell more than {} ms behind capture", MAX_ENCODER_LAG_MS));
                 }
                 if latest.is_none() {
                     interval.reset_at(frame.captured_at);
@@ -1840,7 +1840,7 @@ async fn encode_stream(
             }
             tick = interval.tick() => {
                 if tick.elapsed() > MAX_ENCODER_LAG && latest.is_some() {
-                    return Err("Recording encoder fell more than 500 ms behind capture".to_string());
+                    return Err(format!("Recording encoder fell more than {} ms behind capture", MAX_ENCODER_LAG_MS));
                 }
                 let Some(frame) = latest.as_ref() else { continue };
                 let output_timestamp = cursor_timestamp();
