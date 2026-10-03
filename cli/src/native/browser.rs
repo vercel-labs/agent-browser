@@ -2205,7 +2205,6 @@ impl BrowserManager {
     }
 
     pub async fn set_download_behavior(&self, download_path: &str) -> Result<(), String> {
-        let session_id = self.active_session_id()?;
         self.client
             .send_command(
                 "Browser.setDownloadBehavior",
@@ -2214,7 +2213,7 @@ impl BrowserManager {
                     "downloadPath": download_path,
                     "eventsEnabled": true,
                 })),
-                Some(session_id),
+                None,
             )
             .await?;
         Ok(())
@@ -3065,6 +3064,61 @@ mod tests {
             bound_target_gone: None,
             headless: true,
         }
+    }
+
+    #[tokio::test]
+    async fn test_set_download_behavior_uses_browser_scope() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let message = ws.next().await.unwrap().unwrap();
+            let Message::Text(text) = message else {
+                panic!("expected a text CDP command");
+            };
+            let command: Value = serde_json::from_str(&text).unwrap();
+            ws.send(Message::Text(
+                json!({"id": command["id"], "result": {}})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            command
+        });
+
+        let client = CdpClient::connect(&format!("ws://{}", addr)).await.unwrap();
+        let manager = BrowserManager {
+            client: Arc::new(client),
+            browser_process: None,
+            ws_url: format!("ws://{}", addr),
+            pages: vec![page(1, "target-1", "https://example.com")],
+            active_page_index: 0,
+            default_timeout_ms: 25_000,
+            download_path: None,
+            ignore_https_errors: false,
+            visited_origins: HashSet::new(),
+            next_tab_id: 2,
+            direct_page: false,
+            pin_tab: false,
+            bound_target_id: None,
+            bound_target_gone: None,
+            headless: true,
+        };
+
+        manager
+            .set_download_behavior("/tmp/downloads")
+            .await
+            .unwrap();
+        let command = server.await.unwrap();
+        assert_eq!(command["method"], "Browser.setDownloadBehavior");
+        assert!(command.get("sessionId").is_none());
+        assert_eq!(command["params"]["behavior"], "allowAndName");
+        assert_eq!(command["params"]["eventsEnabled"], true);
     }
 
     #[tokio::test]
