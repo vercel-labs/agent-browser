@@ -33,6 +33,8 @@ agent-browser snapshot -i       # 4. Re-snapshot after any page change
 
 Refs (`@e1`, `@e2`, ...) can be reused across snapshots. Take a fresh snapshot after navigation or to observe page changes.
 
+Long runs of same-role siblings (like a huge `select` list) auto-collapse past 50 items into one `… N more "role" siblings omitted` line. The refs of hidden items stay valid; reach them with `select`, `find text`, or reveal everything with `--max-siblings 0` (or `AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS`).
+
 ## Always use your own session
 
 Before your first command, set a named session for the whole task:

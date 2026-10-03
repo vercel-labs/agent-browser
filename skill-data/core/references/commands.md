@@ -48,6 +48,10 @@ agent-browser snapshot -i         # Interactive elements only (recommended)
 agent-browser snapshot -c         # Compact output
 agent-browser snapshot -d 3       # Limit depth to 3
 agent-browser snapshot -s "#main" # Scope to CSS selector
+agent-browser snapshot --max-siblings 10  # Collapse long same-role sibling runs (default 50; 0 = all)
+# Long selects/listboxes auto-collapse past 50 siblings: "… N more \"option\" siblings omitted".
+# Hidden refs stay valid; use selectedIndex/eval or find text to reach omitted options.
+# Override with --max-siblings <n> or env AGENT_BROWSER_SNAPSHOT_MAX_SIBLINGS (0 = show all).
 agent-browser snapshot --delta     # Full state once, then bounded structural deltas
 agent-browser snapshot --delta --full # Force full state and refresh baseline
 ```
