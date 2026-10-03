@@ -379,7 +379,6 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
     match cmd {
         // === Navigation ===
-        // Maps to "navigate" action in protocol; reflected in ACTION_CATEGORIES in action-policy.ts
         "open" | "goto" | "navigate" => {
             // `open` without a URL launches the browser but stays on
             // about:blank. Lets agents set up routes, cookies, or init
