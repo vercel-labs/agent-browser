@@ -1405,6 +1405,15 @@ impl BrowserManager {
             .map(|page| page.session_id.as_str())
     }
 
+    /// Every attached page as `(session_id, target_id)`. The ref map binds these
+    /// so a page's documents outlive the session id a reconnect replaces.
+    pub fn page_session_targets(&self) -> Vec<(String, String)> {
+        self.pages
+            .iter()
+            .map(|page| (page.session_id.clone(), page.target_id.clone()))
+            .collect()
+    }
+
     /// Returns true if this manager was connected via CDP (as opposed to local launch).
     pub fn is_cdp_connection(&self) -> bool {
         self.browser_process.is_none()
