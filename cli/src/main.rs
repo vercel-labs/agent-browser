@@ -280,6 +280,20 @@ fn should_send_local_launch_config(flags: &Flags, command: &serde_json::Value) -
         && !command_is_external_launch(command)
 }
 
+fn apply_local_launch_config(
+    command: &mut serde_json::Value,
+    launch_config: serde_json::Value,
+) -> Option<serde_json::Value> {
+    if command.get("action").and_then(|value| value.as_str()) == Some("launch")
+        && !command_is_external_launch(command)
+    {
+        *command = launch_config;
+        None
+    } else {
+        Some(launch_config)
+    }
+}
+
 fn attach_restore_config_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
     if let Some(restore_key) = restore_key_from_flags(flags) {
         cmd["restoreKey"] = json!(restore_key);
@@ -2031,33 +2045,35 @@ fn main() {
             launch_cmd["engine"] = json!(engine);
         }
 
-        match send_command(launch_cmd, &flags.session) {
-            Ok(resp) if !resp.success => {
-                // Launch command failed (e.g., invalid state file, profile error)
-                let error_msg = resp
-                    .error
-                    .unwrap_or_else(|| "Browser launch failed".to_string());
-                if flags.json {
-                    print_json_error(error_msg);
-                } else {
-                    eprintln!("{} {}", color::error_indicator(), error_msg);
+        if let Some(launch_cmd) = apply_local_launch_config(&mut cmd, launch_cmd) {
+            match send_command(launch_cmd, &flags.session) {
+                Ok(resp) if !resp.success => {
+                    // Launch command failed (e.g., invalid state file, profile error)
+                    let error_msg = resp
+                        .error
+                        .unwrap_or_else(|| "Browser launch failed".to_string());
+                    if flags.json {
+                        print_json_error(error_msg);
+                    } else {
+                        eprintln!("{} {}", color::error_indicator(), error_msg);
+                    }
+                    exit(1);
                 }
-                exit(1);
-            }
-            Err(e) => {
-                if flags.json {
-                    print_json_error(e);
-                } else {
-                    eprintln!(
-                        "{} Could not configure browser: {}",
-                        color::error_indicator(),
-                        e
-                    );
+                Err(e) => {
+                    if flags.json {
+                        print_json_error(e);
+                    } else {
+                        eprintln!(
+                            "{} Could not configure browser: {}",
+                            color::error_indicator(),
+                            e
+                        );
+                    }
+                    exit(1);
                 }
-                exit(1);
-            }
-            Ok(_) => {
-                // Launch succeeded
+                Ok(_) => {
+                    // Launch succeeded
+                }
             }
         }
     }
@@ -2690,6 +2706,49 @@ mod tests {
         let mut launch = json!({ "action": "launch" });
         attach_webmcp_launch_option(&mut launch, &flags);
         assert_eq!(launch["webmcp"], false);
+    }
+
+    #[test]
+    fn test_bare_open_uses_local_launch_config_as_the_command() {
+        let mut command = json!({
+            "id": "open-command",
+            "action": "launch",
+            "headless": true,
+        });
+        let launch_config = json!({
+            "id": "configured-launch",
+            "action": "launch",
+            "profile": "/tmp/profile",
+            "args": ["--disable-gpu"],
+        });
+
+        let separate_launch = apply_local_launch_config(&mut command, launch_config);
+
+        assert!(separate_launch.is_none());
+        assert_eq!(command["id"], "configured-launch");
+        assert_eq!(command["profile"], "/tmp/profile");
+        assert_eq!(command["args"][0], "--disable-gpu");
+    }
+
+    #[test]
+    fn test_navigation_keeps_local_launch_config_separate() {
+        let mut command = json!({
+            "id": "navigate-command",
+            "action": "navigate",
+            "url": "https://example.com",
+        });
+        let launch_config = json!({
+            "id": "configured-launch",
+            "action": "launch",
+            "profile": "/tmp/profile",
+        });
+
+        let separate_launch = apply_local_launch_config(&mut command, launch_config).unwrap();
+
+        assert_eq!(command["id"], "navigate-command");
+        assert_eq!(command["action"], "navigate");
+        assert_eq!(separate_launch["id"], "configured-launch");
+        assert_eq!(separate_launch["profile"], "/tmp/profile");
     }
 
     #[test]
