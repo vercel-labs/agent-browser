@@ -27,6 +27,8 @@ Also available as the `AGENT_BROWSER_WEBGPU` environment variable or `"webgpu": 
 
 macOS uses the hardware Metal backend and Windows uses D3D — nothing extra to install on either.
 
+On Linux, `--webgpu` requires `--use-angle=vulkan`. A different ANGLE backend supplied through `--args` or `AGENT_BROWSER_ARGS` produces a launch error; the matching Vulkan value is allowed. Remove the custom switch to use the preset, or pass `--webgpu false` to choose another backend. Repeated `--disable-features` switches are merged with the built-in `Translate` opt-out.
+
 ## Platform support
 
 <table>
