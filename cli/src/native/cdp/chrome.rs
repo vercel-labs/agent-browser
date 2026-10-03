@@ -1164,8 +1164,17 @@ pub async fn auto_connect_cdp() -> Result<String, String> {
 
     for dir in &user_data_dirs {
         if let Some((port, ws_path)) = read_devtools_active_port(dir) {
-            if let Ok(ws_url) = resolve_cdp_from_active_port(port, &ws_path).await {
-                return Ok(ws_url);
+            match resolve_cdp_from_active_port(port, &ws_path).await {
+                Ok(ws_url) => return Ok(ws_url),
+                // Chrome is alive and still showing the permission prompt.
+                // Probing further would open another prompt (#1365).
+                Err(ActivePortError::AwaitingApproval) => {
+                    return Err(format!(
+                        "Chrome is waiting for remote-debugging approval on port {}. Approve the prompt in Chrome and retry.",
+                        port
+                    ));
+                }
+                Err(ActivePortError::Unreachable(_)) => {}
             }
             // Port is dead — remove the stale file so future runs skip it.
             let stale = dir.join("DevToolsActivePort");
@@ -1189,10 +1198,28 @@ pub async fn auto_connect_cdp() -> Result<String, String> {
 /// prompt on M144+), then falls back to legacy HTTP discovery for older
 /// Chrome versions. This order avoids triggering duplicate remote-debugging
 /// permission prompts (#1210, #1206).
-async fn resolve_cdp_from_active_port(port: u16, ws_path: &str) -> Result<String, String> {
+async fn resolve_cdp_from_active_port(port: u16, ws_path: &str) -> Result<String, ActivePortError> {
+    resolve_cdp_from_active_port_within(port, ws_path, AUTO_CONNECT_WS_VERIFY_TIMEOUT).await
+}
+
+#[derive(Debug, PartialEq)]
+enum ActivePortError {
+    /// The handshake stayed open past the timeout: Chrome is holding it for
+    /// the remote-debugging permission prompt.
+    AwaitingApproval,
+    Unreachable(String),
+}
+
+async fn resolve_cdp_from_active_port_within(
+    port: u16,
+    ws_path: &str,
+    timeout: Duration,
+) -> Result<String, ActivePortError> {
     let ws_url = format!("ws://127.0.0.1:{}{}", port, ws_path);
-    if verify_ws_endpoint(&ws_url).await {
-        return Ok(ws_url);
+    match verify_ws_endpoint(&ws_url, timeout).await {
+        WsVerify::Live => return Ok(ws_url),
+        WsVerify::TimedOut => return Err(ActivePortError::AwaitingApproval),
+        WsVerify::Failed => {}
     }
 
     // Pre-M144 fallback: HTTP endpoints (/json/version, /json/list, etc.)
@@ -1200,19 +1227,31 @@ async fn resolve_cdp_from_active_port(port: u16, ws_path: &str) -> Result<String
         return Ok(ws_url);
     }
 
-    Err(format!(
+    Err(ActivePortError::Unreachable(format!(
         "Cannot connect to Chrome on port {}: both direct WebSocket and HTTP discovery failed",
         port
-    ))
+    )))
+}
+
+/// How long `--auto-connect` keeps the direct WebSocket handshake open.
+/// Chrome 144+ holds the handshake while it shows the remote-debugging
+/// permission prompt, so this must leave time to approve it (#1365). It stays
+/// below the client's 30s read timeout (`connection::read_timeout_for`) so the
+/// daemon answers before the client gives up and retries.
+const AUTO_CONNECT_WS_VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
+
+enum WsVerify {
+    Live,
+    TimedOut,
+    Failed,
 }
 
 /// Verify that a WebSocket endpoint is a live CDP server by sending
 /// `Browser.getVersion` and checking for a valid response.
-async fn verify_ws_endpoint(ws_url: &str) -> bool {
+async fn verify_ws_endpoint(ws_url: &str, timeout: Duration) -> WsVerify {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 
-    let timeout = Duration::from_secs(2);
     let result = tokio::time::timeout(timeout, async {
         let (mut ws, _) = tokio_tungstenite::connect_async(ws_url).await.ok()?;
         let cmd = r#"{"id":1,"method":"Browser.getVersion"}"#;
@@ -1230,7 +1269,11 @@ async fn verify_ws_endpoint(ws_url: &str) -> bool {
         None
     })
     .await;
-    matches!(result, Ok(Some(())))
+    match result {
+        Ok(Some(())) => WsVerify::Live,
+        Ok(None) => WsVerify::Failed,
+        Err(_) => WsVerify::TimedOut,
+    }
 }
 
 /// Returns the default Chrome user-data directory paths for the current platform.
@@ -2837,6 +2880,39 @@ exec sleep 60
         server.await.unwrap();
     }
 
+    /// Chrome 144+ holds the WebSocket handshake while the remote-debugging
+    /// permission prompt is open. A handshake that completes after a few
+    /// seconds must still resolve through the exact ws_path (#1365).
+    #[tokio::test]
+    async fn test_resolve_cdp_from_active_port_waits_for_permission_prompt() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as WsMsg;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let ws_path = "/devtools/browser/prompt-uuid".to_string();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            if let Some(Ok(WsMsg::Text(text))) = ws.next().await {
+                let req: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let id = req.get("id").unwrap();
+                let reply = format!(
+                    r#"{{"id":{},"result":{{"protocolVersion":"1.3","product":"Chrome/148"}}}}"#,
+                    id
+                );
+                ws.send(WsMsg::Text(reply)).await.unwrap();
+            }
+            let _ = ws.close(None).await;
+        });
+
+        let result = resolve_cdp_from_active_port(port, &ws_path).await;
+        assert_eq!(result, Ok(format!("ws://127.0.0.1:{}{}", port, ws_path)));
+        server.await.unwrap();
+    }
+
     /// When the exact ws_path connection fails, `resolve_cdp_from_active_port`
     /// should fall back to HTTP discovery.
     #[tokio::test]
@@ -2886,6 +2962,44 @@ exec sleep 60
         drop(listener);
 
         let result = resolve_cdp_from_active_port(port, "/devtools/browser/dead").await;
-        assert!(result.is_err(), "should fail when nothing is listening");
+        assert!(
+            matches!(result, Err(ActivePortError::Unreachable(_))),
+            "should fail when nothing is listening: {:?}",
+            result
+        );
+    }
+
+    /// A handshake still held open when the timeout expires means Chrome is
+    /// showing the permission prompt. Resolution must stop without HTTP
+    /// discovery, which would open a second prompt (#1365).
+    #[tokio::test]
+    async fn test_resolve_cdp_from_active_port_stops_while_prompt_is_open() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (held, _) = listener.accept().await.unwrap();
+            let second = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
+            drop(held);
+            second.is_ok()
+        });
+
+        let result = resolve_cdp_from_active_port_within(
+            port,
+            "/devtools/browser/prompt",
+            Duration::from_millis(300),
+        )
+        .await;
+        assert_eq!(result, Err(ActivePortError::AwaitingApproval));
+        assert!(
+            !server.await.unwrap(),
+            "HTTP discovery must not run while the prompt is open"
+        );
+    }
+
+    #[test]
+    fn auto_connect_wait_stays_below_client_read_timeout() {
+        let client_floor = crate::connection::read_timeout_for(&serde_json::json!({}));
+        assert!(AUTO_CONNECT_WS_VERIFY_TIMEOUT < client_floor);
     }
 }
