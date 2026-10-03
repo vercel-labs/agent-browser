@@ -112,6 +112,29 @@ jobs:
       - name: Test sandbox package
         run: pnpm --filter @agent-browser/sandbox test
 
+  eval-harness:
+    name: Eval Harness
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+
+      # These checks use only the language standard libraries. The live runner's
+      # release-age-gated production dependencies are not needed here.
+      - name: Test live eval grading
+        run: pnpm --dir evals run test:live
+
+      - name: Test sandbox orchestration
+        run: pnpm --dir evals run test:sandbox
+
   eve-package:
     name: Eve Package
     runs-on: ubuntu-latest
