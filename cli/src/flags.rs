@@ -22,12 +22,15 @@ fn parse_idle_timeout(s: &str) -> Result<String, String> {
         let (num_str, unit) = s.split_at(s.len() - 1);
         let num: u64 = num_str.parse().map_err(|_| "Invalid number")?;
 
-        let ms = match unit {
-            "s" => num * 1000,
-            "m" => num * 60 * 1000,
-            "h" => num * 60 * 60 * 1000,
+        let multiplier: u64 = match unit {
+            "s" => 1000,
+            "m" => 60 * 1000,
+            "h" => 60 * 60 * 1000,
             _ => return Err("Invalid idle timeout unit (use s, m, h, or raw ms)".to_string()),
         };
+        let ms = num
+            .checked_mul(multiplier)
+            .ok_or("Idle timeout too large")?;
         return Ok(ms.to_string());
     }
 
@@ -1272,6 +1275,7 @@ mod tests {
     #[test]
     fn test_parse_idle_timeout_raw_ms() {
         assert_eq!(parse_idle_timeout("10").unwrap(), "10");
+        assert_eq!(parse_idle_timeout("5000").unwrap(), "5000");
     }
 
     #[test]
@@ -1297,6 +1301,48 @@ mod tests {
     #[test]
     fn test_parse_idle_timeout_rejects_unknown_unit() {
         assert!(parse_idle_timeout("10x").is_err());
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_rejects_overflowing_seconds() {
+        // Wrapped to exactly 5000 ms in release builds, turning a huge timeout
+        // into a five second one.
+        assert!(parse_idle_timeout("2305843009213693957s").is_err());
+        assert!(parse_idle_timeout(&format!("{}s", u64::MAX)).is_err());
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_rejects_overflowing_minutes() {
+        assert!(parse_idle_timeout(&format!("{}m", u64::MAX)).is_err());
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_rejects_overflowing_hours() {
+        // Wrapped to exactly 0 ms, which the daemon reads as "idle timeout
+        // disabled".
+        assert!(parse_idle_timeout("144115188075855872h").is_err());
+        assert!(parse_idle_timeout(&format!("{}h", u64::MAX)).is_err());
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_accepts_largest_non_overflowing_value() {
+        assert_eq!(
+            parse_idle_timeout(&format!("{}s", u64::MAX / 1000)).unwrap(),
+            (u64::MAX / 1000 * 1000).to_string()
+        );
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_accepts_large_raw_ms() {
+        assert_eq!(
+            parse_idle_timeout(&u64::MAX.to_string()).unwrap(),
+            u64::MAX.to_string()
+        );
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_rejects_raw_ms_above_u64() {
+        assert!(parse_idle_timeout("18446744073709551616").is_err());
     }
 
     #[test]
