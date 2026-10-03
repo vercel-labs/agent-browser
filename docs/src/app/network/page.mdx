@@ -66,6 +66,8 @@ agent-browser click @e4
 agent-browser network har stop ./trace.har
 ```
 
+If export fails, the recording and captured requests are retained. Correct the destination and run `network har stop` again without repeating the browser flow.
+
 Text response bodies (JSON, HTML, JavaScript, form data) are embedded in the HAR as `content.text` by default, captured while the browser still has them buffered so they survive navigation. The `--content` flag on `har start` controls this:
 
 <table>
