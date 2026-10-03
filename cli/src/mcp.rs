@@ -18,9 +18,20 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+// Modern requests carry their version and capabilities on every call. Legacy
+// clients still negotiate a session through initialize.
+const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 const PROTOCOL_VERSION: &str = "2025-11-25";
-const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
-    &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[
+    MODERN_PROTOCOL_VERSION,
+    "2025-11-25",
+    "2025-06-18",
+    "2025-03-26",
+    "2024-11-05",
+];
+const PROTOCOL_VERSION_META: &str = "io.modelcontextprotocol/protocolVersion";
+const CLIENT_INFO_META: &str = "io.modelcontextprotocol/clientInfo";
+const CLIENT_CAPABILITIES_META: &str = "io.modelcontextprotocol/clientCapabilities";
 const TOOL_LIST_PAGE_SIZE: usize = 64;
 const TOOL_OPEN: &str = "agent_browser_open";
 const TOOL_READ: &str = "agent_browser_read";
@@ -610,13 +621,97 @@ fn handle_line(line: &str, config: &McpConfig, exit_after_response: &mut bool) -
     // Notifications do not receive responses.
     let id = id?;
 
-    match handle_request(method, message.get("params"), config, exit_after_response) {
-        Ok(result) => Some(json!({
+    let params = message.get("params");
+    let meta = params.and_then(|p| p.get("_meta"));
+    let modern = method == "server/discover"
+        || meta.is_some_and(|m| {
+            m.get(PROTOCOL_VERSION_META).is_some()
+                || m.get(CLIENT_INFO_META).is_some()
+                || m.get(CLIENT_CAPABILITIES_META).is_some()
+        });
+
+    if modern {
+        let requested = meta
+            .and_then(|m| m.get(PROTOCOL_VERSION_META))
+            .and_then(Value::as_str);
+        if let Some(requested) = requested {
+            if requested != MODERN_PROTOCOL_VERSION {
+                return Some(unsupported_protocol_version(id, requested));
+            }
+        } else {
+            return Some(error_response(
+                id,
+                -32602,
+                "Missing or invalid protocol version",
+            ));
+        }
+        if !meta
+            .and_then(|m| m.get(CLIENT_CAPABILITIES_META))
+            .is_some_and(Value::is_object)
+        {
+            return Some(error_response(
+                id,
+                -32602,
+                "Missing or invalid client capabilities",
+            ));
+        }
+        if !matches!(method, "server/discover" | "tools/list" | "tools/call") {
+            return Some(error_response(
+                id,
+                -32601,
+                format!("Method not found: {method}"),
+            ));
+        }
+    }
+
+    match handle_request(method, params, config, exit_after_response) {
+        Ok(mut result) => {
+            if modern {
+                decorate_modern_result(&mut result, method);
+            }
+            Some(json!({
             "jsonrpc": "2.0",
             "id": id,
             "result": result,
-        })),
+            }))
+        }
         Err(err) => Some(error_response(id, err.code, err.message)),
+    }
+}
+
+fn unsupported_protocol_version(id: Value, requested: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": -32022,
+            "message": "Unsupported protocol version",
+            "data": {
+                "supported": SUPPORTED_PROTOCOL_VERSIONS,
+                "requested": requested,
+            }
+        }
+    })
+}
+
+fn server_info() -> Value {
+    json!({ "name": "agent-browser", "version": env!("CARGO_PKG_VERSION") })
+}
+
+fn decorate_modern_result(result: &mut Value, method: &str) {
+    let Some(result) = result.as_object_mut() else {
+        return;
+    };
+    result.insert("resultType".into(), json!("complete"));
+    result.insert(
+        "_meta".into(),
+        json!({ "io.modelcontextprotocol/serverInfo": server_info() }),
+    );
+    if matches!(method, "server/discover" | "tools/list") {
+        // Profile selection is fixed for the process, but use zero freshness
+        // so a client can refresh discovery after a server restart.
+        result.insert("ttlMs".into(), json!(0));
+        result.insert("cacheScope".into(), json!("public"));
     }
 }
 
@@ -627,6 +722,7 @@ fn handle_request(
     exit_after_response: &mut bool,
 ) -> Result<Value, ProtocolError> {
     match method {
+        "server/discover" => Ok(discover_result(config)),
         "initialize" => Ok(initialize_result(params, config)),
         "ping" => Ok(json!({})),
         "tools/list" => list_tools(params, config),
@@ -637,6 +733,21 @@ fn handle_request(
         }
         _ => Err(ProtocolError::method_not_found(method)),
     }
+}
+
+fn discover_result(config: &McpConfig) -> Value {
+    json!({
+        "supportedVersions": SUPPORTED_PROTOCOL_VERSIONS,
+        "capabilities": { "tools": {} },
+        "instructions": server_instructions(config),
+    })
+}
+
+fn server_instructions(config: &McpConfig) -> String {
+    format!(
+        "Use the typed agent_browser_* tools to control a browser. Active MCP tools profile(s): {}. Prefer agent_browser_snapshot after navigation to obtain stable element refs before clicking or typing. Use agent_browser_tools_profiles to see available startup profiles.",
+        config.profile_names().join(", ")
+    )
 }
 
 fn list_tools(params: Option<&Value>, config: &McpConfig) -> Result<Value, ProtocolError> {
@@ -678,7 +789,9 @@ fn initialize_result(params: Option<&Value>, config: &McpConfig) -> Value {
         .and_then(|p| p.get("protocolVersion"))
         .and_then(|v| v.as_str())
         .unwrap_or(PROTOCOL_VERSION);
-    let protocol_version = if SUPPORTED_PROTOCOL_VERSIONS.contains(&requested) {
+    let protocol_version = if requested != MODERN_PROTOCOL_VERSION
+        && SUPPORTED_PROTOCOL_VERSIONS.contains(&requested)
+    {
         requested
     } else {
         PROTOCOL_VERSION
@@ -694,10 +807,7 @@ fn initialize_result(params: Option<&Value>, config: &McpConfig) -> Value {
             "title": "agent-browser",
             "version": env!("CARGO_PKG_VERSION")
         },
-        "instructions": format!(
-            "Use the typed agent_browser_* tools to control a browser. Active MCP tools profile(s): {}. Prefer agent_browser_snapshot after navigation to obtain stable element refs before clicking or typing. Use agent_browser_tools_profiles to see available startup profiles.",
-            config.profile_names().join(", ")
-        )
+        "instructions": server_instructions(config)
     })
 }
 
@@ -5272,6 +5382,147 @@ mod tests {
     fn initialize_defaults_to_latest_protocol_version() {
         let result = initialize_result(None, &McpConfig::default());
         assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
+    }
+
+    fn request(method: &str, params: Value) -> Value {
+        let line = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+        handle_line(&line.to_string(), &McpConfig::all(), &mut false).unwrap()
+    }
+
+    fn modern_params(params: Value) -> Value {
+        let mut params = params;
+        params["_meta"] = json!({
+            "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION,
+            "io.modelcontextprotocol/clientCapabilities": {},
+        });
+        params
+    }
+
+    #[test]
+    fn modern_discovery_advertises_both_eras() {
+        let response = request("server/discover", modern_params(json!({})));
+        let result = &response["result"];
+        assert_eq!(result["resultType"], "complete");
+        assert_eq!(
+            result["supportedVersions"],
+            json!(SUPPORTED_PROTOCOL_VERSIONS)
+        );
+        assert_eq!(result["capabilities"], json!({ "tools": {} }));
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "agent-browser"
+        );
+        assert_eq!(result["ttlMs"], 0);
+        assert_eq!(result["cacheScope"], "public");
+    }
+
+    #[test]
+    fn modern_tool_listing_paginates_complete_catalog() {
+        let mut cursor: Option<String> = None;
+        let mut names = Vec::new();
+        loop {
+            let params = match &cursor {
+                Some(cursor) => modern_params(json!({ "cursor": cursor })),
+                None => modern_params(json!({})),
+            };
+            let response = request("tools/list", params);
+            let result = &response["result"];
+            assert_eq!(result["resultType"], "complete");
+            assert_eq!(result["ttlMs"], 0);
+            assert_eq!(result["cacheScope"], "public");
+            let page = result["tools"].as_array().unwrap();
+            assert!(page.len() <= TOOL_LIST_PAGE_SIZE);
+            names.extend(
+                page.iter()
+                    .map(|tool| tool["name"].as_str().unwrap().to_owned()),
+            );
+            cursor = result["nextCursor"].as_str().map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(names.len(), tools_for_config(&McpConfig::all()).len());
+        let unique: std::collections::HashSet<_> = names.iter().collect();
+        assert_eq!(unique.len(), names.len());
+    }
+
+    #[test]
+    fn modern_tool_call_has_complete_result() {
+        let response = request(
+            "tools/call",
+            modern_params(json!({ "name": TOOL_TOOLS_PROFILES, "arguments": {} })),
+        );
+        let result = &response["result"];
+        assert_eq!(result["resultType"], "complete");
+        assert_eq!(result["isError"], false);
+        assert!(result["content"].is_array());
+        assert!(result["ttlMs"].is_null());
+    }
+
+    #[test]
+    fn modern_requests_reject_unsupported_or_missing_metadata() {
+        let unknown = request(
+            "server/discover",
+            json!({ "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2099-01-01",
+                "io.modelcontextprotocol/clientCapabilities": {},
+            } }),
+        );
+        assert_eq!(unknown["error"]["code"], -32022);
+        assert_eq!(unknown["error"]["data"]["requested"], "2099-01-01");
+        assert_eq!(
+            unknown["error"]["data"]["supported"],
+            json!(SUPPORTED_PROTOCOL_VERSIONS)
+        );
+
+        let legacy_version_in_modern_request = request(
+            "tools/list",
+            json!({ "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2025-11-25",
+                "io.modelcontextprotocol/clientCapabilities": {},
+            } }),
+        );
+        assert_eq!(legacy_version_in_modern_request["error"]["code"], -32022);
+
+        let missing_version = request(
+            "server/discover",
+            json!({ "_meta": {
+            "io.modelcontextprotocol/clientCapabilities": {},
+        } }),
+        );
+        assert_eq!(missing_version["error"]["code"], -32602);
+        let missing_version_on_tool_call = request(
+            "tools/list",
+            json!({ "_meta": {
+                "io.modelcontextprotocol/clientInfo": { "name": "test", "version": "1" },
+                "io.modelcontextprotocol/clientCapabilities": {},
+            } }),
+        );
+        assert_eq!(missing_version_on_tool_call["error"]["code"], -32602);
+        let missing_capabilities = request(
+            "tools/list",
+            json!({ "_meta": {
+            "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION,
+        } }),
+        );
+        assert_eq!(missing_capabilities["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn legacy_initialization_and_results_keep_their_shape() {
+        for version in ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"] {
+            let response = request("initialize", json!({ "protocolVersion": version }));
+            assert_eq!(response["result"]["protocolVersion"], version);
+            assert!(response["result"].get("resultType").is_none());
+        }
+        let future = request(
+            "initialize",
+            json!({ "protocolVersion": MODERN_PROTOCOL_VERSION }),
+        );
+        assert_eq!(future["result"]["protocolVersion"], PROTOCOL_VERSION);
+        let listing = request("tools/list", json!({}));
+        assert!(listing["result"].get("resultType").is_none());
+        assert!(listing["result"].get("ttlMs").is_none());
     }
 }
 

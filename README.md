@@ -590,7 +590,7 @@ agent-browser mcp --tools all
 agent-browser mcp --tools core,network,react
 ```
 
-Starts a Model Context Protocol server over stdio. MCP clients launch this command as a subprocess and exchange newline-delimited JSON-RPC on stdin and stdout. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization.
+Starts a Model Context Protocol server over stdio. MCP clients launch this command as a subprocess and exchange newline-delimited JSON-RPC on stdin and stdout. The server supports MCP protocol 2026-07-28 through per-request metadata and `server/discover`. Legacy clients continue to use `initialize` with 2025-11-25 or older supported versions; their default remains 2025-11-25. Discovery advertises all supported versions, and unsupported modern versions return an error listing them. Modern `tools/list` results retain pagination and include cache hints.
 
 The default tools profile is `core`, which keeps MCP context small for everyday browser automation. Use `--tools all` for the full typed CLI parity surface, or combine profiles with commas, such as `--tools core,network,react`.
 
