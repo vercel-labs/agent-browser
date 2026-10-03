@@ -50,6 +50,16 @@ agent-browser chooses the source from the reference:
   </tbody>
 </table>
 
+### Community plugins
+
+Community plugins are maintained outside the agent-browser repository. Review a plugin's source and security guidance before installing it.
+
+- [CapSolver](https://github.com/tommycapsolver/agent-browser-plugin-capsolver) implements `captcha.solve`, reads its API key from the environment, and returns the provider's structured solution without taking control of browser navigation.
+
+```bash
+agent-browser plugin add tommycapsolver/agent-browser-plugin-capsolver
+```
+
 `plugin add` writes `./agent-browser.json` by default. Use `--global` to write `~/.agent-browser/config.json` instead.
 
 During add, agent-browser runs the package once and asks for `plugin.manifest`. A plugin manifest declares the plugin name and capabilities. If a plugin does not support manifests yet, use the capabilities from the plugin README:
