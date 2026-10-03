@@ -1054,13 +1054,24 @@ mod tests {
         let result = rt.block_on(download_bytes("http://127.0.0.1:1/test.zip"));
         assert!(result.is_err());
         let err = result.unwrap_err();
+
         // The new code should include the root cause (connection refused)
-        // not just the vague "error sending request for url"
+        // not just the vague "error sending request for url". That root cause is
+        // rendered by the OS and is therefore localized: Windows builds it with
+        // FormatMessage in the machine's display language, so any prose match is
+        // only ever right for the locale it was written against. Match the
+        // numeric code instead, asking the OS for it so the assertion stays
+        // correct on every platform (ECONNREFUSED is 111 on Linux, 61 on macOS
+        // and 10061 on Windows) instead of hardcoding one of them.
+        let refused = std::net::TcpStream::connect("127.0.0.1:1")
+            .expect_err("nothing should be listening on 127.0.0.1:1");
+        let code = refused
+            .raw_os_error()
+            .expect("a refused connect carries an os error code");
         assert!(
-            err.contains("Connection refused")
-                || err.contains("connection refused")
-                || err.contains("actively refused it"),
-            "expected 'connection refused' in error, got: {}",
+            err.contains(&format!("(os error {})", code)),
+            "expected '(os error {})' in error, got: {}",
+            code,
             err
         );
     }
