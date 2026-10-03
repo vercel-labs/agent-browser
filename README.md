@@ -383,7 +383,10 @@ agent-browser tab new --label docs [url]       # New tab with a user-assigned la
 agent-browser tab <t<N>|label>                 # Switch to a tab by id or label
 agent-browser tab close [t<N>|label]           # Close a tab (defaults to active)
 agent-browser window new                       # New window
+agent-browser bringtofront                     # Raise the browser window for the active tab
 ```
+
+Creating or switching tabs never raises the browser window, so a headed Chrome shared with a person is not pulled to the foreground while a session works. Use `bringtofront` for an explicit raise, which a screenshot of a background tab needs.
 
 Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused within a session, so scripts and agents can keep referring to the same tab even after other tabs are opened or closed. Positional integers like `tab 2` are **not** accepted; the `t` prefix disambiguates handles from indices and mirrors the `@e1` convention used for element refs.
 

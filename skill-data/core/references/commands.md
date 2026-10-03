@@ -237,7 +237,10 @@ agent-browser tab close                        # Close current tab
 agent-browser tab close t2                     # Close tab by id
 agent-browser tab close docs                   # Close tab by label
 agent-browser window new                       # New window
+agent-browser bringtofront                     # Raise the browser window for the active tab
 ```
+
+Creating a tab or switching to one does not raise the browser window. New targets are created in the background and a switch rebinds the session without a `Page.bringToFront`, so a headed Chrome shared with a person keeps serving whatever they are doing while the session drives its own tab. Navigation, snapshots and input all work against a background tab. A screenshot needs the tab to be the foreground tab of its window, so run `bringtofront` first when you capture one, or give the browser its own display.
 
 Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused within a session, so the same id keeps referring to the same tab across commands. Positional integers are **not** accepted — `tab 2` errors with a teaching message; use `t2`.
 
