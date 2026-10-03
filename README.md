@@ -194,7 +194,7 @@ For sites without WebMCP tools, load the generation and validation workflow with
 agent-browser get text <sel>          # Get text content
 agent-browser get html <sel>          # Get innerHTML
 agent-browser get value <sel>         # Get input value
-agent-browser get attr <sel> <attr>   # Get attribute
+agent-browser get attr <sel> <attr>   # Get attribute (prints (not present) if absent)
 agent-browser get title               # Get page title
 agent-browser get url                 # Get current URL
 agent-browser get cdp-url             # Get CDP WebSocket URL (for DevTools, debugging)
