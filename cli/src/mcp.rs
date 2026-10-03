@@ -3105,7 +3105,7 @@ fn call_cookies_set(arguments: &Value) -> Result<Value, ProtocolError> {
         ("url", "--url"),
         ("domain", "--domain"),
         ("path", "--path"),
-        ("sameSite", "--sameSite"),
+        ("sameSite", "--same-site"),
     ] {
         if let Some(value) = optional_string(arguments, key)? {
             args.push(flag.to_string());
@@ -3117,7 +3117,7 @@ fn call_cookies_set(arguments: &Value) -> Result<Value, ProtocolError> {
         args.push(value.to_string());
     }
     if optional_bool(arguments, "httpOnly")?.unwrap_or(false) {
-        args.push("--httpOnly".to_string());
+        args.push("--http-only".to_string());
     }
     if optional_bool(arguments, "secure")?.unwrap_or(false) {
         args.push("--secure".to_string());
