@@ -10,11 +10,15 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -179,6 +183,8 @@ const TOOL_EVAL: &str = "agent_browser_eval";
 const TOOL_CLOSE: &str = "agent_browser_close";
 const TOOL_TOOLS_PROFILES: &str = "agent_browser_tools_profiles";
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+/// JSON-RPC notification a client sends to abandon an in-flight request.
+const CANCELLED_NOTIFICATION: &str = "notifications/cancelled";
 const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 const RAW_JSON_ARG: &str = "--raw-json";
 
@@ -209,6 +215,96 @@ struct CliRun {
     exit_code: Option<i32>,
     stdout: String,
     stderr: String,
+}
+
+/// Tracks a single in-flight `tools/call` so a `notifications/cancelled`
+/// arriving on the shared stdin reader can stop it.
+///
+/// `requested` is flipped by the reader thread when the matching notification
+/// shows up; `aborted` is flipped by whichever thread actually kills the child
+/// process, which tells the dispatcher to stay quiet (`MCP` receivers should
+/// not answer a cancelled request).
+#[derive(Debug, Default)]
+struct RequestCancel {
+    requested: AtomicBool,
+    aborted: AtomicBool,
+}
+
+impl RequestCancel {
+    fn request(&self) {
+        self.requested.store(true, Ordering::SeqCst);
+    }
+
+    fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::SeqCst)
+    }
+
+    fn is_aborted(&self) -> bool {
+        self.aborted.load(Ordering::SeqCst)
+    }
+}
+
+type CancelRegistry = Mutex<HashMap<String, Arc<RequestCancel>>>;
+
+thread_local! {
+    /// Cancellation token for the request currently being served on this
+    /// thread. `run_cli` reads it so a single flag reaches the child-wait loop
+    /// without threading a parameter through every tool builder.
+    static ACTIVE_REQUEST_CANCEL: RefCell<Option<Arc<RequestCancel>>> =
+        const { RefCell::new(None) };
+}
+
+fn active_request_cancel() -> Option<Arc<RequestCancel>> {
+    ACTIVE_REQUEST_CANCEL.with(|slot| slot.borrow().clone())
+}
+
+struct ActiveCancelGuard(());
+
+impl ActiveCancelGuard {
+    fn install(cancel: Arc<RequestCancel>) -> Self {
+        ACTIVE_REQUEST_CANCEL.with(|slot| *slot.borrow_mut() = Some(cancel));
+        Self(())
+    }
+}
+
+impl Drop for ActiveCancelGuard {
+    fn drop(&mut self) {
+        ACTIVE_REQUEST_CANCEL.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+/// JSON-RPC ids are strings or numbers; everything else is unusable as a
+/// cancellation key.
+fn request_id_key(id: &Value) -> Option<String> {
+    match id {
+        Value::String(id) => Some(id.clone()),
+        Value::Number(id) => Some(id.to_string()),
+        _ => None,
+    }
+}
+
+/// Look up the request named by a `notifications/cancelled` payload and flag
+/// it. Unknown/absent ids are ignored, per the MCP cancellation spec.
+fn cancel_in_flight(params: Option<&Value>, in_flight: &CancelRegistry) -> bool {
+    let Some(target) = params
+        .and_then(|params| params.get("requestId"))
+        .and_then(request_id_key)
+    else {
+        return false;
+    };
+
+    let flag = in_flight
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&target).cloned());
+
+    match flag {
+        Some(flag) => {
+            flag.request();
+            true
+        }
+        None => false,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -507,34 +603,138 @@ const MOBILE_PROFILE_TOOLS: &[&str] = &[
 
 /// Run the MCP stdio server until stdin closes or a `shutdown` request is
 /// received.
+///
+/// `tools/call` is dispatched on its own thread so the reader loop stays free
+/// to observe `notifications/cancelled` while a tool call is parked inside
+/// `run_cli`. Instant methods (`initialize`, `ping`, `tools/list`, `shutdown`)
+/// stay inline to keep control-message ordering simple.
 pub fn run_mcp(args: &[String]) -> Result<(), String> {
     let config = parse_mcp_config(args)?;
     let stdin = io::stdin();
-    let mut stdout = io::stdout();
+    let stdout = Arc::new(Mutex::new(io::stdout()));
+    let in_flight: Arc<CancelRegistry> = Arc::new(Mutex::new(HashMap::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut workers: Vec<thread::JoinHandle<()>> = Vec::new();
 
     for line in stdin.lock().lines() {
-        let mut exit_after_response = false;
-        let response = match line {
-            Ok(line) => handle_line(&line, &config, &mut exit_after_response),
-            Err(e) => Some(error_response(
-                Value::Null,
-                -32603,
-                format!("Failed to read stdin: {}", e),
-            )),
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+
+        let line = match line {
+            Ok(line) => line,
+            Err(e) => {
+                let response =
+                    error_response(Value::Null, -32603, format!("Failed to read stdin: {}", e));
+                write_shared(&stdout, &response);
+                break;
+            }
         };
 
+        let message: Value = match serde_json::from_str(&line) {
+            Ok(value) => value,
+            Err(e) => {
+                let response = error_response(Value::Null, -32700, format!("Parse error: {}", e));
+                if !write_shared(&stdout, &response) {
+                    break;
+                }
+                continue;
+            }
+        };
+
+        // Notifications carry no id and never get a response. Only
+        // cancellation has server-side effects today; the rest are ignored.
+        if message.get("id").is_none() {
+            if message.get("method").and_then(|v| v.as_str()) == Some(CANCELLED_NOTIFICATION) {
+                cancel_in_flight(message.get("params"), &in_flight);
+            }
+            continue;
+        }
+
+        if message.get("method").and_then(|v| v.as_str()) == Some("tools/call") {
+            let Some(key) = message.get("id").and_then(request_id_key) else {
+                // Non-string/number ids cannot be matched to a cancellation;
+                // handle them inline rather than tying up a worker.
+                let mut exit_after_response = false;
+                if let Some(response) = handle_message(&message, &config, &mut exit_after_response)
+                {
+                    let _ = write_shared(&stdout, &response);
+                }
+                continue;
+            };
+
+            let cancel = Arc::new(RequestCancel::default());
+            if let Ok(mut map) = in_flight.lock() {
+                map.insert(key.clone(), cancel.clone());
+            }
+
+            let config = config.clone();
+            let stdout = Arc::clone(&stdout);
+            let in_flight = Arc::clone(&in_flight);
+            let stop = Arc::clone(&stop);
+            reap_finished_workers(&mut workers);
+            workers.push(thread::spawn(move || {
+                let _guard = ActiveCancelGuard::install(Arc::clone(&cancel));
+                let mut exit_after_response = false;
+                let response = handle_message(&message, &config, &mut exit_after_response);
+
+                // Deregister before answering so a late cancellation is a no-op.
+                if let Ok(mut map) = in_flight.lock() {
+                    map.remove(&key);
+                }
+
+                if cancel.is_aborted() {
+                    // MCP: do not send a response for a cancelled request.
+                    return;
+                }
+
+                if let Some(response) = response {
+                    if !write_shared(&stdout, &response) {
+                        stop.store(true, Ordering::SeqCst);
+                    }
+                }
+            }));
+            continue;
+        }
+
+        let mut exit_after_response = false;
+        let response = handle_message(&message, &config, &mut exit_after_response);
         if let Some(response) = response {
-            if write_json_line(&mut stdout, &response).is_err() {
+            if !write_shared(&stdout, &response) {
                 break;
             }
         }
 
         if exit_after_response {
+            // Unblock shutdown if a tool call is still waiting on its child.
+            if let Ok(map) = in_flight.lock() {
+                for flag in map.values() {
+                    flag.request();
+                }
+            }
             break;
         }
     }
 
+    for worker in workers {
+        let _ = worker.join();
+    }
+
     Ok(())
+}
+
+/// Drop handles for tool-call threads that already exited. Their responses
+/// were written before the thread returned, so a long-lived session no longer
+/// accumulates one `JoinHandle` per `tools/call`.
+fn reap_finished_workers(workers: &mut Vec<thread::JoinHandle<()>>) {
+    workers.retain(|worker| !worker.is_finished());
+}
+
+fn write_shared(stdout: &Mutex<io::Stdout>, response: &Value) -> bool {
+    match stdout.lock() {
+        Ok(mut guard) => write_json_line(&mut guard, response).is_ok(),
+        Err(_) => false,
+    }
 }
 
 fn parse_mcp_config(args: &[String]) -> Result<McpConfig, String> {
@@ -587,18 +787,11 @@ fn parse_mcp_config(args: &[String]) -> Result<McpConfig, String> {
     Ok(McpConfig::from_profiles(profiles))
 }
 
-fn handle_line(line: &str, config: &McpConfig, exit_after_response: &mut bool) -> Option<Value> {
-    let message: Value = match serde_json::from_str(line) {
-        Ok(value) => value,
-        Err(e) => {
-            return Some(error_response(
-                Value::Null,
-                -32700,
-                format!("Parse error: {}", e),
-            ));
-        }
-    };
-
+fn handle_message(
+    message: &Value,
+    config: &McpConfig,
+    exit_after_response: &mut bool,
+) -> Option<Value> {
     let id = message.get("id").cloned();
     let method = match message.get("method").and_then(|v| v.as_str()) {
         Some(method) => method,
@@ -3883,8 +4076,22 @@ fn append_common_global_args(
 }
 
 fn run_cli(args: &[String], stdin_body: Option<String>, timeout_ms: u64) -> Result<CliRun, String> {
-    let exe = env::current_exe().map_err(|e| e.to_string())?;
-    let mut command = Command::new(exe);
+    let program = env::current_exe().map_err(|e| e.to_string())?;
+    let cancel = active_request_cancel();
+    run_program(&program, args, stdin_body, timeout_ms, cancel.as_deref())
+}
+
+/// Spawn `program` and wait for it, killing it if `cancel` is signalled or the
+/// timeout elapses. Split from `run_cli` so tests can drive it with an
+/// arbitrary child.
+fn run_program(
+    program: &Path,
+    args: &[String],
+    stdin_body: Option<String>,
+    timeout_ms: u64,
+    cancel: Option<&RequestCancel>,
+) -> Result<CliRun, String> {
+    let mut command = Command::new(program);
     command
         .args(args)
         .stdout(Stdio::piped())
@@ -3928,6 +4135,21 @@ fn run_cli(args: &[String], stdin_body: Option<String>, timeout_ms: u64) -> Resu
     let started = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
     let status = loop {
+        if cancel.is_some_and(RequestCancel::is_requested) {
+            if let Some(cancel) = cancel {
+                cancel.aborted.store(true, Ordering::SeqCst);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            let stdout = join_output(stdout_thread)?;
+            let stderr = join_output(stderr_thread)?;
+            return Ok(CliRun {
+                exit_code: None,
+                stdout,
+                stderr: append_cancel_message(stderr),
+            });
+        }
+
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
@@ -3970,6 +4192,15 @@ fn append_timeout_message(stderr: String, timeout_ms: u64) -> String {
     let msg = format!("agent-browser command timed out after {}ms", timeout_ms);
     if stderr.trim().is_empty() {
         msg
+    } else {
+        format!("{}\n{}", stderr.trim_end(), msg)
+    }
+}
+
+fn append_cancel_message(stderr: String) -> String {
+    let msg = "agent-browser command cancelled by the MCP client";
+    if stderr.trim().is_empty() {
+        msg.to_string()
     } else {
         format!("{}\n{}", stderr.trim_end(), msg)
     }
@@ -4247,6 +4478,22 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn reap_finished_workers_drops_exited_threads() {
+        let quick: Vec<thread::JoinHandle<()>> = (0..3).map(|_| thread::spawn(|| {})).collect();
+        for worker in &quick {
+            while !worker.is_finished() {
+                thread::yield_now();
+            }
+        }
+
+        let mut workers = quick;
+        workers.push(thread::spawn(|| thread::sleep(Duration::from_millis(200))));
+        reap_finished_workers(&mut workers);
+
+        assert_eq!(workers.len(), 1);
+    }
 
     #[test]
     fn tools_list_contains_typed_tools() {
@@ -5272,6 +5519,162 @@ mod tests {
     fn initialize_defaults_to_latest_protocol_version() {
         let result = initialize_result(None, &McpConfig::default());
         assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn active_cancel_guard_scopes_the_thread_local() {
+        assert!(active_request_cancel().is_none());
+
+        let flag = Arc::new(RequestCancel::default());
+        {
+            let _guard = ActiveCancelGuard::install(Arc::clone(&flag));
+            let active = active_request_cancel().expect("guard should install a token");
+            assert!(Arc::ptr_eq(&active, &flag));
+        }
+
+        assert!(active_request_cancel().is_none());
+    }
+
+    #[test]
+    fn cancel_notification_flags_only_the_targeted_request() {
+        let registry: CancelRegistry = Mutex::new(HashMap::new());
+        let target = Arc::new(RequestCancel::default());
+        let other = Arc::new(RequestCancel::default());
+        registry
+            .lock()
+            .unwrap()
+            .insert("7".to_string(), Arc::clone(&target));
+        registry
+            .lock()
+            .unwrap()
+            .insert("other".to_string(), Arc::clone(&other));
+
+        assert!(cancel_in_flight(
+            Some(&json!({"requestId": 7, "reason": "user cancelled"})),
+            &registry
+        ));
+        assert!(target.is_requested());
+        assert!(!other.is_requested());
+
+        // String ids are matched too.
+        assert!(cancel_in_flight(
+            Some(&json!({"requestId": "other"})),
+            &registry
+        ));
+        assert!(other.is_requested());
+    }
+
+    #[test]
+    fn cancel_notification_ignores_unknown_or_malformed_ids() {
+        let registry: CancelRegistry = Mutex::new(HashMap::new());
+        let tracked = Arc::new(RequestCancel::default());
+        registry
+            .lock()
+            .unwrap()
+            .insert("1".to_string(), Arc::clone(&tracked));
+
+        assert!(!cancel_in_flight(None, &registry));
+        assert!(!cancel_in_flight(Some(&json!({})), &registry));
+        assert!(!cancel_in_flight(
+            Some(&json!({"requestId": 99})),
+            &registry
+        ));
+        assert!(!cancel_in_flight(
+            Some(&json!({"requestId": {"nested": true}})),
+            &registry
+        ));
+        assert!(!tracked.is_requested());
+    }
+
+    #[test]
+    fn cancel_after_deregistration_is_a_noop() {
+        let registry: CancelRegistry = Mutex::new(HashMap::new());
+        let flag = Arc::new(RequestCancel::default());
+        registry
+            .lock()
+            .unwrap()
+            .insert("1".to_string(), Arc::clone(&flag));
+        registry.lock().unwrap().remove("1");
+
+        assert!(!cancel_in_flight(Some(&json!({"requestId": 1})), &registry));
+        assert!(!flag.is_requested());
+    }
+
+    #[test]
+    fn cancellation_notification_yields_no_response() {
+        let config = McpConfig::default();
+        let mut exit_after_response = false;
+        let message = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": 1, "reason": "user cancelled"}
+        });
+
+        assert!(handle_message(&message, &config, &mut exit_after_response).is_none());
+        assert!(!exit_after_response);
+    }
+
+    #[test]
+    #[ignore = "internal subprocess helper for cancellation tests"]
+    fn cancel_sleep_helper() {
+        thread::sleep(Duration::from_secs(30));
+    }
+
+    fn run_helper_args(filter: &str) -> Vec<String> {
+        vec![
+            "--exact".to_string(),
+            format!("mcp::tests::{filter}"),
+            "--ignored".to_string(),
+        ]
+    }
+
+    #[test]
+    fn run_program_aborts_an_in_flight_child_on_cancel() {
+        let program = env::current_exe().unwrap();
+        let cancel = Arc::new(RequestCancel::default());
+        let trigger = Arc::clone(&cancel);
+        let canceller = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            trigger.request();
+        });
+
+        let started = Instant::now();
+        let run = run_program(
+            &program,
+            &run_helper_args("cancel_sleep_helper"),
+            None,
+            30_000,
+            Some(&cancel),
+        )
+        .unwrap();
+        canceller.join().unwrap();
+
+        assert!(cancel.is_aborted(), "the child should have been killed");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "cancel should return without waiting out the child"
+        );
+        assert!(run.stderr.contains("cancelled by the MCP client"));
+    }
+
+    #[test]
+    fn run_program_reports_normal_completion_and_ignores_late_cancel() {
+        let program = env::current_exe().unwrap();
+        let cancel = Arc::new(RequestCancel::default());
+        let args = vec!["cancel_sleep_helper".to_string(), "--list".to_string()];
+
+        let run = run_program(&program, &args, None, 30_000, Some(&cancel)).unwrap();
+
+        assert!(!cancel.is_aborted());
+        assert!(
+            run.stderr.trim().is_empty() || !run.stderr.contains("cancelled by the MCP client")
+        );
+        assert_eq!(run.exit_code, Some(0));
+        assert!(run.stdout.contains("cancel_sleep_helper"));
+
+        // A cancellation that lands after completion has nothing to abort.
+        cancel.request();
+        assert!(!cancel.is_aborted());
     }
 }
 
