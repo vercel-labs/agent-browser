@@ -3239,6 +3239,23 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     }
 }
 
+/// Parse a floating-point argument, rejecting values JSON cannot represent.
+/// `nan` and `inf` serialise to `null`, which silently drops the value on the
+/// way to the daemon, so they are refused here where the error is local.
+fn parse_finite_f64(raw: &str, what: &str, usage: &'static str) -> Result<f64, ParseError> {
+    let value = raw.parse::<f64>().map_err(|_| ParseError::InvalidValue {
+        message: format!("{} expects a number, got '{}'", what, raw),
+        usage,
+    })?;
+    if !value.is_finite() {
+        return Err(ParseError::InvalidValue {
+            message: format!("{} must be a finite number, got '{}'", what, raw),
+            usage,
+        });
+    }
+    Ok(value)
+}
+
 fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &[
         "viewport",
@@ -3276,12 +3293,20 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 })?;
             let mut cmd = json!({ "id": id, "action": "viewport", "width": w, "height": h });
             if let Some(scale_str) = rest.get(3) {
-                let scale = scale_str
-                    .parse::<f64>()
-                    .map_err(|_| ParseError::MissingArguments {
-                        context: "set viewport".to_string(),
+                let scale = parse_finite_f64(
+                    scale_str,
+                    "set viewport scale",
+                    "set viewport <width> <height> [scale]",
+                )?;
+                if scale < 0.0 {
+                    return Err(ParseError::InvalidValue {
+                        message: format!(
+                            "set viewport scale must be non-negative, got '{}'",
+                            scale_str
+                        ),
                         usage: "set viewport <width> <height> [scale]",
-                    })?;
+                    });
+                }
                 cmd["deviceScaleFactor"] = json!(scale);
             }
             Ok(cmd)
@@ -3302,18 +3327,16 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 context: "set geo".to_string(),
                 usage: "set geo <latitude> <longitude>",
             })?;
-            let lat = lat_str
-                .parse::<f64>()
-                .map_err(|_| ParseError::MissingArguments {
-                    context: "set geo".to_string(),
-                    usage: "set geo <latitude> <longitude>",
-                })?;
-            let lng = lng_str
-                .parse::<f64>()
-                .map_err(|_| ParseError::MissingArguments {
-                    context: "set geo".to_string(),
-                    usage: "set geo <latitude> <longitude>",
-                })?;
+            let lat = parse_finite_f64(
+                lat_str,
+                "set geo latitude",
+                "set geo <latitude> <longitude>",
+            )?;
+            let lng = parse_finite_f64(
+                lng_str,
+                "set geo longitude",
+                "set geo <latitude> <longitude>",
+            )?;
             Ok(json!({ "id": id, "action": "geolocation", "latitude": lat, "longitude": lng }))
         }
         Some("offline") => {
@@ -5614,6 +5637,60 @@ mod tests {
     fn test_set_viewport_invalid_scale() {
         let result = parse_command(&args("set viewport 1920 1080 abc"), &default_flags());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_viewport_rejects_non_finite_scale() {
+        // `nan`/`inf` cannot be represented in JSON: they serialise to `null`
+        // and the daemon silently falls back to a scale of 1.0.
+        for raw in ["nan", "inf", "-inf", "NaN", "infinity"] {
+            let err = parse_command(
+                &args(&format!("set viewport 800 600 {}", raw)),
+                &default_flags(),
+            )
+            .unwrap_err()
+            .format();
+            assert!(
+                err.contains("finite"),
+                "scale '{}' should be rejected as non-finite: {}",
+                raw,
+                err
+            );
+            assert!(err.contains(raw), "error should quote the input: {}", err);
+        }
+    }
+
+    #[test]
+    fn test_set_viewport_rejects_negative_scale() {
+        let err = parse_command(&args("set viewport 800 600 -2"), &default_flags())
+            .unwrap_err()
+            .format();
+        assert!(
+            err.contains("non-negative"),
+            "negative scale should be rejected locally: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_set_viewport_accepts_zero_scale() {
+        let cmd = parse_command(&args("set viewport 800 600 0"), &default_flags()).unwrap();
+        assert_eq!(cmd["deviceScaleFactor"], 0.0);
+    }
+
+    #[test]
+    fn test_set_geo_rejects_non_finite_coordinates() {
+        for cmd in ["set geo nan 10", "set geo 10 inf"] {
+            let err = parse_command(&args(cmd), &default_flags())
+                .unwrap_err()
+                .format();
+            assert!(
+                err.contains("finite"),
+                "`{}` should be rejected as non-finite: {}",
+                cmd,
+                err
+            );
+        }
     }
 
     #[test]
