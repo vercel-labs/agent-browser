@@ -76,6 +76,26 @@ pub async fn set_content(client: &CdpClient, session_id: &str, html: &str) -> Re
 // Domain filter
 // ---------------------------------------------------------------------------
 
+/// Error text shared by every entry point that accepts an allowlist, so an
+/// allowlist that parses to zero domains reports the same failure everywhere.
+pub const EMPTY_ALLOWED_DOMAINS_ERROR: &str =
+    "Allowed domains list is empty. Pass at least one domain pattern to --allowed-domains, \
+AGENT_BROWSER_ALLOWED_DOMAINS, or allowedDomains, or omit it to run without domain containment.";
+
+/// Reject an explicitly supplied allowlist that parses to zero domains.
+///
+/// An empty list is how "no allowlist configured" is represented internally, so
+/// accepting one here would silently disable containment instead of enforcing it.
+pub fn ensure_allowed_domains_not_empty<S: AsRef<str>>(domains: &[S]) -> Result<(), String> {
+    let has_domain = domains
+        .iter()
+        .any(|domain| !domain.as_ref().trim().is_empty());
+    if !has_domain {
+        return Err(EMPTY_ALLOWED_DOMAINS_ERROR.to_string());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct DomainFilter {
     pub allowed_domains: Vec<String>,
@@ -90,8 +110,10 @@ impl DomainFilter {
     }
 
     pub fn is_allowed(&self, hostname: &str) -> bool {
+        // A filter only exists when containment was requested, so an empty list
+        // is a degenerate allowlist and denies everything rather than allowing it.
         if self.allowed_domains.is_empty() {
-            return true;
+            return false;
         }
         let hostname = hostname.to_lowercase();
         for pattern in &self.allowed_domains {
@@ -108,7 +130,7 @@ impl DomainFilter {
 
     pub fn check_url(&self, url: &str) -> Result<(), String> {
         if self.allowed_domains.is_empty() {
-            return Ok(());
+            return Err(EMPTY_ALLOWED_DOMAINS_ERROR.to_string());
         }
         let parsed = url::Url::parse(url).map_err(|_| format!("Invalid URL: {}", url))?;
         let hostname = parsed
@@ -680,9 +702,38 @@ mod tests {
     }
 
     #[test]
-    fn test_domain_filter_empty() {
+    fn test_domain_filter_empty_denies_everything() {
+        // An empty allowlist is a degenerate allowlist, not "allow everything".
         let filter = DomainFilter::new("");
-        assert!(filter.is_allowed("anything.com"));
+        assert!(!filter.is_allowed("anything.com"));
+        let comma_only = DomainFilter::new(",");
+        assert!(!comma_only.is_allowed("anything.com"));
+    }
+
+    #[test]
+    fn test_domain_filter_check_url_empty_is_rejected() {
+        let filter = DomainFilter::new("");
+        let err = filter.check_url("http://evil.test/").unwrap_err();
+        assert_eq!(err, EMPTY_ALLOWED_DOMAINS_ERROR);
+    }
+
+    #[test]
+    fn test_ensure_allowed_domains_not_empty_rejects_degenerate_lists() {
+        let empty: Vec<String> = Vec::new();
+        assert_eq!(
+            ensure_allowed_domains_not_empty(&empty).unwrap_err(),
+            EMPTY_ALLOWED_DOMAINS_ERROR
+        );
+        assert_eq!(
+            ensure_allowed_domains_not_empty(&["".to_string(), "  ".to_string()]).unwrap_err(),
+            EMPTY_ALLOWED_DOMAINS_ERROR
+        );
+    }
+
+    #[test]
+    fn test_ensure_allowed_domains_not_empty_accepts_real_domains() {
+        assert!(ensure_allowed_domains_not_empty(&["example.com".to_string()]).is_ok());
+        assert!(ensure_allowed_domains_not_empty(&["", "*.example.com"]).is_ok());
     }
 
     #[test]
@@ -698,6 +749,10 @@ mod tests {
     fn test_parse_domain_list() {
         let domains = parse_domain_list("A.com, B.com , *.C.com");
         assert_eq!(domains, vec!["a.com", "b.com", "*.c.com"]);
+        // Degenerate input still parses to zero domains; callers that were given
+        // an explicit allowlist must reject that instead of allowing everything.
+        assert!(parse_domain_list("").is_empty());
+        assert!(parse_domain_list(",").is_empty());
     }
 
     #[test]

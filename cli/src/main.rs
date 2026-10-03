@@ -100,6 +100,15 @@ fn attach_webmcp_launch_option(launch_cmd: &mut serde_json::Value, flags: &Flags
     }
 }
 
+/// Reject an allowlist that was supplied (by flag, env var, or config file) but
+/// parses to zero domains. An absent allowlist stays absent and unrestricted.
+fn validate_allowed_domains_flag(flags: &Flags) -> Result<(), String> {
+    match flags.allowed_domains {
+        Some(ref domains) => native::network::ensure_allowed_domains_not_empty(domains),
+        None => Ok(()),
+    }
+}
+
 fn attach_allowed_domains_to_launch_command(launch_cmd: &mut serde_json::Value, flags: &Flags) {
     if let Some(ref domains) = flags.allowed_domains {
         launch_cmd["allowedDomains"] = json!(domains);
@@ -1401,6 +1410,15 @@ fn main() {
         return;
     }
 
+    if let Err(error) = validate_allowed_domains_flag(&flags) {
+        if flags.json {
+            print_json_error(error);
+        } else {
+            eprintln!("{} {}", color::error_indicator(), error);
+        }
+        exit(1);
+    }
+
     // Handle install separately
     if clean.first().map(|s| s.as_str()) == Some("install") {
         let with_deps = args.iter().any(|a| a == "--with-deps" || a == "-d");
@@ -2518,6 +2536,54 @@ mod tests {
             cmd["allowedDomains"],
             json!(["example.com", "*.example.org"])
         );
+    }
+
+    #[test]
+    fn test_validate_allowed_domains_flag_absent_is_allowed() {
+        let mut flags = neutral_launch_config_flags();
+        flags.allowed_domains = None;
+        assert!(validate_allowed_domains_flag(&flags).is_ok());
+    }
+
+    #[test]
+    fn test_validate_allowed_domains_flag_accepts_real_domains() {
+        let mut flags = neutral_launch_config_flags();
+        flags.allowed_domains = Some(vec!["example.com".to_string()]);
+        assert!(validate_allowed_domains_flag(&flags).is_ok());
+    }
+
+    #[test]
+    fn test_validate_allowed_domains_flag_rejects_degenerate_allowlist() {
+        let mut flags = neutral_launch_config_flags();
+        flags.allowed_domains = Some(Vec::new());
+        assert_eq!(
+            validate_allowed_domains_flag(&flags).unwrap_err(),
+            native::network::EMPTY_ALLOWED_DOMAINS_ERROR
+        );
+
+        flags.allowed_domains = Some(vec!["".to_string(), "  ".to_string()]);
+        assert_eq!(
+            validate_allowed_domains_flag(&flags).unwrap_err(),
+            native::network::EMPTY_ALLOWED_DOMAINS_ERROR
+        );
+    }
+
+    #[test]
+    fn test_parsed_empty_allowed_domains_flag_is_rejected() {
+        // `--allowed-domains ""` and `--allowed-domains ","` must not be read as
+        // "no allowlist"; they reach validation as a present but empty list.
+        for value in ["", ","] {
+            let flags = parse_flags(&[
+                "open".to_string(),
+                "--allowed-domains".to_string(),
+                value.to_string(),
+            ]);
+            assert_eq!(flags.allowed_domains, Some(Vec::new()));
+            assert_eq!(
+                validate_allowed_domains_flag(&flags).unwrap_err(),
+                native::network::EMPTY_ALLOWED_DOMAINS_ERROR
+            );
+        }
     }
 
     #[test]

@@ -2013,7 +2013,7 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         json!({
             "type": "array",
             "items": { "type": "string" },
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active."
+            "description": "Restrict browser and read traffic to these domain patterns. Supply at least one pattern; an empty list is rejected instead of disabling containment. Chromium sessions also disable RTCPeerConnection while this is active."
         }),
     );
     props.insert(
@@ -3860,10 +3860,12 @@ fn append_common_global_args(
         args.push(check);
     }
     if let Some(domains) = optional_string_array(arguments, "allowedDomains")? {
-        if !domains.is_empty() {
-            args.push("--allowed-domains".to_string());
-            args.push(domains.join(","));
-        }
+        // A supplied allowlist with no domains is rejected rather than dropped,
+        // which would silently run the command without containment.
+        crate::native::network::ensure_allowed_domains_not_empty(&domains)
+            .map_err(ProtocolError::invalid_params)?;
+        args.push("--allowed-domains".to_string());
+        args.push(domains.join(","));
     }
     let ca_cert = optional_string(arguments, "caCert")?;
     let clear_ca_cert = optional_bool(arguments, "clearCaCert")?.unwrap_or(false);
@@ -4747,6 +4749,31 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["--allowed-domains", "example.com,*.example.org"]);
+    }
+
+    #[test]
+    fn common_global_args_omit_allowed_domains_when_absent() {
+        let mut args = Vec::new();
+
+        append_common_global_args(&mut args, &json!({}), None).unwrap();
+
+        assert!(!args.iter().any(|arg| arg == "--allowed-domains"));
+    }
+
+    #[test]
+    fn common_global_args_reject_degenerate_allowed_domains() {
+        for value in [json!([]), json!(["", "  "])] {
+            let mut args = Vec::new();
+            let arguments = json!({ "allowedDomains": value });
+
+            let err = append_common_global_args(&mut args, &arguments, None)
+                .expect_err("degenerate allowlist must be rejected");
+
+            assert_eq!(
+                err.message,
+                crate::native::network::EMPTY_ALLOWED_DOMAINS_ERROR
+            );
+        }
     }
 
     #[test]

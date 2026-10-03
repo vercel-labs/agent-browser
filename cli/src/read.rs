@@ -105,17 +105,25 @@ pub fn options_from_command(cmd: &Value) -> Result<ReadOptions, String> {
             }
         }
     }
-    let allowed_domains = cmd
-        .get("allowedDomains")
-        .and_then(|v| v.as_array())
-        .map(|domains| {
+    // An absent key means no containment. A key that is present but parses to
+    // zero domains is rejected instead of being read as "allow everything".
+    let allowed_domains = match cmd.get("allowedDomains") {
+        Some(value) => {
+            let domains = value
+                .as_array()
+                .map(|domains| {
+                    domains
+                        .iter()
+                        .filter_map(|domain| domain.as_str())
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            crate::native::network::ensure_allowed_domains_not_empty(&domains)?;
             domains
-                .iter()
-                .filter_map(|domain| domain.as_str())
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+        }
+        None => Vec::new(),
+    };
 
     Ok(ReadOptions {
         raw: cmd.get("raw").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -1355,6 +1363,22 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
             options.allowed_domains,
             vec!["example.com".to_string(), "*.example.org".to_string()]
         );
+    }
+
+    #[test]
+    fn options_from_command_without_allowed_domains_is_unrestricted() {
+        let options = options_from_command(&json!({ "action": "read" })).unwrap();
+        assert!(options.allowed_domains.is_empty());
+    }
+
+    #[test]
+    fn options_from_command_rejects_degenerate_allowed_domains() {
+        for value in [json!([]), json!(["", "  "]), json!("")] {
+            let cmd = json!({ "action": "read", "allowedDomains": value });
+            let err =
+                options_from_command(&cmd).expect_err("degenerate allowlist must be rejected");
+            assert_eq!(err, crate::native::network::EMPTY_ALLOWED_DOMAINS_ERROR);
+        }
     }
 
     #[test]
