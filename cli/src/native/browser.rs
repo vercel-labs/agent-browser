@@ -343,6 +343,36 @@ pub fn is_valid_label(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// True for strings shaped like a stable tab id (`t1`, `T42`, even `t0`).
+/// Such strings always resolve as ids, so accepting one as a label would
+/// leave the labelled tab permanently shadowed.
+pub fn looks_like_tab_id(s: &str) -> bool {
+    match s.strip_prefix('t').or_else(|| s.strip_prefix('T')) {
+        Some(digits) => !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()),
+        None => false,
+    }
+}
+
+/// Validate a user-supplied label at assignment time: it must look like an
+/// identifier and must not collide with the `t<N>` tab-id namespace.
+pub fn validate_label(label: &str) -> Result<(), String> {
+    if !is_valid_label(label) {
+        return Err(format!(
+            "Invalid tab label `{}`; labels must start with a letter and contain only \
+             letters, digits, `-`, and `_`",
+            label
+        ));
+    }
+    if looks_like_tab_id(label) {
+        return Err(format!(
+            "Invalid tab label `{}`; labels cannot use the `t<N>` form reserved for tab ids, \
+             which would make the labelled tab unreachable",
+            label
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitUntil {
     Load,
@@ -1574,13 +1604,7 @@ impl BrowserManager {
         label: Option<&str>,
     ) -> Result<Value, String> {
         if let Some(label) = label {
-            if !is_valid_label(label) {
-                return Err(format!(
-                    "Invalid tab label `{}`; labels must start with a letter and contain only \
-                     letters, digits, `-`, and `_`",
-                    label
-                ));
-            }
+            validate_label(label)?;
             if self.has_label(label) {
                 return Err(format!(
                     "Label `{}` is already used by another tab; labels must be unique within a \
@@ -2532,6 +2556,51 @@ mod tests {
         assert!(!is_valid_label("2docs"));
         assert!(!is_valid_label("-docs"));
         assert!(!is_valid_label("docs!"));
+    }
+
+    #[test]
+    fn test_looks_like_tab_id() {
+        assert!(looks_like_tab_id("t1"));
+        assert!(looks_like_tab_id("T42"));
+        assert!(looks_like_tab_id("t0"));
+        assert!(!looks_like_tab_id("t"));
+        assert!(!looks_like_tab_id("tab"));
+        assert!(!looks_like_tab_id("t1a"));
+        assert!(!looks_like_tab_id("docs"));
+    }
+
+    #[test]
+    fn test_validate_label_rejects_tab_id_shape() {
+        // `t1` resolves as a tab id everywhere, so accepting it as a label
+        // would leave the labelled tab unreachable (and `tab close t1` would
+        // close the id-matched tab instead).
+        let err = validate_label("t1").unwrap_err();
+        assert!(
+            err.contains("reserved for tab ids"),
+            "error should explain the id namespace: {}",
+            err
+        );
+        assert!(err.contains("t1"));
+        assert!(validate_label("T42").is_err());
+        assert!(validate_label("t0").is_err());
+    }
+
+    #[test]
+    fn test_validate_label_accepts_ordinary_labels() {
+        assert!(validate_label("docs").is_ok());
+        assert!(validate_label("tab").is_ok());
+        assert!(validate_label("t1a").is_ok());
+        assert!(validate_label("app-2").is_ok());
+    }
+
+    #[test]
+    fn test_validate_label_rejects_invalid_characters() {
+        let err = validate_label("2docs").unwrap_err();
+        assert!(
+            err.contains("must start with a letter"),
+            "error should describe the identifier rule: {}",
+            err
+        );
     }
 
     #[test]

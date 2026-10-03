@@ -241,7 +241,7 @@ agent-browser window new                       # New window
 
 Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused within a session, so the same id keeps referring to the same tab across commands. Positional integers are **not** accepted — `tab 2` errors with a teaching message; use `t2`.
 
-User-assigned labels (`docs`, `app`, `admin`) are interchangeable with ids everywhere a tab ref is accepted. Labels are the agent-friendly way to write multi-tab workflows:
+User-assigned labels (`docs`, `app`, `admin`) are interchangeable with ids everywhere a tab ref is accepted. Labels are the agent-friendly way to write multi-tab workflows. A label must start with a letter and contain only letters, digits, `-`, and `_`, and it can't take the `t<N>` id form (`t1`), which would make the labelled tab unreachable:
 
 ```bash
 agent-browser tab new --label docs https://docs.example.com

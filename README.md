@@ -387,7 +387,7 @@ agent-browser window new                       # New window
 
 Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused within a session, so scripts and agents can keep referring to the same tab even after other tabs are opened or closed. Positional integers like `tab 2` are **not** accepted; the `t` prefix disambiguates handles from indices and mirrors the `@e1` convention used for element refs.
 
-You can also assign a memorable label (`docs`, `app`, `admin`) and use it interchangeably with the id. Labels are never auto-generated and never rewritten on navigation — they're yours to name and keep:
+You can also assign a memorable label (`docs`, `app`, `admin`) and use it interchangeably with the id. Labels are never auto-generated and never rewritten on navigation — they're yours to name and keep. A label must start with a letter and contain only letters, digits, `-`, and `_`, and it can't take the `t<N>` id form (`t1`), which would make the labelled tab unreachable:
 
 ```bash
 agent-browser tab new --label docs https://docs.example.com
