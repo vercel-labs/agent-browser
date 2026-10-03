@@ -1,0 +1,15 @@
+{
+  "name": "agent-browser-plugin",
+  "version": "1.0.0",
+  "description": "Integration of agent-browser CLI and MCP toolset into Antigravity",
+  "author": {
+    "name": "Antigravity Developer"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "browser",
+    "automation",
+    "agent-browser",
+    "mcp"
+  ]
+}
