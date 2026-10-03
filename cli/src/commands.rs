@@ -1402,8 +1402,14 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Cookies ===
         "cookies" => {
-            let op = rest.first().unwrap_or(&"get");
-            match *op {
+            const VALID: &[&str] = &["get", "set", "clear (removes all cookies)"];
+            // A leading flag (`cookies --url <url>`) is not a subcommand: those
+            // forms still list cookies.
+            let op = match rest.first().copied() {
+                Some(first) if !first.starts_with("--") => first,
+                _ => "get",
+            };
+            match op {
                 "set" => {
                     // --curl <file> mode: import cookies from a JSON array,
                     // raw cURL dump, or bare Cookie header. Scoped to the
@@ -1558,7 +1564,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     Ok(json!({ "id": id, "action": "cookies_set", "cookies": [cookie] }))
                 }
                 "clear" => Ok(json!({ "id": id, "action": "cookies_clear" })),
-                _ => Ok(json!({ "id": id, "action": "cookies_get" })),
+                "get" => Ok(json!({ "id": id, "action": "cookies_get" })),
+                sub => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: VALID,
+                }),
             }
         }
 
@@ -3696,6 +3706,37 @@ mod tests {
     fn test_cookies_clear() {
         let cmd = parse_command(&args("cookies clear"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "cookies_clear");
+    }
+
+    #[test]
+    fn test_cookies_delete_unknown_subcommand() {
+        let err = parse_command(&args("cookies delete sid"), &default_flags()).unwrap_err();
+        assert!(matches!(err, ParseError::UnknownSubcommand { .. }));
+        let msg = err.format();
+        assert!(msg.contains("delete"));
+        assert!(msg.contains("clear"));
+    }
+
+    #[test]
+    fn test_cookies_remove_unknown_subcommand() {
+        let err = parse_command(&args("cookies remove sid"), &default_flags()).unwrap_err();
+        assert!(matches!(err, ParseError::UnknownSubcommand { .. }));
+        let msg = err.format();
+        assert!(msg.contains("remove"));
+        assert!(msg.contains("clear"));
+    }
+
+    #[test]
+    fn test_cookies_get_with_leading_flag() {
+        let cmd =
+            parse_command(&args("cookies --url https://example.com"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "cookies_get");
+    }
+
+    #[test]
+    fn test_cookies_get_with_leading_json_flag() {
+        let cmd = parse_command(&args("cookies --json"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "cookies_get");
     }
 
     #[test]
