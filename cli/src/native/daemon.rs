@@ -89,12 +89,8 @@ pub async fn run_daemon(session: &str) {
     let _ = fs::remove_file(socket_dir.join(format!("{}.provider", session)));
     let _ = fs::remove_file(socket_dir.join(format!("{}.extensions", session)));
 
-    if let Ok(days_str) = env::var("AGENT_BROWSER_STATE_EXPIRE_DAYS") {
-        if let Ok(days) = days_str.parse::<u64>() {
-            if days > 0 {
-                let _ = state::state_clean(days);
-            }
-        }
+    if let Some(days) = state::state_expiration_days() {
+        let _ = state::state_clean(days);
     }
 
     let mut stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>> = None;

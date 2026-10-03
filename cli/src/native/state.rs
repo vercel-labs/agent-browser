@@ -4,8 +4,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::env;
 use std::fs;
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
@@ -537,7 +539,7 @@ pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Res
     Ok(())
 }
 
-fn is_state_file(path: &std::path::Path) -> bool {
+pub(crate) fn is_state_file(path: &std::path::Path) -> bool {
     let fname = path
         .file_name()
         .unwrap_or_default()
@@ -659,14 +661,51 @@ pub fn state_clear(path: Option<&str>) -> Result<Value, String> {
     Ok(json!({ "deleted": count }))
 }
 
+pub const DEFAULT_STATE_EXPIRE_DAYS: u64 = 30;
+
+/// Resolve the saved-state expiration policy. Zero explicitly disables
+/// expiration; unset and invalid values use the documented 30-day default.
+pub fn state_expiration_days() -> Option<u64> {
+    match env::var("AGENT_BROWSER_STATE_EXPIRE_DAYS") {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(0) => None,
+            Ok(days) => Some(days),
+            Err(_) => Some(DEFAULT_STATE_EXPIRE_DAYS),
+        },
+        Err(_) => Some(DEFAULT_STATE_EXPIRE_DAYS),
+    }
+}
+
+/// Compute the cutoff for the configured expiration policy without allowing
+/// an oversized environment value to panic during duration construction.
+pub fn state_expiration_cutoff(now: SystemTime) -> Result<Option<SystemTime>, String> {
+    let Some(days) = state_expiration_days() else {
+        return Ok(None);
+    };
+    let seconds = days
+        .checked_mul(86_400)
+        .ok_or_else(|| "state expiration exceeds the supported duration".to_string())?;
+    let cutoff = now
+        .checked_sub(Duration::from_secs(seconds))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    Ok(Some(cutoff))
+}
+
+fn state_max_age_duration(max_age_days: u64) -> Result<Duration, String> {
+    let seconds = max_age_days
+        .checked_mul(86_400)
+        .ok_or_else(|| "state expiration exceeds the supported duration".to_string())?;
+    Ok(Duration::from_secs(seconds))
+}
+
 pub fn state_clean(max_age_days: u64) -> Result<Value, String> {
+    let max_age = state_max_age_duration(max_age_days)?;
     let dir = get_sessions_dir();
     if !dir.exists() {
         return Ok(json!({ "cleaned": 0, "keptCount": 0, "days": max_age_days }));
     }
 
     let now = std::time::SystemTime::now();
-    let max_age = std::time::Duration::from_secs(max_age_days * 86400);
     let mut deleted = 0;
     let mut kept = 0;
 
@@ -939,6 +978,45 @@ mod tests {
         assert!(!sessions.join("auth-test.json").exists());
         assert!(!sessions.join("auth-test.json.previous").exists());
         assert!(!sessions.join("auth-test.json.enc.previous").exists());
+    }
+
+    #[test]
+    fn state_expiration_days_zero_disables_expiration() {
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_STATE_EXPIRE_DAYS"]);
+        guard.set("AGENT_BROWSER_STATE_EXPIRE_DAYS", "0");
+
+        assert_eq!(state_expiration_days(), None);
+        assert_eq!(state_expiration_cutoff(SystemTime::now()).unwrap(), None);
+    }
+
+    #[test]
+    fn state_expiration_days_positive_value_is_preserved() {
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_STATE_EXPIRE_DAYS"]);
+        guard.set("AGENT_BROWSER_STATE_EXPIRE_DAYS", "7");
+
+        assert_eq!(state_expiration_days(), Some(7));
+        assert!(state_expiration_cutoff(SystemTime::now())
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn state_expiration_days_invalid_and_unset_use_default() {
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_STATE_EXPIRE_DAYS"]);
+        guard.remove("AGENT_BROWSER_STATE_EXPIRE_DAYS");
+        assert_eq!(state_expiration_days(), Some(DEFAULT_STATE_EXPIRE_DAYS));
+
+        guard.set("AGENT_BROWSER_STATE_EXPIRE_DAYS", "not-a-number");
+        assert_eq!(state_expiration_days(), Some(DEFAULT_STATE_EXPIRE_DAYS));
+    }
+
+    #[test]
+    fn state_expiration_overflow_is_reported() {
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_STATE_EXPIRE_DAYS"]);
+        guard.set("AGENT_BROWSER_STATE_EXPIRE_DAYS", &u64::MAX.to_string());
+
+        assert!(state_expiration_cutoff(SystemTime::now()).is_err());
+        assert!(state_clean(u64::MAX).is_err());
     }
 
     #[test]
