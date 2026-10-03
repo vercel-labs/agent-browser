@@ -5068,6 +5068,26 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         connection_target.as_deref(),
     );
 
+    // A live externally-attached browser (via `connect`, `--cdp`, or
+    // `--auto-connect`) stays attached across follow-up commands that carry
+    // no explicit connection target. Without this, the per-command local
+    // launch envelope (config executablePath/args, see
+    // should_send_local_launch_config) forces a relaunch onto a fresh local
+    // browser and silently drops the attach. Switching back to a
+    // locally-launched browser requires `close` first.
+    let keep_external_browser = if let Some(mgr) = state.browser.as_mut() {
+        !launch_connection_is_external(cdp_url, cdp_port, auto_connect, provider_name)
+            && mgr.is_cdp_connection()
+            && mgr.is_connection_alive().await
+    } else {
+        false
+    };
+    if keep_external_browser {
+        load_storage_state(state, &storage_state_owned).await?;
+        state.effective_ca_cert = effective_ca_cert;
+        return Ok(json!({ "launched": true, "reused": true, "relaunchedBrowser": false }));
+    }
+
     // Hash comparison and fast process-exit check are evaluated before the
     // async is_connection_alive to skip the expensive CDP liveness probe
     // when a relaunch is already certain.
