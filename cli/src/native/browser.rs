@@ -223,6 +223,24 @@ pub fn to_ai_friendly_error(error: &str) -> String {
     error.to_string()
 }
 
+/// Adds guidance to a `Page.navigate` failure reported by Chrome.
+///
+/// An authentication challenge reaches the caller as a bare net error, which
+/// says nothing about why the page never loaded. Name the cause and the one
+/// workaround that exists today; every other error keeps its original text so
+/// no existing caller sees new wording.
+fn navigation_failure_message(error_text: &str) -> String {
+    let lower = error_text.to_lowercase();
+    if lower.contains("err_invalid_auth_credentials")
+        || lower.contains("err_ssl_client_auth_cert_needed")
+    {
+        return format!(
+            "Navigation failed: {error_text}. The site asked for HTTP authentication (Basic, Digest, or NTLM) or a client certificate, and nothing answered the challenge. Basic credentials can be sent preemptively with --headers '{{\"Authorization\": \"Basic <base64>\"}}'; Digest/NTLM and certificate prompts have no handler yet."
+        );
+    }
+    format!("Navigation failed: {error_text}")
+}
+
 /// True for the "couldn't find a matching element" family of messages
 /// produced by locator code (`find role`, `find text`, CSS/ref resolution,
 /// and friends). Every such message already carries the selector, role, or
@@ -1128,7 +1146,7 @@ impl BrowserManager {
             .await?;
 
         if let Some(ref error_text) = nav_result.error_text {
-            return Err(format!("Navigation failed: {}", error_text));
+            return Err(navigation_failure_message(error_text));
         }
 
         // Only wait for lifecycle events if Chrome created a new loader (full navigation).
@@ -2752,6 +2770,28 @@ mod tests {
     fn test_to_ai_friendly_error_unknown() {
         let msg = "Some custom error message";
         assert_eq!(to_ai_friendly_error(msg), msg);
+    }
+
+    #[test]
+    fn test_navigation_failure_message_names_auth_challenge() {
+        let msg = navigation_failure_message("net::ERR_INVALID_AUTH_CREDENTIALS");
+        assert!(msg.starts_with("Navigation failed: net::ERR_INVALID_AUTH_CREDENTIALS."));
+        assert!(msg.contains("--headers"));
+        assert!(msg.contains("Digest/NTLM"));
+    }
+
+    #[test]
+    fn test_navigation_failure_message_names_client_certificate() {
+        let msg = navigation_failure_message("net::ERR_SSL_CLIENT_AUTH_CERT_NEEDED");
+        assert!(msg.contains("client certificate"));
+    }
+
+    #[test]
+    fn test_navigation_failure_message_passes_through_other_errors() {
+        assert_eq!(
+            navigation_failure_message("net::ERR_NAME_NOT_RESOLVED"),
+            "Navigation failed: net::ERR_NAME_NOT_RESOLVED"
+        );
     }
 
     /// Errors containing "not found" but NOT "element" should pass through unchanged.
