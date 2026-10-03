@@ -8,7 +8,9 @@ use tokio::sync::{broadcast, Mutex};
 use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchOptions};
 use super::cdp::client::CdpClient;
 use super::cdp::discovery::discover_cdp_url;
-use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
+use super::cdp::lightpanda::{
+    launch_lightpanda, lightpanda_managed_arg, LightpandaLaunchOptions, LightpandaProcess,
+};
 use super::cdp::types::*;
 use super::element::{resolve_element_object_id, RefMap};
 use super::tab_binding;
@@ -100,10 +102,12 @@ fn validate_lightpanda_options(options: &LaunchOptions) -> Result<(), String> {
     if options.ca_cert.is_some() {
         return Err("--ca-cert is not supported with Lightpanda (Chromium only)".to_string());
     }
-    if !options.args.is_empty() {
-        return Err(
-            "Custom Chrome arguments (--args) are not supported with Lightpanda".to_string(),
-        );
+    // --args go to `lightpanda serve`, except the flags agent-browser sets.
+    if let Some(arg) = lightpanda_managed_arg(&options.args) {
+        return Err(format!(
+            "{} cannot be passed in --args with Lightpanda (agent-browser sets it)",
+            arg
+        ));
     }
     Ok(())
 }
@@ -504,6 +508,7 @@ impl BrowserManager {
                     executable_path: options.executable_path.clone(),
                     proxy: options.proxy.clone(),
                     port: None,
+                    args: options.args.clone(),
                 };
                 let lp = launch_lightpanda(&lp_options).await?;
                 let url = lp.ws_url.clone();
@@ -2867,6 +2872,22 @@ mod tests {
         let err = validate_lightpanda_options(&options).unwrap_err();
         assert!(err.contains("WebGPU"));
         assert!(validate_lightpanda_options(&LaunchOptions::default()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_lightpanda_args() {
+        let options = LaunchOptions {
+            args: vec!["--load-resources".to_string(), "iframe".to_string()],
+            ..Default::default()
+        };
+        assert!(validate_lightpanda_options(&options).is_ok());
+
+        let options = LaunchOptions {
+            args: vec!["--port".to_string(), "9000".to_string()],
+            ..Default::default()
+        };
+        let err = validate_lightpanda_options(&options).unwrap_err();
+        assert!(err.contains("--port"));
     }
 
     #[test]

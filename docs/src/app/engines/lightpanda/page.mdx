@@ -61,6 +61,16 @@ If the `lightpanda` binary is not in your `PATH`, use `--executable-path`:
 agent-browser --engine lightpanda --executable-path /path/to/lightpanda open example.com
 ```
 
+## Lightpanda Flags
+
+`--args` passes extra flags to `lightpanda serve`. Lightpanda takes a flag and its value as separate arguments, so give each its own comma-separated entry. For example, Lightpanda loads no iframes by default; to load them:
+
+```bash
+agent-browser --engine lightpanda --args "--load-resources,iframe" open example.com
+```
+
+agent-browser sets `--host` and `--port` itself and rejects them in `--args`. Run `lightpanda serve --help` for the full list of flags.
+
 ## Differences from Chrome
 
 Lightpanda is a purpose-built headless engine. Some Chrome-specific features are not available:

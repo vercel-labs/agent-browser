@@ -37,9 +37,24 @@ pub struct LightpandaLaunchOptions {
     pub executable_path: Option<String>,
     pub proxy: Option<String>,
     pub port: Option<u16>,
+    /// Extra `lightpanda serve` flags from `--args`, one argv entry each
+    /// (e.g. `--load-resources`, `iframe`).
+    pub args: Vec<String>,
 }
 
-fn build_lightpanda_serve_args(port: u16, proxy: Option<&str>) -> Vec<String> {
+/// `lightpanda serve` flags that agent-browser sets itself: the readiness
+/// probe and the CDP connection depend on them.
+const LIGHTPANDA_MANAGED_ARGS: [&str; 2] = ["--host", "--port"];
+
+/// Returns the first `--args` entry that would override a flag agent-browser
+/// manages for Lightpanda.
+pub fn lightpanda_managed_arg(args: &[String]) -> Option<&str> {
+    args.iter()
+        .map(|a| a.split('=').next().unwrap_or(a))
+        .find(|a| LIGHTPANDA_MANAGED_ARGS.contains(a))
+}
+
+fn build_lightpanda_serve_args(port: u16, proxy: Option<&str>, extra: &[String]) -> Vec<String> {
     let mut args = vec![
         "serve".to_string(),
         "--host".to_string(),
@@ -53,6 +68,7 @@ fn build_lightpanda_serve_args(port: u16, proxy: Option<&str>) -> Vec<String> {
         args.push(proxy.to_string());
     }
 
+    args.extend(extra.iter().cloned());
     args
 }
 
@@ -160,7 +176,7 @@ pub async fn launch_lightpanda(
             .map(|a| a.port())
             .map_err(|e| format!("Failed to find an available port for Lightpanda: {}", e))?,
     };
-    let args = build_lightpanda_serve_args(port, options.proxy.as_deref());
+    let args = build_lightpanda_serve_args(port, options.proxy.as_deref(), &options.args);
 
     let mut child = Command::new(&binary_path)
         .args(&args)
@@ -450,11 +466,12 @@ mod tests {
         assert!(opts.executable_path.is_none());
         assert!(opts.proxy.is_none());
         assert!(opts.port.is_none());
+        assert!(opts.args.is_empty());
     }
 
     #[test]
     fn test_build_lightpanda_serve_args_uses_supported_options() {
-        let args = build_lightpanda_serve_args(9222, None);
+        let args = build_lightpanda_serve_args(9222, None, &[]);
 
         assert_eq!(
             args,
@@ -470,7 +487,7 @@ mod tests {
 
     #[test]
     fn test_build_lightpanda_serve_args_with_proxy() {
-        let args = build_lightpanda_serve_args(9333, Some("http://127.0.0.1:8080"));
+        let args = build_lightpanda_serve_args(9333, Some("http://127.0.0.1:8080"), &[]);
 
         assert_eq!(
             args,
@@ -483,6 +500,45 @@ mod tests {
                 "--http_proxy".to_string(),
                 "http://127.0.0.1:8080".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn test_build_lightpanda_serve_args_appends_extra_args() {
+        let extra = vec!["--load-resources".to_string(), "iframe".to_string()];
+        let args = build_lightpanda_serve_args(9444, Some("http://127.0.0.1:8080"), &extra);
+
+        assert_eq!(
+            args,
+            vec![
+                "serve".to_string(),
+                "--host".to_string(),
+                "127.0.0.1".to_string(),
+                "--port".to_string(),
+                "9444".to_string(),
+                "--http_proxy".to_string(),
+                "http://127.0.0.1:8080".to_string(),
+                "--load-resources".to_string(),
+                "iframe".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_lightpanda_managed_arg() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(
+            lightpanda_managed_arg(&args(&["--load-resources", "iframe"])),
+            None
+        );
+        assert_eq!(
+            lightpanda_managed_arg(&args(&["--port", "9000"])),
+            Some("--port")
+        );
+        assert_eq!(
+            lightpanda_managed_arg(&args(&["--host=0.0.0.0"])),
+            Some("--host")
         );
     }
 }
