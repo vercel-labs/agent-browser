@@ -1930,6 +1930,9 @@ Usage: agent-browser upload <selector> <files...>
 
 Uploads one or more files to a file input element.
 
+Each file must exist. Relative paths are resolved against the current working
+directory before the command is sent to the browser.
+
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session

@@ -1,6 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use std::io::{self, BufRead};
+use std::path::{Component, Path, PathBuf};
 
 use crate::color;
 use crate::flags::Flags;
@@ -328,6 +329,45 @@ fn parse_cookie_header(header: &str) -> Result<Vec<Value>, String> {
     Ok(out)
 }
 
+const UPLOAD_USAGE: &str = "upload <selector> <files...>";
+
+/// Resolve a user-supplied upload path to an absolute path against `base`.
+///
+/// The daemon that ultimately calls `DOM.setFileInputFiles` has its own working
+/// directory (often `/`), so relative paths must be resolved in the CLI process
+/// where the user's working directory is meaningful. Missing files are rejected
+/// here too: the browser silently accepts unknown paths and attaches empty files.
+fn resolve_upload_path(path: &str, base: &Path) -> Result<String, ParseError> {
+    let candidate = Path::new(path);
+    let joined = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        base.join(candidate)
+    };
+    let mut resolved = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::CurDir => {}
+            other => resolved.push(other.as_os_str()),
+        }
+    }
+    let metadata = std::fs::metadata(&resolved).map_err(|error| ParseError::InvalidValue {
+        message: format!(
+            "Unable to read upload file '{}': {}",
+            resolved.display(),
+            error
+        ),
+        usage: UPLOAD_USAGE,
+    })?;
+    if !metadata.is_file() {
+        return Err(ParseError::InvalidValue {
+            message: format!("Upload path is not a file: {}", resolved.display()),
+            usage: UPLOAD_USAGE,
+        });
+    }
+    Ok(resolved.to_string_lossy().into_owned())
+}
+
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
     let mut result = parse_command_inner(args, flags)?;
 
@@ -567,9 +607,14 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "upload" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
                 context: "upload".to_string(),
-                usage: "upload <selector> <files...>",
+                usage: UPLOAD_USAGE,
             })?;
-            Ok(json!({ "id": id, "action": "upload", "selector": sel, "files": &rest[1..] }))
+            let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let files = rest[1..]
+                .iter()
+                .map(|path| resolve_upload_path(path, &base))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(json!({ "id": id, "action": "upload", "selector": sel, "files": files }))
         }
         "download" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -6717,5 +6762,80 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, ParseError::MissingArguments { .. }));
+    }
+
+    #[test]
+    fn test_resolve_upload_path_keeps_existing_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("real.txt");
+        std::fs::write(&file, "hello").unwrap();
+
+        let resolved = resolve_upload_path(&file.to_string_lossy(), Path::new("/")).unwrap();
+
+        assert_eq!(resolved, file.to_string_lossy());
+    }
+
+    #[test]
+    fn test_resolve_upload_path_resolves_relative_against_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("real.txt");
+        std::fs::write(&file, "hello").unwrap();
+
+        let resolved = resolve_upload_path("./real.txt", dir.path()).unwrap();
+
+        assert_eq!(resolved, file.to_string_lossy());
+    }
+
+    #[test]
+    fn test_resolve_upload_path_rejects_missing_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let ghost = dir.path().join("ghost.txt");
+
+        let err = resolve_upload_path(&ghost.to_string_lossy(), Path::new("/")).unwrap_err();
+
+        assert!(matches!(err, ParseError::InvalidValue { .. }));
+        assert!(err.format().contains("ghost.txt"));
+    }
+
+    #[test]
+    fn test_resolve_upload_path_rejects_missing_relative_path() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = resolve_upload_path("./ghost.txt", dir.path()).unwrap_err();
+
+        assert!(matches!(err, ParseError::InvalidValue { .. }));
+        assert!(err.format().contains("ghost.txt"));
+    }
+
+    #[test]
+    fn test_resolve_upload_path_rejects_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("folder")).unwrap();
+
+        let err = resolve_upload_path("folder", dir.path()).unwrap_err();
+
+        assert!(matches!(err, ParseError::InvalidValue { .. }));
+        assert!(err.format().contains("not a file"));
+    }
+
+    #[test]
+    fn test_resolve_upload_path_validates_every_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("one.txt");
+        let second = dir.path().join("two.txt");
+        std::fs::write(&first, "1").unwrap();
+        std::fs::write(&second, "2").unwrap();
+
+        let resolved: Vec<String> = ["one.txt", "two.txt"]
+            .iter()
+            .map(|path| resolve_upload_path(path, dir.path()).unwrap())
+            .collect();
+        assert_eq!(
+            resolved,
+            [first.to_string_lossy(), second.to_string_lossy()]
+        );
+
+        let err = resolve_upload_path("three.txt", dir.path()).unwrap_err();
+        assert!(matches!(err, ParseError::InvalidValue { .. }));
     }
 }
