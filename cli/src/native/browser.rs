@@ -2204,6 +2204,13 @@ impl BrowserManager {
         &self.visited_origins
     }
 
+    /// Keep imported origins in the same history used to collect future saves.
+    pub async fn load_state(&mut self, session_id: &str, path: &str) -> Result<(), String> {
+        let origins = super::state::load_state(&self.client, session_id, path).await?;
+        self.visited_origins.extend(origins);
+        Ok(())
+    }
+
     pub async fn set_download_behavior(&self, download_path: &str) -> Result<(), String> {
         let session_id = self.active_session_id()?;
         self.client
