@@ -3221,12 +3221,47 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             Ok(json!({ "id": id, "action": "mouseup", "button": rest.get(1).unwrap_or(&"left") }))
         }
         Some("wheel") => {
-            let dy = rest
-                .get(1)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(100);
-            let dx = rest.get(2).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
-            Ok(json!({ "id": id, "action": "wheel", "deltaX": dx, "deltaY": dy }))
+            const USAGE: &str = "mouse wheel <dy> [dx] [--at <x> <y>]";
+            let mut cmd = json!({ "id": id, "action": "wheel", "deltaX": 0, "deltaY": 100 });
+            let mut positional = 0;
+            let mut i = 1;
+            while i < rest.len() {
+                match rest[i] {
+                    "--at" => {
+                        let parse_coord = |offset: usize| -> Result<i32, ParseError> {
+                            rest.get(i + offset)
+                                .and_then(|s| s.parse::<i32>().ok())
+                                .ok_or_else(|| ParseError::InvalidValue {
+                                    message: "--at expects two integer coordinates".to_string(),
+                                    usage: USAGE,
+                                })
+                        };
+                        cmd["x"] = json!(parse_coord(1)?);
+                        cmd["y"] = json!(parse_coord(2)?);
+                        i += 3;
+                    }
+                    raw => {
+                        let value = raw.parse::<i32>().map_err(|_| ParseError::InvalidValue {
+                            message: format!("expected an integer delta, got '{}'", raw),
+                            usage: USAGE,
+                        })?;
+                        let key = match positional {
+                            0 => "deltaY",
+                            1 => "deltaX",
+                            _ => {
+                                return Err(ParseError::InvalidValue {
+                                    message: format!("unexpected argument '{}'", raw),
+                                    usage: USAGE,
+                                })
+                            }
+                        };
+                        cmd[key] = json!(value);
+                        positional += 1;
+                        i += 1;
+                    }
+                }
+            }
+            Ok(cmd)
         }
         Some(sub) => Err(ParseError::UnknownSubcommand {
             subcommand: sub.to_string(),
@@ -5559,6 +5594,16 @@ mod tests {
         assert_eq!(cmd["action"], "wheel");
         assert_eq!(cmd["deltaY"], 100);
         assert_eq!(cmd["deltaX"], 50);
+        assert!(cmd.get("x").is_none());
+    }
+
+    #[test]
+    fn test_mouse_wheel_at_position() {
+        let cmd = parse_command(&args("mouse wheel -300 --at 420 180"), &default_flags()).unwrap();
+        assert_eq!(cmd["deltaY"], -300);
+        assert_eq!(cmd["deltaX"], 0);
+        assert_eq!(cmd["x"], 420);
+        assert_eq!(cmd["y"], 180);
     }
 
     #[test]
