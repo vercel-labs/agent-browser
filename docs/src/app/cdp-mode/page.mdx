@@ -39,13 +39,28 @@ Root WebSocket endpoints accept query strings with or without an explicit slash,
 Use `--auto-connect` to automatically discover and connect to a running Chrome instance without specifying a port:
 
 ```bash
-# Auto-discover running Chrome with remote debugging
-agent-browser --auto-connect open example.com
-agent-browser --auto-connect snapshot
+# Inspect an existing session without launching or reconnecting
+SESSION="existing-chrome"
+agent-browser session list
+agent-browser --session "$SESSION" session info --json
 
-# Or via environment variable
-AGENT_BROWSER_AUTO_CONNECT=1 agent-browser snapshot
+# If status confirms an active attachment, continue without --auto-connect
+agent-browser --session "$SESSION" open example.com
+agent-browser --session "$SESSION" snapshot
+
+# Otherwise warn the user, then attach once in a standalone command
+agent-browser --session "$SESSION" --auto-connect --pin-tab tab list
+
+# Continue without --auto-connect
+agent-browser --session "$SESSION" open example.com
+agent-browser --session "$SESSION" snapshot
 ```
+
+`session list` and `session info` inspect state without launching a browser. If runtime or browser status is missing or uncertain, warn the user before the first browser-touching command. Any browser command, including `tab list`, can attempt stale-session recovery. If the daemon was started with `AGENT_BROWSER_AUTO_CONNECT`, that recovery may reconnect and cause Chrome to show an Allow debugging prompt.
+
+In an interactive agent workflow, warn the user before the attachment command, run that command by itself, and pause with `Action required: Allow debugging in Chrome` if the prompt appears. Never silently retry auto-connect. Reuse the attached named session for the rest of a linear workflow, and create additional sessions only for genuine parallel work or separate browser identities.
+
+If an attached session returns `tab_gone`, the Chrome connection is still available. Recover with `tab list`, `tab new <url>`, or tab selection instead of reconnecting.
 
 Auto-connect discovers Chrome by:
 
