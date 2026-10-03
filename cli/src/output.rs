@@ -491,6 +491,54 @@ fn recording_fps_suffix(data: &serde_json::Value) -> String {
         .unwrap_or_default()
 }
 
+pub(crate) fn format_request_detail_text(data: &serde_json::Value) -> Option<String> {
+    let method = data.get("method")?.as_str()?;
+    let url = data.get("url")?.as_str()?;
+    let mut lines = vec![format!("{} {}", method, url)];
+
+    if let Some(status) = data.get("status").and_then(|value| value.as_i64()) {
+        lines.push(format!("Status: {}", status));
+    }
+
+    append_headers(&mut lines, "Request Headers", data.get("headers"));
+
+    if let Some(body) = data.get("postData").and_then(|value| value.as_str()) {
+        lines.push("Request Body:".to_string());
+        lines.push(body.to_string());
+    }
+
+    append_headers(&mut lines, "Response Headers", data.get("responseHeaders"));
+
+    if let Some(mime_type) = data.get("mimeType").and_then(|value| value.as_str()) {
+        lines.push(format!("Content-Type: {}", mime_type));
+    }
+
+    if let Some(body) = data.get("responseBody").and_then(|value| value.as_str()) {
+        lines.push("Response Body:".to_string());
+        lines.push(body.to_string());
+    }
+
+    Some(lines.join("\n"))
+}
+
+fn append_headers(lines: &mut Vec<String>, label: &str, headers: Option<&serde_json::Value>) {
+    let Some(headers) = headers.and_then(|value| value.as_object()) else {
+        return;
+    };
+    if headers.is_empty() {
+        return;
+    }
+
+    lines.push(format!("{}:", label));
+    for (name, value) in headers {
+        let value = value
+            .as_str()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| value.to_string());
+        lines.push(format!("  {}: {}", name, value));
+    }
+}
+
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     print_primary_response(resp, action, opts);
     if !opts.json {
@@ -635,6 +683,12 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                 print_with_boundaries(content, origin, opts);
             }
             return;
+        }
+        if action == Some("request_detail") {
+            if let Some(output) = format_request_detail_text(data) {
+                println!("{}", output);
+                return;
+            }
         }
         // Navigation response
         if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
@@ -4342,6 +4396,47 @@ mod tests {
         let rendered = super::format_stream_status_text(Some("stream_status"), &data).unwrap();
 
         assert_eq!(rendered, "Streaming disabled");
+    }
+
+    #[test]
+    fn test_format_request_detail_text_includes_request_and_response() {
+        let data = json!({
+            "requestId": "123.4",
+            "method": "POST",
+            "url": "https://example.com/api",
+            "status": 201,
+            "headers": { "content-type": "application/json" },
+            "postData": "{\"name\":\"test\"}",
+            "responseHeaders": { "x-request-id": "abc" },
+            "mimeType": "application/json",
+            "responseBody": "{\"ok\":true}"
+        });
+
+        let rendered = super::format_request_detail_text(&data).unwrap();
+
+        assert!(rendered.contains("POST https://example.com/api"));
+        assert!(rendered.contains("Status: 201"));
+        assert!(rendered.contains("content-type: application/json"));
+        assert!(rendered.contains("{\"name\":\"test\"}"));
+        assert!(rendered.contains("x-request-id: abc"));
+        assert!(rendered.contains("Content-Type: application/json"));
+        assert!(rendered.contains("{\"ok\":true}"));
+    }
+
+    #[test]
+    fn test_format_request_detail_text_omits_missing_optional_sections() {
+        let rendered = super::format_request_detail_text(&json!({
+            "requestId": "123.4",
+            "method": "GET",
+            "url": "https://example.com/api",
+            "headers": {}
+        }))
+        .unwrap();
+
+        assert_eq!(rendered, "GET https://example.com/api");
+        assert!(!rendered.contains("null"));
+        assert!(!rendered.contains("Headers:"));
+        assert!(!rendered.contains("Body:"));
     }
 
     #[test]
