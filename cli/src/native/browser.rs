@@ -5,7 +5,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Mutex};
 
-use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchOptions};
+use super::cdp::chrome::{
+    auto_connect_candidates, devtools_file_names_port, launch_chrome, AutoConnectCandidate,
+    ChromeProcess, LaunchOptions,
+};
 use super::cdp::client::CdpClient;
 use super::cdp::discovery::discover_cdp_url;
 use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
@@ -150,6 +153,76 @@ fn update_page_target_info_in_pages(pages: &mut [PageInfo], target: &TargetInfo)
         return true;
     }
     false
+}
+
+/// Distinguishes why a CDP connection attempt failed, so auto-connect can
+/// decide whether to try the next candidate or stop.
+enum CdpConnectError {
+    /// No listener or a refused WebSocket endpoint. Safe to skip to the next
+    /// candidate. An associated stale `DevToolsActivePort` file is pruned only
+    /// when a follow-up TCP probe confirms nothing is listening: a live port
+    /// can fail the handshake while a remote-debugging approval is pending
+    /// (#2041), and deleting the file would break other CDP clients.
+    Unreachable(String),
+    /// Reached the endpoint but a CDP setup command failed, or approval did not
+    /// arrive within the configured timeout. Terminal: another connection to
+    /// the same live endpoint would only re-trigger Chrome's approval prompt.
+    Other(String),
+}
+
+impl CdpConnectError {
+    fn message(&self) -> &str {
+        match self {
+            CdpConnectError::Unreachable(m) | CdpConnectError::Other(m) => m,
+        }
+    }
+}
+
+/// Timeout for the TCP reachability check that guards pruning of a stale
+/// `DevToolsActivePort` file. A loopback connect fails immediately when
+/// nothing listens, so this only bounds pathological cases such as a firewall
+/// dropping loopback packets.
+const AUTO_CONNECT_TCP_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Outcome of a TCP reachability check on an auto-connect candidate.
+enum TcpProbe {
+    /// A listener accepted the connection: the port is alive.
+    Listening,
+    /// The connection was explicitly refused (ECONNREFUSED): nothing is
+    /// listening on the port.
+    Refused,
+    /// Any other outcome: another connect error (for example descriptor
+    /// exhaustion, which says nothing about the remote port) or a probe
+    /// timeout. The port state is unknown.
+    Unknown,
+}
+
+/// Classify a TCP connect result for pruning decisions. Only an explicit
+/// refusal proves nothing is listening; local failures such as descriptor
+/// exhaustion (EMFILE) must not authorize deleting a live browser's
+/// `DevToolsActivePort` file (#2041).
+fn classify_tcp_connect<T>(result: std::io::Result<T>) -> TcpProbe {
+    match result {
+        Ok(_) => TcpProbe::Listening,
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => TcpProbe::Refused,
+        Err(_) => TcpProbe::Unknown,
+    }
+}
+
+/// Confirm whether anything is listening on a candidate port before pruning
+/// its `DevToolsActivePort` file. A plain TCP connection never triggers
+/// Chrome's remote-debugging approval prompt, which is shown per WebSocket
+/// attach (#2041).
+async fn probe_tcp_port(host: &str, port: u16) -> TcpProbe {
+    match tokio::time::timeout(
+        AUTO_CONNECT_TCP_PROBE_TIMEOUT,
+        tokio::net::TcpStream::connect((host, port)),
+    )
+    .await
+    {
+        Ok(result) => classify_tcp_connect(result),
+        Err(_) => TcpProbe::Unknown,
+    }
 }
 
 fn active_page_index_after_removal(
@@ -622,13 +695,32 @@ impl BrowserManager {
         Self::connect_cdp_inner(url, false, headers).await
     }
 
+    /// Upstream's contract for callers and tests: plain message strings.
     async fn connect_cdp_inner(
         url: &str,
         direct_page: bool,
         headers: Option<Vec<(String, String)>>,
     ) -> Result<Self, String> {
-        let ws_url = resolve_cdp_url(url).await?;
-        let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
+        Self::connect_cdp_typed(url, direct_page, headers)
+            .await
+            .map_err(|e| e.message().to_string())
+    }
+
+    /// Typed core so auto-connect can classify a refusal (prune and move on)
+    /// against a terminal setup failure or approval timeout.
+    async fn connect_cdp_typed(
+        url: &str,
+        direct_page: bool,
+        headers: Option<Vec<(String, String)>>,
+    ) -> Result<Self, CdpConnectError> {
+        let ws_url = resolve_cdp_url(url)
+            .await
+            .map_err(CdpConnectError::Unreachable)?;
+        let client = Arc::new(
+            CdpClient::connect_with_headers(&ws_url, headers)
+                .await
+                .map_err(CdpConnectError::Unreachable)?,
+        );
         let mut manager = Self {
             client,
             browser_process: None,
@@ -659,9 +751,15 @@ impl BrowserManager {
                 target_type: "page".to_string(),
             });
             manager.active_page_index = 0;
-            manager.enable_domains_direct().await
+            manager
+                .enable_domains_direct()
+                .await
+                .map_err(CdpConnectError::Other)
         } else {
-            manager.discover_and_attach_targets().await
+            manager
+                .discover_and_attach_targets()
+                .await
+                .map_err(CdpConnectError::Other)
         };
         if let Err(error) = initialization {
             let _ = manager
@@ -672,9 +770,73 @@ impl BrowserManager {
         Ok(manager)
     }
 
-    pub async fn connect_auto() -> Result<Self, String> {
-        let ws_url = auto_connect_cdp().await?;
-        Self::connect_cdp(&ws_url).await
+    pub async fn connect_auto(timeout: std::time::Duration) -> Result<Self, String> {
+        let candidates = auto_connect_candidates(timeout).await;
+        Self::connect_auto_from_candidates(candidates, timeout).await
+    }
+
+    /// Try each discovered candidate in order. Each candidate gets at most one
+    /// real CDP connection, bounded by `timeout`; there is no throwaway probe,
+    /// so a live Chrome instance is prompted at most once per `--auto-connect`.
+    ///
+    /// A WebSocket refusal (`Unreachable`) moves on to the next candidate and
+    /// prunes an associated stale `DevToolsActivePort` file only when a TCP
+    /// probe confirms nothing is listening (#2041): a live port can fail the
+    /// handshake while an approval is pending. A setup failure or approval
+    /// timeout (`Other`) is terminal: retrying the same live endpoint would
+    /// only produce another approval prompt.
+    async fn connect_auto_from_candidates(
+        candidates: Vec<AutoConnectCandidate>,
+        timeout: std::time::Duration,
+    ) -> Result<Self, String> {
+        for candidate in candidates {
+            let attempt = tokio::time::timeout(
+                timeout,
+                Self::connect_cdp_typed(&candidate.ws_url, false, None),
+            )
+            .await;
+            match attempt {
+                Ok(Ok(mgr)) => return Ok(mgr),
+                Ok(Err(CdpConnectError::Unreachable(_))) => {
+                    // #2041: a WebSocket failure does not prove the port is
+                    // dead. Prune only when the file still names this
+                    // candidate's port and a TCP connect is explicitly
+                    // refused. A live port may hold a pending or denied
+                    // approval, and deleting its file would break every other
+                    // CDP client until remote debugging is re-toggled. Chrome
+                    // may also have restarted debugging on a new port since
+                    // discovery, in which case the file now names a live
+                    // session and must survive.
+                    if let Some(stale) = candidate.stale_devtools_file {
+                        if devtools_file_names_port(&stale, candidate.port)
+                            && matches!(
+                                probe_tcp_port(&candidate.host, candidate.port).await,
+                                TcpProbe::Refused
+                            )
+                        {
+                            let _ = std::fs::remove_file(&stale);
+                        }
+                    }
+                    continue;
+                }
+                Ok(Err(CdpConnectError::Other(msg))) => return Err(msg),
+                Err(_) => {
+                    return Err(format!(
+                        "Chrome is waiting for remote-debugging approval on \
+                         {}:{} (timed out after {}ms). Approve the prompt in \
+                         Chrome and retry, or increase `autoConnectTimeout`.",
+                        candidate.host,
+                        candidate.port,
+                        timeout.as_millis()
+                    ));
+                }
+            }
+        }
+
+        Err(
+            "No running Chrome instance found. Launch Chrome with --remote-debugging-port or use --cdp."
+                .to_string(),
+        )
     }
 
     async fn discover_and_attach_targets(&mut self) -> Result<(), String> {
@@ -986,16 +1148,16 @@ impl BrowserManager {
 
     /// Enable domains on a direct page connection (no session_id needed).
     async fn enable_domains_direct(&self) -> Result<(), String> {
+        let _ = self
+            .client
+            .send_command_no_params("Runtime.runIfWaitingForDebugger", None)
+            .await;
         self.client
             .send_command_no_params("Page.enable", None)
             .await?;
         self.client
             .send_command_no_params("Runtime.enable", None)
             .await?;
-        let _ = self
-            .client
-            .send_command_no_params("Runtime.runIfWaitingForDebugger", None)
-            .await;
         self.client
             .send_command_no_params("Network.enable", None)
             .await?;
@@ -2471,11 +2633,343 @@ mod tests {
         assert_eq!(format_tab_id(42), "t42");
     }
 
+    #[tokio::test]
+    async fn test_auto_connect_keeps_first_devtools_active_port_websocket() {
+        use futures_util::{SinkExt, StreamExt};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio_tungstenite::tungstenite::Message as WsMsg;
+
+        // One candidate derived from a DevToolsActivePort file pointing at a
+        // live WebSocket server. There is no prior probe: the server must see
+        // exactly one WebSocket connection (the real one).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let profile_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            profile_dir.path().join("DevToolsActivePort"),
+            format!("{}\n/devtools/browser/test-browser\n", port),
+        )
+        .unwrap();
+
+        let connections = Arc::new(AtomicUsize::new(0));
+        let server_connections = Arc::clone(&connections);
+        let server = tokio::spawn(async move {
+            // A single accepted connection: any extra TCP connect (for example
+            // a reintroduced up-front probe) breaks this test.
+            let (stream, _) = listener.accept().await.unwrap();
+            server_connections.fetch_add(1, Ordering::SeqCst);
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+
+            while let Some(Ok(WsMsg::Text(text))) = ws.next().await {
+                let req: Value = serde_json::from_str(&text).unwrap();
+                let id = req.get("id").cloned().unwrap_or_else(|| json!(0));
+                let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                let result = match method {
+                    "Target.getTargets" => json!({
+                        "targetInfos": [{
+                            "targetId": "page-1",
+                            "type": "page",
+                            "title": "",
+                            "url": "about:blank",
+                            "attached": false
+                        }]
+                    }),
+                    "Target.attachToTarget" => json!({ "sessionId": "session-1" }),
+                    _ => json!({}),
+                };
+                ws.send(WsMsg::Text(
+                    json!({ "id": id, "result": result }).to_string(),
+                ))
+                .await
+                .unwrap();
+            }
+        });
+
+        let candidates = vec![AutoConnectCandidate {
+            ws_url: format!("ws://127.0.0.1:{}/devtools/browser/test-browser", port),
+            host: "127.0.0.1".to_string(),
+            port,
+            stale_devtools_file: Some(profile_dir.path().join("DevToolsActivePort")),
+        }];
+        let manager =
+            BrowserManager::connect_auto_from_candidates(candidates, Duration::from_secs(5))
+                .await
+                .expect("auto-connect should keep the first DevToolsActivePort WebSocket");
+
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+        assert_eq!(manager.pages.len(), 1);
+        drop(manager);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_auto_connect_skips_dead_candidate_without_prompting() {
+        // A candidate pointing at a port with no listener fails its WebSocket
+        // connect, the file still names that port, and the follow-up TCP probe
+        // is explicitly refused, so the stale DevToolsActivePort file is
+        // pruned and the next candidate is tried.
+        let dead_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_port = dead_listener.local_addr().unwrap().port();
+        drop(dead_listener);
+        let profile_dir = tempfile::tempdir().unwrap();
+        let stale = profile_dir.path().join("DevToolsActivePort");
+        std::fs::write(&stale, format!("{}\n/devtools/browser/dead\n", dead_port)).unwrap();
+
+        let candidates = vec![AutoConnectCandidate {
+            ws_url: format!("ws://127.0.0.1:{}/devtools/browser/dead", dead_port),
+            host: "127.0.0.1".to_string(),
+            port: dead_port,
+            stale_devtools_file: Some(stale.clone()),
+        }];
+        let result =
+            BrowserManager::connect_auto_from_candidates(candidates, Duration::from_secs(5)).await;
+
+        assert!(result.is_err(), "no live candidate should error");
+        assert!(
+            !stale.exists(),
+            "stale DevToolsActivePort should be pruned after an unreachable candidate"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_auto_connect_keeps_devtools_file_when_port_is_alive_but_ws_fails() {
+        // #2041: a port can be listening while the WebSocket handshake is
+        // rejected or reset (for example a pending or denied remote-debugging
+        // approval). The DevToolsActivePort file must survive so other CDP
+        // clients keep working.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            // Accept every TCP connection and close it immediately: the port
+            // answers, but no WebSocket handshake can complete.
+            while listener.accept().await.is_ok() {}
+        });
+        let profile_dir = tempfile::tempdir().unwrap();
+        let stale = profile_dir.path().join("DevToolsActivePort");
+        std::fs::write(&stale, format!("{}\n/devtools/browser/live\n", port)).unwrap();
+
+        let candidates = vec![AutoConnectCandidate {
+            ws_url: format!("ws://127.0.0.1:{}/devtools/browser/live", port),
+            host: "127.0.0.1".to_string(),
+            port,
+            stale_devtools_file: Some(stale.clone()),
+        }];
+        let result =
+            BrowserManager::connect_auto_from_candidates(candidates, Duration::from_secs(5)).await;
+
+        assert!(
+            result.is_err(),
+            "a WebSocket failure should fail auto-connect"
+        );
+        assert!(
+            stale.exists(),
+            "DevToolsActivePort must be kept when the port is alive (#2041)"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_auto_connect_approval_timeout_keeps_devtools_file() {
+        // A WebSocket that completes its handshake but never answers the first
+        // CDP command models Chrome holding commands while the
+        // "Allow remote debugging?" approval is pending. The per-candidate
+        // timeout must fire with the approval message and must not prune.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            use futures_util::StreamExt;
+            while let Ok((stream, _)) = listener.accept().await {
+                if let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await {
+                    while ws.next().await.is_some() {}
+                }
+            }
+        });
+        let profile_dir = tempfile::tempdir().unwrap();
+        let stale = profile_dir.path().join("DevToolsActivePort");
+        std::fs::write(&stale, format!("{}\n/devtools/browser/pending\n", port)).unwrap();
+
+        let candidates = vec![AutoConnectCandidate {
+            ws_url: format!("ws://127.0.0.1:{}/devtools/browser/pending", port),
+            host: "127.0.0.1".to_string(),
+            port,
+            stale_devtools_file: Some(stale.clone()),
+        }];
+        let result =
+            BrowserManager::connect_auto_from_candidates(candidates, Duration::from_millis(300))
+                .await;
+
+        let error = match result {
+            Ok(_) => panic!("pending approval must time out"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("remote-debugging approval") && error.contains(&port.to_string()),
+            "unexpected error: {}",
+            error
+        );
+        assert!(
+            stale.exists(),
+            "DevToolsActivePort must be kept while approval is pending (#2041)"
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn test_classify_tcp_connect_error_kinds() {
+        use std::io::{Error, ErrorKind};
+
+        assert!(matches!(
+            classify_tcp_connect::<()>(Ok(())),
+            TcpProbe::Listening
+        ));
+        assert!(matches!(
+            classify_tcp_connect::<()>(Err(Error::new(ErrorKind::ConnectionRefused, "refused"))),
+            TcpProbe::Refused
+        ));
+        // Local failures such as descriptor exhaustion (EMFILE) say nothing
+        // about the remote port and must not authorize pruning.
+        assert!(matches!(
+            classify_tcp_connect::<()>(Err(Error::from_raw_os_error(24))),
+            TcpProbe::Unknown
+        ));
+        assert!(matches!(
+            classify_tcp_connect::<()>(Err(Error::new(ErrorKind::TimedOut, "timed out"))),
+            TcpProbe::Unknown
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_auto_connect_keeps_devtools_file_rewritten_to_new_port() {
+        // Chrome may restart remote debugging on a new port between discovery
+        // and the prune check. The file now names the live session and must
+        // survive, even though the old candidate port is dead.
+        let live_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live_port = live_listener.local_addr().unwrap().port();
+        let live_server =
+            tokio::spawn(async move { while live_listener.accept().await.is_ok() {} });
+        let dead_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_port = dead_listener.local_addr().unwrap().port();
+        drop(dead_listener);
+
+        let profile_dir = tempfile::tempdir().unwrap();
+        let stale = profile_dir.path().join("DevToolsActivePort");
+        std::fs::write(
+            &stale,
+            format!("{}\n/devtools/browser/restarted\n", live_port),
+        )
+        .unwrap();
+
+        let candidates = vec![AutoConnectCandidate {
+            ws_url: format!("ws://127.0.0.1:{}/devtools/browser/old", dead_port),
+            host: "127.0.0.1".to_string(),
+            port: dead_port,
+            stale_devtools_file: Some(stale.clone()),
+        }];
+        let result =
+            BrowserManager::connect_auto_from_candidates(candidates, Duration::from_secs(5)).await;
+
+        assert!(result.is_err(), "dead candidate should fail auto-connect");
+        assert!(
+            stale.exists(),
+            "DevToolsActivePort rewritten to a new port must not be pruned"
+        );
+        live_server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_auto_connect_approval_timeout_tries_no_further_candidate() {
+        use futures_util::StreamExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // The first candidate holds its WebSocket open like Chrome holding
+        // the approval prompt; the second stands in for the port-based
+        // fallbacks. The timeout must stop discovery: contacting the fallback
+        // would open another approval prompt (#1365).
+        let held = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let held_port = held.local_addr().unwrap().port();
+        let fallback = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fallback_port = fallback.local_addr().unwrap().port();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let fallback_connections = Arc::clone(&connections);
+
+        let held_server = tokio::spawn(async move {
+            while let Ok((stream, _)) = held.accept().await {
+                if let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await {
+                    while ws.next().await.is_some() {}
+                }
+            }
+        });
+        let fallback_server = tokio::spawn(async move {
+            while let Ok((stream, _)) = fallback.accept().await {
+                fallback_connections.fetch_add(1, Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+
+        let profile_dir = tempfile::tempdir().unwrap();
+        let stale = profile_dir.path().join("DevToolsActivePort");
+        std::fs::write(
+            &stale,
+            format!("{}\n/devtools/browser/pending\n", held_port),
+        )
+        .unwrap();
+
+        let candidates = vec![
+            AutoConnectCandidate {
+                ws_url: format!("ws://127.0.0.1:{}/devtools/browser/pending", held_port),
+                host: "127.0.0.1".to_string(),
+                port: held_port,
+                stale_devtools_file: Some(stale.clone()),
+            },
+            AutoConnectCandidate {
+                ws_url: format!("ws://127.0.0.1:{}/devtools/browser", fallback_port),
+                host: "127.0.0.1".to_string(),
+                port: fallback_port,
+                stale_devtools_file: None,
+            },
+        ];
+        let result =
+            BrowserManager::connect_auto_from_candidates(candidates, Duration::from_millis(300))
+                .await;
+
+        let error = match result {
+            Ok(_) => panic!("pending approval must time out"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("remote-debugging approval") && error.contains(&held_port.to_string()),
+            "unexpected error: {}",
+            error
+        );
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            0,
+            "no further candidate may be contacted while the prompt is open"
+        );
+        assert!(
+            stale.exists(),
+            "DevToolsActivePort must be kept while approval is pending (#2041)"
+        );
+        held_server.abort();
+        fallback_server.abort();
+    }
+
     #[test]
     fn test_parse_tab_ref_id() {
         assert_eq!(TabRef::parse("t1"), Ok(TabRef::Id(1)));
         assert_eq!(TabRef::parse("t42"), Ok(TabRef::Id(42)));
         assert_eq!(TabRef::parse("T7"), Ok(TabRef::Id(7)));
+    }
+
+    #[test]
+    fn auto_connect_default_wait_stays_below_client_read_timeout() {
+        // The daemon must answer the client before its IPC read budget expires,
+        // or the client gives up and retries on its own (#1365).
+        let default_wait = std::time::Duration::from_millis(
+            crate::native::cdp::chrome::DEFAULT_AUTO_CONNECT_TIMEOUT_MS,
+        );
+        let client_floor = crate::connection::read_timeout_for(&serde_json::json!({}));
+        assert!(default_wait < client_floor);
     }
 
     #[test]

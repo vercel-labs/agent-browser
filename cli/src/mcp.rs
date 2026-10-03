@@ -2042,7 +2042,7 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         json!({
             "type": "array",
             "items": { "type": "string" },
-            "description": "Advanced: extra CLI arguments for this command, preserving full CLI parity."
+            "description": "Advanced: extra CLI arguments for this command, preserving full CLI parity, including launch flags such as --auto-connect and --pin-tab. autoConnectTimeout remains config/env-only; when omitted its effective default is 10000ms, including for implicit recovery after a disconnect, and changing or omitting it reuses the existing daemon and browser connection."
         }),
     );
     props.insert(
@@ -4286,6 +4286,12 @@ mod tests {
         assert!(props.get("headed").is_some());
         assert!(props.get("webgpu").is_some());
         assert!(props.get("webmcp").is_some());
+        assert!(props["extraArgs"]["description"]
+            .as_str()
+            .is_some_and(|description| {
+                description.contains("effective default is 10000ms")
+                    && description.contains("implicit recovery after a disconnect")
+            }));
     }
 
     #[test]

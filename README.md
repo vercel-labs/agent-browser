@@ -1076,6 +1076,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
 | `--pin-tab` | Pin the session to its bound tab; fail with `tab_gone` instead of falling back to another tab (or `AGENT_BROWSER_PIN_TAB` env) |
 | `--no-pin-tab` | Disable a sticky pin previously enabled with `--pin-tab` |
+| `autoConnectTimeout` | Config/env only: effective auto-connect discovery and approval timeout in ms (default: 10000 when omitted); changing or omitting it reuses an existing daemon and browser connection, including implicit recovery after a disconnect (or `AGENT_BROWSER_AUTO_CONNECT_TIMEOUT` env) |
 | `--color-scheme <scheme>` | Color scheme: `dark`, `light`, `no-preference` (or `AGENT_BROWSER_COLOR_SCHEME` env) |
 | `--download-path <path>` | Default download directory (or `AGENT_BROWSER_DOWNLOAD_PATH` env) |
 | `--content-boundaries` | Wrap page output in boundary markers for LLM safety (or `AGENT_BROWSER_CONTENT_BOUNDARIES` env) |
@@ -1184,6 +1185,7 @@ Create an `agent-browser.json` file to set persistent defaults instead of repeat
   "userAgent": "my-agent/1.0",
   "hideScrollbars": false,
   "ignoreHttpsErrors": true,
+  "autoConnectTimeout": 25000,
   "plugins": [
     {
       "name": "vault",
@@ -1558,6 +1560,8 @@ agent-browser --auto-connect snapshot
 # Or via environment variable
 AGENT_BROWSER_AUTO_CONNECT=1 agent-browser snapshot
 ```
+
+Chrome 144+ may show a remote-debugging approval prompt. Auto-connect waits up to 10000ms by default for discovery and approval. Set `autoConnectTimeout` in config or `AGENT_BROWSER_AUTO_CONNECT_TIMEOUT` in the environment to give yourself a longer approval window, such as 30000ms. When omitted, the effective timeout remains 10000ms, including for implicit recovery after a lost connection. The timeout applies to an auto-connect attempt that actually runs; changing or omitting it between commands reuses the current agent-browser daemon and browser connection.
 
 Auto-connect discovers Chrome by:
 

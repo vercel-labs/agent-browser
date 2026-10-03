@@ -70,6 +70,8 @@ The structured `lastUrl` is limited to sanitized HTTP(S) URLs and `about:blank`.
 
 When re-running a shared-tab script such as the repro from #1530, add `--pin-tab` to the first command for every session. Without it, `open` intentionally preserves the legacy behavior and navigates the shared active tab, so the original script still collides. The same rule applies when sessions attach with `--auto-connect` instead of `--cdp`.
 
+`autoConnectTimeout` and `AGENT_BROWSER_AUTO_CONNECT_TIMEOUT` apply only when an auto-connect attempt needs to run. Omission uses the effective 10000ms default, including implicit recovery after a disconnect. Changing or omitting the timeout between commands reuses the existing daemon and browser connection; daemon-owned options such as `--no-auto-dialog` retain their normal restart behavior.
+
 ## Session State Persistence
 
 ### Automatic Restore
