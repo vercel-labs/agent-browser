@@ -25,6 +25,30 @@ pub async fn discover_cdp_url(
     discover_cdp_url_with_timeout(host, port, query, DEFAULT_DISCOVERY_TIMEOUT).await
 }
 
+/// Like [`discover_cdp_url`], sending `headers` (from `--cdp-headers`) on
+/// every discovery request so endpoints that authenticate discovery work.
+///
+/// When `secure` is true (the user passed an `https://` CDP URL), discovery
+/// uses `https://`/`wss://` so auth headers are never sent in plaintext, and
+/// there is no silent fallback to an unencrypted scheme.
+pub async fn discover_cdp_url_with_headers(
+    host: &str,
+    port: u16,
+    query: Option<&str>,
+    headers: &[(String, String)],
+    secure: bool,
+) -> Result<String, String> {
+    discover(
+        host,
+        port,
+        query,
+        DEFAULT_DISCOVERY_TIMEOUT,
+        headers,
+        secure,
+    )
+    .await
+}
+
 /// Like [`discover_cdp_url`] but with a custom request timeout.
 pub async fn discover_cdp_url_with_timeout(
     host: &str,
@@ -32,11 +56,35 @@ pub async fn discover_cdp_url_with_timeout(
     query: Option<&str>,
     timeout: Duration,
 ) -> Result<String, String> {
+    discover(host, port, query, timeout, &[], false).await
+}
+
+/// HTTP and WebSocket schemes for discovery. `secure` preserves the
+/// encryption of the user-supplied CDP URL.
+fn discovery_schemes(secure: bool) -> (&'static str, &'static str) {
+    if secure {
+        ("https", "wss")
+    } else {
+        ("http", "ws")
+    }
+}
+
+async fn discover(
+    host: &str,
+    port: u16,
+    query: Option<&str>,
+    timeout: Duration,
+    headers: &[(String, String)],
+    secure: bool,
+) -> Result<String, String> {
     // Primary: /json/version (standard path)
-    let version_err = match fetch_cdp_info(host, port, timeout).await {
+    let version_err = match fetch_cdp_info(host, port, timeout, headers, secure).await {
         Ok(info) => {
             if let Some(ws_url) = info.web_socket_debugger_url {
-                return Ok(append_query(&rewrite_ws_host(&ws_url, host, port), query));
+                return Ok(append_query(
+                    &rewrite_ws_host(&ws_url, host, port, secure),
+                    query,
+                ));
             }
             format!(
                 "No webSocketDebuggerUrl in /json/version at {}:{}",
@@ -47,15 +95,20 @@ pub async fn discover_cdp_url_with_timeout(
     };
 
     // Fallback: /json/list (returns target list; look for the browser target)
-    let list_err = match fetch_cdp_list(host, port, timeout).await {
-        Ok(ws_url) => return Ok(append_query(&rewrite_ws_host(&ws_url, host, port), query)),
+    let list_err = match fetch_cdp_list(host, port, timeout, headers, secure).await {
+        Ok(ws_url) => {
+            return Ok(append_query(
+                &rewrite_ws_host(&ws_url, host, port, secure),
+                query,
+            ))
+        }
         Err(e) => e,
     };
 
     // Final fallback: direct WebSocket at /devtools/browser.
     // Chrome 136+ with UI-based remote debugging (chrome://inspect) exposes
     // CDP over WebSocket but does not serve HTTP discovery endpoints.
-    match discover_cdp_ws(host, port, timeout).await {
+    match discover_cdp_ws(host, port, timeout, headers, secure).await {
         Ok(ws_url) => Ok(append_query(&ws_url, query)),
         Err(ws_err) => Err(format!(
             "All CDP discovery methods failed for {}:{}: /json/version: {}; /json/list: {}; WebSocket: {}",
@@ -78,10 +131,18 @@ async fn fetch_cdp_info(
     host: &str,
     port: u16,
     timeout: Duration,
+    headers: &[(String, String)],
+    secure: bool,
 ) -> Result<BrowserVersionInfo, String> {
-    let url = format!("http://{}:{}/json/version", bracket_ipv6(host), port);
+    let (http_scheme, _) = discovery_schemes(secure);
+    let url = format!(
+        "{}://{}:{}/json/version",
+        http_scheme,
+        bracket_ipv6(host),
+        port
+    );
 
-    let body = tokio::time::timeout(timeout, reqwest_get_string(&url))
+    let body = tokio::time::timeout(timeout, reqwest_get_string(&url, headers))
         .await
         .map_err(|_| format!("Timeout connecting to CDP at {}:{}", host, port))?
         .map_err(|e| format!("Failed to connect to CDP at {}:{}: {}", host, port, e))?;
@@ -93,10 +154,15 @@ async fn fetch_cdp_info(
 /// actually connected to. Chrome's `/json/version` always returns
 /// `ws://127.0.0.1:<local-port>/...` which is unreachable when the
 /// browser is on a remote machine or behind a port-forward.
-fn rewrite_ws_host(ws_url: &str, host: &str, port: u16) -> String {
+/// When discovery ran over TLS, upgrade the scheme to `wss` so the returned
+/// URL keeps the encryption (and auth headers) of the original connection.
+fn rewrite_ws_host(ws_url: &str, host: &str, port: u16, secure: bool) -> String {
     if let Ok(mut parsed) = url::Url::parse(ws_url) {
         let _ = parsed.set_host(Some(&bracket_ipv6(host)));
         let _ = parsed.set_port(Some(port));
+        if secure {
+            let _ = parsed.set_scheme("wss");
+        }
         parsed.to_string()
     } else {
         ws_url.to_string()
@@ -128,10 +194,22 @@ fn append_query(url: &str, query: Option<&str>) -> String {
 
 /// Fetch `/json/list` and extract the `webSocketDebuggerUrl` from the first
 /// target with `type == "browser"`, or the first target if none has that type.
-async fn fetch_cdp_list(host: &str, port: u16, timeout: Duration) -> Result<String, String> {
-    let url = format!("http://{}:{}/json/list", bracket_ipv6(host), port);
+async fn fetch_cdp_list(
+    host: &str,
+    port: u16,
+    timeout: Duration,
+    headers: &[(String, String)],
+    secure: bool,
+) -> Result<String, String> {
+    let (http_scheme, _) = discovery_schemes(secure);
+    let url = format!(
+        "{}://{}:{}/json/list",
+        http_scheme,
+        bracket_ipv6(host),
+        port
+    );
 
-    let body = tokio::time::timeout(timeout, reqwest_get_string(&url))
+    let body = tokio::time::timeout(timeout, reqwest_get_string(&url, headers))
         .await
         .map_err(|_| format!("Timeout connecting to /json/list at {}:{}", host, port))?
         .map_err(|e| {
@@ -159,13 +237,37 @@ async fn fetch_cdp_list(host: &str, port: u16, timeout: Duration) -> Result<Stri
 }
 
 /// Discover a CDP endpoint by connecting directly to `ws://host:port/devtools/browser`
-/// and verifying it responds to `Browser.getVersion`.
+/// (`wss://` when `secure`) and verifying it responds to `Browser.getVersion`.
 /// Returns the WebSocket URL on success.
-async fn discover_cdp_ws(host: &str, port: u16, timeout: Duration) -> Result<String, String> {
-    let ws_url = format!("ws://{}:{}/devtools/browser", bracket_ipv6(host), port);
+async fn discover_cdp_ws(
+    host: &str,
+    port: u16,
+    timeout: Duration,
+    headers: &[(String, String)],
+    secure: bool,
+) -> Result<String, String> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::header::{HeaderName, HeaderValue};
+
+    let (_, ws_scheme) = discovery_schemes(secure);
+    let ws_url = format!(
+        "{}://{}:{}/devtools/browser",
+        ws_scheme,
+        bracket_ipv6(host),
+        port
+    );
+    let mut request = ws_url
+        .as_str()
+        .into_client_request()
+        .map_err(|e| format!("Invalid WebSocket URL {}: {}", ws_url, e))?;
+    for (key, value) in headers {
+        if let (Ok(name), Ok(val)) = (key.parse::<HeaderName>(), value.parse::<HeaderValue>()) {
+            request.headers_mut().insert(name, val);
+        }
+    }
 
     tokio::time::timeout(timeout, async {
-        let (mut ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
+        let (mut ws_stream, _) = tokio_tungstenite::connect_async(request)
             .await
             .map_err(|e| format!("WebSocket connect failed at {}: {}", ws_url, e))?;
 
@@ -202,8 +304,12 @@ async fn discover_cdp_ws(host: &str, port: u16, timeout: Duration) -> Result<Str
     .map(|()| ws_url)
 }
 
-async fn reqwest_get_string(url: &str) -> Result<String, String> {
-    let resp = reqwest::get(url).await.map_err(|e| e.to_string())?;
+async fn reqwest_get_string(url: &str, headers: &[(String, String)]) -> Result<String, String> {
+    let mut request = reqwest::Client::new().get(url);
+    for (key, value) in headers {
+        request = request.header(key, value);
+    }
+    let resp = request.send().await.map_err(|e| e.to_string())?;
     resp.text().await.map_err(|e| e.to_string())
 }
 
@@ -228,6 +334,30 @@ mod tests {
         let mut buf = [0u8; 1024];
         let _ = s.read(&mut buf).await;
         s.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_sends_cdp_headers_on_json_version() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 2048];
+            let n = s.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+            s.write_all(http_200(r#"{"webSocketDebuggerUrl":"ws://127.0.0.1:1234/"}"#).as_bytes())
+                .await
+                .unwrap();
+            request
+        });
+
+        let headers = vec![("Authorization".to_string(), "Bearer t".to_string())];
+        discover_cdp_url_with_headers("127.0.0.1", port, None, &headers, false)
+            .await
+            .unwrap();
+        let request = server.await.unwrap();
+        assert!(request.starts_with("get /json/version"), "{request}");
+        assert!(request.contains("authorization: bearer t"), "{request}");
     }
 
     #[tokio::test]
@@ -308,17 +438,59 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn secure_discovery_never_sends_headers_in_plaintext() {
+        // Plaintext server: every discovery method of a secure (https) target
+        // must attempt TLS and fail rather than downgrading to http/ws and
+        // leaking the auth header onto the wire.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut captured = Vec::new();
+            for _ in 0..3 {
+                let accept = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await;
+                let Ok(Ok((mut s, _))) = accept else { break };
+                let mut buf = [0u8; 2048];
+                let n = tokio::time::timeout(Duration::from_secs(1), s.read(&mut buf))
+                    .await
+                    .unwrap_or(Ok(0))
+                    .unwrap_or(0);
+                captured.extend_from_slice(&buf[..n]);
+            }
+            captured
+        });
+
+        let headers = vec![(
+            "Authorization".to_string(),
+            "Bearer secret-token".to_string(),
+        )];
+        let err = discover_cdp_url_with_headers("127.0.0.1", port, None, &headers, true)
+            .await
+            .unwrap_err();
+        assert!(err.contains("All CDP discovery methods failed"), "{err}");
+        let captured = String::from_utf8_lossy(&server.await.unwrap()).to_string();
+        assert!(!captured.contains("secret-token"), "{captured}");
+        assert!(!captured.contains("GET /json"), "{captured}");
+    }
+
     #[test]
     fn rewrite_ws_host_replaces_host_and_port() {
         let original = "ws://127.0.0.1:9222/devtools/browser/abc";
-        let rewritten = rewrite_ws_host(original, "10.211.55.12", 9223);
+        let rewritten = rewrite_ws_host(original, "10.211.55.12", 9223, false);
         assert_eq!(rewritten, "ws://10.211.55.12:9223/devtools/browser/abc");
+    }
+
+    #[test]
+    fn rewrite_ws_host_upgrades_to_wss_when_secure() {
+        let original = "ws://127.0.0.1:9222/devtools/browser/abc";
+        let rewritten = rewrite_ws_host(original, "10.211.55.12", 8443, true);
+        assert_eq!(rewritten, "wss://10.211.55.12:8443/devtools/browser/abc");
     }
 
     #[test]
     fn rewrite_ws_host_handles_ipv6() {
         let original = "ws://127.0.0.1:9222/devtools/browser/abc";
-        let rewritten = rewrite_ws_host(original, "::1", 9222);
+        let rewritten = rewrite_ws_host(original, "::1", 9222, false);
         assert_eq!(rewritten, "ws://[::1]:9222/devtools/browser/abc");
     }
 

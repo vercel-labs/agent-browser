@@ -293,6 +293,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_JSON</code></td><td>Use JSON output by default.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_ANNOTATE</code></td><td>Enable annotated screenshots by default.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_CDP</code></td><td>Connect the daemon to a CDP port or WebSocket URL.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_CDP_HEADERS</code></td><td>JSON object of headers sent on CDP discovery and the WebSocket handshake, such as <code>Authorization</code>.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_STREAM_PORT</code></td><td>Override the WebSocket streaming port. By default, an OS-assigned port is used. Set this to bind to a specific port (e.g., <code>9223</code>).</td><td>OS-assigned</td></tr>
     <tr><td><code>AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS</code></td><td>Comma-separated exact HTTPS origins allowed for a reverse-proxied dashboard. Every entry must be valid or dashboard startup fails. Without this setting, only loopback origins are accepted. Loopback access does not require the external dashboard token.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_STREAM_QUALITY</code></td><td>JPEG quality for streamed frames, 0 to 100. Lower values cut bandwidth: quality 20 costs about half the bytes of the default on a busy page.</td><td><code>80</code></td></tr>
