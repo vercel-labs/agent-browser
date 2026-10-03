@@ -1248,7 +1248,7 @@ impl BrowserManager {
             return Err(format!("Evaluation error: {}", msg));
         }
 
-        Ok(result.result.value.unwrap_or(Value::Null))
+        Ok(remote_object_to_value(result.result))
     }
 
     async fn evaluate_simple(&self, expression: &str) -> Result<Value, String> {
@@ -2460,10 +2460,89 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
     ))
 }
 
+// ---------------------------------------------------------------------------
+// Evaluate result conversion
+// ---------------------------------------------------------------------------
+
+/// Converts a `Runtime.RemoteObject` into the JSON value `eval` returns.
+///
+/// Values JavaScript can express but JSON cannot (`NaN`, `Infinity`,
+/// `-Infinity`, `-0`, BigInt literals and `undefined`) arrive from CDP without
+/// a `value` field, so returning `null` for them made them indistinguishable
+/// from a real `null` result. They are tagged as
+/// `{"unserializable": "<token>"}` instead, where the token is the JavaScript
+/// spelling of the value; the plain-text formatter prints the bare token.
+fn remote_object_to_value(object: RemoteObject) -> Value {
+    if let Some(value) = object.value {
+        return value;
+    }
+    if let Some(token) = object.unserializable_value {
+        return json!({ "unserializable": token });
+    }
+    if object.object_type == "undefined" {
+        return json!({ "unserializable": "undefined" });
+    }
+    Value::Null
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::time::sleep;
+
+    fn remote_object(raw: Value) -> RemoteObject {
+        serde_json::from_value(raw).expect("valid RemoteObject")
+    }
+
+    #[test]
+    fn test_remote_object_value_passes_through() {
+        let object = remote_object(json!({ "type": "object", "value": { "a": 1 } }));
+        assert_eq!(remote_object_to_value(object), json!({ "a": 1 }));
+    }
+
+    #[test]
+    fn test_remote_object_null_stays_null() {
+        let object = remote_object(json!({ "type": "object", "subtype": "null", "value": null }));
+        assert_eq!(remote_object_to_value(object), Value::Null);
+    }
+
+    #[test]
+    fn test_remote_object_unserializable_numbers() {
+        for token in ["NaN", "Infinity", "-Infinity", "-0"] {
+            let object = remote_object(json!({
+                "type": "number",
+                "unserializableValue": token,
+                "description": token,
+            }));
+            assert_eq!(
+                remote_object_to_value(object),
+                json!({ "unserializable": token }),
+                "token {} should be tagged, not null",
+                token
+            );
+        }
+    }
+
+    #[test]
+    fn test_remote_object_unserializable_bigint() {
+        let object = remote_object(json!({
+            "type": "bigint",
+            "unserializableValue": "1n",
+            "description": "1n",
+        }));
+        assert_eq!(
+            remote_object_to_value(object),
+            json!({ "unserializable": "1n" })
+        );
+    }
+
+    #[test]
+    fn test_remote_object_undefined_is_distinct_from_null() {
+        let object = remote_object(json!({ "type": "undefined" }));
+        let value = remote_object_to_value(object);
+        assert_eq!(value, json!({ "unserializable": "undefined" }));
+        assert_ne!(value, Value::Null);
+    }
 
     #[test]
     fn test_format_tab_id() {

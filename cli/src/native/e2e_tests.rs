@@ -1892,6 +1892,48 @@ async fn e2e_select_option_label_override_names() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_evaluate_unserializable_values() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Values JSON cannot spell must stay distinguishable from a real null.
+    assert_evaluate(&mut state, "2", "NaN", json!({ "unserializable": "NaN" })).await;
+    assert_evaluate(
+        &mut state,
+        "3",
+        "Infinity",
+        json!({ "unserializable": "Infinity" }),
+    )
+    .await;
+    assert_evaluate(
+        &mut state,
+        "4",
+        "-Infinity",
+        json!({ "unserializable": "-Infinity" }),
+    )
+    .await;
+    assert_evaluate(&mut state, "5", "-0", json!({ "unserializable": "-0" })).await;
+    assert_evaluate(&mut state, "6", "1n", json!({ "unserializable": "1n" })).await;
+    assert_evaluate(
+        &mut state,
+        "7",
+        "undefined",
+        json!({ "unserializable": "undefined" }),
+    )
+    .await;
+    assert_evaluate(&mut state, "8", "null", Value::Null).await;
+
+    let _ = close_current_browser(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_select_option_normalized_names() {
     let mut state = DaemonState::new();
 
