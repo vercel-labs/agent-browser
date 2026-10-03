@@ -5469,6 +5469,129 @@ async fn e2e_material_checkbox_check_uncheck() {
 }
 
 // ---------------------------------------------------------------------------
+// check/uncheck must fail loudly when the requested state cannot be reached.
+// Previously all of these reported success while the page was untouched.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_check_uncheck_rejects_uncheckable_elements() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = concat!(
+        "data:text/html,<html><body>",
+        "<input id='r1' type='radio' name='g' checked>",
+        "<input id='r2' type='radio' name='g'>",
+        "<div id='notbox'>not a checkbox</div>",
+        "<button id='b4' disabled>disabled</button>",
+        "<input id='t1' type='text'>",
+        "<input id='cb-disabled' type='checkbox' disabled>",
+        "</body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // HTML cannot clear a radio by clicking it.
+    let resp = execute_command(
+        &json!({ "id": "10", "action": "uncheck", "selector": "#r1" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp.get("success").and_then(Value::as_bool), Some(false));
+    assert!(
+        resp["error"].as_str().unwrap_or_default().contains("radio"),
+        "uncheck on a radio should explain radios cannot be unchecked: {}",
+        resp
+    );
+
+    // The radio must still be checked.
+    let resp = execute_command(
+        &json!({ "id": "11", "action": "ischecked", "selector": "#r1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["checked"], true);
+
+    // Elements that are not checkable at all.
+    for (id, selector) in [("20", "#notbox"), ("21", "#b4"), ("22", "#t1")] {
+        let resp = execute_command(
+            &json!({ "id": id, "action": "check", "selector": selector }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(
+            resp.get("success").and_then(Value::as_bool),
+            Some(false),
+            "check on {} should fail: {}",
+            selector,
+            resp
+        );
+        assert!(
+            resp["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("is not a checkbox or radio"),
+            "check on {} should say it is not checkable: {}",
+            selector,
+            resp
+        );
+    }
+
+    // A disabled checkbox cannot be toggled.
+    let resp = execute_command(
+        &json!({ "id": "30", "action": "check", "selector": "#cb-disabled" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp.get("success").and_then(Value::as_bool), Some(false));
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("disabled"),
+        "check on a disabled checkbox should say it is disabled: {}",
+        resp
+    );
+
+    // Checking a radio still works, and unchecking an already-unchecked radio
+    // remains a no-op success.
+    let resp = execute_command(
+        &json!({ "id": "40", "action": "check", "selector": "#r2" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "41", "action": "ischecked", "selector": "#r2" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["checked"], true);
+    let resp = execute_command(
+        &json!({ "id": "42", "action": "uncheck", "selector": "#r1" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
 // Issue #841 – snapshot -C and screenshot --annotate must not hang over WSS
 // (PS: -C is deprecated, cursor-interactive elements are referred by default now)
 // ---------------------------------------------------------------------------

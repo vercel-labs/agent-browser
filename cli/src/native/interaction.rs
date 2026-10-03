@@ -523,6 +523,214 @@ pub async fn select_option(
     Ok(())
 }
 
+/// ARIA roles that expose a checked state, matching `is_element_checked`.
+const ARIA_CHECKED_ROLES: [&str; 7] = [
+    "checkbox",
+    "radio",
+    "switch",
+    "menuitemcheckbox",
+    "menuitemradio",
+    "option",
+    "treeitem",
+];
+
+/// Snapshot of the control that `check`/`uncheck` actually acts on, taken after
+/// the same follow-label / nested-input retargeting that `is_element_checked`
+/// performs. Kept as plain data so the decision logic below is pure and
+/// unit-testable without a browser.
+#[derive(Debug, Clone, Default)]
+pub struct CheckableProbe {
+    /// Uppercase tag name of the resolved control, e.g. "INPUT" or "DIV".
+    pub tag: String,
+    /// Lowercase `type` of the resolved control; empty for non-inputs.
+    pub input_type: String,
+    /// Lowercase ARIA role of the resolved control; empty when absent.
+    pub role: String,
+    pub disabled: bool,
+    pub checked: bool,
+}
+
+impl CheckableProbe {
+    fn is_native_input(&self) -> bool {
+        self.tag == "INPUT" && (self.input_type == "checkbox" || self.input_type == "radio")
+    }
+
+    fn has_aria_checked_role(&self) -> bool {
+        ARIA_CHECKED_ROLES.contains(&self.role.as_str())
+    }
+
+    fn is_radio(&self) -> bool {
+        (self.tag == "INPUT" && self.input_type == "radio")
+            || self.role == "radio"
+            || self.role == "menuitemradio"
+    }
+
+    /// Short HTML-ish description used in error messages.
+    fn describe(&self) -> String {
+        if self.tag == "INPUT" && !self.input_type.is_empty() {
+            format!("<input type=\"{}\">", self.input_type)
+        } else if self.tag.is_empty() {
+            "element".to_string()
+        } else {
+            format!("<{}>", self.tag.to_lowercase())
+        }
+    }
+}
+
+/// Decide whether `selector` may be checked/unchecked at all, before clicking
+/// anything. Playwright's `setChecked` throws for all of these cases instead of
+/// clicking a random element and reporting success.
+fn ensure_checkable(
+    probe: &CheckableProbe,
+    selector: &str,
+    want_checked: bool,
+) -> Result<(), String> {
+    if !probe.is_native_input() && !probe.has_aria_checked_role() {
+        return Err(format!(
+            "{}: {} is not a checkbox or radio. check/uncheck need an \
+             input[type=checkbox], input[type=radio], or an element with a \
+             checkbox-like ARIA role",
+            selector,
+            probe.describe()
+        ));
+    }
+    if probe.disabled {
+        return Err(format!(
+            "{}: element is disabled and cannot be {}",
+            selector,
+            if want_checked { "checked" } else { "unchecked" }
+        ));
+    }
+    if !want_checked && probe.checked && probe.is_radio() {
+        return Err(format!(
+            "{selector}: cannot uncheck a radio button. A checked radio is \
+             cleared only by selecting another radio in the same group"
+        ));
+    }
+    Ok(())
+}
+
+/// Assert the requested state was actually reached after the click (and the
+/// JS-click retry). Playwright parity: `_setChecked` re-reads and throws.
+fn verify_checked_state(
+    probe: &CheckableProbe,
+    selector: &str,
+    want_checked: bool,
+) -> Result<(), String> {
+    if probe.checked == want_checked {
+        return Ok(());
+    }
+    Err(format!(
+        "{}: {} did not become {} after clicking it",
+        selector,
+        probe.describe(),
+        if want_checked { "checked" } else { "unchecked" }
+    ))
+}
+
+/// Read the checkable properties of the element behind `selector_or_ref`,
+/// following the same label/nested-input retargeting as `is_element_checked`
+/// so the probe describes the control that would actually be toggled.
+async fn probe_checkable(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<CheckableProbe, String> {
+    let (object_id, effective_session_id) = resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector_or_ref,
+        iframe_sessions,
+    )
+    .await?;
+
+    let js = r#"function() {
+            var el = this;
+            var tag = el.tagName ? el.tagName.toUpperCase() : '';
+            var role = (el.getAttribute && el.getAttribute('role')) || '';
+            var ariaRoles = ['checkbox','radio','switch','menuitemcheckbox','menuitemradio','option','treeitem'];
+            // Native checkbox/radio input, or an ARIA role that carries a
+            // checked state: act on the element itself.
+            if ((tag === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) ||
+                ariaRoles.indexOf(role.toLowerCase()) !== -1) {
+                return {
+                    tag: tag,
+                    type: tag === 'INPUT' ? String(el.type || '').toLowerCase() : '',
+                    role: role.toLowerCase(),
+                    disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true',
+                    checked: tag === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')
+                        ? !!el.checked
+                        : el.getAttribute('aria-checked') === 'true'
+                };
+            }
+            // Follow label -> control association, then a nested native input.
+            var target = null;
+            var label = tag === 'LABEL' ? el : (el.closest && el.closest('label'));
+            if (label && label.tagName && label.tagName.toUpperCase() === 'LABEL' && label.control) {
+                var ctrl = label.control;
+                if (ctrl.type === 'checkbox' || ctrl.type === 'radio') target = ctrl;
+            }
+            if (!target && el.querySelector) {
+                target = el.querySelector('input[type="checkbox"], input[type="radio"]');
+            }
+            if (target) {
+                return {
+                    tag: 'INPUT',
+                    type: String(target.type || '').toLowerCase(),
+                    role: '',
+                    disabled: !!target.disabled,
+                    checked: !!target.checked
+                };
+            }
+            return {
+                tag: tag,
+                type: tag === 'INPUT' ? String(el.type || '').toLowerCase() : '',
+                role: role.toLowerCase(),
+                disabled: !!el.disabled,
+                checked: false
+            };
+        }"#;
+
+    let result = client
+        .send_command_typed::<_, Value>(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: js.to_string(),
+                object_id: Some(object_id),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(&effective_session_id),
+        )
+        .await?;
+
+    let value = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .ok_or_else(|| format!("{selector_or_ref}: could not read element state"))?;
+
+    let string_field = |key: &str| {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let bool_field = |key: &str| value.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+
+    Ok(CheckableProbe {
+        tag: string_field("tag"),
+        input_type: string_field("type"),
+        role: string_field("role"),
+        disabled: bool_field("disabled"),
+        checked: bool_field("checked"),
+    })
+}
+
 pub async fn check(
     client: &CdpClient,
     session_id: &str,
@@ -531,7 +739,7 @@ pub async fn check(
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<Option<(f64, f64)>, String> {
     let mut position = None;
-    let is_checked = super::element::is_element_checked(
+    let probe = probe_checkable(
         client,
         session_id,
         ref_map,
@@ -539,7 +747,8 @@ pub async fn check(
         iframe_sessions,
     )
     .await?;
-    if !is_checked {
+    ensure_checkable(&probe, selector_or_ref, true)?;
+    if !probe.checked {
         let result = click(
             client,
             session_id,
@@ -555,15 +764,15 @@ pub async fn check(
         // Verify the click changed the state (Playwright parity: _setChecked re-checks).
         // If the coordinate-based click missed (e.g. hidden input, overlay), retry
         // with a JS .click() on the element and its associated input.
-        if !super::element::is_element_checked(
+        let mut after = probe_checkable(
             client,
             session_id,
             ref_map,
             selector_or_ref,
             iframe_sessions,
         )
-        .await?
-        {
+        .await?;
+        if !after.checked {
             js_click_checkbox(
                 client,
                 session_id,
@@ -572,7 +781,16 @@ pub async fn check(
                 iframe_sessions,
             )
             .await?;
+            after = probe_checkable(
+                client,
+                session_id,
+                ref_map,
+                selector_or_ref,
+                iframe_sessions,
+            )
+            .await?;
         }
+        verify_checked_state(&after, selector_or_ref, true)?;
     }
     Ok(position)
 }
@@ -585,7 +803,7 @@ pub async fn uncheck(
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<Option<(f64, f64)>, String> {
     let mut position = None;
-    let is_checked = super::element::is_element_checked(
+    let probe = probe_checkable(
         client,
         session_id,
         ref_map,
@@ -593,7 +811,8 @@ pub async fn uncheck(
         iframe_sessions,
     )
     .await?;
-    if is_checked {
+    ensure_checkable(&probe, selector_or_ref, false)?;
+    if probe.checked {
         let result = click(
             client,
             session_id,
@@ -607,15 +826,15 @@ pub async fn uncheck(
         position = Some(result.position);
 
         // Same verify-and-retry as check().
-        if super::element::is_element_checked(
+        let mut after = probe_checkable(
             client,
             session_id,
             ref_map,
             selector_or_ref,
             iframe_sessions,
         )
-        .await?
-        {
+        .await?;
+        if after.checked {
             js_click_checkbox(
                 client,
                 session_id,
@@ -624,7 +843,16 @@ pub async fn uncheck(
                 iframe_sessions,
             )
             .await?;
+            after = probe_checkable(
+                client,
+                session_id,
+                ref_map,
+                selector_or_ref,
+                iframe_sessions,
+            )
+            .await?;
         }
+        verify_checked_state(&after, selector_or_ref, false)?;
     }
     Ok(position)
 }
@@ -1371,6 +1599,137 @@ mod tests {
             );
             assert_eq!(key, ch.to_string());
         }
+    }
+
+    fn checkable_probe(tag: &str, input_type: &str, role: &str, checked: bool) -> CheckableProbe {
+        CheckableProbe {
+            tag: tag.to_string(),
+            input_type: input_type.to_string(),
+            role: role.to_string(),
+            disabled: false,
+            checked,
+        }
+    }
+
+    /// A checkbox that reached the requested state is accepted by both halves
+    /// of the decision (checkable up front, verified afterwards).
+    #[test]
+    fn test_checkbox_reaching_requested_state_is_ok() {
+        let before = checkable_probe("INPUT", "checkbox", "", false);
+        assert!(ensure_checkable(&before, "#cb", true).is_ok());
+        let after = checkable_probe("INPUT", "checkbox", "", true);
+        assert!(verify_checked_state(&after, "#cb", true).is_ok());
+
+        // And the same in the uncheck direction.
+        let before = checkable_probe("INPUT", "checkbox", "", true);
+        assert!(ensure_checkable(&before, "#cb", false).is_ok());
+        let after = checkable_probe("INPUT", "checkbox", "", false);
+        assert!(verify_checked_state(&after, "#cb", false).is_ok());
+    }
+
+    /// The bug: a checkbox whose state did not change must be an error, not
+    /// a silent success.
+    #[test]
+    fn test_checkbox_state_unchanged_is_error() {
+        let after = checkable_probe("INPUT", "checkbox", "", false);
+        let err = verify_checked_state(&after, "#cb", true).unwrap_err();
+        assert!(err.contains("#cb"), "error should name the selector: {err}");
+        assert!(
+            err.contains("did not become checked"),
+            "error should say the state was not reached: {err}"
+        );
+
+        let after = checkable_probe("INPUT", "checkbox", "", true);
+        let err = verify_checked_state(&after, "#cb", false).unwrap_err();
+        assert!(
+            err.contains("did not become unchecked"),
+            "error should say the state was not reached: {err}"
+        );
+    }
+
+    /// HTML cannot clear a radio by clicking it, so `uncheck` on a checked
+    /// radio is rejected before any click happens, and the message says why.
+    #[test]
+    fn test_checked_radio_cannot_be_unchecked() {
+        let err = ensure_checkable(&checkable_probe("INPUT", "radio", "", true), "#r1", false).unwrap_err();
+        assert!(err.contains("#r1"), "error should name the selector: {err}");
+        assert!(
+            err.contains("radio"),
+            "error should mention the radio button: {err}"
+        );
+        assert!(
+            err.contains("selecting another radio"),
+            "error should explain how radios are cleared: {err}"
+        );
+
+        // Checking a radio is still allowed, and an already-unchecked radio
+        // is left alone (nothing to do, so nothing to reject).
+        assert!(ensure_checkable(&checkable_probe("INPUT", "radio", "", false), "#r1", true).is_ok());
+        assert!(ensure_checkable(&checkable_probe("INPUT", "radio", "", false), "#r1", false).is_ok());
+    }
+
+    /// Elements that are not checkable at all are rejected up front instead of
+    /// being clicked and reported as done.
+    #[test]
+    fn test_non_checkable_elements_are_rejected() {
+        let cases: &[(CheckableProbe, &str)] = &[
+            (checkable_probe("DIV", "", "", false), "<div>"),
+            (checkable_probe("BUTTON", "", "", false), "<button>"),
+            (checkable_probe("INPUT", "text", "", false), "<input type=\"text\">"),
+        ];
+        for (p, described) in cases {
+            for want in [true, false] {
+                let err = ensure_checkable(p, "#el", want).unwrap_err();
+                assert!(
+                    err.contains("is not a checkbox or radio"),
+                    "{described} should be rejected as not checkable: {err}"
+                );
+                assert!(
+                    err.contains(described),
+                    "error should describe the element as {described}: {err}"
+                );
+            }
+        }
+    }
+
+    /// A disabled checkbox cannot be toggled, so say so rather than clicking it.
+    #[test]
+    fn test_disabled_checkbox_is_rejected() {
+        let mut p = checkable_probe("INPUT", "checkbox", "", false);
+        p.disabled = true;
+        let err = ensure_checkable(&p, "#cb", true).unwrap_err();
+        assert!(
+            err.contains("disabled"),
+            "error should mention the element is disabled: {err}"
+        );
+    }
+
+    /// ARIA checkboxes are exposed by the accessibility-tree snapshot and are
+    /// already supported by `is_element_checked`, so they stay checkable.
+    #[test]
+    fn test_aria_checkbox_roles_are_checkable() {
+        for role in [
+            "checkbox",
+            "switch",
+            "menuitemcheckbox",
+            "option",
+            "treeitem",
+        ] {
+            let p = checkable_probe("DIV", "", role, false);
+            assert!(
+                ensure_checkable(&p, "#aria", true).is_ok(),
+                "role={role} should be checkable"
+            );
+        }
+        // Verification still applies to them.
+        let after = checkable_probe("DIV", "", "checkbox", true);
+        assert!(verify_checked_state(&after, "#aria", true).is_ok());
+        let after = checkable_probe("DIV", "", "checkbox", false);
+        assert!(verify_checked_state(&after, "#aria", true).is_err());
+
+        // An ARIA radio follows the same rule as a native one.
+        let err = ensure_checkable(&checkable_probe("DIV", "", "radio", true), "#ar", false).unwrap_err();
+        assert!(err.contains("radio"), "error should mention radio: {err}");
     }
 
     #[test]
