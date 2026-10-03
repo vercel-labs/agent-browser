@@ -87,6 +87,7 @@ Global launch, output, provider, and chat options can be set in the config file 
     <tr><td><code>ignoreHttpsErrors</code></td><td><code>--ignore-https-errors</code></td><td>boolean</td></tr>
     <tr><td><code>caCert</code></td><td><code>--ca-cert</code></td><td>string</td></tr>
     <tr><td><code>clearCaCert</code></td><td><code>--no-ca-cert</code></td><td>boolean</td></tr>
+    <tr><td><code>useSystemCa</code></td><td><code>--use-system-ca</code></td><td>boolean</td></tr>
     <tr><td><code>allowFileAccess</code></td><td><code>--allow-file-access</code></td><td>boolean</td></tr>
     <tr><td><code>cdp</code></td><td><code>--cdp</code></td><td>string</td></tr>
     <tr><td><code>autoConnect</code></td><td><code>--auto-connect</code></td><td>boolean</td></tr>
@@ -133,7 +134,9 @@ Global launch, output, provider, and chat options can be set in the config file 
 }
 ```
 
-`caCert` imports the supplied CA certificate or PEM bundle into an isolated NSS database for locally launched Chromium on Linux. Hostname, validity period, and unrelated CA verification remain enabled. The CA remains active when later commands omit it. Setting different certificate content or `clearCaCert: true` relaunches Chromium without restarting the daemon. `agent-browser install --with-deps` installs the required `certutil`; otherwise install `libnss3-tools` on Debian/Ubuntu or `nss-tools` on RPM Linux. This initial implementation does not support Chrome profiles, CDP attach, providers, Lightpanda, macOS, or Windows.
+`caCert` imports the supplied CA certificate or PEM bundle into an isolated NSS database for locally launched Chromium on Linux. Hostname, validity period, and unrelated CA verification remain enabled. The CA remains active when later commands omit it. Setting different certificate content or `clearCaCert: true` relaunches Chromium without restarting the daemon. `agent-browser install --with-deps` installs the required `certutil`; otherwise install `libnss3-tools` on Debian/Ubuntu or `nss-tools` on RPM Linux. Browser trust does not support Chrome profiles, CDP attach, providers, Lightpanda, macOS, or Windows.
+
+`caCert` and `useSystemCa` also apply to the CLI's own HTTPS requests on every platform. `read`, `install`, `upgrade`, and `doctor` make their own HTTPS requests and trust the built-in Mozilla roots by default. On every platform, `--ca-cert` adds the CA to those requests, and `--use-system-ca` switches them to the operating system trust store, which already holds a CA deployed by MDM or an enterprise image. `SSL_CERT_FILE` is used as a fallback CA file and is ignored with a warning when unusable. Neither option disables certificate or hostname verification. For `read`, a selection given on the command line stays in effect for the session until `close`, including across daemon restarts; `--no-ca-cert` or `--use-system-ca false` turns it off. `read` never launches or relaunches a browser because of these options. They do not yet change how agent-browser connects to a remote browser over `--cdp`, `--auto-connect`, or a provider.
 
 Without the CA certificate on hand, fall back to ignoring every certificate error, which is less secure:
 
@@ -290,6 +293,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_WEBGPU</code></td><td>Enable WebGPU; SwiftShader software Vulkan on Linux, no GPU required (<code>1</code> to enable).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_NO_XVFB</code></td><td>Disable automatic Xvfb virtual display for headed mode on displayless Linux hosts (<code>1</code> to disable).</td><td>(auto-Xvfb enabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_CLEAR_CA_CERT</code></td><td>Clear CA trust retained by the running browser session.</td><td>(disabled)</td></tr>
+    <tr><td><code>AGENT_BROWSER_USE_SYSTEM_CA</code></td><td>Use the operating system trust store for the CLI's own HTTPS requests (<code>1</code> to enable).</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_JSON</code></td><td>Use JSON output by default.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_ANNOTATE</code></td><td>Enable annotated screenshots by default.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_CDP</code></td><td>Connect the daemon to a CDP port or WebSocket URL.</td><td>(none)</td></tr>
