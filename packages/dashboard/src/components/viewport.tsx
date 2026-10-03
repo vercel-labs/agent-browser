@@ -34,6 +34,8 @@ import {
   currentFrameAtom,
   viewportWidthAtom,
   viewportHeightAtom,
+  frameDeviceWidthAtom,
+  frameDeviceHeightAtom,
   browserConnectedAtom,
   screencastingAtom,
   recordingAtom,
@@ -125,6 +127,8 @@ export function Viewport() {
   const frame = useAtomValue(currentFrameAtom);
   const viewportWidth = useAtomValue(viewportWidthAtom);
   const viewportHeight = useAtomValue(viewportHeightAtom);
+  const frameDeviceWidth = useAtomValue(frameDeviceWidthAtom);
+  const frameDeviceHeight = useAtomValue(frameDeviceHeightAtom);
   const browserConnected = useAtomValue(browserConnectedAtom);
   const screencasting = useAtomValue(screencastingAtom);
   const recording = useAtomValue(recordingAtom);
@@ -310,15 +314,21 @@ export function Viewport() {
     (e: React.MouseEvent): { x: number; y: number } | null => {
       const canvas = canvasRef.current;
       if (!canvas) return null;
+      // Map into the frame's true DIP space (from CDP metadata) when known.
+      // The configured viewport can differ from the actual content area
+      // (window chrome, scrollbars, emulation), and clicks would land off
+      // target if scaled by the wrong dimensions.
+      const targetWidth = frameDeviceWidth > 0 ? frameDeviceWidth : viewportWidth;
+      const targetHeight = frameDeviceHeight > 0 ? frameDeviceHeight : viewportHeight;
       const rect = canvas.getBoundingClientRect();
-      const scaleX = viewportWidth / rect.width;
-      const scaleY = viewportHeight / rect.height;
+      const scaleX = targetWidth / rect.width;
+      const scaleY = targetHeight / rect.height;
       return {
         x: Math.round((e.clientX - rect.left) * scaleX),
         y: Math.round((e.clientY - rect.top) * scaleY),
       };
     },
-    [viewportWidth, viewportHeight],
+    [viewportWidth, viewportHeight, frameDeviceWidth, frameDeviceHeight],
   );
 
   const handleMouseEvent = useCallback(
