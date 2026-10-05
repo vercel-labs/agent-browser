@@ -164,7 +164,7 @@ agent-browser mouse up [button]       # Release button
 agent-browser mouse wheel <dy> [dx]   # Scroll wheel
 ```
 
-Use `--human` with `click`, `drag`, or `mouse move` for curved, eased movement from the current cursor position. For `mouse move`, `--duration` sets milliseconds, `--steps` sets the number of events, and `--seed` makes the path reproducible.
+Use `--human` with `click`, `drag`, or `mouse move` for curved, eased movement from the current cursor position. For `mouse move`, `--duration` sets the target total milliseconds including browser response time, `--steps` sets the number of events, and `--seed` makes the path reproducible. A slow browser can still extend the requested duration.
 
 ## Clipboard
 
@@ -390,6 +390,8 @@ Save options:
 - `--username-selector <sel>`: custom CSS selector for username field
 - `--password-selector <sel>`: custom CSS selector for password field
 - `--submit-selector <sel>`: custom CSS selector for submit button
+
+`auth login` filters matching controls by their layout size, computed visibility and opacity, and disabled/readonly state, including custom CSS selectors. If a selected credential field is replaced or redirects focus before entry, the command fails without submitting.
 
 `auth login` navigates with `load` and then waits for the username/password/submit selectors to appear before interacting. This improves reliability on SPA login pages where fields render after initial page load.
 

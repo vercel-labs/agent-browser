@@ -164,7 +164,7 @@ agent-browser mouse up left           # Release button
 agent-browser mouse wheel 100         # Scroll wheel
 ```
 
-Use `--human` with `click` or `drag` when pointer-path events matter. Movement starts at the current cursor position and ends at the target; `mouse move --seed` makes the path reproducible.
+Use `--human` with `click` or `drag` when pointer-path events matter. Movement starts at the current cursor position and ends at the target; `mouse move --seed` makes the path reproducible. `--duration` is the target total duration, including browser response time; a slow browser can still extend it.
 
 ## Semantic Locators (alternative to refs)
 
@@ -344,6 +344,8 @@ agent-browser plugin run <name> <type> --payload <json>
                                           # Run an arbitrary plugin request
 ```
 
+`auth login` filters matching controls by their layout size, computed visibility and opacity, and disabled/readonly state, including custom CSS selectors. If a selected credential field is replaced or redirects focus before entry, the command fails without submitting.
+
 `auth login` normally navigates to the effective credential URL. `--no-navigate` requires an existing active top-level HTTP(S) page, checks that its scheme, host, and effective port match the effective credential URL, then uses the normal selector waits, fills, and submit click without replacing the document. Paths, queries, and fragments may differ, and submit-triggered navigation remains enabled. Command-level `--url` takes precedence over stored or provider metadata and becomes the expected-origin constraint in this mode.
 
 Credential provider plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol and must declare `credential.read`. Use `--confirm-actions plugin:<name>:credential.read` to require explicit approval before a plugin resolves secrets.
@@ -374,7 +376,7 @@ agent-browser stream enable --port 9223
 # Choose a relevant tool, fetch its schema, then invoke within the user task.
 agent-browser webmcp list <tool> --frame <frame-id> --json
 agent-browser webmcp list --json  # Full catalog or context recovery
-agent-browser webmcp invoke <tool> --params '{"key":"value"}'
+agent-browser webmcp invoke <tool> --frame <frame-id> --params '{"key":"value"}'
 agent-browser webmcp invoke <tool> --params @input.json --detach
 agent-browser webmcp result <invocation-id>
 agent-browser webmcp cancel <invocation-id>
@@ -550,6 +552,10 @@ AGENT_BROWSER_HIDE_SCROLLBARS="false"        # Keep native scrollbars visible in
 AGENT_BROWSER_WEBGPU="1"                     # Enable the WebGPU launch preset (see references/webgpu.md)
 AGENT_BROWSER_NO_XVFB="1"                    # Disable automatic Xvfb for headed mode on displayless Linux
 AGENT_BROWSER_PROVIDER="browserbase"         # Browser provider or configured provider plugin
+BROWSER_USE_API_KEY="your-api-key"           # Browser Use Cloud API key
+BROWSER_USE_PROFILE_ID="profile-uuid"        # Optional Browser Use profile UUID
+BROWSER_USE_PROXY_COUNTRY="de"               # Managed proxy country; none/direct disables proxy
+BROWSER_USE_ENABLE_RECORDING="true"          # Record the Browser Use Cloud session
 AGENT_BROWSER_STREAM_PORT="9223"             # Override WebSocket streaming port (default: OS-assigned)
 AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS="https://dashboard.example.com" # Trusted HTTPS reverse-proxied dashboard origins
 AGENT_BROWSER_CONFIG="./agent-browser.json"  # Custom config file
@@ -557,3 +563,5 @@ AGENT_BROWSER_CDP="9222"                     # Connect daemon to CDP port or Web
 AGENT_BROWSER_ALLOWED_DOMAINS="example.com"  # Restrict network domains; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins
 AGENT_BROWSER_PLUGINS='[{"name":"vault","command":"agent-browser-plugin-vault","capabilities":["credential.read"]},{"name":"stealth","command":"agent-browser-plugin-stealth","capabilities":["launch.mutate"]}]'
 ```
+
+Browser Use Cloud lifecycle: setup is bounded to 18s plus up to 4s for timeout cleanup (10s create, 8s CDP attach, 4s stop). `close` succeeds only after the Cloud session acknowledges it stopped; a failed stop returns an error, keeps the session id for retrying `close`, and blocks a new launch until released. If create fails before an id arrives, the outcome is unknown; inspect the Browser Use Cloud dashboard before retrying. If the daemon exits before a successful stop, inspect and stop the browser in Cloud.

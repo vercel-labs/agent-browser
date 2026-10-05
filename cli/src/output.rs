@@ -2459,6 +2459,14 @@ Subcommands:
   up [button]          Release mouse button
   wheel <dy> [dx]      Scroll mouse wheel
 
+Movement Options:
+  --duration <ms>       Target total duration, including browser response time
+  --steps <n>           Number of movement events (1-240)
+  --human               Use a reproducible eased curve
+  --seed <n>            Seed for the human movement path
+
+Steps share one schedule; a slow browser can extend the requested duration.
+
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
@@ -2774,6 +2782,9 @@ Login behavior:
   auth login navigates, then waits for form selectors before filling/clicking.
   --no-navigate preserves the active top-level page and checks its origin
   against the effective credential URL. Submit-triggered navigation is allowed.
+  Matches are checked for size, computed visibility/opacity, and disabled/readonly
+  state, including custom selectors.
+  Replaced or focus-redirected credential fields fail without submitting.
   Selector wait timeout follows the default action timeout.
   Plugin credentials are resolved just-in-time and are not saved locally.
 
@@ -2929,6 +2940,10 @@ ffmpeg, or apt install ffmpeg). Run `agent-browser doctor` to check.
 Recording captures 30 fps, which keeps scrolls and CSS transitions smooth.
 Raise it to 60 for short, motion-heavy takes (drag interactions, animation
 work); lower it for long sessions where file size matters more than motion.
+
+With --cursor, an inert overlay renders the pointer and page together so
+drags stay synchronized. It is hidden from accessibility snapshots and
+removed on stop. Screenshots taken while recording include the overlay.
 
 Operations:
   start <path> [url]     Start recording the active page (navigates first if url given)
@@ -3585,6 +3600,10 @@ Chat Options:
   -v, --verbose          Show tool commands and their raw output
   -q, --quiet            Show only the AI text response (hide tool calls)
 
+Each tool call runs one agent-browser command. Chat can load bundled skills
+(skills get <name>) and use page WebMCP tools, fetching a tool's schema with
+webmcp list <tool> --frame <frame-id> --json before invoking it in that frame.
+
 Global Options:
   --json                 Structured JSON output per turn
   --session <name>       Target session for commands
@@ -4122,6 +4141,13 @@ Environment:
   AGENT_BROWSER_CA_CERT          Path to CA certificate to trust (HTTPS interception proxies)
   AGENT_BROWSER_CLEAR_CA_CERT    Clear CA trust retained by the running browser session
   AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless, agentcore, or plugin name)
+  BROWSER_USE_API_KEY            Browser Use Cloud API key
+  BROWSER_USE_PROFILE_ID         Browser Use profile UUID
+  BROWSER_USE_PROXY_COUNTRY      Managed proxy country; none/direct disables proxy
+  BROWSER_USE_ENABLE_RECORDING   Record the Browser Use Cloud session
+                                 Browser Use setup: 18s total, plus up to 4s timeout cleanup.
+                                 close fails and stays retryable until the Cloud session confirms it
+                                 stopped. After daemon exit, inspect and stop the browser in Cloud.
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_PIN_TAB          Pin the session to its bound tab (strict tab binding)
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files

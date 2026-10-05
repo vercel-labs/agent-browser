@@ -2,7 +2,13 @@
 
 Browser automation CLI for AI agents. Fast native Rust CLI.
 
-[![skills.sh](https://skills.sh/b/vercel-labs/agent-browser)](https://skills.sh/vercel-labs/agent-browser)
+<p>
+  <a href="https://vercel.com/labs#labs-products"><img alt="Vercel Labs Product" src="https://img.shields.io/badge/LABS-PRODUCT-0a0a0a.svg?style=for-the-badge&amp;logo=Vercel&amp;labelColor=000000" height="28"></a>
+  <a href="https://www.npmjs.com/package/agent-browser"><img alt="npm version: agent-browser" src="https://img.shields.io/npm/v/agent-browser.svg?style=for-the-badge&amp;labelColor=000000" height="28"></a>
+  <a href="https://github.com/vercel-labs/agent-browser/blob/main/LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/github/license/vercel-labs/agent-browser.svg?style=for-the-badge&amp;labelColor=000000" height="28"></a>
+  <a href="https://www.npmjs.com/package/agent-browser"><img alt="npm downloads per month: agent-browser" src="https://img.shields.io/npm/dm/agent-browser.svg?style=for-the-badge&amp;labelColor=000000&amp;label=npm%20downloads" height="28"></a>
+  <a href="https://skills.sh/vercel-labs/agent-browser"><img alt="skills.sh" src="https://skills.sh/b/vercel-labs/agent-browser?style=for-the-badge" height="28"></a>
+</p>
 
 ## Installation
 
@@ -315,7 +321,7 @@ agent-browser mouse up [button]       # Release button
 agent-browser mouse wheel <dy> [dx]   # Scroll wheel
 ```
 
-Add `--human` to `click` or `drag` for curved, eased movement from the current cursor position.
+Add `--human` to `click` or `drag` for curved, eased movement from the current cursor position. For timed mouse moves, `--duration` is the target total duration, including browser response time; a slow browser can still extend it.
 
 ### Browser Settings
 
@@ -460,6 +466,8 @@ agent-browser state clear [name]      # Clear states for session
 agent-browser state clear --all       # Clear all saved states
 agent-browser state clean --older-than <days>  # Delete old states
 ```
+
+With recording `--cursor`, the pointer and click ripple render with the page, keeping drags synchronized in every captured frame. The temporary overlay is inert, hidden from accessibility snapshots, and removed when recording stops. Screenshots taken during the recording include it.
 
 ### Navigation
 
@@ -656,6 +664,8 @@ agent-browser provides multiple ways to persist login sessions so you don't re-a
 | **Import from your browser** | Grab auth from a Chrome session you already logged into | `--auto-connect` + `state save` |
 | **State file** | Load a previously saved state JSON on launch | `--state <path>` / `AGENT_BROWSER_STATE` |
 | **Auth vault** | Store credentials locally (encrypted), login by name | `auth save` / `auth login` |
+
+`auth login` filters matching controls by their layout size, computed visibility and opacity, and disabled/readonly state, including custom CSS selectors. If a selected credential field is replaced or redirects focus before entry, the command fails without submitting.
 
 ### Stateful auth vault login
 
@@ -1147,6 +1157,8 @@ agent-browser --model openai/gpt-4o chat "take a screenshot" # Override model
 ```
 
 The `chat` command translates natural language instructions into agent-browser commands, executes them, and streams the AI response. In interactive mode, type `quit` to exit. Use `--json` for structured output suitable for agent consumption.
+
+Chat runs one agent-browser command per tool call. A `;` or `&&` inside a quoted argument is kept as text, so JSON parameters can contain them. Chat can load bundled skills with `skills get <name>` and use page WebMCP tools: it fetches a tool's input schema with `webmcp list <tool> --frame <frame-id> --json`, then calls `webmcp invoke` with the same `--frame`.
 
 **Dashboard usage:**
 
@@ -1913,7 +1925,7 @@ Get your API key from the [Browserbase Dashboard](https://browserbase.com/overvi
 
 ### Browser Use
 
-[Browser Use](https://browser-use.com) provides cloud browser infrastructure for AI agents. Use it when running agent-browser in environments where a local browser isn't available (serverless, CI/CD, etc.).
+[Browser Use](https://browser-use.com) is an open-source browser automation project for AI agents with [over 100,000 GitHub stars](https://github.com/browser-use/browser-use), plus a managed Cloud browser service. Browser Use Cloud is useful when running agent-browser in environments where a local browser isn't available, such as serverless and CI environments.
 
 To enable Browser Use, use the `-p` flag:
 
@@ -1930,9 +1942,32 @@ export BROWSER_USE_API_KEY="your-api-key"
 agent-browser open https://example.com
 ```
 
-When enabled, agent-browser connects to a Browser Use cloud session instead of launching a local browser. All commands work identically.
+Optional Browser Use Cloud settings:
 
-Get your API key from the [Browser Use Cloud Dashboard](https://cloud.browser-use.com/settings?tab=api-keys). Free credits are available to get started, with pay-as-you-go pricing after.
+| Variable                       | Description                                                |
+| ------------------------------ | ---------------------------------------------------------- |
+| `BROWSER_USE_PROFILE_ID`       | Profile UUID for persistent cookies and logins             |
+| `BROWSER_USE_PROXY_COUNTRY`    | Managed proxy country, or `none`/`direct` to disable proxy |
+| `BROWSER_USE_ENABLE_RECORDING` | Record the Cloud browser session                           |
+
+```bash
+export BROWSER_USE_PROFILE_ID="your-profile-uuid"
+export BROWSER_USE_PROXY_COUNTRY="de"
+export BROWSER_USE_ENABLE_RECORDING="true"
+agent-browser -p browseruse open https://example.com
+```
+
+When enabled, agent-browser creates a Browser Use Cloud V4 session and connects to its CDP endpoint. Browser Use setup is limited to 18 seconds, with up to 4 more seconds for cleanup if setup times out. Within setup, creation waits up to 10 seconds and CDP attachment up to 8 seconds; each stop request waits up to 4 seconds. Navigation and other page commands keep their existing timeouts. If creation fails before a browser id is returned, the outcome is unknown; inspect the Browser Use Cloud dashboard before retrying, since a browser may still have been created.
+
+The Cloud browser stays active between commands. Run `agent-browser close` when the task finishes. The daemon also attempts cleanup on exit, including its default one-hour idle timeout; a failed stop can leave the Cloud browser running.
+
+`close` succeeds only after Browser Use acknowledges the browser as stopped. On a failed stop, `close` returns an error and keeps the session id, so running `agent-browser close` again retries the same browser, and a new launch is blocked until the pending browser is released.
+
+If the daemon exits before a stop succeeds, inspect the Browser Use Cloud dashboard and stop the browser there.
+
+If a stop keeps returning 404, verify the browser status in Browser Use Cloud. After confirming it has stopped, use a new `--session` name to continue; agent-browser does not treat 404 as proof of a successful stop.
+
+Get your API key from the [Browser Use Cloud Dashboard](https://cloud.browser-use.com/settings?tab=api-keys).
 
 ### Kernel
 
@@ -1960,11 +1995,12 @@ Optional configuration via environment variables:
 | `KERNEL_HEADLESS`        | Run browser in headless mode (`true`/`false`)                                    | `true`  |
 | `KERNEL_STEALTH`         | Enable stealth mode to avoid bot detection (`true`/`false`)                      | `false` |
 | `KERNEL_TIMEOUT_SECONDS` | Session timeout in seconds                                                       | `300`   |
-| `KERNEL_PROFILE_NAME`    | Browser profile name for persistent cookies/logins (created if it doesn't exist) | (none)  |
+| `KERNEL_PROFILE_NAME`    | Name of an existing browser profile to load                                      | (none)  |
+| `KERNEL_PROFILE_SAVE_CHANGES` | Save session changes back to the profile (`true`/`false`)                   | `false` |
 
 When enabled, agent-browser connects to a Kernel cloud session instead of launching a local browser. All commands work identically.
 
-**Profile Persistence:** When `KERNEL_PROFILE_NAME` is set, the profile will be created if it doesn't already exist. Cookies, logins, and session data are automatically saved back to the profile when the browser session ends, making them available for future sessions.
+**Profile Persistence:** `KERNEL_PROFILE_NAME` loads an existing Kernel profile (create it first in Kernel). Set `KERNEL_PROFILE_SAVE_CHANGES=true` to save cookies, logins, and session data back to the profile when the session ends.
 
 Get your API key from the [Kernel Dashboard](https://dashboard.onkernel.com).
 

@@ -6013,6 +6013,61 @@ async fn e2e_snapshot_cursor_many_elements() {
     assert_success(&resp);
 }
 
+/// Test that a selector-scoped snapshot of a web component includes the
+/// content of its shadow root.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_selector_includes_shadow_root() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html =
+        "data:text/html,<my-card><span>Slotted</span></my-card><button>Outside</button><script>\
+        customElements.define('my-card', class extends HTMLElement { constructor() { \
+        super(); this.attachShadow({ mode: 'open' }).innerHTML = \
+        '<button>Inside shadow</button><slot></slot>'; } });</script>";
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "selector": "my-card" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    assert!(
+        snapshot.contains("button \"Inside shadow\""),
+        "Snapshot should contain the shadow root button: {}",
+        snapshot
+    );
+    assert!(
+        snapshot.contains("Slotted"),
+        "Snapshot should contain the slotted text: {}",
+        snapshot
+    );
+    assert!(
+        !snapshot.contains("Outside"),
+        "Snapshot should not contain content outside the selector: {}",
+        snapshot
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// Test that InlineTextBox nodes are filtered from snapshot output while preserving
 /// the actual text content from parent elements.
 #[tokio::test]
@@ -6065,6 +6120,59 @@ async fn e2e_snapshot_continuous_static_text() {
         elapsed.as_secs() < 5,
         "snapshot with InlineTextBox filtering took {:?}, expected < 5s",
         elapsed,
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Test that a selector-scoped snapshot renders each element once when plain
+/// wrapper elements (ignored in the AX tree) sit between the matched element
+/// and its descendants.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_selector_no_duplicates() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<main><div><div><button>Save</button></div></div>\
+        <select><option>Small</option><option>Large</option></select></main>\
+        <footer><button>Outside</button></footer>";
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "selector": "main" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    for name in ["button \"Save\"", "option \"Small\"", "option \"Large\""] {
+        assert_eq!(
+            snapshot.matches(name).count(),
+            1,
+            "{} should appear once: {}",
+            name,
+            snapshot
+        );
+    }
+    assert!(
+        !snapshot.contains("Outside"),
+        "Snapshot should not contain content outside the selector: {}",
+        snapshot
     );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
@@ -6364,6 +6472,171 @@ fn unique_auth_profile_name(suffix: &str) -> String {
             .unwrap_or_else(|_| std::time::Duration::from_secs(0))
             .as_nanos()
     )
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_selects_usable_controls_and_preserves_credential_targets() {
+    let (base_url, _, server) = start_stateful_auth_login_server().await;
+    let mut state = DaemonState::new();
+    let profile = unique_auth_profile_name("changed-target");
+    for command in [
+        json!({ "id": "launch", "action": "launch", "headless": true }),
+        json!({ "id": "open", "action": "navigate", "url": base_url }),
+        json!({ "id": "save", "action": "auth_save", "name": profile,
+            "url": base_url, "username": "target@example.test", "password": "target-password" }),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+    let mut results = Vec::new();
+    for field in ["user", "pass"] {
+        for phase in [
+            "normal",
+            "selection",
+            "focus-detach",
+            "focus-redirect",
+            "select-redirect",
+            "focus-readonly",
+            "input-detach",
+            "exception",
+            "textarea",
+            "contenteditable",
+            "no-native-edit",
+            "no-native-edit-textarea",
+            "no-native-edit-contenteditable",
+        ] {
+            let script = format!(
+                r#"(() => {{
+                    document.body.innerHTML = '<form><input id="decoy" value="decoy:"><input id="hidden-user" type="email" autocomplete="username" hidden><input id="user" type="email" autocomplete="username webauthn"><input id="hidden-pass" type="password" hidden><input id="pass" type="password"><button hidden type="submit" onclick="window.hiddenClicked = true">Hidden</button><button type="submit" onclick="window.visibleClicked = true">Sign in</button></form>';
+                    if ('{phase}'.endsWith('textarea')) document.getElementById('{field}').outerHTML = '<textarea id="{field}">old value</textarea>';
+                    if ('{phase}'.endsWith('contenteditable')) document.getElementById('{field}').outerHTML = '<div id="{field}" contenteditable="true">old value</div>';
+                    window.events = [];
+                    window.submitted = false;
+                    window.hiddenClicked = false;
+                    window.visibleClicked = false;
+                    window.nativeEdit ??= document.execCommand;
+                    document.execCommand = '{phase}'.startsWith('no-native-edit') ? undefined : window.nativeEdit;
+                    const decoy = document.getElementById('decoy');
+                    const target = document.getElementById('{field}');
+                    const replace = () => {{
+                        window.detached = target;
+                        target.replaceWith(target.cloneNode(true));
+                        decoy.focus();
+                    }};
+                    window.detached = null;
+                    document.querySelector('form').onsubmit = event => {{
+                        event.preventDefault();
+                        window.submitted = true;
+                    }};
+                    document.oninput = event => window.events.push({{
+                        id: event.target.id, value: event.target.value ?? event.target.textContent,
+                        trusted: event.isTrusted
+                    }});
+                    decoy.focus();
+                    decoy.setSelectionRange(6, 6);
+                    if ('{phase}' === 'selection') {{
+                        const box = target.getBoundingClientRect.bind(target);
+                        target.getBoundingClientRect = () => {{
+                            const rect = box();
+                            queueMicrotask(replace);
+                            return rect;
+                        }};
+                    }}
+                    if ('{phase}' === 'focus-detach') target.onfocus = replace;
+                    if ('{phase}' === 'focus-redirect') target.onfocus = () => decoy.focus();
+                    if ('{phase}' === 'select-redirect') target.select = () => decoy.focus();
+                    if ('{phase}' === 'focus-readonly') target.onfocus = () => target.readOnly = true;
+                    if ('{phase}' === 'input-detach') target.oninput = replace;
+                    if ('{phase}' === 'exception') target.focus = () => {{ throw new Error('page failure'); }};
+                }})()"#
+            );
+            assert_success(
+                &execute_command(
+                    &json!({ "id": "fixture", "action": "evaluate", "script": script }),
+                    &mut state,
+                )
+                .await,
+            );
+            let mut command = json!({
+                "id": "login", "action": "auth_login", "name": profile,
+                "noNavigate": true, "timeout": 200
+            });
+            if phase.ends_with("textarea") || phase.ends_with("contenteditable") {
+                command["usernameSelector"] = json!("#user");
+                command["passwordSelector"] = json!("#pass");
+            }
+            let login = execute_command(&command, &mut state).await;
+            let observation = execute_command(
+                &json!({
+                    "id": "observe", "action": "evaluate",
+                    "script": "({ user: document.getElementById('user').value ?? document.getElementById('user').textContent, pass: document.getElementById('pass').value ?? document.getElementById('pass').textContent, decoy: document.getElementById('decoy').value, events: window.events, hiddenUser: document.getElementById('hidden-user').value, hiddenPass: document.getElementById('hidden-pass').value, hiddenClicked: window.hiddenClicked, visibleClicked: window.visibleClicked, submitted: window.submitted, detached: !!window.detached && !window.detached.isConnected })"
+                }),
+                &mut state,
+            )
+            .await;
+            results.push((field, phase, login, observation));
+        }
+    }
+    for command in [
+        json!({ "id": "delete", "action": "auth_delete", "name": profile }),
+        json!({ "id": "close", "action": "close" }),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+    server.abort();
+    for (field, phase, login, observation) in results {
+        assert_success(&observation);
+        let observed = &get_data(&observation)["result"];
+        let normal = ["normal", "textarea", "contenteditable"].contains(&phase)
+            || phase.starts_with("no-native-edit");
+        assert_eq!(observed["decoy"], "decoy:", "{field}/{phase}: {observed}");
+        assert_eq!(observed["hiddenUser"], "", "{field}/{phase}: {observed}");
+        assert_eq!(observed["hiddenPass"], "", "{field}/{phase}: {observed}");
+        assert_eq!(
+            observed["hiddenClicked"], false,
+            "{field}/{phase}: {observed}"
+        );
+        assert_eq!(
+            observed["visibleClicked"], normal,
+            "{field}/{phase}: {observed}"
+        );
+        assert_eq!(login["success"], normal, "{field}/{phase}: {login}");
+        assert_eq!(observed["submitted"], normal, "{field}/{phase}: {observed}");
+        if phase == "selection" || phase == "focus-detach" || phase == "input-detach" {
+            assert_eq!(observed["detached"], true, "{field}/{phase}: {observed}");
+        }
+        for event in observed["events"].as_array().unwrap() {
+            let expected = match event["id"].as_str().unwrap() {
+                "user" => "target@example.test",
+                "pass" => "target-password",
+                other => panic!("{field}/{phase}: input delivered to {other}: {event}"),
+            };
+            assert_eq!(event["value"], expected, "{field}/{phase}: {event}");
+            assert_eq!(
+                event["trusted"],
+                !phase.starts_with("no-native-edit"),
+                "{field}/{phase}: {event}"
+            );
+        }
+        let expected_user = if normal || field == "pass" || phase == "input-detach" {
+            "target@example.test"
+        } else {
+            ""
+        };
+        let expected_pass = if normal || (field == "pass" && phase == "input-detach") {
+            "target-password"
+        } else {
+            ""
+        };
+        assert_eq!(
+            observed["user"], expected_user,
+            "{field}/{phase}: {observed}"
+        );
+        assert_eq!(
+            observed["pass"], expected_pass,
+            "{field}/{phase}: {observed}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -9270,6 +9543,242 @@ async fn e2e_recording_cursor_and_contact_sheet() {
     assert_success(&resp);
 }
 
+/// The cursor must not intercept clicks, leak into snapshots, or survive stop.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_cursor_overlay_lifecycle() {
+    let mut state = DaemonState::new();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cursor-lifecycle.mp4");
+    let url =
+        "data:text/html,<button id=keep onclick='window.clicks=(window.clicks||0)+1'>Keep</button>";
+    for command in [
+        json!({"action":"launch","headless":true}),
+        json!({"action":"navigate","url":url}),
+        json!({"action":"recording_start","path":path,"cursor":true}),
+        json!({"action":"click","selector":"#keep"}),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+    let inspected = execute_command(&json!({"action":"evaluate","script":"(() => { const host = document.querySelector('[data-agent-browser-recording-cursor]'); return !!host && host.inert && host.getAttribute('aria-hidden') === 'true' && host.shadowRoot === null && typeof globalThis.__agentBrowserRecordingCursorCleanup === 'undefined' && window.clicks === 1; })()"}), &mut state).await;
+    assert_success(&inspected);
+    assert_eq!(get_data(&inspected)["result"], true);
+    let snapshot = execute_command(&json!({"action":"snapshot"}), &mut state).await;
+    assert_success(&snapshot);
+    assert!(!get_data(&snapshot)
+        .to_string()
+        .contains("agent-browser-recording-cursor"));
+    assert_success(
+        &execute_command(
+            &json!({"action":"navigate","url":"data:text/html,<button>After navigation</button>"}),
+            &mut state,
+        )
+        .await,
+    );
+    let after_navigation = execute_command(&json!({"action":"evaluate","script":"document.querySelectorAll('[data-agent-browser-recording-cursor]').length"}), &mut state).await;
+    let stopped = execute_command(&json!({"action":"recording_stop"}), &mut state).await;
+    let after_stop = execute_command(&json!({"action":"evaluate","script":"document.querySelectorAll('[data-agent-browser-recording-cursor]').length"}), &mut state).await;
+    assert_success(&execute_command(&json!({"action":"navigate","url":url}), &mut state).await);
+    let after_next_navigation = execute_command(&json!({"action":"evaluate","script":"document.querySelectorAll('[data-agent-browser-recording-cursor]').length"}), &mut state).await;
+    assert_success(&execute_command(&json!({"action":"close"}), &mut state).await);
+    assert_success(&stopped);
+    assert_eq!(get_data(&after_navigation)["result"], 1);
+    assert_eq!(get_data(&after_stop)["result"], 0);
+    assert_eq!(get_data(&after_next_navigation)["result"], 0);
+}
+
+/// Check every encoded frame while a real page control follows drag input.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_cursor_stays_aligned_during_drag() {
+    let mut state = DaemonState::new();
+    for command in [
+        json!({ "action": "launch", "headless": true }),
+        json!({ "action": "viewport", "width": 640, "height": 480 }),
+        json!({
+            "action": "navigate",
+            "url": "data:text/html,<style>body{margin:0;background:%23303030}div{position:fixed;left:80px;top:0;width:2px;height:100vh;background:%2300ff00}</style><div></div><script>document.addEventListener('pointermove',e=>{if(e.buttons)document.querySelector('div').style.left=e.clientX+'px'})</script>"
+        }),
+        json!({ "action": "mousemove", "x": 80, "y": 240 }),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("drag-cursor.mp4");
+    assert_success(
+        &execute_command(
+            &json!({ "action": "recording_start", "path": path, "cursor": true, "fps": 60 }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(&execute_command(&json!({ "action": "mousedown" }), &mut state).await);
+    for x in [560, 80, 560] {
+        assert_success(
+            &execute_command(
+                &json!({ "action": "mousemove", "x": x, "y": 240, "duration": 1000, "inputMode": "human", "seed": 42 }),
+                &mut state,
+            )
+            .await,
+        );
+    }
+    assert_success(&execute_command(&json!({ "action": "mouseup" }), &mut state).await);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_success(&execute_command(&json!({ "action": "recording_stop" }), &mut state).await);
+    assert_success(&execute_command(&json!({ "action": "close" }), &mut state).await);
+
+    let output = tokio::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(&path)
+        .args([
+            "-vf",
+            "crop=640:80:0:200",
+            "-pix_fmt",
+            "rgb24",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert!(output.status.success());
+    let mut measured = 0;
+    let mut worst = 0;
+    let mut positions = std::collections::HashSet::new();
+    for bytes in output.stdout.chunks_exact(640 * 80 * 3) {
+        let frame = image::RgbImage::from_raw(640, 80, bytes.to_vec()).unwrap();
+        let line = (0..640).find(|&x| {
+            let [r, g, b] = frame.get_pixel(x, 0).0;
+            g > 150 && g > r.saturating_add(60) && g > b.saturating_add(60)
+        });
+        let cursor = frame
+            .enumerate_pixels()
+            .filter_map(|(x, _, pixel)| {
+                let [r, g, b] = pixel.0;
+                (r > 180 && g > 180 && b > 180).then_some(x)
+            })
+            .min();
+        if let (Some(line), Some(cursor)) = (line, cursor) {
+            measured += 1;
+            positions.insert(line);
+            worst = worst.max(line.abs_diff(cursor));
+        }
+    }
+    assert!(measured >= 100, "only {measured} drag frames measured");
+    assert!(
+        positions.len() >= 60,
+        "drag must exercise moving page frames"
+    );
+    // The cursor's white fill starts 1-2 pixels inside its black outline.
+    assert!(
+        worst <= 3,
+        "recorded cursor separated from the dragged control by {worst} pixels"
+    );
+}
+
+/// A completed drag must not pin the recorded cursor to a stale page frame.
+#[tokio::test]
+#[ignore]
+async fn e2e_recording_cursor_moves_after_release_without_repaint() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(&json!({ "action": "launch", "headless": true }), &mut state).await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "action": "viewport", "width": 640, "height": 480 }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({
+                "action": "navigate",
+                "url": "data:text/html,<style>body{margin:0;background:%23202020}</style>"
+            }),
+            &mut state,
+        )
+        .await,
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("released-cursor.mp4");
+    assert_success(
+        &execute_command(
+            &json!({ "action": "recording_start", "path": path, "cursor": true, "fps": 60 }),
+            &mut state,
+        )
+        .await,
+    );
+    for command in [
+        json!({ "action": "mousemove", "x": 80, "y": 80 }),
+        json!({ "action": "mousedown" }),
+        json!({ "action": "mousemove", "x": 120, "y": 100, "duration": 150, "inputMode": "human" }),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+    let captured = state
+        .recording_state
+        .shared_captured_count
+        .as_ref()
+        .unwrap()
+        .clone();
+    let before = captured.load(Ordering::Relaxed);
+    // Paint while pressed, then leave the page completely static after release.
+    assert_success(
+        &execute_command(
+            &json!({ "action": "evaluate", "script": "document.body.style.background = '#303030'" }),
+            &mut state,
+        )
+        .await,
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while captured.load(Ordering::Relaxed) == before {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the pressed page frame should reach the recorder");
+    for command in [
+        json!({ "action": "mouseup" }),
+        json!({ "action": "mousemove", "x": 240, "y": 180, "duration": 250, "inputMode": "human" }),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert_success(&execute_command(&json!({ "action": "recording_stop" }), &mut state).await);
+    assert_success(&execute_command(&json!({ "action": "close" }), &mut state).await);
+
+    let output = tokio::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-sseof", "-0.1", "-i"])
+        .arg(&path)
+        .args([
+            "-frames:v",
+            "1",
+            "-f",
+            "image2pipe",
+            "-c:v",
+            "png",
+            "pipe:1",
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert!(output.status.success());
+    let frame = image::load_from_memory(&output.stdout).unwrap().to_rgb8();
+    assert_eq!(frame.dimensions(), (640, 480));
+    assert!(
+        frame.get_pixel(244, 184).0.iter().all(|value| *value > 180),
+        "the released cursor should reach the new position in the encoded video; got {:?}",
+        frame.get_pixel(244, 184).0
+    );
+    assert!(
+        frame.get_pixel(124, 104).0.iter().all(|value| *value < 80),
+        "the old drag position should contain only the page background"
+    );
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_initial_recording_frame_uses_css_viewport_dimensions() {
@@ -11296,8 +11805,7 @@ async fn e2e_recording_cursor_uses_page_coordinates_for_oopif() {
         .unwrap()
         .0
         .clone();
-    // Initialize cursor history without an encoder; the test inspects the exact
-    // samples consumed by both video and contact-sheet compositing.
+    // Verify the input samples retain top-level coordinates for frame actions.
     super::recording::recording_start(
         &mut state.recording_state,
         "unused.webm",
@@ -11324,8 +11832,56 @@ async fn e2e_recording_cursor_uses_page_coordinates_for_oopif() {
         assert!((state.mouse_state.y - cursor.y).abs() < 1.0);
     }
     state.recording_state.active = false;
+    state.browser.as_ref().unwrap().client.send_command("Runtime.evaluate", Some(json!({
+        "expression": "document.body.style.background='#303030'; const button = document.querySelector('button'); button.style.background='#303030'; button.style.border='0'; button.textContent=''"
+    })), Some(&child_session)).await.unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("iframe-cursor.mp4");
+    assert_success(
+        &execute_command(
+            &json!({"action":"recording_start", "path":path,"cursor":true,"fps":60}),
+            &mut state,
+        )
+        .await,
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert_success(
+        &execute_command(
+            &json!({"action":"hover", "selector":format!("@{reference}"), "inputMode":"human"}),
+            &mut state,
+        )
+        .await,
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let stopped = execute_command(&json!({"action":"recording_stop"}), &mut state).await;
     assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
     server.abort();
+    assert_success(&stopped);
+    let output = tokio::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-sseof", "-0.1", "-i"])
+        .arg(path)
+        .args([
+            "-frames:v",
+            "1",
+            "-f",
+            "image2pipe",
+            "-c:v",
+            "png",
+            "pipe:1",
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert!(output.status.success());
+    let image = image::load_from_memory(&output.stdout).unwrap().to_rgb8();
+    assert!(
+        image
+            .get_pixel(314, 224)
+            .0
+            .iter()
+            .all(|channel| *channel > 180),
+        "the cursor should be visible inside the out-of-process iframe"
+    );
 }
 
 #[tokio::test]

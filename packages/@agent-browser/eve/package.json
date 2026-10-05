@@ -1,6 +1,6 @@
 {
   "name": "@agent-browser/eve",
-  "version": "0.38.0",
+  "version": "0.38.2",
   "description": "eve extension that gives agents a full browser automation tool set backed by agent-browser",
   "type": "module",
   "sideEffects": false,
@@ -59,12 +59,12 @@
     "zod": "4.4.3"
   },
   "peerDependencies": {
-    "eve": ">=0.39.1"
+    "eve": ">=0.57.0"
   },
   "devDependencies": {
     "@types/node": "24.x",
-    "ai": "7.0.58",
-    "eve": "^0.47.3",
+    "ai": "7.0.102",
+    "eve": "^0.57.0",
     "typescript": "7.0.2"
   },
   "engines": {

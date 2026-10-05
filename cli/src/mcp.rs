@@ -1119,7 +1119,7 @@ fn parity_tools() -> Vec<Value> {
             json!({
                 "x": number_schema(),
                 "y": number_schema(),
-                "durationMs": { "type": "integer", "minimum": 0, "description": "Total movement duration in milliseconds." },
+                "durationMs": { "type": "integer", "minimum": 0, "description": "Target total movement duration in milliseconds, including browser response time." },
                 "steps": { "type": "integer", "minimum": 1, "maximum": 240, "description": "Number of interpolated events." },
                 "human": { "type": "boolean", "default": false, "description": "Add a seeded perpendicular curve." },
                 "seed": { "type": "integer", "minimum": 0, "description": "Seed for reproducible human movement." }
@@ -1395,7 +1395,7 @@ fn parity_tools() -> Vec<Value> {
                     "maximum": crate::native::recording::MAX_FPS,
                     "description": "Capture rate in frames per second (default 30, max 60).",
                 },
-                "cursor": { "type": "boolean", "description": "Show an animated pointer in the recording." },
+                "cursor": { "type": "boolean", "description": "Render a pointer and click ripple with the page so drags stay synchronized. The inert overlay is hidden from accessibility snapshots, included in screenshots while recording, and removed on stop." },
                 "contactSheet": { "type": "boolean", "description": "Export first, changed, and final frames as a timestamped PNG beside the video." },
                 "contactSheetThreshold": { "type": "number", "minimum": 0, "maximum": 1, "description": "Changed-pixel ratio required to select a contact-sheet frame (default 0.05). Implies contactSheet." },
             }),
@@ -1424,7 +1424,7 @@ fn parity_tools() -> Vec<Value> {
                     "maximum": crate::native::recording::MAX_FPS,
                     "description": "Capture rate in frames per second (default 30, max 60).",
                 },
-                "cursor": { "type": "boolean", "description": "Show an animated pointer in the recording." },
+                "cursor": { "type": "boolean", "description": "Render a pointer and click ripple with the page so drags stay synchronized. The inert overlay is hidden from accessibility snapshots, included in screenshots while recording, and removed on stop." },
                 "contactSheet": { "type": "boolean", "description": "Export first, changed, and final frames as a timestamped PNG beside the video." },
                 "contactSheetThreshold": { "type": "number", "minimum": 0, "maximum": 1, "description": "Changed-pixel ratio required to select a contact-sheet frame (default 0.05). Implies contactSheet." },
             }),
@@ -1504,7 +1504,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_AUTH_LOGIN,
             "Auth login",
-            "Log in with a saved auth profile.",
+            "Log in with a saved auth profile. Control selection checks layout size, computed visibility and opacity, and disabled/readonly state. Replaced or focus-redirected credential fields fail without submitting.",
             json!({
                 "name": { "type": "string" },
                 "noNavigate": {
@@ -2888,7 +2888,7 @@ fn call_find(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool(arguments, args, None)
 }
 
-fn call_mouse_move(arguments: &Value) -> Result<Value, ProtocolError> {
+fn mouse_move_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let x = required_number_string(arguments, "x")?;
     let y = required_number_string(arguments, "y")?;
     let mut args = vec!["mouse".to_string(), "move".to_string(), x, y];
@@ -2905,7 +2905,11 @@ fn call_mouse_move(arguments: &Value) -> Result<Value, ProtocolError> {
     if optional_bool(arguments, "human")?.unwrap_or(false) {
         args.push("--human".to_string());
     }
-    call_cli_tool(arguments, args, None)
+    Ok(args)
+}
+
+fn call_mouse_move(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, mouse_move_command_args(arguments)?, None)
 }
 
 fn call_mouse_button(arguments: &Value, action: &str) -> Result<Value, ProtocolError> {
@@ -4171,14 +4175,35 @@ mod tests {
     #[test]
     fn recording_cursor_uses_cli_parser() {
         for operation in ["start", "restart"] {
-            let args =
-                record_command_args(&json!({"path": "cursor.webm", "cursor": true}), operation)
-                    .unwrap();
+            let args = record_command_args(
+                &json!({"path": "cursor.webm", "cursor": true, "fps": 60}),
+                operation,
+            )
+            .unwrap();
             let flags = crate::flags::parse_flags(&args);
             let command = crate::commands::parse_command(&args, &flags).unwrap();
             assert_eq!(command["cursor"], true);
+            assert_eq!(command["fps"], 60);
             assert_eq!(command["action"], format!("recording_{operation}"));
         }
+    }
+
+    #[test]
+    fn human_mouse_timing_uses_cli_parser() {
+        let args = mouse_move_command_args(&json!({
+            "x": 640, "y": 320, "durationMs": 1000,
+            "steps": 60, "human": true, "seed": 42
+        }))
+        .unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        let command = crate::commands::parse_command(&args, &flags).unwrap();
+        assert_eq!(command["action"], "mousemove");
+        assert_eq!(command["x"], 640);
+        assert_eq!(command["y"], 320);
+        assert_eq!(command["duration"], 1000);
+        assert_eq!(command["steps"], 60);
+        assert_eq!(command["inputMode"], "human");
+        assert_eq!(command["seed"], 42);
     }
 
     #[test]

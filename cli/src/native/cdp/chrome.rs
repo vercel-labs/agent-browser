@@ -1,6 +1,8 @@
 #[cfg(windows)]
 use super::windows_process::Child;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 #[cfg(not(windows))]
 use std::process::{Child, Command, Stdio};
@@ -903,6 +905,17 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         }
     };
 
+    // Chrome blocks on stderr writes once the pipe buffer fills, so keep draining it
+    // after readiness. The fallback path has already taken stderr.
+    if let Some(stderr) = child.stderr.take() {
+        let _ = std::thread::Builder::new()
+            .name("chrome-stderr-drain".into())
+            .spawn(move || {
+                let mut stderr = stderr;
+                let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+            });
+    }
+
     #[cfg(unix)]
     let pgid = {
         let pid = child.id() as i32;
@@ -1559,14 +1572,44 @@ fn should_disable_sandbox(existing_args: &[String]) -> bool {
     false
 }
 
-/// Returns true if Chrome should use disk instead of /dev/shm for shared memory.
-/// On CI runners and containers, /dev/shm is often too small (64MB default),
-/// which causes Chrome to crash mid-session.
+#[cfg(any(target_os = "linux", test))]
+const MIN_DEV_SHM_AVAILABLE_BYTES: u64 = 256 * 1024 * 1024;
+
+#[cfg(target_os = "linux")]
+fn available_filesystem_bytes(path: &Path) -> Option<u64> {
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+
+    // SAFETY: `path` is a valid, NUL-terminated C string and `stats` points to
+    // writable storage for a `statvfs` value. A successful call initializes it.
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return None;
+    }
+
+    let stats = unsafe { stats.assume_init() };
+    let available_bytes = u128::from(stats.f_bavail).saturating_mul(u128::from(stats.f_frsize));
+    Some(u64::try_from(available_bytes).unwrap_or(u64::MAX))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn dev_shm_is_too_small(available_bytes: u64) -> bool {
+    available_bytes < MIN_DEV_SHM_AVAILABLE_BYTES
+}
+
+/// Returns true if Chrome should use disk instead of `/dev/shm` for shared memory.
+/// Prefer the actual filesystem capacity over environment markers because some
+/// container runtimes expose no conventional marker and others provision a large mount.
 fn should_disable_dev_shm(existing_args: &[String]) -> bool {
     if existing_args.iter().any(|a| a == "--disable-dev-shm-usage") {
         return false;
     }
 
+    #[cfg(target_os = "linux")]
+    if let Some(available_bytes) = available_filesystem_bytes(Path::new("/dev/shm")) {
+        return dev_shm_is_too_small(available_bytes);
+    }
+
+    // Preserve the existing safe fallback when `/dev/shm` cannot be inspected.
     if std::env::var("CI").is_ok() {
         return true;
     }
@@ -1743,6 +1786,78 @@ fn expand_tilde(path: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
+
+    #[test]
+    fn test_dev_shm_capacity_threshold() {
+        assert!(dev_shm_is_too_small(64 * 1024 * 1024));
+        assert!(dev_shm_is_too_small(128 * 1024 * 1024));
+        assert!(!dev_shm_is_too_small(256 * 1024 * 1024));
+        assert!(!dev_shm_is_too_small(1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_existing_disable_dev_shm_arg_is_not_duplicated() {
+        assert!(!should_disable_dev_shm(&[
+            "--disable-dev-shm-usage".to_string()
+        ]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stderr_drained_after_port_readiness() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let executable = fixture.path().join("chrome");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+set -eu
+for arg do
+    case "$arg" in --user-data-dir=*) profile="${arg#*=}" ;; esac
+done
+printf '9222\n/devtools/browser/stderr-test\n' > "$profile/DevToolsActivePort"
+for round in 1 2; do
+    while [ ! -f "$profile/request-$round" ]; do sleep 0.01; done
+    printf '\377' >&2
+    head -c 2097152 /dev/zero >&2
+    touch "$profile/drained-$round"
+done
+exec sleep 60
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let options = LaunchOptions {
+            headless: true,
+            ..Default::default()
+        };
+        let mut chrome = try_launch_chrome(&executable, &options).unwrap();
+        let profile = chrome.temp_user_data_dir.clone().unwrap();
+        assert_eq!(
+            chrome.ws_url,
+            "ws://127.0.0.1:9222/devtools/browser/stderr-test"
+        );
+        for round in 1..=2 {
+            std::fs::write(profile.join(format!("request-{round}")), b"").unwrap();
+            let drained = profile.join(format!("drained-{round}"));
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !drained.exists() && std::time::Instant::now() < deadline {
+                assert!(
+                    !chrome.has_exited(),
+                    "writer exited before completing stderr"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                drained.exists(),
+                "stderr burst {round} blocked after readiness"
+            );
+            assert!(!chrome.has_exited());
+        }
+        drop(chrome);
+        assert!(!profile.exists());
+    }
 
     fn prepared_nss_home() -> PreparedNssHome {
         let path = std::env::temp_dir().join(format!(

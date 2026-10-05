@@ -43,7 +43,7 @@ agent-browser record start ./demo.webm
 
 ## Visible cursor
 
-Chrome recordings do not normally include the native pointer. Add `--cursor` for an animated pointer and click ripple:
+Chrome recordings do not normally include the native pointer. Add `--cursor` for an animated pointer and click ripple rendered with the page, keeping drags synchronized in every captured frame. The temporary overlay is inert, hidden from accessibility snapshots, and removed when recording stops. Screenshots taken during the recording include it:
 
 ```bash
 agent-browser record start ./walkthrough.webm --cursor
