@@ -516,6 +516,17 @@ where
     Value::Object(body)
 }
 
+/// Kernel expects `profile` as an object (`{"name": ..., "save_changes": ...}`), not a string.
+fn kernel_profile_from_env() -> Option<Value> {
+    let name = env::var("KERNEL_PROFILE_NAME")
+        .ok()
+        .filter(|v| !v.is_empty())?;
+    let save_changes = env::var("KERNEL_PROFILE_SAVE_CHANGES")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    Some(json!({ "name": name, "save_changes": save_changes }))
+}
+
 async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
     let api_key = env::var("KERNEL_API_KEY").ok();
     let endpoint =
@@ -540,12 +551,10 @@ async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
         "timeout_seconds": timeout_seconds,
     });
 
-    if let Ok(profile) = env::var("KERNEL_PROFILE_NAME") {
-        if !profile.is_empty() {
-            body.as_object_mut()
-                .unwrap()
-                .insert("profile".to_string(), json!(profile));
-        }
+    if let Some(profile) = kernel_profile_from_env() {
+        body.as_object_mut()
+            .unwrap()
+            .insert("profile".to_string(), profile);
     }
 
     let client = reqwest::Client::new();
@@ -1203,6 +1212,65 @@ mod tests {
         let result = rt.block_on(connect_provider("unknown-provider"));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Unknown provider"));
+    }
+
+    fn kernel_env() -> EnvGuard<'static> {
+        let vars = [
+            "KERNEL_API_KEY",
+            "KERNEL_ENDPOINT",
+            "KERNEL_PROFILE_NAME",
+            "KERNEL_PROFILE_SAVE_CHANGES",
+        ];
+        let guard = EnvGuard::new(&vars);
+        for name in vars {
+            guard.remove(name);
+        }
+        guard
+    }
+
+    #[test]
+    fn test_kernel_profile_from_env() {
+        let guard = kernel_env();
+        assert_eq!(kernel_profile_from_env(), None);
+
+        guard.set("KERNEL_PROFILE_NAME", "");
+        assert_eq!(kernel_profile_from_env(), None);
+
+        guard.set("KERNEL_PROFILE_NAME", "my-profile");
+        assert_eq!(
+            kernel_profile_from_env(),
+            Some(json!({ "name": "my-profile", "save_changes": false }))
+        );
+
+        guard.set("KERNEL_PROFILE_SAVE_CHANGES", "true");
+        assert_eq!(
+            kernel_profile_from_env(),
+            Some(json!({ "name": "my-profile", "save_changes": true }))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_kernel_sends_profile_as_object() {
+        let guard = kernel_env();
+        guard.set("KERNEL_PROFILE_NAME", "my-profile");
+        let (base, server) = browser_use_server(
+            200,
+            r#"{"session_id":"s1","cdp_ws_url":"wss://example.com/cdp"}"#,
+            false,
+        );
+        guard.set("KERNEL_ENDPOINT", &base);
+
+        let (ws_url, session) = connect_kernel().await.unwrap();
+        assert_eq!(ws_url, "wss://example.com/cdp");
+        assert_eq!(session.unwrap().session_id, "s1");
+
+        let request = server.join().unwrap();
+        let (_, body) = request.split_once("\r\n\r\n").unwrap();
+        let body: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            body["profile"],
+            json!({ "name": "my-profile", "save_changes": false })
+        );
     }
 
     #[test]

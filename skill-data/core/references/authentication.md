@@ -147,6 +147,8 @@ agent-browser get url  # Should be dashboard, not login
 
 After submitting, wait for the authenticated destination, a success message, or another app-specific condition. Do not use `networkidle` as a generic login wait because long-lived background connections can keep it from resolving.
 
+`auth login` filters matching controls by their layout size, computed visibility and opacity, and disabled/readonly state, including custom CSS selectors. If a selected credential field is replaced or redirects focus before entry, the command fails without submitting.
+
 For a form reached through an in-page click, challenge clearance, consent dismissal, or another stateful step, use the auth vault without discarding the prepared document:
 
 ```bash

@@ -155,6 +155,8 @@ export AI_GATEWAY_MODEL=openai/gpt-4o-mini           # default: anthropic/claude
 
 The Rust server proxies chat requests from the dashboard to the Vercel AI Gateway and streams responses back using the Vercel AI SDK's UI Message Stream protocol. The dashboard frontend uses `useChat` from `@ai-sdk/react` with `DefaultChatTransport`.
 
+Chat runs one agent-browser command per tool call. A `;` or `&&` inside a quoted argument is kept as text, so JSON parameters can contain them. Chat can load bundled skills with `skills get <name>` and use page WebMCP tools: it fetches a tool's input schema with `webmcp list <tool> --frame <frame-id> --json`, then calls `webmcp invoke` with the same `--frame`.
+
 <table>
   <thead>
     <tr><th>Variable</th><th>Description</th><th>Default</th></tr>

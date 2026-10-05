@@ -33,11 +33,12 @@ The `-p` flag takes precedence over `AGENT_BROWSER_PROVIDER`.
     <tr><td><code>KERNEL_HEADLESS</code></td><td>Run browser in headless mode</td><td><code>true</code></td></tr>
     <tr><td><code>KERNEL_STEALTH</code></td><td>Enable stealth mode to avoid bot detection</td><td><code>false</code></td></tr>
     <tr><td><code>KERNEL_TIMEOUT_SECONDS</code></td><td>Session timeout in seconds</td><td><code>300</code></td></tr>
-    <tr><td><code>KERNEL_PROFILE_NAME</code></td><td>Browser profile name for persistent cookies/logins</td><td>(none)</td></tr>
+    <tr><td><code>KERNEL_PROFILE_NAME</code></td><td>Name of an existing browser profile to load</td><td>(none)</td></tr>
+    <tr><td><code>KERNEL_PROFILE_SAVE_CHANGES</code></td><td>Save session changes back to the profile</td><td><code>false</code></td></tr>
   </tbody>
 </table>
 
-**Profile persistence:** When `KERNEL_PROFILE_NAME` is set, the profile will be created if it doesn't already exist. Cookies, logins, and session data are automatically saved back to the profile when the browser session ends, making them available for future sessions.
+**Profile persistence:** `KERNEL_PROFILE_NAME` loads an existing Kernel profile (create it first in Kernel). Set `KERNEL_PROFILE_SAVE_CHANGES=true` to save cookies, logins, and session data back to the profile when the session ends.
 
 When enabled, agent-browser connects to a Kernel cloud session instead of launching a local browser. All commands work identically.
 

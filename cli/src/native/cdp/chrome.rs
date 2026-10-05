@@ -905,6 +905,17 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         }
     };
 
+    // Chrome blocks on stderr writes once the pipe buffer fills, so keep draining it
+    // after readiness. The fallback path has already taken stderr.
+    if let Some(stderr) = child.stderr.take() {
+        let _ = std::thread::Builder::new()
+            .name("chrome-stderr-drain".into())
+            .spawn(move || {
+                let mut stderr = stderr;
+                let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+            });
+    }
+
     #[cfg(unix)]
     let pgid = {
         let pid = child.id() as i32;
@@ -1789,6 +1800,63 @@ mod tests {
         assert!(!should_disable_dev_shm(&[
             "--disable-dev-shm-usage".to_string()
         ]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stderr_drained_after_port_readiness() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let executable = fixture.path().join("chrome");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+set -eu
+for arg do
+    case "$arg" in --user-data-dir=*) profile="${arg#*=}" ;; esac
+done
+printf '9222\n/devtools/browser/stderr-test\n' > "$profile/DevToolsActivePort"
+for round in 1 2; do
+    while [ ! -f "$profile/request-$round" ]; do sleep 0.01; done
+    printf '\377' >&2
+    head -c 2097152 /dev/zero >&2
+    touch "$profile/drained-$round"
+done
+exec sleep 60
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let options = LaunchOptions {
+            headless: true,
+            ..Default::default()
+        };
+        let mut chrome = try_launch_chrome(&executable, &options).unwrap();
+        let profile = chrome.temp_user_data_dir.clone().unwrap();
+        assert_eq!(
+            chrome.ws_url,
+            "ws://127.0.0.1:9222/devtools/browser/stderr-test"
+        );
+        for round in 1..=2 {
+            std::fs::write(profile.join(format!("request-{round}")), b"").unwrap();
+            let drained = profile.join(format!("drained-{round}"));
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !drained.exists() && std::time::Instant::now() < deadline {
+                assert!(
+                    !chrome.has_exited(),
+                    "writer exited before completing stderr"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                drained.exists(),
+                "stderr burst {round} blocked after readiness"
+            );
+            assert!(!chrome.has_exited());
+        }
+        drop(chrome);
+        assert!(!profile.exists());
     }
 
     fn prepared_nss_home() -> PreparedNssHome {

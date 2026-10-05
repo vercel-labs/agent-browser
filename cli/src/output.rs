@@ -2782,6 +2782,9 @@ Login behavior:
   auth login navigates, then waits for form selectors before filling/clicking.
   --no-navigate preserves the active top-level page and checks its origin
   against the effective credential URL. Submit-triggered navigation is allowed.
+  Matches are checked for size, computed visibility/opacity, and disabled/readonly
+  state, including custom selectors.
+  Replaced or focus-redirected credential fields fail without submitting.
   Selector wait timeout follows the default action timeout.
   Plugin credentials are resolved just-in-time and are not saved locally.
 
@@ -3596,6 +3599,10 @@ Chat Options:
   --model <name>         AI model (or AI_GATEWAY_MODEL env, default: anthropic/claude-sonnet-4.6)
   -v, --verbose          Show tool commands and their raw output
   -q, --quiet            Show only the AI text response (hide tool calls)
+
+Each tool call runs one agent-browser command. Chat can load bundled skills
+(skills get <name>) and use page WebMCP tools, fetching a tool's schema with
+webmcp list <tool> --frame <frame-id> --json before invoking it in that frame.
 
 Global Options:
   --json                 Structured JSON output per turn

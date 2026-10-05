@@ -665,6 +665,8 @@ agent-browser provides multiple ways to persist login sessions so you don't re-a
 | **State file** | Load a previously saved state JSON on launch | `--state <path>` / `AGENT_BROWSER_STATE` |
 | **Auth vault** | Store credentials locally (encrypted), login by name | `auth save` / `auth login` |
 
+`auth login` filters matching controls by their layout size, computed visibility and opacity, and disabled/readonly state, including custom CSS selectors. If a selected credential field is replaced or redirects focus before entry, the command fails without submitting.
+
 ### Stateful auth vault login
 
 By default, `auth login` navigates to the effective credential URL before it locates the form. Use `--no-navigate` after an in-page click, challenge clearance, consent dismissal, or other stateful setup that must survive credential entry:
@@ -1154,6 +1156,8 @@ agent-browser --model openai/gpt-4o chat "take a screenshot" # Override model
 ```
 
 The `chat` command translates natural language instructions into agent-browser commands, executes them, and streams the AI response. In interactive mode, type `quit` to exit. Use `--json` for structured output suitable for agent consumption.
+
+Chat runs one agent-browser command per tool call. A `;` or `&&` inside a quoted argument is kept as text, so JSON parameters can contain them. Chat can load bundled skills with `skills get <name>` and use page WebMCP tools: it fetches a tool's input schema with `webmcp list <tool> --frame <frame-id> --json`, then calls `webmcp invoke` with the same `--frame`.
 
 **Dashboard usage:**
 
@@ -1990,11 +1994,12 @@ Optional configuration via environment variables:
 | `KERNEL_HEADLESS`        | Run browser in headless mode (`true`/`false`)                                    | `true`  |
 | `KERNEL_STEALTH`         | Enable stealth mode to avoid bot detection (`true`/`false`)                      | `false` |
 | `KERNEL_TIMEOUT_SECONDS` | Session timeout in seconds                                                       | `300`   |
-| `KERNEL_PROFILE_NAME`    | Browser profile name for persistent cookies/logins (created if it doesn't exist) | (none)  |
+| `KERNEL_PROFILE_NAME`    | Name of an existing browser profile to load                                      | (none)  |
+| `KERNEL_PROFILE_SAVE_CHANGES` | Save session changes back to the profile (`true`/`false`)                   | `false` |
 
 When enabled, agent-browser connects to a Kernel cloud session instead of launching a local browser. All commands work identically.
 
-**Profile Persistence:** When `KERNEL_PROFILE_NAME` is set, the profile will be created if it doesn't already exist. Cookies, logins, and session data are automatically saved back to the profile when the browser session ends, making them available for future sessions.
+**Profile Persistence:** `KERNEL_PROFILE_NAME` loads an existing Kernel profile (create it first in Kernel). Set `KERNEL_PROFILE_SAVE_CHANGES=true` to save cookies, logins, and session data back to the profile when the session ends.
 
 Get your API key from the [Kernel Dashboard](https://dashboard.onkernel.com).
 

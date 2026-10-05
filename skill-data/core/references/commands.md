@@ -344,6 +344,8 @@ agent-browser plugin run <name> <type> --payload <json>
                                           # Run an arbitrary plugin request
 ```
 
+`auth login` filters matching controls by their layout size, computed visibility and opacity, and disabled/readonly state, including custom CSS selectors. If a selected credential field is replaced or redirects focus before entry, the command fails without submitting.
+
 `auth login` normally navigates to the effective credential URL. `--no-navigate` requires an existing active top-level HTTP(S) page, checks that its scheme, host, and effective port match the effective credential URL, then uses the normal selector waits, fills, and submit click without replacing the document. Paths, queries, and fragments may differ, and submit-triggered navigation remains enabled. Command-level `--url` takes precedence over stored or provider metadata and becomes the expected-origin constraint in this mode.
 
 Credential provider plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol and must declare `credential.read`. Use `--confirm-actions plugin:<name>:credential.read` to require explicit approval before a plugin resolves secrets.
@@ -374,7 +376,7 @@ agent-browser stream enable --port 9223
 # Choose a relevant tool, fetch its schema, then invoke within the user task.
 agent-browser webmcp list <tool> --frame <frame-id> --json
 agent-browser webmcp list --json  # Full catalog or context recovery
-agent-browser webmcp invoke <tool> --params '{"key":"value"}'
+agent-browser webmcp invoke <tool> --frame <frame-id> --params '{"key":"value"}'
 agent-browser webmcp invoke <tool> --params @input.json --detach
 agent-browser webmcp result <invocation-id>
 agent-browser webmcp cancel <invocation-id>

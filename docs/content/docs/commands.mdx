@@ -394,6 +394,8 @@ Save options:
 - `--password-selector <sel>`: custom CSS selector for password field
 - `--submit-selector <sel>`: custom CSS selector for submit button
 
+`auth login` filters matching controls by their layout size, computed visibility and opacity, and disabled/readonly state, including custom CSS selectors. If a selected credential field is replaced or redirects focus before entry, the command fails without submitting.
+
 `auth login` navigates with `load` and then waits for the username/password/submit selectors to appear before interacting. This improves reliability on SPA login pages where fields render after initial page load.
 
 Use `--no-navigate` after an in-page click, challenge clearance, consent dismissal, or other stateful setup that must survive credential entry:

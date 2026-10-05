@@ -1504,7 +1504,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_AUTH_LOGIN,
             "Auth login",
-            "Log in with a saved auth profile.",
+            "Log in with a saved auth profile. Control selection checks layout size, computed visibility and opacity, and disabled/readonly state. Replaced or focus-redirected credential fields fail without submitting.",
             json!({
                 "name": { "type": "string" },
                 "noNavigate": {
