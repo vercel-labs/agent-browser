@@ -8,7 +8,7 @@ import { runInNewContext } from "node:vm";
 import { createProcessor } from "@mdx-js/mdx";
 import ts from "typescript";
 
-const commit = "d01253d9db28d75080e36da3c1c31ef89454731e";
+const commit = "526157cfd4ec64f45939f9ba0f10d5936aa7ac33";
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const output = new URL("../tests/fixtures/docs-baseline.json", import.meta.url);
 const git = (...args) =>

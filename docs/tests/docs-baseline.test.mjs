@@ -48,7 +48,7 @@ test("deployment explicitly uses Corepack for frozen installs and builds", async
 });
 
 test("baseline pins all 38 routes and the original metadata, slugger and converter sources", () => {
-  assert.equal(baseline.commit, "d01253d9db28d75080e36da3c1c31ef89454731e");
+  assert.equal(baseline.commit, "526157cfd4ec64f45939f9ba0f10d5936aa7ac33");
   assert.equal(pages.length, 38);
   assert.equal(new Set(pages.map((page) => page.path)).size, 38);
   for (const path of [
@@ -154,7 +154,7 @@ test("heading oracle excludes fenced shell comments and preserves original dupli
   const changelog = pages.find((page) => page.path === "/changelog");
   assert.equal(
     changelog.headings.filter((heading) => heading.id === "bug-fixes").length,
-    53,
+    54,
   );
   assert.ok(changelog.headings.some((heading) => heading.level === 3));
   assert.equal(
