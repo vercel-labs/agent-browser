@@ -1088,6 +1088,323 @@ async fn e2e_lightpanda_auto_launch_can_open_page() {
     assert_eq!(get_data(&resp)["closed"], true);
 }
 
+#[tokio::test]
+async fn test_obscura_launch_uses_request_proxy_bypass() {
+    let env = EnvGuard::new(&["AGENT_BROWSER_PROXY_BYPASS"]);
+    env.set("AGENT_BROWSER_PROXY_BYPASS", "stale-daemon-value");
+    for (options, expected) in [
+        (json!({"proxyBypass": "localhost"}), "--proxy-bypass"),
+        (json!({"proxyBypass": null}), "Failed to launch Obscura"),
+        (json!({"proxy": {"bypass": "localhost"}}), "--proxy-bypass"),
+        (json!({}), "Failed to launch Obscura"),
+    ] {
+        let mut state = DaemonState::new();
+        let mut request = json!({
+            "id": "1", "action": "launch", "headless": true,
+            "engine": "obscura", "executablePath": "/nonexistent/obscura",
+        });
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(options.as_object().unwrap().clone());
+        let resp = execute_command(&request, &mut state).await;
+        assert_eq!(resp["success"], false, "{resp}");
+        assert!(
+            resp["error"]
+                .as_str()
+                .is_some_and(|error| error.contains(expected)),
+            "{resp}"
+        );
+    }
+}
+
+fn required_obscura_binary() -> String {
+    let path = std::env::var("OBSCURA_BIN")
+        .expect("OBSCURA_BIN is required for explicitly invoked Obscura E2E verification");
+    assert!(!path.trim().is_empty(), "OBSCURA_BIN must not be empty");
+    assert!(
+        std::path::Path::new(&path).is_file(),
+        "OBSCURA_BIN must point to an existing executable: {path}"
+    );
+    path
+}
+
+struct ObscuraFixture {
+    url: String,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for ObscuraFixture {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+async fn obscura_fixture() -> ObscuraFixture {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            let body = include_str!("test_fixtures/obscura_probe.html");
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+    ObscuraFixture { url, server }
+}
+
+async fn obscura_command(state: &mut DaemonState, command: Value) -> Value {
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(30),
+        execute_command(&command, state),
+    )
+    .await
+    .expect("Obscura command must not hang")
+}
+
+fn obscura_test_environment() -> EnvGuard<'static> {
+    let env = EnvGuard::new(&[
+        "AGENT_BROWSER_CDP",
+        "AGENT_BROWSER_AUTO_CONNECT",
+        "AGENT_BROWSER_PROVIDER",
+        "AGENT_BROWSER_ENGINE",
+        "AGENT_BROWSER_EXECUTABLE_PATH",
+        "OBSCURA_ALLOW_PRIVATE_NETWORK",
+        "AGENT_BROWSER_OBSCURA_STEALTH",
+        "AGENT_BROWSER_PROXY",
+        "AGENT_BROWSER_PROXY_BYPASS",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    ]);
+    for key in [
+        "AGENT_BROWSER_CDP",
+        "AGENT_BROWSER_AUTO_CONNECT",
+        "AGENT_BROWSER_PROVIDER",
+        "AGENT_BROWSER_ENGINE",
+        "AGENT_BROWSER_EXECUTABLE_PATH",
+        "AGENT_BROWSER_OBSCURA_STEALTH",
+        "AGENT_BROWSER_PROXY",
+        "AGENT_BROWSER_PROXY_BYPASS",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    ] {
+        env.remove(key);
+    }
+    env.set("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+    env
+}
+
+async fn verify_obscura_page(auto_launch: bool) {
+    let obscura_bin = required_obscura_binary();
+    let env = obscura_test_environment();
+    let fixture = obscura_fixture().await;
+    let mut state = DaemonState::new();
+    if auto_launch {
+        env.set("AGENT_BROWSER_ENGINE", "obscura");
+        env.set("AGENT_BROWSER_EXECUTABLE_PATH", &obscura_bin);
+    } else {
+        let resp = obscura_command(
+            &mut state,
+            json!({
+                "id": "1", "action": "launch", "headless": true,
+                "engine": "obscura", "executablePath": obscura_bin,
+            }),
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["launched"], true);
+    }
+    let resp = obscura_command(
+        &mut state,
+        json!({
+            "id": "2", "action": "navigate", "url": fixture.url,
+        }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["url"], fixture.url);
+    assert_eq!(get_data(&resp)["title"], "Obscura adapter probe");
+    assert_eq!(state.engine, "obscura");
+    assert!(
+        state
+            .browser
+            .as_ref()
+            .is_some_and(|manager| manager.owns_obscura_process()),
+        "Obscura verification must own an Obscura process, not an attached browser"
+    );
+
+    let resp = obscura_command(&mut state, json!({
+        "id": "3", "action": "evaluate", "script": "document.querySelector('#message').textContent",
+    })).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "JavaScript ready");
+
+    let resp = obscura_command(
+        &mut state,
+        json!({
+            "id": "4", "action": "snapshot",
+        }),
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        get_data(&resp)["snapshot"]
+            .as_str()
+            .is_some_and(|text| text.contains("Adapter probe")),
+        "{resp}"
+    );
+
+    let resp = obscura_command(&mut state, json!({ "id": "5", "action": "close" })).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["closed"], true);
+}
+
+#[test]
+fn test_obscura_e2e_clears_inherited_connection_modes() {
+    const PROBE: &str = "OBSCURA_TEST_ENV_PROBE";
+    let keys = [
+        "AGENT_BROWSER_CDP",
+        "AGENT_BROWSER_AUTO_CONNECT",
+        "AGENT_BROWSER_PROVIDER",
+    ];
+    if std::env::var(PROBE).as_deref() == Ok("1") {
+        let _env = obscura_test_environment();
+        for key in keys {
+            assert!(
+                std::env::var_os(key).is_none(),
+                "Obscura E2E must clear {key}"
+            );
+        }
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .env_clear()
+        .env("HOME", dir.path())
+        .env(PROBE, "1")
+        .env(keys[0], format!("ws://{}", listener.local_addr().unwrap()))
+        .env(keys[1], "1")
+        .env(keys[2], "obscura-test-not-a-provider")
+        .args([
+            "--exact",
+            "native::e2e_tests::test_obscura_e2e_clears_inherited_connection_modes",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_obscura_e2e_unlaunchable_binary_does_not_attach_to_inherited_cdp() {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let server_accepted = accepted.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            server_accepted.fetch_add(1, Ordering::SeqCst);
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                match message {
+                    Message::Text(text) => {
+                        let command: Value = serde_json::from_str(&text).unwrap();
+                        let response = json!({"id": command["id"], "error": {
+                            "code": -32000, "message": "controlled CDP endpoint must not be used by Obscura verification"
+                        }});
+                        let _ = ws.send(Message::Text(response.to_string())).await;
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+        }
+    });
+    let fixture = ObscuraFixture {
+        url: endpoint.clone(),
+        server,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let false_bin = if std::path::Path::new("/usr/bin/false").is_file() {
+        "/usr/bin/false"
+    } else {
+        "/bin/false"
+    };
+    let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .env_clear()
+        .env("HOME", dir.path())
+        .env("AGENT_BROWSER_SOCKET_DIR", dir.path())
+        .env("OBSCURA_BIN", false_bin)
+        .env("AGENT_BROWSER_CDP", &fixture.url)
+        .env("AGENT_BROWSER_PROVIDER", "obscura-test-not-a-provider")
+        .args([
+            "--exact",
+            "native::e2e_tests::e2e_obscura_auto_launch_can_open_page",
+            "--ignored",
+            "--nocapture",
+        ])
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
+        .await
+        .expect("Obscura false-binary probe must terminate")
+        .unwrap();
+    let diagnostics = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.status.code(), Some(101), "{diagnostics}");
+    assert!(
+        diagnostics.contains("Obscura exited before CDP became ready"),
+        "accepted {} inherited CDP connections\n{diagnostics}",
+        accepted.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        0,
+        "Obscura E2E attached to the inherited endpoint"
+    );
+}
+
+/// Requires a real OBSCURA_BIN; missing binaries fail rather than silently skip verification.
+#[tokio::test]
+#[ignore = "requires OBSCURA_BIN; run serially"]
+async fn e2e_obscura_launch_can_open_page() {
+    verify_obscura_page(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires OBSCURA_BIN; run serially"]
+async fn e2e_obscura_auto_launch_can_open_page() {
+    verify_obscura_page(true).await;
+}
+
 // ---------------------------------------------------------------------------
 // Runtime stream lifecycle
 // ---------------------------------------------------------------------------
