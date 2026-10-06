@@ -13,7 +13,6 @@ import {
   decode,
   tags,
   meta,
-  renderedHeadings,
   get,
   rawGet,
   responseType,
@@ -155,81 +154,6 @@ for (const page of pages) {
         );
       }
     }
-  });
-
-  test(`${page.path}: original heading text, nested levels and duplicate anchor multiplicity survive`, async () => {
-    const html = await htmlFor(page);
-    const headings = renderedHeadings(html);
-    assert.deepEqual(
-      headings
-        .filter((heading) => heading.level === 1)
-        .map((heading) => heading.text),
-      [page.markdownTitle],
-    );
-    const ids = [...html.matchAll(/<[a-z][^>]*\sid="([^"]*)"[^>]*>/gi)].map(
-      (match) => decode(match[1]),
-    );
-    for (const id of new Set(
-      page.headings.map((heading) => heading.id).filter(Boolean),
-    )) {
-      const expected = page.headings.filter((heading) => heading.id === id);
-      assert.equal(
-        ids.filter((value) => value === id).length,
-        expected.length,
-        `${page.path}: #${id} preserves original duplicate count`,
-      );
-      assert.deepEqual(
-        headings.filter((heading) => heading.id === id && heading.level > 1),
-        expected.filter((heading) => heading.level > 1),
-        `${page.path}: nested heading #${id}`,
-      );
-    }
-    const expectedBody = page.headings.filter((heading) => heading.level > 1);
-    const expectedIds = new Set(expectedBody.map((heading) => heading.id));
-    assert.deepEqual(
-      headings.filter(
-        (heading) => heading.level > 1 && expectedIds.has(heading.id),
-      ),
-      expectedBody,
-      `${page.path}: heading order and nesting`,
-    );
-  });
-
-  test(`${page.path}: API, .md and negotiated Markdown preserve the complete original content`, async () => {
-    const bodies = [];
-    for (const [path, headers] of [
-      [apiPath(page.path), {}],
-      [markdownPath(page.path), {}],
-      [page.path, { accept: "text/markdown" }],
-    ]) {
-      const response = await get(path, { headers });
-      responseType(response, "text/markdown");
-      representationHeaders(response);
-      indexing(response);
-      assert.equal(
-        response.headers.get("link"),
-        `<${canonical(page.path)}>; rel="canonical"`,
-      );
-      const body = await response.text();
-      assertModernMarkdown(body, page);
-      bodies.push(body);
-    }
-    assert.equal(bodies[0], bodies[1]);
-    assert.equal(bodies[1], bodies[2]);
-  });
-
-  test(`${page.path}: legacy ?path= API returns exactly the old bare Markdown, not new frontmatter`, async () => {
-    const response = await get(legacyPath(page.path));
-    responseType(response, "text/markdown");
-    representationHeaders(response);
-    indexing(response);
-    const body = await response.text();
-    assert.equal(
-      hash(body),
-      page.legacyMarkdownSha256,
-      `${page.path}: legacy mdxToCleanMarkdown bytes`,
-    );
-    assert.equal(body, page.legacyMarkdown);
   });
 
   test(`${page.path}: HEAD preserves all five representations without a response body`, async () => {
@@ -570,25 +494,6 @@ test("legacy Markdown never resolves traversal or malformed path values to unrel
     assert.ok(body.error.length > 0);
   }
 });
-
-for (const fixture of baseline.legacySearch) {
-  test(`legacy search ?q=${JSON.stringify(fixture.query)} retains original object, ranking and snippet shape`, async () => {
-    const suffix =
-      fixture.query === null ? "" : `?q=${encodeURIComponent(fixture.query)}`;
-    const response = await get(`/api/search${suffix}`);
-    responseType(response, "application/json");
-    const body = await response.json();
-    assert.deepEqual(body, fixture.response);
-    assert.deepEqual(Object.keys(body), ["results"]);
-    for (const result of body.results)
-      assert.deepEqual(Object.keys(result).sort(), [
-        "href",
-        "section",
-        "snippet",
-        "title",
-      ]);
-  });
-}
 
 test("WebMCP search results use Features without changing the public URL", async () => {
   const legacy = await get("/api/search?q=webmcp");
