@@ -53,7 +53,7 @@ Set `DOCS_EXPECT_NOINDEX=1` when testing an existing preview server. The capture
 
 ## Regression invariants
 
-Byte-for-byte MDX reconstruction, full Markdown equality, heading multiplicity and legacy search ranking were migration checks against the pinned commit. They were removed after the migration merged because any later content edit fails them. Remaining checks treat the baseline as a floor: original content must still render, and new content is allowed.
+Byte-for-byte MDX reconstruction, full Markdown equality, heading multiplicity and legacy search ranking were migration checks against the pinned commit. They were removed after the migration merged because any later content edit fails them. Remaining checks treat the baseline as a floor: every original block must still render in order, and new content is allowed.
 
 - SSR prose/table/code content from the baseline, metadata, canonical URLs and Markdown alternates.
 - Every page's Markdown API, `.md`, negotiated Markdown, legacy query API and HEAD representations.

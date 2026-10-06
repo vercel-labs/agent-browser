@@ -19,6 +19,7 @@ import {
   representationHeaders,
   indexing,
   assertModernMarkdown,
+  assertLegacyMarkdown,
   absoluteDestination,
   imageSourceUrls,
   assertOriginalResource,
@@ -154,6 +155,37 @@ for (const page of pages) {
         );
       }
     }
+  });
+
+  test(`${page.path}: API, .md and negotiated Markdown serve the original content`, async () => {
+    const bodies = [];
+    for (const [path, headers] of [
+      [apiPath(page.path), {}],
+      [markdownPath(page.path), {}],
+      [page.path, { accept: "text/markdown" }],
+    ]) {
+      const response = await get(path, { headers });
+      responseType(response, "text/markdown");
+      representationHeaders(response);
+      indexing(response);
+      assert.equal(
+        response.headers.get("link"),
+        `<${canonical(page.path)}>; rel="canonical"`,
+      );
+      const body = await response.text();
+      assertModernMarkdown(body, page);
+      bodies.push(body);
+    }
+    assert.equal(bodies[0], bodies[1]);
+    assert.equal(bodies[1], bodies[2]);
+  });
+
+  test(`${page.path}: legacy ?path= API serves the original bare Markdown`, async () => {
+    const response = await get(legacyPath(page.path));
+    responseType(response, "text/markdown");
+    representationHeaders(response);
+    indexing(response);
+    assertLegacyMarkdown(await response.text(), page);
   });
 
   test(`${page.path}: HEAD preserves all five representations without a response body`, async () => {
@@ -453,21 +485,14 @@ test("legacy Markdown handles required, missing, unknown and normalized path par
     const response = await get(legacyPath(path));
     responseType(response, "text/markdown");
     const canonicalPath = `/${path.replace(/^\//, "").replace(/\/$/, "")}`;
-    assert.equal(
-      await response.text(),
-      pageAt(canonicalPath).legacyMarkdown,
-      path,
-    );
+    assertLegacyMarkdown(await response.text(), pageAt(canonicalPath));
   }
   const duplicate = await get(
     "/api/docs-markdown?path=%2Fcommands&path=%2Fmissing",
   );
   responseType(duplicate, "text/markdown");
-  assert.equal(
-    await duplicate.text(),
-    pageAt("/commands").legacyMarkdown,
-    "first path parameter wins, matching original URLSearchParams.get",
-  );
+  // First path parameter wins, matching original URLSearchParams.get.
+  assertLegacyMarkdown(await duplicate.text(), pageAt("/commands"));
 });
 
 test("legacy Markdown never resolves traversal or malformed path values to unrelated pages", async () => {
