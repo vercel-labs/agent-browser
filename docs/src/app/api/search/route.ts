@@ -1,24 +1,25 @@
+import { createSearchRoute } from "@vercel/geistdocs/routes/search";
 import { NextRequest, NextResponse } from "next/server";
+import { config } from "@/lib/geistdocs/config";
+import { geistdocsSource } from "@/lib/geistdocs/source";
 import { getSearchIndex } from "@/lib/search-index";
 
-export async function GET(req: NextRequest) {
-  const q = req.nextUrl.searchParams.get("q")?.trim().toLowerCase();
+const nativeSearch = createSearchRoute({ config, source: geistdocsSource });
 
-  if (!q) {
-    return NextResponse.json({ results: [] });
-  }
+export async function GET(req: NextRequest) {
+  if (req.nextUrl.searchParams.has("query")) return nativeSearch(req);
+
+  const q = req.nextUrl.searchParams.get("q")?.trim().toLowerCase();
+  if (!q) return NextResponse.json({ results: [] });
 
   const index = await getSearchIndex();
   const terms = q.split(/\s+/).filter(Boolean);
-
   const results = index
     .map((entry) => {
       const titleLower = entry.title.toLowerCase();
       const contentLower = entry.content.toLowerCase();
-
       const titleMatch = terms.every((t) => titleLower.includes(t));
       const contentMatch = terms.every((t) => contentLower.includes(t));
-
       if (!titleMatch && !contentMatch) return null;
 
       let snippet = "";
@@ -38,7 +39,6 @@ export async function GET(req: NextRequest) {
             (end < entry.content.length ? "..." : "");
         }
       }
-
       return {
         title: entry.title,
         href: entry.href,
@@ -60,7 +60,12 @@ export async function GET(req: NextRequest) {
     )
     .sort((a, b) => b.score - a.score)
     .slice(0, 20)
-    .map(({ score: _, ...rest }) => rest);
+    .map(({ title, href, section, snippet }) => ({
+      title,
+      href,
+      section,
+      snippet,
+    }));
 
   return NextResponse.json(
     { results },

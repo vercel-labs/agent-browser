@@ -1,8 +1,39 @@
 # agent-browser
 
-## 0.38.1
+## 0.38.2
 
 <!-- release:start -->
+### Bug Fixes
+
+- Fixed **auth vault login** to pick usable controls when hidden duplicates exist, and to bind credential entry to the selected field so replaced fields or redirected focus are rejected before submitting (#2014)
+- Fixed **chat mode** to allow `webmcp`, `skills`, and other top-level browser commands, so the model uses page WebMCP tools instead of falling back to `eval` (#2015)
+- Fixed **Kernel profiles** so `KERNEL_PROFILE_NAME` sessions send the profile as an object instead of failing with a 400, and added `KERNEL_PROFILE_SAVE_CHANGES` to opt into saving changes back (#2004)
+- Fixed **Chrome freezing after launch** by draining its stderr for the browser's lifetime, so a full log pipe no longer blocks the browser (#2003)
+- Fixed **Browser Use** by switching to Cloud V4, which creates, attaches to, and stops the same browser with bounded timeouts (#1879)
+- Fixed **Vercel Sandbox shared memory detection** by measuring `/dev/shm` capacity and adding `--disable-dev-shm-usage` below 256 MiB, so Chrome no longer terminates renderers on the undersized mount (#1890)
+
+### Improvements
+
+- Upgraded the **eve integration** from eve 0.47.3 to 0.57.0, so apps on eve 0.50 and later build again (#1945)
+
+### Documentation
+
+- Updated the **contact sheet example** with the loading-flash demo output (#1871)
+
+### Contributors
+
+- @Railly
+- @benjamincanac
+- @boatri
+- @luxleader
+- @petehunt
+- @robertjamesprior
+- @simonellefsen
+- @zyz619963502zyz
+<!-- release:end -->
+
+## 0.38.1
+
 ### Bug Fixes
 
 - Fixed **recording cursor and mouse movement timing** so cursor rendering stays synchronized with page content during drags and timed mouse moves (#1869)
@@ -15,7 +46,6 @@
 
 - @ctate
 - @Railly
-<!-- release:end -->
 
 ## 0.38.0
 
