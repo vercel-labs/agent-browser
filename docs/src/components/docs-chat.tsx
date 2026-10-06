@@ -5,13 +5,16 @@ import {
   useEffect,
   useState,
   useCallback,
+  useSyncExternalStore,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { Streamdown } from "streamdown";
 import Link from "next/link";
+import { Button } from "@vercel/geistdocs/components/button";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { cn } from "@/lib/utils";
 
 const STORAGE_KEY = "docs-chat-messages";
 const transport = new DefaultChatTransport({ api: "/api/docs-chat" });
@@ -19,6 +22,21 @@ const transport = new DefaultChatTransport({ api: "/api/docs-chat" });
 const DESKTOP_DEFAULT_WIDTH = 400;
 const DESKTOP_MIN_WIDTH = 300;
 const DESKTOP_MAX_WIDTH = 700;
+const DESKTOP_QUERY = "(min-width: 1280px)";
+
+function subscribeToDesktop(onStoreChange: () => void) {
+  const media = window.matchMedia(DESKTOP_QUERY);
+  media.addEventListener("change", onStoreChange);
+  return () => media.removeEventListener("change", onStoreChange);
+}
+
+function getDesktopSnapshot() {
+  return window.matchMedia(DESKTOP_QUERY).matches;
+}
+
+function getServerDesktopSnapshot(): boolean | null {
+  return null;
+}
 
 function setCookie(name: string, value: string) {
   document.cookie = `${name}=${encodeURIComponent(value)};path=/;max-age=${60 * 60 * 24 * 365};samesite=lax`;
@@ -129,39 +147,33 @@ export function DocsChat({
   defaultOpen?: boolean;
   defaultWidth?: number;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const [openOverride, setOpen] = useState<boolean | null>(null);
   const [input, setInput] = useState("");
-  const [isDesktop, setIsDesktop] = useState(false);
-  const [hasMounted, setHasMounted] = useState(false);
-  const [desktopWidth, setDesktopWidth] = useState(
-    Math.min(DESKTOP_MAX_WIDTH, Math.max(DESKTOP_MIN_WIDTH, defaultWidth)),
+  const isDesktop = useSyncExternalStore(
+    subscribeToDesktop,
+    getDesktopSnapshot,
+    getServerDesktopSnapshot,
+  );
+  const hasMounted = isDesktop !== null;
+  const open = openOverride ?? (defaultOpen && (isDesktop ?? true));
+  const [desktopWidth, setDesktopWidth] = useState(() =>
+    Number.isFinite(defaultWidth) && defaultWidth > 0
+      ? Math.min(DESKTOP_MAX_WIDTH, Math.max(DESKTOP_MIN_WIDTH, defaultWidth))
+      : DESKTOP_DEFAULT_WIDTH,
   );
   const messagesScrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const launcherRef = useRef<HTMLDivElement>(null);
   const restoredRef = useRef(false);
   const isDraggingRef = useRef(false);
 
   const { messages, sendMessage, status, setMessages, error } = useChat({
     transport,
+    onError: () => setOpen(true),
   });
 
   const isLoading = status === "streaming" || status === "submitted";
   const showMessages = messages.length > 0 || !!error || isLoading;
-
-  // Detect desktop vs mobile. Close sidebar on mobile if it was open from cookie.
-  useEffect(() => {
-    const mq = window.matchMedia("(min-width: 640px)");
-    setIsDesktop(mq.matches);
-    setHasMounted(true);
-    // If on mobile but sidebar was open from cookie, close it
-    if (!mq.matches && defaultOpen) {
-      setOpen(false);
-    }
-    const handler = (e: MediaQueryListEvent) => setIsDesktop(e.matches);
-    mq.addEventListener("change", handler);
-    return () => mq.removeEventListener("change", handler);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // Persist open state to cookie (only after mount to avoid overwriting on mobile)
   useEffect(() => {
@@ -170,9 +182,44 @@ export function DocsChat({
     }
   }, [open, hasMounted]);
 
-  // Push page content on desktop when pane is open.
-  // Use padding on body so the page scrollbar stays at the viewport edge (behind the sidebar)
-  // instead of appearing right next to the sidebar's scrollbar.
+  useEffect(() => {
+    const launcher = launcherRef.current;
+    if (!hasMounted || open || !launcher) return;
+    const footer = document.querySelector("footer");
+    let frame = 0;
+    const update = () => {
+      frame = 0;
+      const rect = document
+        .querySelector("footer fieldset")
+        ?.getBoundingClientRect();
+      const overlap =
+        rect && rect.width > 0 && rect.bottom > 0
+          ? Math.max(0, window.innerHeight - rect.top)
+          : 0;
+      launcher.style.setProperty("--chat-launcher-bottom", `${24 + overlap}px`);
+    };
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(update);
+    };
+    const resize = new ResizeObserver(schedule);
+    resize.observe(document.body);
+    const mutation = new MutationObserver(schedule);
+    if (footer) {
+      resize.observe(footer);
+      mutation.observe(footer, { childList: true, subtree: true });
+    }
+    window.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", schedule);
+    update();
+    return () => {
+      cancelAnimationFrame(frame);
+      resize.disconnect();
+      mutation.disconnect();
+      window.removeEventListener("scroll", schedule);
+      window.removeEventListener("resize", schedule);
+    };
+  }, [hasMounted, open]);
+
   useEffect(() => {
     const body = document.body;
     if (isDesktop && open) {
@@ -258,25 +305,19 @@ export function DocsChat({
     }
   }, [messages, isLoading]);
 
-  // Cmd+K to open sidebar and focus prompt, Escape to close
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "i" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
-        setOpen((prev) => {
-          if (!prev) {
-            setTimeout(() => inputRef.current?.focus(), 200);
-          }
-          return !prev;
-        });
+        setOpen(!open);
       }
-      if (e.key === "Escape" && open && isDesktop) {
+      if (e.key === "Escape" && open) {
         setOpen(false);
       }
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [open, isDesktop]);
+  }, [open]);
 
   // Auto-focus input when opened
   useEffect(() => {
@@ -285,11 +326,6 @@ export function DocsChat({
       return () => clearTimeout(timer);
     }
   }, [open]);
-
-  // Auto-open when error occurs
-  useEffect(() => {
-    if (error) setOpen(true);
-  }, [error]);
 
   // Scroll to bottom when messages change or error occurs
   useEffect(() => {
@@ -326,22 +362,29 @@ export function DocsChat({
   // Shared chat panel content used by both desktop and mobile
   const chatPanel = (
     <>
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-border/50 shrink-0">
+      <div className="flex items-center justify-between gap-2 border-b border-border shrink-0 pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-[max(0.75rem,env(safe-area-inset-top))] pb-3">
         <span className="text-sm font-medium">agent-browser Docs</span>
         <div className="flex items-center gap-3">
           {showMessages && (
-            <button
+            <Button
               onClick={handleClear}
-              className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+              size="small"
+              variant="tertiary"
               aria-label="Clear conversation"
             >
               Clear
-            </button>
+            </Button>
           )}
-          <button
-            onClick={() => setOpen(false)}
-            className="text-muted-foreground hover:text-foreground transition-colors"
+          <Button
+            onClick={() => {
+              setOpen(false);
+              requestAnimationFrame(() =>
+                launcherRef.current?.querySelector("button")?.focus(),
+              );
+            }}
+            size="small"
+            variant="tertiary"
+            svgOnly
             aria-label="Close panel"
           >
             <svg
@@ -357,15 +400,14 @@ export function DocsChat({
               <line x1="18" y1="6" x2="6" y2="18" />
               <line x1="6" y1="6" x2="18" y2="18" />
             </svg>
-          </button>
+          </Button>
         </div>
       </div>
 
-      {/* Content: suggestions or messages */}
       {showMessages ? (
         <div
           ref={messagesScrollRef}
-          className="flex-1 min-h-0 p-4 space-y-4 overflow-y-auto"
+          className="flex flex-col flex-1 min-h-0 gap-4 py-4 pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] overflow-y-auto"
         >
           {messages.map((message) => {
             if (!hasVisibleContent(message.parts)) return null;
@@ -382,13 +424,13 @@ export function DocsChat({
                       .join("")}
                   </div>
                 ) : (
-                  <div className="space-y-2">
+                  <div className="flex flex-col gap-2">
                     {message.parts.map((part, i) => {
                       if (part.type === "text" && part.text) {
                         return (
                           <div
                             key={i}
-                            className="docs-chat-content text-sm text-foreground leading-relaxed prose prose-sm dark:prose-invert max-w-none"
+                            className="docs-chat-content text-sm text-foreground leading-relaxed"
                           >
                             <Streamdown>{part.text}</Streamdown>
                           </div>
@@ -425,25 +467,25 @@ export function DocsChat({
         <div className="flex-1 min-h-0 flex flex-col">
           <div className="flex flex-wrap gap-2 p-4">
             {SUGGESTIONS.map((s) => (
-              <button
+              <Button
                 key={s}
-                type="button"
+                typeName="button"
+                size="small"
+                variant="secondary"
                 onClick={() => {
                   sendMessage({ text: s });
                 }}
-                className="text-xs px-3 py-1.5 rounded-full border bg-secondary font-medium text-muted-foreground hover:text-foreground transition-colors"
               >
                 {s}
-              </button>
+              </Button>
             ))}
           </div>
         </div>
       )}
 
-      {/* Input bar */}
       <form
         onSubmit={handleSubmit}
-        className="flex items-end gap-2 px-4 py-3 border-t border-border/50 shrink-0"
+        className="flex items-end gap-2 pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-border shrink-0"
       >
         <textarea
           ref={inputRef}
@@ -456,18 +498,22 @@ export function DocsChat({
           rows={1}
           enterKeyHint="send"
           placeholder="Ask a question..."
+          aria-label="Ask a question about agent-browser"
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
               handleSubmit(e);
             }
           }}
-          className="flex-1 bg-transparent text-base sm:text-sm text-foreground outline-none disabled:opacity-50 resize-none max-h-32 leading-relaxed placeholder:text-muted-foreground"
+          className="flex-1 min-w-0 bg-transparent text-base sm:text-sm text-foreground outline-none focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring disabled:opacity-50 resize-none max-h-32 leading-relaxed placeholder:text-muted-foreground"
         />
-        <button
-          type="submit"
+        <Button
+          typeName="submit"
+          size="small"
+          shape="circle"
+          svgOnly
           disabled={isLoading || !input.trim()}
-          className="bg-primary text-primary-foreground rounded-full p-1.5 hover:bg-primary/90 transition-colors disabled:opacity-30 shrink-0"
+          className="shrink-0"
           aria-label="Send message"
         >
           <svg
@@ -483,32 +529,50 @@ export function DocsChat({
             <line x1="12" y1="19" x2="12" y2="5" />
             <polyline points="5 12 12 5 19 12" />
           </svg>
-        </button>
+        </Button>
       </form>
     </>
   );
 
   return (
     <>
-      {/* Ask AI trigger button */}
       {!open && (
-        <button
-          onClick={() => setOpen(true)}
-          className="fixed z-50 bottom-4 left-1/2 -translate-x-1/2 sm:left-auto sm:translate-x-0 sm:right-4 flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground shadow-lg hover:opacity-90 transition-opacity text-sm font-medium"
-          aria-label="Ask AI"
+        <div
+          ref={launcherRef}
+          data-docs-chat-launcher
+          className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] left-1/2 z-30 -translate-x-1/2 min-[640px]:right-[max(1.5rem,env(safe-area-inset-right))] min-[640px]:bottom-[max(var(--chat-launcher-bottom,24px),env(safe-area-inset-bottom))] min-[640px]:left-auto min-[640px]:translate-x-0"
         >
-          Ask AI
-          <kbd className="hidden sm:inline-flex items-center gap-0.5 text-xs opacity-60 font-mono">
-            <span>&#8984;</span>I
-          </kbd>
-        </button>
+          <Button
+            onClick={() => setOpen(true)}
+            size="medium"
+            className="h-10 shadow-lg min-[640px]:h-9"
+            aria-label="Ask AI"
+            aria-expanded={open}
+            aria-controls={
+              isDesktop
+                ? "agent-browser-chat-desktop"
+                : "agent-browser-chat-mobile"
+            }
+            aria-keyshortcuts="Meta+I Control+I"
+          >
+            Ask AI
+            <kbd className="ml-2 hidden items-center gap-0.5 font-mono text-xs opacity-60 min-[640px]:inline-flex">
+              <span>&#8984;</span>I
+            </kbd>
+          </Button>
+        </div>
       )}
 
-      {/* Desktop: resizable side pane -- always rendered, hidden on mobile via CSS */}
       <aside
-        className={`hidden sm:flex fixed top-0 right-0 bottom-0 z-40 border-l border-border/50 bg-background transition-transform duration-150 ease-in-out ${open ? "translate-x-0" : "translate-x-full"}`}
+        id="agent-browser-chat-desktop"
+        aria-label="agent-browser documentation assistant"
+        inert={!open || !isDesktop}
+        className={cn(
+          "hidden xl:flex fixed top-0 right-0 bottom-0 z-40 border-l border-border bg-background transition-transform duration-150 ease-in-out motion-reduce:transition-none",
+          open ? "translate-x-0" : "translate-x-full",
+        )}
         style={{ width: desktopWidth }}
-        aria-hidden={!open}
+        aria-hidden={!open || !isDesktop}
       >
         {/* Resize handle */}
         <div
@@ -518,17 +582,22 @@ export function DocsChat({
         <div className="flex flex-col flex-1 min-w-0">{chatPanel}</div>
       </aside>
 
-      {/* Mobile: Sheet overlay/drawer -- only after mount to avoid flash on desktop */}
       {hasMounted && !isDesktop && (
         <Sheet open={open} onOpenChange={setOpen}>
           <SheetContent
             side="right"
             showCloseButton={false}
-            overlayClassName="bg-background!"
-            className="inset-0! w-full! h-full! max-w-none! border-l-0! p-0 flex flex-col"
-            style={{ backgroundColor: "var(--background)", opacity: 1 }}
+            id="agent-browser-chat-mobile"
+            aria-describedby={undefined}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              launcherRef.current?.querySelector("button")?.focus();
+            }}
+            className="inset-0! w-full! h-dvh! max-w-none! border-l-0! p-0! flex flex-col gap-0"
           >
-            <SheetTitle className="sr-only">AI Chat</SheetTitle>
+            <SheetTitle className="sr-only">
+              agent-browser documentation assistant
+            </SheetTitle>
             {chatPanel}
           </SheetContent>
         </Sheet>
