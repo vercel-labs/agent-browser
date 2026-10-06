@@ -131,7 +131,7 @@ jobs:
       - name: Create and verify signed release manifest
         id: sign
         continue-on-error: true
-        uses: jdx/packslip@2af36e792faa28130987c8af509e475c7458405d # v1.6.0; internally SHA-256 locked CLI
+        uses: jdx/packslip@2af36e792faa28130987c8af509e475c7458405d # v1.6.0
         with:
           artifacts: dist/agent-browser-*
           tag: v${{ needs.check-release.outputs.version }}
