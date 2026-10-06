@@ -2,10 +2,8 @@
 //! version-mismatched daemons, purge expired state files, and generate a
 //! missing encryption key.
 
-use std::env;
 use std::fs;
 use std::path::Path;
-use std::time::{Duration, SystemTime};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -15,7 +13,7 @@ use serde_json::json;
 use super::helpers::new_id;
 use super::{Check, Status};
 use crate::connection::{cleanup_stale_files, send_command, walk_daemons};
-use crate::native::state::{get_sessions_dir, get_state_dir};
+use crate::native::state::{get_state_dir, state_clean, state_expiration_days};
 
 pub(super) fn run(checks: &mut [Check], fixed: &mut Vec<String>) {
     // `close_all_sessions` is expensive and closes every session at once, so
@@ -98,29 +96,13 @@ fn close_all_sessions() -> usize {
 }
 
 fn purge_old_state() -> usize {
-    let dir = get_sessions_dir();
-    let expire_days = env::var("AGENT_BROWSER_STATE_EXPIRE_DAYS")
+    let Some(days) = state_expiration_days() else {
+        return 0;
+    };
+    state_clean(days)
         .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(30);
-    let cutoff = SystemTime::now()
-        .checked_sub(Duration::from_secs(expire_days * 86_400))
-        .unwrap_or(SystemTime::UNIX_EPOCH);
-    let mut removed = 0;
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                if let Ok(meta) = entry.metadata() {
-                    if let Ok(modified) = meta.modified() {
-                        if modified < cutoff && fs::remove_file(entry.path()).is_ok() {
-                            removed += 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    removed
+        .and_then(|result| result.get("cleaned").and_then(|value| value.as_u64()))
+        .unwrap_or(0) as usize
 }
 
 fn create_encryption_key() -> bool {
@@ -243,5 +225,21 @@ mod tests {
             tmp.path().join(".agent-browser/.encryption-key").exists(),
             "key file should exist at ~/.agent-browser/.encryption-key"
         );
+    }
+
+    #[test]
+    fn test_purge_old_state_does_not_delete_when_expiration_is_disabled() {
+        let guard = crate::test_utils::EnvGuard::new(&["HOME", "AGENT_BROWSER_STATE_EXPIRE_DAYS"]);
+        let tmp = TempDir::new().unwrap();
+        guard.set("HOME", tmp.path().to_str().unwrap());
+        guard.set("AGENT_BROWSER_STATE_EXPIRE_DAYS", "0");
+
+        let sessions = crate::native::state::get_sessions_dir();
+        fs::create_dir_all(&sessions).unwrap();
+        let state = sessions.join("keep.json");
+        fs::write(&state, "{}").unwrap();
+
+        assert_eq!(purge_old_state(), 0);
+        assert!(state.exists());
     }
 }
