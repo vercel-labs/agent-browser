@@ -1,8 +1,32 @@
 # agent-browser
 
-## 0.38.2
+## 0.39.0
 
 <!-- release:start -->
+### New Features
+
+- Added an experimental **Obscura engine** (`--engine obscura`), launched and cleaned up locally like Chrome with bounded startup and CLI/MCP support. Obscura still has accessibility and rendering gaps, so review the engine page before choosing it (#1876)
+
+### Bug Fixes
+
+- Fixed **selector-scoped snapshots** (`snapshot -s`) so elements under ignored wrappers are no longer printed twice and shadow root content of a selected custom element is no longer dropped (#2043)
+- Fixed **`--auto-connect`** to wait up to 30s while Chrome 144+ shows the remote-debugging prompt, so it no longer opens repeated prompts or fails with "No running Chrome instance found" (#2026)
+
+### Documentation
+
+- Migrated the **docs site** to Geistdocs (#1887)
+
+### Contributors
+
+- @NamanSatish
+- @Railly
+- @SGavrl
+- @SUSINDRAREDDY
+- @godtail
+<!-- release:end -->
+
+## 0.38.2
+
 ### Bug Fixes
 
 - Fixed **auth vault login** to pick usable controls when hidden duplicates exist, and to bind credential entry to the selected field so replaced fields or redirected focus are rejected before submitting (#2014)
@@ -30,7 +54,6 @@
 - @robertjamesprior
 - @simonellefsen
 - @zyz619963502zyz
-<!-- release:end -->
 
 ## 0.38.1
 
