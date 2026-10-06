@@ -47,10 +47,10 @@ test("deployment explicitly uses Corepack for frozen installs and builds", async
   assert.equal(config.buildCommand, "corepack pnpm run build");
 });
 
-test("baseline pins all 38 routes and the original metadata, slugger and converter sources", () => {
-  assert.equal(baseline.commit, "526157cfd4ec64f45939f9ba0f10d5936aa7ac33");
-  assert.equal(pages.length, 38);
-  assert.equal(new Set(pages.map((page) => page.path)).size, 38);
+test("baseline pins all 39 routes and the original metadata, slugger and converter sources", () => {
+  assert.equal(baseline.commit, "efee3893d9080fcacb1aa6c9a21d13fbc6021f20");
+  assert.equal(pages.length, 39);
+  assert.equal(new Set(pages.map((page) => page.path)).size, 39);
   for (const path of [
     "docs/mdx-components.tsx",
     "docs/src/lib/mdx-to-markdown.ts",
@@ -306,7 +306,7 @@ test("tracking oracle permits Flight serialization but rejects visible, canonica
     );
 });
 
-test("migrated content has exactly the 38 original public pages", async () => {
+test("migrated content has exactly the 39 original public pages", async () => {
   const entries = await readdir(new URL("../content/docs/", import.meta.url), {
     recursive: true,
   });

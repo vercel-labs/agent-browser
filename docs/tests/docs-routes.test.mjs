@@ -711,7 +711,7 @@ test("native search empty and unmatched queries return arrays, not legacy object
   }
 });
 
-test("sitemap contains exactly the 38 canonical production URLs", async () => {
+test("sitemap contains exactly the 39 canonical production URLs", async () => {
   const response = await get("/sitemap.xml", { headers: agent });
   responseType(response, "application/xml");
   indexing(response);
@@ -732,7 +732,7 @@ test("sitemap contains exactly the 38 canonical production URLs", async () => {
 });
 
 for (const path of ["/llms.txt", "/sitemap.md"]) {
-  test(`${path}: agent index exposes all 38 public pages and Markdown alternatives exactly once`, async () => {
+  test(`${path}: agent index exposes all 39 public pages and Markdown alternatives exactly once`, async () => {
     const response = await get(path, { headers: agent });
     responseType(
       response,

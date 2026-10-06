@@ -8,7 +8,7 @@ import { runInNewContext } from "node:vm";
 import { createProcessor } from "@mdx-js/mdx";
 import ts from "typescript";
 
-const commit = "526157cfd4ec64f45939f9ba0f10d5936aa7ac33";
+const commit = "efee3893d9080fcacb1aa6c9a21d13fbc6021f20";
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const output = new URL("../tests/fixtures/docs-baseline.json", import.meta.url);
 const git = (...args) =>
@@ -131,8 +131,8 @@ const files = git("ls-tree", "-r", "--name-only", commit, "docs/src/app")
   .sort();
 assert.equal(
   files.length,
-  38,
-  "Pinned commit must contain exactly 38 public pages",
+  39,
+  "Pinned commit must contain exactly 39 public pages",
 );
 const pages = files.map((source) => {
   const raw = original(source);

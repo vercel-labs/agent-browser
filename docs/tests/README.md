@@ -2,7 +2,7 @@
 
 ## Fixture provenance
 
-`fixtures/docs-baseline.json` is pinned to `526157cfd4ec64f45939f9ba0f10d5936aa7ac33`. The capture script reads git objects at that commit, not migrated application code or content. It preserves all 38 original `docs/src/app/**/page.mdx` files, their layouts, root metadata, `mdx-components.tsx`, `page-metadata.ts`, `page-titles.ts`, navigation, search implementation, and `mdx-to-markdown.ts`: 84 complete source files with SHA-256 hashes. Public resources and favicon are pinned by byte length and SHA-256.
+`fixtures/docs-baseline.json` is pinned to `efee3893d9080fcacb1aa6c9a21d13fbc6021f20`. The capture script reads git objects at that commit, not migrated application code or content. It preserves all 39 original `docs/src/app/**/page.mdx` files, their layouts, root metadata, `mdx-components.tsx`, `page-metadata.ts`, `page-titles.ts`, navigation, search implementation, and `mdx-to-markdown.ts`: 86 complete source files with SHA-256 hashes. Public resources and favicon are pinned by byte length and SHA-256.
 
 Each page records its complete source hash, original H1 insertion position, metadata, heading levels/text/IDs, prose paragraphs, table cells, code examples, links, legacy Markdown and new Markdown derived from the original source. The H1 insertion position preserves imports before the title, as on `/diffing`.
 
@@ -53,7 +53,7 @@ Set `DOCS_EXPECT_NOINDEX=1` when testing an existing preview server. The capture
 
 ## Regression invariants
 
-- Exactly 38 public pages, byte-for-byte reconstruction of original MDX, SSR prose/table/code content, original heading levels/order/anchor multiplicity, metadata, canonical URLs and Markdown alternates.
+- Exactly 39 public pages, byte-for-byte reconstruction of original MDX, SSR prose/table/code content, original heading levels/order/anchor multiplicity, metadata, canonical URLs and Markdown alternates.
 - Every page's new Markdown API, `.md`, negotiated Markdown, legacy query API and HEAD responses. Markdown content is checked in full, not only by headings or representative substrings.
 - Link destinations are resolved against the canonical page URL before comparison. Absolute and relative references to the same resource are equivalent; changes to origin, path, query or fragment are not.
 - Images retain original alt text. Direct sources and every responsive `srcset` candidate are resolved through Next's image optimizer to their underlying same-origin resources. Those bytes must match the original resource fixture's length and SHA-256, including when static imports generate hashed filenames. Alt text or filenames alone cannot establish image parity.
@@ -63,7 +63,7 @@ Set `DOCS_EXPECT_NOINDEX=1` when testing an existing preview server. The capture
 - Alternating HTML/Markdown requests cannot contaminate one another. Tracking queries must not change visible text, metadata, document links or Markdown. Next's Flight hydration scripts may serialize the request URL; their presence is not content or canonical leakage. Mutation tests demonstrate that visible, canonical and OG leakage still fails.
 - Permanent locale and trailing-slash redirects preserve request origin and queries. HTML/Markdown/API misses return real 404s, including HEAD. Raw malformed encoding, encoded separators/control characters, double encoding and unsafe legacy path values are rejected.
 - Legacy search shape, ranking, snippets and empty-query behavior; native search arrays containing table text and nested-section fragments that resolve to SSR anchors.
-- Exact canonical sitemap/index inventories, environment-aware robots, original static resource hashes, all 38 OG PNG endpoints with signature and 1200x630 dimensions, and Next CSS/JS/font routing.
+- Exact canonical sitemap/index inventories, environment-aware robots, original static resource hashes, all 39 OG PNG endpoints with signature and 1200x630 dimensions, and Next CSS/JS/font routing.
 
 ## Compatibility contracts
 
