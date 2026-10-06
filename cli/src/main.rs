@@ -2283,8 +2283,10 @@ fn run_batch(
             }
         };
         attach_input_mode(&mut parsed, flags);
-        if parsed.get("action").and_then(|v| v.as_str()) == Some("read") {
-            parsed["tls"] = json!(tls::session_options(flags, &flags.session));
+        match parsed.get("action").and_then(|v| v.as_str()) {
+            Some("read") => parsed["tls"] = json!(tls::session_options(flags, &flags.session)),
+            Some("close") => tls::clear_session(&flags.session),
+            _ => {}
         }
 
         let action = parsed

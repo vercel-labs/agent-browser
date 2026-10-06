@@ -537,3 +537,19 @@ fn stdin_batch_read_uses_session_trust_without_a_browser() {
         );
     }
 }
+
+#[test]
+fn batch_close_clears_session_trust() {
+    let a = TlsServer::a();
+    let session = Session::new();
+    let ca = session.ca("ca.pem", CA_A);
+    read(
+        &session,
+        &a.url(),
+        &["--ca-cert", ca.to_str().unwrap()],
+        true,
+    );
+    let response = session.run(&["batch", "close"]);
+    assert_eq!(response[0]["success"], true, "{response}");
+    read(&session, &a.url(), &[], false);
+}
