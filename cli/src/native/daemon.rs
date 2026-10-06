@@ -20,6 +20,29 @@ use super::state;
 use super::stream::{IdleActivity, StreamServer};
 use crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION;
 
+#[cfg(test)]
+static TEST_SHUTDOWN_ARMED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static TEST_COMMAND_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static TEST_SHUTDOWN_ARMED_NOTIFY: std::sync::OnceLock<tokio::sync::Notify> =
+    std::sync::OnceLock::new();
+#[cfg(test)]
+static TEST_COMMAND_STARTED_NOTIFY: std::sync::OnceLock<tokio::sync::Notify> =
+    std::sync::OnceLock::new();
+#[cfg(test)]
+static TEST_DRAIN_WAITING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static TEST_DRAIN_WAITING_NOTIFY: std::sync::OnceLock<tokio::sync::Notify> =
+    std::sync::OnceLock::new();
+#[cfg(test)]
+static TEST_COMMAND_RELEASE: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+#[cfg(test)]
+static TEST_SIGNAL_LIFECYCLE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub async fn run_daemon(session: &str) {
     let socket_dir = get_daemon_socket_dir();
     if !socket_dir.exists() {
@@ -257,6 +280,9 @@ async fn run_socket_server(
     let idle_sleep = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
     let mut idle_sleep_pin = idle_sleep.map(Box::pin);
 
+    let shutdown_signal = shutdown_signal();
+    tokio::pin!(shutdown_signal);
+
     loop {
         tokio::select! {
             accept_result = listener.accept() => {
@@ -276,6 +302,15 @@ async fn run_socket_server(
                 }
             }
             _ = drain_interval.tick() => {
+                #[cfg(test)]
+                if TEST_COMMAND_STARTED.load(std::sync::atomic::Ordering::SeqCst)
+                    && state.try_lock().is_err()
+                {
+                    TEST_DRAIN_WAITING.store(true, std::sync::atomic::Ordering::SeqCst);
+                    TEST_DRAIN_WAITING_NOTIFY
+                        .get_or_init(tokio::sync::Notify::new)
+                        .notify_one();
+                }
                 let mut s = state.lock().await;
                 let process_exited = s
                     .browser
@@ -344,7 +379,7 @@ async fn run_socket_server(
                 // so destructors fire.
                 break;
             }
-            _ = shutdown_signal() => {
+            _ = &mut shutdown_signal => {
                 let mut s = state.lock().await;
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_all_browser_backends(&mut s).await;
@@ -405,6 +440,9 @@ async fn run_socket_server(
     let idle_sleep = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
     let mut idle_sleep_pin = idle_sleep.map(Box::pin);
 
+    let shutdown_signal = shutdown_signal();
+    tokio::pin!(shutdown_signal);
+
     // Mirror the unix loop's background tick: reap a browser the user closed
     // by hand, and drain CDP events (dialog state in particular) before
     // autosave so a save never runs against a dialog-blocked renderer.
@@ -430,6 +468,15 @@ async fn run_socket_server(
                 }
             }
             _ = drain_interval.tick() => {
+                #[cfg(test)]
+                if TEST_COMMAND_STARTED.load(std::sync::atomic::Ordering::SeqCst)
+                    && state.try_lock().is_err()
+                {
+                    TEST_DRAIN_WAITING.store(true, std::sync::atomic::Ordering::SeqCst);
+                    TEST_DRAIN_WAITING_NOTIFY
+                        .get_or_init(tokio::sync::Notify::new)
+                        .notify_one();
+                }
                 let mut s = state.lock().await;
                 let process_exited = s
                     .browser
@@ -487,7 +534,7 @@ async fn run_socket_server(
                 let _ = fs::remove_file(&port_path);
                 break;
             }
-            _ = shutdown_signal() => {
+            _ = &mut shutdown_signal => {
                 let mut s = state.lock().await;
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_all_browser_backends(&mut s).await;
@@ -551,6 +598,21 @@ async fn handle_connection<S>(
 
                 let response = {
                     let mut s = state.lock().await;
+                    #[cfg(test)]
+                    let response = if action == "__test_hold_state" {
+                        TEST_COMMAND_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
+                        TEST_COMMAND_STARTED_NOTIFY
+                            .get_or_init(tokio::sync::Notify::new)
+                            .notify_one();
+                        TEST_COMMAND_RELEASE
+                            .get_or_init(tokio::sync::Notify::new)
+                            .notified()
+                            .await;
+                        serde_json::json!({"success": true, "data": {"released": true}})
+                    } else {
+                        execute_command(&cmd, &mut s).await
+                    };
+                    #[cfg(not(test))]
                     let response = execute_command(&cmd, &mut s).await;
                     // Refresh while the state lock is still held. An idle
                     // timer waiting on this command will observe the updated
@@ -618,7 +680,7 @@ fn close_completed_response(action: &str, response: &Value) -> bool {
     })
 }
 
-async fn shutdown_signal() {
+fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     #[cfg(unix)]
     {
         let mut sigint = match signal::unix::signal(signal::unix::SignalKind::interrupt()) {
@@ -647,18 +709,34 @@ async fn shutdown_signal() {
             }
         };
 
-        tokio::select! {
-            _ = sigint.recv() => {}
-            _ = sigterm.recv() => {}
-            _ = sighup.recv() => {}
+        #[cfg(test)]
+        TEST_SHUTDOWN_ARMED.store(true, std::sync::atomic::Ordering::SeqCst);
+        #[cfg(test)]
+        TEST_SHUTDOWN_ARMED_NOTIFY
+            .get_or_init(tokio::sync::Notify::new)
+            .notify_one();
+
+        async move {
+            tokio::select! {
+                _ = sigint.recv() => {}
+                _ = sigterm.recv() => {}
+                _ = sighup.recv() => {}
+            }
         }
     }
 
     #[cfg(windows)]
     {
-        if let Err(e) = signal::ctrl_c().await {
-            let _ = writeln!(std::io::stderr(), "Failed to install Ctrl+C handler: {}", e);
-            process::exit(1);
+        let mut ctrl_c = match signal::windows::ctrl_c() {
+            Ok(signal) => signal,
+            Err(e) => {
+                let _ = writeln!(std::io::stderr(), "Failed to install Ctrl+C handler: {}", e);
+                process::exit(1);
+            }
+        };
+
+        async move {
+            let _ = ctrl_c.recv().await;
         }
     }
 }
@@ -740,6 +818,220 @@ mod tests {
         // wait for a new full idle period instead of closing immediately.
         activity.mark();
         assert!(remaining_idle_timeout(&activity, 100).is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_shutdown_signal_is_retained_while_command_holds_state_lock() {
+        use std::sync::atomic::Ordering;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixStream;
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let _signal_test_guard = TEST_SIGNAL_LIFECYCLE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        TEST_SHUTDOWN_ARMED.store(false, Ordering::SeqCst);
+        TEST_COMMAND_STARTED.store(false, Ordering::SeqCst);
+        TEST_DRAIN_WAITING.store(false, Ordering::SeqCst);
+
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("shutdown-test.sock");
+        let server = spawn_shutdown_test_server(socket_path.clone(), "shutdown-test");
+        wait_for_shutdown_registration().await;
+
+        let mut client = UnixStream::connect(&socket_path).await.unwrap();
+        client
+            .write_all(b"{\"action\":\"__test_hold_state\"}\n")
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !TEST_COMMAND_STARTED.load(Ordering::SeqCst)
+                || !TEST_DRAIN_WAITING.load(Ordering::SeqCst)
+            {
+                if !TEST_COMMAND_STARTED.load(Ordering::SeqCst) {
+                    TEST_COMMAND_STARTED_NOTIFY
+                        .get_or_init(tokio::sync::Notify::new)
+                        .notified()
+                        .await;
+                } else {
+                    TEST_DRAIN_WAITING_NOTIFY
+                        .get_or_init(tokio::sync::Notify::new)
+                        .notified()
+                        .await;
+                }
+            }
+        })
+        .await
+        .expect("background drain should be waiting on the command's state lock");
+
+        let mut signal_observer = signal(SignalKind::terminate()).unwrap();
+        assert_eq!(
+            unsafe { libc::kill(libc::getpid(), libc::SIGTERM) },
+            0,
+            "SIGTERM should be delivered to the test daemon"
+        );
+        tokio::time::timeout(Duration::from_secs(2), signal_observer.recv())
+            .await
+            .expect("Tokio should dispatch SIGTERM while the command is still active");
+
+        TEST_COMMAND_RELEASE
+            .get_or_init(tokio::sync::Notify::new)
+            .notify_one();
+        let mut response = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            BufReader::new(&mut client).read_line(&mut response),
+        )
+        .await
+        .expect("active command should reach its safe completion point")
+        .unwrap();
+        assert!(response.contains("\"released\":true"), "{response}");
+
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("daemon should exit after the command releases the state lock")
+            .unwrap()
+            .unwrap();
+        drop(client);
+        fs::remove_file(socket_path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_repeated_shutdown_signals_exit_without_panicking() {
+        use std::sync::atomic::Ordering;
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let _signal_test_guard = TEST_SIGNAL_LIFECYCLE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        TEST_SHUTDOWN_ARMED.store(false, Ordering::SeqCst);
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("repeated-shutdown-test.sock");
+        let server = spawn_shutdown_test_server(socket_path.clone(), "repeated-shutdown-test");
+        wait_for_shutdown_registration().await;
+
+        let mut signal_observer = signal(SignalKind::terminate()).unwrap();
+        assert_eq!(unsafe { libc::kill(libc::getpid(), libc::SIGTERM) }, 0);
+        tokio::time::timeout(Duration::from_secs(2), signal_observer.recv())
+            .await
+            .expect("Tokio should dispatch the first SIGTERM to the daemon");
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("daemon should exit after its first SIGTERM")
+            .unwrap()
+            .unwrap();
+        assert_eq!(unsafe { libc::kill(libc::getpid(), libc::SIGTERM) }, 0);
+        tokio::time::timeout(Duration::from_secs(2), signal_observer.recv())
+            .await
+            .expect("a repeated SIGTERM during shutdown should not panic");
+        fs::remove_file(socket_path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_idle_shutdown_signal_exits_daemon() {
+        use std::sync::atomic::Ordering;
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let _signal_test_guard = TEST_SIGNAL_LIFECYCLE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        TEST_SHUTDOWN_ARMED.store(false, Ordering::SeqCst);
+        let directory = tempfile::tempdir().unwrap();
+        let socket_path = directory.path().join("idle-shutdown-test.sock");
+        let server = spawn_shutdown_test_server(socket_path.clone(), "idle-shutdown-test");
+        wait_for_shutdown_registration().await;
+
+        let mut signal_observer = signal(SignalKind::terminate()).unwrap();
+        assert_eq!(unsafe { libc::kill(libc::getpid(), libc::SIGTERM) }, 0);
+        tokio::time::timeout(Duration::from_secs(2), signal_observer.recv())
+            .await
+            .expect("Tokio should dispatch SIGTERM to the idle daemon");
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("idle daemon should exit after one SIGTERM")
+            .unwrap()
+            .unwrap();
+        fs::remove_file(socket_path).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn spawn_shutdown_test_server(
+        socket_path: PathBuf,
+        session: &'static str,
+    ) -> tokio::task::JoinHandle<Result<(), String>> {
+        tokio::spawn(async move {
+            run_socket_server(
+                &socket_path,
+                session,
+                None,
+                None,
+                Arc::new(IdleActivity::new()),
+                None,
+                30_000,
+            )
+            .await
+        })
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_shutdown_registration() {
+        use std::sync::atomic::Ordering;
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !TEST_SHUTDOWN_ARMED.load(Ordering::SeqCst) {
+                TEST_SHUTDOWN_ARMED_NOTIFY
+                    .get_or_init(tokio::sync::Notify::new)
+                    .notified()
+                    .await;
+            }
+        })
+        .await
+        .expect("daemon should register shutdown signals before accepting work");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_socket_close_stops_daemon_without_signal() {
+        use std::sync::atomic::Ordering;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixStream;
+
+        let _signal_test_guard = TEST_SIGNAL_LIFECYCLE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        TEST_SHUTDOWN_ARMED.store(false, Ordering::SeqCst);
+        let directory = tempfile::tempdir().unwrap();
+        let close_socket_path = directory.path().join("close-test.sock");
+        let close_server = spawn_shutdown_test_server(close_socket_path.clone(), "close-test");
+        wait_for_shutdown_registration().await;
+        let mut close_client = UnixStream::connect(&close_socket_path).await.unwrap();
+        close_client
+            .write_all(b"{\"action\":\"close\"}\n")
+            .await
+            .unwrap();
+        let mut close_response = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            BufReader::new(&mut close_client).read_line(&mut close_response),
+        )
+        .await
+        .expect("close should return a response")
+        .unwrap();
+        assert!(
+            close_response.contains("\"closed\":true"),
+            "{close_response}"
+        );
+        tokio::time::timeout(Duration::from_secs(2), close_server)
+            .await
+            .expect("normal close should stop the daemon")
+            .unwrap()
+            .unwrap();
+        drop(close_client);
+        fs::remove_file(close_socket_path).unwrap();
     }
 
     #[test]
