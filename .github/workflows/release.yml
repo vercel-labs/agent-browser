@@ -87,6 +87,105 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # This workflow file is the durable signing identity for Packslip consumers.
+  # Keep signing separate from release upload and optional for existing users.
+  packslip:
+    name: Sign optional release manifest
+    needs: [check-release, github-release]
+    if: >-
+      always() &&
+      needs.github-release.result == 'success' &&
+      needs.check-release.outputs.needs_github_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      bundle_ready: ${{ steps.stage.outcome == 'success' }}
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Download the binaries built by this run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: agent-browser-*
+          path: dist
+          merge-multiple: true
+
+      - name: Require all seven release binaries
+        run: |
+          set -euo pipefail
+          for binary in \
+            agent-browser-linux-x64 agent-browser-linux-arm64 \
+            agent-browser-linux-musl-x64 agent-browser-linux-musl-arm64 \
+            agent-browser-win32-x64.exe \
+            agent-browser-darwin-x64 agent-browser-darwin-arm64; do
+            test -s "dist/$binary"
+          done
+
+      - name: Create and verify signed release manifest
+        id: sign
+        continue-on-error: true
+        uses: jdx/packslip@2af36e792faa28130987c8af509e475c7458405d # v1.6.0; internally SHA-256 locked CLI
+        with:
+          artifacts: dist/agent-browser-*
+          tag: v${{ needs.check-release.outputs.version }}
+          version: ${{ needs.check-release.outputs.version }}
+          commit: ${{ github.sha }}
+          bin: agent-browser
+          manifest: packslip.toml
+          resources: |
+            skill/core=repo:skill-data/core
+            skill/electron=repo:skill-data/electron
+            skill/agentcore=repo:skill-data/agentcore
+            skill/derive-client=repo:skill-data/derive-client
+            skill/dogfood=repo:skill-data/dogfood
+            skill/protected-vercel-deployments=repo:skill-data/protected-vercel-deployments
+            skill/slack=repo:skill-data/slack
+            skill/vercel-sandbox=repo:skill-data/vercel-sandbox
+            skill/webmcp-gen=repo:skill-data/webmcp-gen
+          # These build jobs do not produce binary provenance attestations.
+          attest: false
+          upload: false
+
+      - name: Stage only a successfully verified bundle
+        id: stage
+        if: steps.sign.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: packslip-bundle
+          path: ${{ steps.sign.outputs.bundle }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-packslip:
+    name: Upload optional release manifest
+    needs: [check-release, packslip]
+    if: needs.packslip.outputs.bundle_ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: write
+    steps:
+      - name: Download the verified bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: packslip-bundle
+          path: packslip
+
+      - name: Attach the bundle to the existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: v${{ needs.check-release.outputs.version }}
+        run: gh release upload "$RELEASE_TAG" packslip/packslip.sigstore.json --clobber
+
   build-binaries:
     name: Build ${{ matrix.name }}
     needs: check-release
