@@ -1088,6 +1088,323 @@ async fn e2e_lightpanda_auto_launch_can_open_page() {
     assert_eq!(get_data(&resp)["closed"], true);
 }
 
+#[tokio::test]
+async fn test_obscura_launch_uses_request_proxy_bypass() {
+    let env = EnvGuard::new(&["AGENT_BROWSER_PROXY_BYPASS"]);
+    env.set("AGENT_BROWSER_PROXY_BYPASS", "stale-daemon-value");
+    for (options, expected) in [
+        (json!({"proxyBypass": "localhost"}), "--proxy-bypass"),
+        (json!({"proxyBypass": null}), "Failed to launch Obscura"),
+        (json!({"proxy": {"bypass": "localhost"}}), "--proxy-bypass"),
+        (json!({}), "Failed to launch Obscura"),
+    ] {
+        let mut state = DaemonState::new();
+        let mut request = json!({
+            "id": "1", "action": "launch", "headless": true,
+            "engine": "obscura", "executablePath": "/nonexistent/obscura",
+        });
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(options.as_object().unwrap().clone());
+        let resp = execute_command(&request, &mut state).await;
+        assert_eq!(resp["success"], false, "{resp}");
+        assert!(
+            resp["error"]
+                .as_str()
+                .is_some_and(|error| error.contains(expected)),
+            "{resp}"
+        );
+    }
+}
+
+fn required_obscura_binary() -> String {
+    let path = std::env::var("OBSCURA_BIN")
+        .expect("OBSCURA_BIN is required for explicitly invoked Obscura E2E verification");
+    assert!(!path.trim().is_empty(), "OBSCURA_BIN must not be empty");
+    assert!(
+        std::path::Path::new(&path).is_file(),
+        "OBSCURA_BIN must point to an existing executable: {path}"
+    );
+    path
+}
+
+struct ObscuraFixture {
+    url: String,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for ObscuraFixture {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+async fn obscura_fixture() -> ObscuraFixture {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            let body = include_str!("test_fixtures/obscura_probe.html");
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+    ObscuraFixture { url, server }
+}
+
+async fn obscura_command(state: &mut DaemonState, command: Value) -> Value {
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(30),
+        execute_command(&command, state),
+    )
+    .await
+    .expect("Obscura command must not hang")
+}
+
+fn obscura_test_environment() -> EnvGuard<'static> {
+    let env = EnvGuard::new(&[
+        "AGENT_BROWSER_CDP",
+        "AGENT_BROWSER_AUTO_CONNECT",
+        "AGENT_BROWSER_PROVIDER",
+        "AGENT_BROWSER_ENGINE",
+        "AGENT_BROWSER_EXECUTABLE_PATH",
+        "OBSCURA_ALLOW_PRIVATE_NETWORK",
+        "AGENT_BROWSER_OBSCURA_STEALTH",
+        "AGENT_BROWSER_PROXY",
+        "AGENT_BROWSER_PROXY_BYPASS",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    ]);
+    for key in [
+        "AGENT_BROWSER_CDP",
+        "AGENT_BROWSER_AUTO_CONNECT",
+        "AGENT_BROWSER_PROVIDER",
+        "AGENT_BROWSER_ENGINE",
+        "AGENT_BROWSER_EXECUTABLE_PATH",
+        "AGENT_BROWSER_OBSCURA_STEALTH",
+        "AGENT_BROWSER_PROXY",
+        "AGENT_BROWSER_PROXY_BYPASS",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    ] {
+        env.remove(key);
+    }
+    env.set("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+    env
+}
+
+async fn verify_obscura_page(auto_launch: bool) {
+    let obscura_bin = required_obscura_binary();
+    let env = obscura_test_environment();
+    let fixture = obscura_fixture().await;
+    let mut state = DaemonState::new();
+    if auto_launch {
+        env.set("AGENT_BROWSER_ENGINE", "obscura");
+        env.set("AGENT_BROWSER_EXECUTABLE_PATH", &obscura_bin);
+    } else {
+        let resp = obscura_command(
+            &mut state,
+            json!({
+                "id": "1", "action": "launch", "headless": true,
+                "engine": "obscura", "executablePath": obscura_bin,
+            }),
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["launched"], true);
+    }
+    let resp = obscura_command(
+        &mut state,
+        json!({
+            "id": "2", "action": "navigate", "url": fixture.url,
+        }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["url"], fixture.url);
+    assert_eq!(get_data(&resp)["title"], "Obscura adapter probe");
+    assert_eq!(state.engine, "obscura");
+    assert!(
+        state
+            .browser
+            .as_ref()
+            .is_some_and(|manager| manager.owns_obscura_process()),
+        "Obscura verification must own an Obscura process, not an attached browser"
+    );
+
+    let resp = obscura_command(&mut state, json!({
+        "id": "3", "action": "evaluate", "script": "document.querySelector('#message').textContent",
+    })).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], "JavaScript ready");
+
+    let resp = obscura_command(
+        &mut state,
+        json!({
+            "id": "4", "action": "snapshot",
+        }),
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        get_data(&resp)["snapshot"]
+            .as_str()
+            .is_some_and(|text| text.contains("Adapter probe")),
+        "{resp}"
+    );
+
+    let resp = obscura_command(&mut state, json!({ "id": "5", "action": "close" })).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["closed"], true);
+}
+
+#[test]
+fn test_obscura_e2e_clears_inherited_connection_modes() {
+    const PROBE: &str = "OBSCURA_TEST_ENV_PROBE";
+    let keys = [
+        "AGENT_BROWSER_CDP",
+        "AGENT_BROWSER_AUTO_CONNECT",
+        "AGENT_BROWSER_PROVIDER",
+    ];
+    if std::env::var(PROBE).as_deref() == Ok("1") {
+        let _env = obscura_test_environment();
+        for key in keys {
+            assert!(
+                std::env::var_os(key).is_none(),
+                "Obscura E2E must clear {key}"
+            );
+        }
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .env_clear()
+        .env("HOME", dir.path())
+        .env(PROBE, "1")
+        .env(keys[0], format!("ws://{}", listener.local_addr().unwrap()))
+        .env(keys[1], "1")
+        .env(keys[2], "obscura-test-not-a-provider")
+        .args([
+            "--exact",
+            "native::e2e_tests::test_obscura_e2e_clears_inherited_connection_modes",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_obscura_e2e_unlaunchable_binary_does_not_attach_to_inherited_cdp() {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let server_accepted = accepted.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            server_accepted.fetch_add(1, Ordering::SeqCst);
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                match message {
+                    Message::Text(text) => {
+                        let command: Value = serde_json::from_str(&text).unwrap();
+                        let response = json!({"id": command["id"], "error": {
+                            "code": -32000, "message": "controlled CDP endpoint must not be used by Obscura verification"
+                        }});
+                        let _ = ws.send(Message::Text(response.to_string())).await;
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+        }
+    });
+    let fixture = ObscuraFixture {
+        url: endpoint.clone(),
+        server,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let false_bin = if std::path::Path::new("/usr/bin/false").is_file() {
+        "/usr/bin/false"
+    } else {
+        "/bin/false"
+    };
+    let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .env_clear()
+        .env("HOME", dir.path())
+        .env("AGENT_BROWSER_SOCKET_DIR", dir.path())
+        .env("OBSCURA_BIN", false_bin)
+        .env("AGENT_BROWSER_CDP", &fixture.url)
+        .env("AGENT_BROWSER_PROVIDER", "obscura-test-not-a-provider")
+        .args([
+            "--exact",
+            "native::e2e_tests::e2e_obscura_auto_launch_can_open_page",
+            "--ignored",
+            "--nocapture",
+        ])
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
+        .await
+        .expect("Obscura false-binary probe must terminate")
+        .unwrap();
+    let diagnostics = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.status.code(), Some(101), "{diagnostics}");
+    assert!(
+        diagnostics.contains("Obscura exited before CDP became ready"),
+        "accepted {} inherited CDP connections\n{diagnostics}",
+        accepted.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        0,
+        "Obscura E2E attached to the inherited endpoint"
+    );
+}
+
+/// Requires a real OBSCURA_BIN; missing binaries fail rather than silently skip verification.
+#[tokio::test]
+#[ignore = "requires OBSCURA_BIN; run serially"]
+async fn e2e_obscura_launch_can_open_page() {
+    verify_obscura_page(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires OBSCURA_BIN; run serially"]
+async fn e2e_obscura_auto_launch_can_open_page() {
+    verify_obscura_page(true).await;
+}
+
 // ---------------------------------------------------------------------------
 // Runtime stream lifecycle
 // ---------------------------------------------------------------------------
@@ -5696,6 +6013,61 @@ async fn e2e_snapshot_cursor_many_elements() {
     assert_success(&resp);
 }
 
+/// Test that a selector-scoped snapshot of a web component includes the
+/// content of its shadow root.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_selector_includes_shadow_root() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html =
+        "data:text/html,<my-card><span>Slotted</span></my-card><button>Outside</button><script>\
+        customElements.define('my-card', class extends HTMLElement { constructor() { \
+        super(); this.attachShadow({ mode: 'open' }).innerHTML = \
+        '<button>Inside shadow</button><slot></slot>'; } });</script>";
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "selector": "my-card" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    assert!(
+        snapshot.contains("button \"Inside shadow\""),
+        "Snapshot should contain the shadow root button: {}",
+        snapshot
+    );
+    assert!(
+        snapshot.contains("Slotted"),
+        "Snapshot should contain the slotted text: {}",
+        snapshot
+    );
+    assert!(
+        !snapshot.contains("Outside"),
+        "Snapshot should not contain content outside the selector: {}",
+        snapshot
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// Test that InlineTextBox nodes are filtered from snapshot output while preserving
 /// the actual text content from parent elements.
 #[tokio::test]
@@ -5748,6 +6120,59 @@ async fn e2e_snapshot_continuous_static_text() {
         elapsed.as_secs() < 5,
         "snapshot with InlineTextBox filtering took {:?}, expected < 5s",
         elapsed,
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Test that a selector-scoped snapshot renders each element once when plain
+/// wrapper elements (ignored in the AX tree) sit between the matched element
+/// and its descendants.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_selector_no_duplicates() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = "data:text/html,<main><div><div><button>Save</button></div></div>\
+        <select><option>Small</option><option>Large</option></select></main>\
+        <footer><button>Outside</button></footer>";
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "selector": "main" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+
+    for name in ["button \"Save\"", "option \"Small\"", "option \"Large\""] {
+        assert_eq!(
+            snapshot.matches(name).count(),
+            1,
+            "{} should appear once: {}",
+            name,
+            snapshot
+        );
+    }
+    assert!(
+        !snapshot.contains("Outside"),
+        "Snapshot should not contain content outside the selector: {}",
+        snapshot
     );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
@@ -6047,6 +6472,171 @@ fn unique_auth_profile_name(suffix: &str) -> String {
             .unwrap_or_else(|_| std::time::Duration::from_secs(0))
             .as_nanos()
     )
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_auth_login_selects_usable_controls_and_preserves_credential_targets() {
+    let (base_url, _, server) = start_stateful_auth_login_server().await;
+    let mut state = DaemonState::new();
+    let profile = unique_auth_profile_name("changed-target");
+    for command in [
+        json!({ "id": "launch", "action": "launch", "headless": true }),
+        json!({ "id": "open", "action": "navigate", "url": base_url }),
+        json!({ "id": "save", "action": "auth_save", "name": profile,
+            "url": base_url, "username": "target@example.test", "password": "target-password" }),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+    let mut results = Vec::new();
+    for field in ["user", "pass"] {
+        for phase in [
+            "normal",
+            "selection",
+            "focus-detach",
+            "focus-redirect",
+            "select-redirect",
+            "focus-readonly",
+            "input-detach",
+            "exception",
+            "textarea",
+            "contenteditable",
+            "no-native-edit",
+            "no-native-edit-textarea",
+            "no-native-edit-contenteditable",
+        ] {
+            let script = format!(
+                r#"(() => {{
+                    document.body.innerHTML = '<form><input id="decoy" value="decoy:"><input id="hidden-user" type="email" autocomplete="username" hidden><input id="user" type="email" autocomplete="username webauthn"><input id="hidden-pass" type="password" hidden><input id="pass" type="password"><button hidden type="submit" onclick="window.hiddenClicked = true">Hidden</button><button type="submit" onclick="window.visibleClicked = true">Sign in</button></form>';
+                    if ('{phase}'.endsWith('textarea')) document.getElementById('{field}').outerHTML = '<textarea id="{field}">old value</textarea>';
+                    if ('{phase}'.endsWith('contenteditable')) document.getElementById('{field}').outerHTML = '<div id="{field}" contenteditable="true">old value</div>';
+                    window.events = [];
+                    window.submitted = false;
+                    window.hiddenClicked = false;
+                    window.visibleClicked = false;
+                    window.nativeEdit ??= document.execCommand;
+                    document.execCommand = '{phase}'.startsWith('no-native-edit') ? undefined : window.nativeEdit;
+                    const decoy = document.getElementById('decoy');
+                    const target = document.getElementById('{field}');
+                    const replace = () => {{
+                        window.detached = target;
+                        target.replaceWith(target.cloneNode(true));
+                        decoy.focus();
+                    }};
+                    window.detached = null;
+                    document.querySelector('form').onsubmit = event => {{
+                        event.preventDefault();
+                        window.submitted = true;
+                    }};
+                    document.oninput = event => window.events.push({{
+                        id: event.target.id, value: event.target.value ?? event.target.textContent,
+                        trusted: event.isTrusted
+                    }});
+                    decoy.focus();
+                    decoy.setSelectionRange(6, 6);
+                    if ('{phase}' === 'selection') {{
+                        const box = target.getBoundingClientRect.bind(target);
+                        target.getBoundingClientRect = () => {{
+                            const rect = box();
+                            queueMicrotask(replace);
+                            return rect;
+                        }};
+                    }}
+                    if ('{phase}' === 'focus-detach') target.onfocus = replace;
+                    if ('{phase}' === 'focus-redirect') target.onfocus = () => decoy.focus();
+                    if ('{phase}' === 'select-redirect') target.select = () => decoy.focus();
+                    if ('{phase}' === 'focus-readonly') target.onfocus = () => target.readOnly = true;
+                    if ('{phase}' === 'input-detach') target.oninput = replace;
+                    if ('{phase}' === 'exception') target.focus = () => {{ throw new Error('page failure'); }};
+                }})()"#
+            );
+            assert_success(
+                &execute_command(
+                    &json!({ "id": "fixture", "action": "evaluate", "script": script }),
+                    &mut state,
+                )
+                .await,
+            );
+            let mut command = json!({
+                "id": "login", "action": "auth_login", "name": profile,
+                "noNavigate": true, "timeout": 200
+            });
+            if phase.ends_with("textarea") || phase.ends_with("contenteditable") {
+                command["usernameSelector"] = json!("#user");
+                command["passwordSelector"] = json!("#pass");
+            }
+            let login = execute_command(&command, &mut state).await;
+            let observation = execute_command(
+                &json!({
+                    "id": "observe", "action": "evaluate",
+                    "script": "({ user: document.getElementById('user').value ?? document.getElementById('user').textContent, pass: document.getElementById('pass').value ?? document.getElementById('pass').textContent, decoy: document.getElementById('decoy').value, events: window.events, hiddenUser: document.getElementById('hidden-user').value, hiddenPass: document.getElementById('hidden-pass').value, hiddenClicked: window.hiddenClicked, visibleClicked: window.visibleClicked, submitted: window.submitted, detached: !!window.detached && !window.detached.isConnected })"
+                }),
+                &mut state,
+            )
+            .await;
+            results.push((field, phase, login, observation));
+        }
+    }
+    for command in [
+        json!({ "id": "delete", "action": "auth_delete", "name": profile }),
+        json!({ "id": "close", "action": "close" }),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+    server.abort();
+    for (field, phase, login, observation) in results {
+        assert_success(&observation);
+        let observed = &get_data(&observation)["result"];
+        let normal = ["normal", "textarea", "contenteditable"].contains(&phase)
+            || phase.starts_with("no-native-edit");
+        assert_eq!(observed["decoy"], "decoy:", "{field}/{phase}: {observed}");
+        assert_eq!(observed["hiddenUser"], "", "{field}/{phase}: {observed}");
+        assert_eq!(observed["hiddenPass"], "", "{field}/{phase}: {observed}");
+        assert_eq!(
+            observed["hiddenClicked"], false,
+            "{field}/{phase}: {observed}"
+        );
+        assert_eq!(
+            observed["visibleClicked"], normal,
+            "{field}/{phase}: {observed}"
+        );
+        assert_eq!(login["success"], normal, "{field}/{phase}: {login}");
+        assert_eq!(observed["submitted"], normal, "{field}/{phase}: {observed}");
+        if phase == "selection" || phase == "focus-detach" || phase == "input-detach" {
+            assert_eq!(observed["detached"], true, "{field}/{phase}: {observed}");
+        }
+        for event in observed["events"].as_array().unwrap() {
+            let expected = match event["id"].as_str().unwrap() {
+                "user" => "target@example.test",
+                "pass" => "target-password",
+                other => panic!("{field}/{phase}: input delivered to {other}: {event}"),
+            };
+            assert_eq!(event["value"], expected, "{field}/{phase}: {event}");
+            assert_eq!(
+                event["trusted"],
+                !phase.starts_with("no-native-edit"),
+                "{field}/{phase}: {event}"
+            );
+        }
+        let expected_user = if normal || field == "pass" || phase == "input-detach" {
+            "target@example.test"
+        } else {
+            ""
+        };
+        let expected_pass = if normal || (field == "pass" && phase == "input-detach") {
+            "target-password"
+        } else {
+            ""
+        };
+        assert_eq!(
+            observed["user"], expected_user,
+            "{field}/{phase}: {observed}"
+        );
+        assert_eq!(
+            observed["pass"], expected_pass,
+            "{field}/{phase}: {observed}"
+        );
+    }
 }
 
 #[tokio::test]

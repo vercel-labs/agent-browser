@@ -191,9 +191,9 @@
     },
     "engine": {
       "type": "string",
-      "enum": ["chrome", "lightpanda"],
+      "enum": ["chrome", "lightpanda", "obscura"],
       "default": "chrome",
-      "description": "Browser engine to use."
+      "description": "Browser engine to use. Obscura is experimental and does not support proxy bypass rules."
     },
     "screenshotDir": {
       "type": "string",
