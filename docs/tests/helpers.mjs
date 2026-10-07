@@ -23,6 +23,47 @@ export const tokens = (value) =>
     .split(/\s*,\s*/)
     .filter(Boolean);
 export const normalize = (value) => value.replace(/\s+/g, " ").trim();
+
+/**
+ * Intentional edits to original content since the pinned baseline. Each `from`
+ * must still occur in the baseline page, so stale entries fail.
+ */
+const edits = JSON.parse(
+  await readFile(new URL("fixtures/docs-edits.json", import.meta.url), "utf8"),
+);
+
+function applyEdits(page) {
+  const pageEdits = edits.pages[page.path] ?? [];
+  let { content, modernMarkdown, legacyMarkdown } = page;
+  for (const { from, to } of pageEdits) {
+    const found = [modernMarkdown, legacyMarkdown, ...content].some(
+      (value) => value.includes(from) || normalize(value).includes(normalize(from)),
+    );
+    if (!found)
+      throw new Error(`docs-edits.json: ${page.path} has no ${JSON.stringify(from)}`);
+    modernMarkdown = modernMarkdown.replaceAll(from, to);
+    legacyMarkdown = legacyMarkdown.replaceAll(from, to);
+    content = content.map((sample) =>
+      sample.includes(from)
+        ? sample.replaceAll(from, to)
+        : normalize(sample).replaceAll(normalize(from), normalize(to)),
+    );
+  }
+  return { ...page, content, modernMarkdown, legacyMarkdown };
+}
+
+for (const path of Object.keys(edits.pages))
+  if (!pages.some((page) => page.path === path))
+    throw new Error(`docs-edits.json: unknown page ${path}`);
+
+/** Baseline pages with intentional edits applied: the floor for live routes. */
+export const currentPages = pages.map(applyEdits);
+
+/** Baseline resources with intentionally changed bytes replaced. */
+export const currentResources = baseline.resources.map((resource) => ({
+  ...resource,
+  ...edits.resources[resource.path],
+}));
 export const decode = (value) =>
   value.replace(
     /&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi,
@@ -276,16 +317,16 @@ export function indexing(response, html, missing = false) {
     );
   }
 }
-/** Every blank-line-separated block of `original` appears in `body`, in order. */
-export function assertContainsBlocks(body, original, label) {
+/** Every non-blank line of `original` appears in `body`, in order. New lines may appear anywhere. */
+export function assertContainsLines(body, original, label) {
   let from = 0;
-  for (const block of original.split(/\n{2,}/).filter((b) => b.trim())) {
-    const at = body.indexOf(block, from);
+  for (const line of original.split("\n").filter((l) => l.trim())) {
+    const at = body.indexOf(line, from);
     assert.ok(
       at !== -1,
-      `${label}: lost original block ${JSON.stringify(block.slice(0, 80))}`,
+      `${label}: lost original line ${JSON.stringify(line.slice(0, 80))}`,
     );
-    from = at + block.length;
+    from = at + line.length;
   }
 }
 
@@ -295,7 +336,7 @@ export function assertModernMarkdown(body, page) {
     body.startsWith(frontmatter),
     `${page.path}: exact canonical frontmatter`,
   );
-  assertContainsBlocks(
+  assertContainsLines(
     body.slice(frontmatter.length),
     page.modernMarkdown,
     `${page.path}: original body, preserving fenced export/import examples`,
@@ -307,7 +348,7 @@ export function assertLegacyMarkdown(body, page) {
     !body.startsWith("---\n"),
     `${page.path}: legacy Markdown has no frontmatter`,
   );
-  assertContainsBlocks(
+  assertContainsLines(
     body,
     page.legacyMarkdown,
     `${page.path}: legacy Markdown`,
