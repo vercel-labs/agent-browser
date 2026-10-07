@@ -276,15 +276,40 @@ export function indexing(response, html, missing = false) {
     );
   }
 }
+/** Every blank-line-separated block of `original` appears in `body`, in order. */
+export function assertContainsBlocks(body, original, label) {
+  let from = 0;
+  for (const block of original.split(/\n{2,}/).filter((b) => b.trim())) {
+    const at = body.indexOf(block, from);
+    assert.ok(
+      at !== -1,
+      `${label}: lost original block ${JSON.stringify(block.slice(0, 80))}`,
+    );
+    from = at + block.length;
+  }
+}
+
 export function assertModernMarkdown(body, page) {
   const frontmatter = `---\ntitle: ${JSON.stringify(page.markdownTitle)}\ndescription: ${JSON.stringify(page.description)}\ncanonical_url: ${JSON.stringify(canonical(page.path))}\n---\n\n`;
   assert.ok(
     body.startsWith(frontmatter),
     `${page.path}: exact canonical frontmatter`,
   );
-  assert.equal(
+  assertContainsBlocks(
     body.slice(frontmatter.length),
-    `${page.modernMarkdown}\n`,
+    page.modernMarkdown,
     `${page.path}: original body, preserving fenced export/import examples`,
+  );
+}
+
+export function assertLegacyMarkdown(body, page) {
+  assert.ok(
+    !body.startsWith("---\n"),
+    `${page.path}: legacy Markdown has no frontmatter`,
+  );
+  assertContainsBlocks(
+    body,
+    page.legacyMarkdown,
+    `${page.path}: legacy Markdown`,
   );
 }

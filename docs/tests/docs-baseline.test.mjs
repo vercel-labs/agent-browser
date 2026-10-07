@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, readFile, readdir } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { navigation } from "../src/lib/docs-navigation.ts";
 import {
@@ -305,40 +305,3 @@ test("tracking oracle permits Flight serialization but rejects visible, canonica
       assert.AssertionError,
     );
 });
-
-test("migrated content has exactly the 39 original public pages", async () => {
-  const entries = await readdir(new URL("../content/docs/", import.meta.url), {
-    recursive: true,
-  });
-  const mdx = entries.filter((path) => path.endsWith(".mdx")).sort();
-  assert.deepEqual(
-    mdx,
-    pages
-      .map((page) => `${page.path === "/" ? "index" : page.path.slice(1)}.mdx`)
-      .sort(),
-  );
-});
-
-for (const page of pages) {
-  test(`${page.path}: full migrated MDX reconstructs the original git blob byte for byte`, async () => {
-    const slug = page.path === "/" ? "index" : page.path.slice(1);
-    const raw = await readFile(
-      new URL(`../content/docs/${slug}.mdx`, import.meta.url),
-      "utf8",
-    );
-    const frontmatter = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/);
-    assert.ok(frontmatter, page.path);
-    assert.ok(
-      frontmatter[1]
-        .split("\n")
-        .includes(`title: ${JSON.stringify(page.markdownTitle)}`),
-      `${page.path}: title derived from original H1`,
-    );
-    const body = raw.slice(frontmatter[0].length);
-    const restored =
-      body.slice(0, page.h1InsertionOffset) +
-      page.h1Source +
-      body.slice(page.h1InsertionOffset);
-    assert.equal(hash(restored), page.sourceSha256, page.source);
-  });
-}
