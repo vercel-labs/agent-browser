@@ -11,6 +11,7 @@
 
 - Fixed **selector-scoped snapshots** (`snapshot -s`) so elements under ignored wrappers are no longer printed twice and shadow root content of a selected custom element is no longer dropped (#2043)
 - Fixed **`--auto-connect`** to wait up to 30s while Chrome 144+ shows the remote-debugging prompt, so it no longer opens repeated prompts or fails with "No running Chrome instance found" (#2026)
+- Fixed **daemon responsiveness during long commands** so it keeps accepting connections, including `close`, while a command holds the state lock, and a SIGTERM sent in that window is no longer lost (#2059)
 
 ### Documentation
 
@@ -23,6 +24,7 @@
 - @SGavrl
 - @SUSINDRAREDDY
 - @godtail
+- @jadenfix
 <!-- release:end -->
 
 ## 0.38.2
