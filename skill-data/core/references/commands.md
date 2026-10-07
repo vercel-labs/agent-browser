@@ -464,6 +464,8 @@ agent-browser <command> --help        # Show detailed help for a command
 
 ## Debugging
 
+Start a new session with `--debug` (or `AGENT_BROWSER_DEBUG=1`) to write daemon diagnostics to `<socket-dir>/<session>.log` on Windows and Unix. The log uses the normal socket directory, which can be overridden with `AGENT_BROWSER_SOCKET_DIR`. Windows daemons otherwise discard stderr through `NUL`, including when the debug log cannot be opened, so warnings remain safe after the launching CLI exits.
+
 On Windows, owned headless Chrome runs on a private desktop so hidden windows cannot draw stray rectangles over the user's desktop. This applies to custom Chrome executables and windows created later through CDP. Headed and extension sessions use the interactive desktop. Owned Chrome trees are terminated when their daemon exits, including forced termination; attaching to an external browser does not take ownership of it.
 
 ```bash

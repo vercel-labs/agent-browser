@@ -351,6 +351,41 @@ async fn run_socket_server(
 }
 
 #[cfg(windows)]
+/// Replace the startup stderr pipe before accepting commands. Keep the returned
+/// file alive while the daemon runs: SetStdHandle borrows its handle, and Rust
+/// looks up that standard handle on every stderr write.
+fn redirect_windows_daemon_stderr(
+    socket_dir: &std::path::Path,
+    session: &str,
+    debug: bool,
+) -> std::io::Result<fs::File> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE};
+
+    let file = if debug {
+        fs::File::create(socket_dir.join(format!("{}.log", session)))
+            .or_else(|_| fs::OpenOptions::new().write(true).open("NUL"))?
+    } else {
+        fs::OpenOptions::new().write(true).open("NUL")?
+    };
+
+    // SAFETY: file owns a valid writable handle. The caller retains file for
+    // the entire server lifetime, so the process stderr handle stays valid.
+    if unsafe { SetStdHandle(STD_ERROR_HANDLE, file.as_raw_handle() as HANDLE) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if debug {
+        let _ = writeln!(
+            std::io::stderr(),
+            "[daemon] Debug logging started for session: {}",
+            session
+        );
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
 async fn run_socket_server(
     socket_path: &PathBuf,
     session: &str,
@@ -379,6 +414,14 @@ async fn run_socket_server(
         .port();
 
     let socket_dir = socket_path.parent().unwrap_or(std::path::Path::new("."));
+    // Binding failures still reach the launching CLI through the startup pipe.
+    // Once bound, daemon warnings must outlive that CLI's stderr reader (#1993).
+    let _stderr = redirect_windows_daemon_stderr(
+        socket_dir,
+        session,
+        env::var("AGENT_BROWSER_DEBUG").is_ok(),
+    )
+    .map_err(|e| format!("Failed to redirect daemon stderr: {}", e))?;
     let port_path = socket_dir.join(format!("{}.port", session));
     let _ = fs::write(&port_path, actual_port.to_string());
 
@@ -708,6 +751,121 @@ fn get_port_for_session(session: &str) -> u16 {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+
+    // Standard handles are process-global, so exercise the Windows redirect in
+    // a subprocess rather than changing stderr underneath parallel unit tests.
+    #[test]
+    #[cfg(windows)]
+    fn windows_daemon_stderr_child() {
+        let Ok(dir) = env::var("AGENT_BROWSER_STDERR_TEST_DIR") else {
+            return;
+        };
+        let debug = env::var("AGENT_BROWSER_STDERR_TEST_DEBUG").is_ok();
+        let _stderr = redirect_windows_daemon_stderr(std::path::Path::new(&dir), "probe", debug)
+            .expect("stderr redirect should succeed");
+        println!("stderr-probe-ready");
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        // The parent has now dropped the startup pipe's read end. eprintln!
+        // must still succeed, including for warnings introduced in future code.
+        eprintln!("stderr-probe-warning-after-parent-exit");
+        println!("stderr-probe-survived");
+    }
+
+    #[cfg(windows)]
+    fn assert_windows_stderr_survives_closed_pipe(debug: bool, missing_log_dir: bool) {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Child, Command, Stdio};
+        use std::sync::mpsc;
+
+        struct Probe(Child);
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = if missing_log_dir {
+            tmp.path().join("missing")
+        } else {
+            tmp.path().to_path_buf()
+        };
+        let mut cmd = Command::new(env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            "native::daemon::tests::windows_daemon_stderr_child",
+            "--nocapture",
+        ])
+        .env("AGENT_BROWSER_STDERR_TEST_DIR", &dir)
+        .env_remove("AGENT_BROWSER_STDERR_TEST_DEBUG")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+        if debug {
+            cmd.env("AGENT_BROWSER_STDERR_TEST_DEBUG", "1");
+        }
+        let mut child = Probe(cmd.spawn().unwrap());
+        let stdout = child.0.stdout.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                if tx.send(line.unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        loop {
+            let line = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("stderr probe did not become ready");
+            if line == "stderr-probe-ready" {
+                break;
+            }
+        }
+        drop(child.0.stderr.take());
+        writeln!(child.0.stdin.take().unwrap(), "pipe closed").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(std::time::Instant::now() < deadline, "stderr probe hung");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(
+            status.success(),
+            "writing to daemon stderr panicked: {status}"
+        );
+        reader.join().unwrap();
+        assert!(rx.try_iter().any(|line| line == "stderr-probe-survived"));
+        if debug && !missing_log_dir {
+            let log = fs::read_to_string(dir.join("probe.log")).unwrap();
+            assert!(log.contains("Debug logging started for session: probe"));
+            assert!(log.contains("stderr-probe-warning-after-parent-exit"));
+        } else {
+            assert!(!dir.join("probe.log").exists());
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_daemon_stderr_survives_closed_startup_pipe() {
+        assert_windows_stderr_survives_closed_pipe(false, false);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_daemon_stderr_debug_log_survives_closed_startup_pipe() {
+        assert_windows_stderr_survives_closed_pipe(true, false);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_daemon_stderr_falls_back_when_debug_log_cannot_be_opened() {
+        assert_windows_stderr_survives_closed_pipe(true, true);
+    }
 
     #[test]
     fn test_resolve_idle_timeout_unset_applies_default() {

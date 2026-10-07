@@ -439,6 +439,8 @@ agent-browser diff url https://v1.com https://v2.com --selector "#main"  # Scope
 
 ### Debug
 
+Start a new session with `--debug` (or `AGENT_BROWSER_DEBUG=1`) to write daemon diagnostics to `<socket-dir>/<session>.log` on Windows and Unix. The log uses the normal socket directory, which can be overridden with `AGENT_BROWSER_SOCKET_DIR`. Windows daemons otherwise discard stderr through `NUL`, so warnings remain safe after the launching CLI exits. If the Windows debug log cannot be opened, stderr falls back to `NUL`.
+
 ```bash
 agent-browser trace start             # Start recording trace
 agent-browser trace stop [path]       # Stop and save trace
@@ -1093,7 +1095,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `-v`, `--verbose` | Show tool commands and their raw output (chat) |
 | `-q`, `--quiet` | Show only AI text responses, hide tool calls (chat) |
 | `--config <path>` | Use a custom config file (or `AGENT_BROWSER_CONFIG` env) |
-| `--debug` | Debug output |
+| `--debug` | Debug output; daemon diagnostics in `<socket-dir>/<session>.log` |
 
 ## Observability Dashboard
 

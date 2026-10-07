@@ -9,6 +9,11 @@ import { createProcessor } from "@mdx-js/mdx";
 import ts from "typescript";
 
 const commit = "efee3893d9080fcacb1aa6c9a21d13fbc6021f20";
+// #1993 deliberately adds daemon diagnostics before the docs migration.
+// Capture that page from the original PR source, not migrated output.
+const sourceCommits = {
+  "docs/src/app/debugging/page.mdx": "13d8c50a3dc6ca8318f7b45e54493480e830febd",
+};
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const output = new URL("../tests/fixtures/docs-baseline.json", import.meta.url);
 const git = (...args) =>
@@ -17,7 +22,7 @@ const hash = (value) => createHash("sha256").update(value).digest("hex");
 const sources = {};
 function original(path) {
   if (!sources[path]) {
-    const raw = git("show", `${commit}:${path}`).toString("utf8");
+    const raw = git("show", `${sourceCommits[path] ?? commit}:${path}`).toString("utf8");
     sources[path] = { sha256: hash(raw), raw };
   }
   return sources[path].raw;
@@ -312,8 +317,9 @@ const resources = git(
 const serialized = `${JSON.stringify(
   {
     commit,
+    sourceCommits,
     policy:
-      "Only git objects at the pinned commit are inputs. Modern Markdown removes AST-level MDX imports, DiffDemo and presentation className attributes; fenced code is preserved. Legacy Markdown executes the original converter verbatim, including its removal of export/import lines inside fences. Heading IDs execute the original slugify/extractText without deduplication. Root metadata comes from the root layout; child metadata comes from each original layout and pageMetadata/PAGE_TITLES.",
+      "Only git objects at the pinned commit and explicit sourceCommits overrides are inputs. Modern Markdown removes AST-level MDX imports, DiffDemo and presentation className attributes; fenced code is preserved. Legacy Markdown executes the original converter verbatim, including its removal of export/import lines inside fences. Heading IDs execute the original slugify/extractText without deduplication. Root metadata comes from the root layout; child metadata comes from each original layout and pageMetadata/PAGE_TITLES.",
     sources,
     pages,
     legacySearch,

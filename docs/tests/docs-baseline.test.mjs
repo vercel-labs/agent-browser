@@ -310,7 +310,10 @@ test("migrated content has exactly the 39 original public pages", async () => {
   const entries = await readdir(new URL("../content/docs/", import.meta.url), {
     recursive: true,
   });
-  const mdx = entries.filter((path) => path.endsWith(".mdx")).sort();
+  const mdx = entries
+    .filter((path) => path.endsWith(".mdx"))
+    .map((path) => path.replaceAll("\\", "/"))
+    .sort();
   assert.deepEqual(
     mdx,
     pages

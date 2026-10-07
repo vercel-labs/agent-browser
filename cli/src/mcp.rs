@@ -5,6 +5,8 @@
 //! so MCP behavior stays aligned with the normal CLI command surface. Daemon
 //! lifecycle settings, including the default idle timeout, use the same CLI
 //! parser and daemon as direct commands.
+//! Windows daemon stderr is redirected independently of these short-lived CLI
+//! subprocesses; AGENT_BROWSER_DEBUG writes the same session log as direct CLI use.
 //! Owned Windows Chrome uses the same private headless desktop and Job Object
 //! lifetime through MCP; headed and external-connection semantics are unchanged.
 

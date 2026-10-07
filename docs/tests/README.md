@@ -8,7 +8,9 @@ Each page records its complete source hash, original H1 insertion position, meta
 
 The generator executes the original slugger and recursive React-child text extractor without substituting GitHub slugging or deduplicating IDs. The independent oracle compiles and renders the captured original MDX with the original heading components, checking every captured heading and content sample. Synthetic cases exercise nested inline children, numeric text, punctuation and duplicate IDs. Fenced code is not parsed as headings.
 
-Never regenerate fixtures from migrated output to accept a failing assertion. To verify reproducibility from the pinned commit:
+The `/debugging` page is explicitly captured from the original #1993 fix at `13d8c50a3dc6ca8318f7b45e54493480e830febd`, before its migration to Geistdocs. This intentional content change adds the daemon diagnostics section; all other source files remain pinned to the migration baseline. The capture script records this exception in `sourceCommits` and still reads original git objects.
+
+Never regenerate fixtures from migrated output to accept a failing assertion. To verify reproducibility from the pinned commits:
 
 ```sh
 node scripts/capture-docs-baseline.mjs --check
