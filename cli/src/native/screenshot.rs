@@ -172,37 +172,19 @@ async fn capture_screenshot_base64(
         capture_beyond_viewport: if options.full_page { Some(true) } else { None },
     };
 
-    if options.full_page {
-        let metrics: Value = client
-            .send_command_no_params("Page.getLayoutMetrics", Some(session_id))
-            .await?;
-
-        let content_size = metrics
-            .get("contentSize")
-            .or_else(|| metrics.get("cssContentSize"));
-        if let Some(size) = content_size {
-            let width = size.get("width").and_then(|v| v.as_f64()).unwrap_or(1280.0);
-            let height = size.get("height").and_then(|v| v.as_f64()).unwrap_or(720.0);
-
-            params.clip = Some(Viewport {
-                x: 0.0,
-                y: 0.0,
-                width,
-                height,
-                scale: 1.0,
-            });
-        }
-    } else if let Some(ref selector) = options.selector {
-        if let Some(rect) =
-            get_rect_for_selector(client, session_id, ref_map, selector, iframe_sessions).await?
-        {
-            params.clip = Some(Viewport {
-                x: rect.x,
-                y: rect.y,
-                width: rect.width,
-                height: rect.height,
-                scale: 1.0,
-            });
+    if !options.full_page {
+        if let Some(ref selector) = options.selector {
+            if let Some(rect) =
+                get_rect_for_selector(client, session_id, ref_map, selector, iframe_sessions).await?
+            {
+                params.clip = Some(Viewport {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.width,
+                    height: rect.height,
+                    scale: 1.0,
+                });
+            }
         }
     }
 
