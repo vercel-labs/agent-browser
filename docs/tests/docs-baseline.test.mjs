@@ -8,6 +8,8 @@ import {
   hash,
   canonical,
   assertModernMarkdown,
+  assertContainsLines,
+  currentPages,
   absoluteDestination,
   imageSourceUrls,
   assertOriginalResource,
@@ -202,6 +204,26 @@ test("Markdown oracle rejects missing tables, fenced export examples and nested 
       assert.AssertionError,
     );
   }
+});
+
+test("content floor accepts inserted lines and rejects edited or dropped ones", () => {
+  const original = "| a | b |\n| - | - |\n| 1 | 2 |\n\n```bash\nfoo # one\nbar # two\n```";
+  assertContainsLines(
+    original.replace("| 1 | 2 |", "| 1 | 2 |\n| 3 | 4 |").replace("foo # one", "foo # one\nbaz # new"),
+    original,
+    "insert",
+  );
+  for (const mutated of [original.replace("bar # two", "bar # 2"), original.replace("| 1 | 2 |\n", "")])
+    assert.throws(() => assertContainsLines(mutated, original, "edit"), assert.AssertionError);
+});
+
+test("intentional docs edits apply to the live floor without touching the pinned baseline", () => {
+  const original = pages.find((page) => page.path === "/proxy");
+  const current = currentPages.find((page) => page.path === "/proxy");
+  const before = "It is not supported on macOS or Windows.";
+  assert.ok(original.modernMarkdown.includes(before));
+  assert.ok(!current.modernMarkdown.includes(before));
+  assert.ok(current.content.some((sample) => sample.includes("where Chromium already uses the operating system trust store")));
 });
 
 test("link normalization preserves origin, path, query and fragment destinations", () => {

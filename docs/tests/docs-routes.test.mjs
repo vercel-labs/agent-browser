@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  baseline,
-  pages,
+  currentPages as pages,
+  currentResources,
   origin,
   hash,
   canonical,
@@ -133,7 +133,7 @@ for (const page of pages) {
         1,
         `${page.path}: expected original image alt ${image.text}`,
       );
-      const resource = baseline.resources.find(
+      const resource = currentResources.find(
         (entry) =>
           absoluteDestination(entry.path, page.path) ===
           absoluteDestination(image.url, page.path),
@@ -713,7 +713,7 @@ test("robots is environment-aware without losing the production sitemap", async 
     assert.ok(!directives.some((line) => /^disallow:\s*\S/.test(line)));
 });
 
-for (const resource of baseline.resources) {
+for (const resource of currentResources) {
   test(`${resource.path}: original static resource bytes bypass locale and Markdown routing`, async () => {
     const response = await get(resource.path, { headers: agent });
     assert.equal(response.status, 200);
