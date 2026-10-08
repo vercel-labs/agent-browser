@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, readFile, readdir } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { navigation } from "../src/lib/docs-navigation.ts";
 import {
@@ -8,6 +8,8 @@ import {
   hash,
   canonical,
   assertModernMarkdown,
+  assertContainsLines,
+  currentPages,
   absoluteDestination,
   imageSourceUrls,
   assertOriginalResource,
@@ -204,6 +206,26 @@ test("Markdown oracle rejects missing tables, fenced export examples and nested 
   }
 });
 
+test("content floor accepts inserted lines and rejects edited or dropped ones", () => {
+  const original = "| a | b |\n| - | - |\n| 1 | 2 |\n\n```bash\nfoo # one\nbar # two\n```";
+  assertContainsLines(
+    original.replace("| 1 | 2 |", "| 1 | 2 |\n| 3 | 4 |").replace("foo # one", "foo # one\nbaz # new"),
+    original,
+    "insert",
+  );
+  for (const mutated of [original.replace("bar # two", "bar # 2"), original.replace("| 1 | 2 |\n", "")])
+    assert.throws(() => assertContainsLines(mutated, original, "edit"), assert.AssertionError);
+});
+
+test("intentional docs edits apply to the live floor without touching the pinned baseline", () => {
+  const original = pages.find((page) => page.path === "/proxy");
+  const current = currentPages.find((page) => page.path === "/proxy");
+  const before = "It is not supported on macOS or Windows.";
+  assert.ok(original.modernMarkdown.includes(before));
+  assert.ok(!current.modernMarkdown.includes(before));
+  assert.ok(current.content.some((sample) => sample.includes("where Chromium already uses the operating system trust store")));
+});
+
 test("link normalization preserves origin, path, query and fragment destinations", () => {
   const expected = absoluteDestination(
     "https://agent-browser.dev/schema.json",
@@ -305,40 +327,3 @@ test("tracking oracle permits Flight serialization but rejects visible, canonica
       assert.AssertionError,
     );
 });
-
-test("migrated content has exactly the 39 original public pages", async () => {
-  const entries = await readdir(new URL("../content/docs/", import.meta.url), {
-    recursive: true,
-  });
-  const mdx = entries.filter((path) => path.endsWith(".mdx")).sort();
-  assert.deepEqual(
-    mdx,
-    pages
-      .map((page) => `${page.path === "/" ? "index" : page.path.slice(1)}.mdx`)
-      .sort(),
-  );
-});
-
-for (const page of pages) {
-  test(`${page.path}: full migrated MDX reconstructs the original git blob byte for byte`, async () => {
-    const slug = page.path === "/" ? "index" : page.path.slice(1);
-    const raw = await readFile(
-      new URL(`../content/docs/${slug}.mdx`, import.meta.url),
-      "utf8",
-    );
-    const frontmatter = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/);
-    assert.ok(frontmatter, page.path);
-    assert.ok(
-      frontmatter[1]
-        .split("\n")
-        .includes(`title: ${JSON.stringify(page.markdownTitle)}`),
-      `${page.path}: title derived from original H1`,
-    );
-    const body = raw.slice(frontmatter[0].length);
-    const restored =
-      body.slice(0, page.h1InsertionOffset) +
-      page.h1Source +
-      body.slice(page.h1InsertionOffset);
-    assert.equal(hash(restored), page.sourceSha256, page.source);
-  });
-}

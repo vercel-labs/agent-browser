@@ -83,6 +83,7 @@ pub struct Config {
     pub ignore_https_errors: Option<bool>,
     pub ca_cert: Option<String>,
     pub clear_ca_cert: Option<bool>,
+    pub use_system_ca: Option<bool>,
     pub allow_file_access: Option<bool>,
     pub cdp: Option<String>,
     pub auto_connect: Option<bool>,
@@ -166,6 +167,7 @@ impl Config {
             ignore_https_errors: other.ignore_https_errors.or(self.ignore_https_errors),
             ca_cert,
             clear_ca_cert,
+            use_system_ca: other.use_system_ca.or(self.use_system_ca),
             allow_file_access: other.allow_file_access.or(self.allow_file_access),
             cdp: other.cdp.or(self.cdp),
             auto_connect: other.auto_connect.or(self.auto_connect),
@@ -389,6 +391,7 @@ pub struct Flags {
     pub ignore_https_errors: bool,
     pub ca_cert: Option<String>,
     pub clear_ca_cert: bool,
+    pub use_system_ca: bool,
     pub allow_file_access: bool,
     pub hide_scrollbars: bool,
     pub webgpu: bool,
@@ -436,6 +439,7 @@ pub struct Flags {
     pub cli_proxy: bool,
     pub cli_proxy_bypass: bool,
     pub cli_ca_cert: bool,
+    pub cli_use_system_ca: bool,
     pub cli_allow_file_access: bool,
     pub cli_hide_scrollbars: bool,
     pub cli_annotate: bool,
@@ -588,6 +592,9 @@ pub fn parse_flags(args: &[String]) -> Flags {
             || config.ignore_https_errors.unwrap_or(false),
         ca_cert,
         clear_ca_cert,
+        use_system_ca: env_var_bool("AGENT_BROWSER_USE_SYSTEM_CA")
+            .or(config.use_system_ca)
+            .unwrap_or(false),
         allow_file_access: env_var_is_truthy("AGENT_BROWSER_ALLOW_FILE_ACCESS")
             || config.allow_file_access.unwrap_or(false),
         hide_scrollbars: env_var_bool("AGENT_BROWSER_HIDE_SCROLLBARS")
@@ -672,6 +679,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_proxy: false,
         cli_proxy_bypass: false,
         cli_ca_cert: false,
+        cli_use_system_ca: false,
         cli_allow_file_access: false,
         cli_hide_scrollbars: false,
         cli_annotate: false,
@@ -927,6 +935,14 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--use-system-ca" => {
+                let (val, consumed) = parse_bool_arg(args, i);
+                flags.use_system_ca = val;
+                flags.cli_use_system_ca = true;
+                if consumed {
+                    i += 1;
+                }
+            }
             "--allow-file-access" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.allow_file_access = val;
@@ -1153,6 +1169,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--pin-tab",
         "--no-pin-tab",
         "--no-ca-cert",
+        "--use-system-ca",
         "--annotate",
         "--content-boundaries",
         "--confirm-interactive",
@@ -2028,6 +2045,44 @@ mod tests {
         let flags = parse_flags(&args("--ca-cert /path/to/ca.crt open example.com"));
         assert_eq!(flags.ca_cert, Some("/path/to/ca.crt".to_string()));
         assert!(!flags.clear_ca_cert);
+    }
+
+    #[test]
+    fn test_parse_use_system_ca_flag() {
+        let flags = parse_flags(&args("--use-system-ca read https://example.com"));
+        assert!(flags.use_system_ca);
+        assert!(flags.cli_use_system_ca);
+    }
+
+    #[test]
+    fn test_parse_use_system_ca_explicit_false() {
+        let flags = parse_flags(&args("--use-system-ca false read https://example.com"));
+        assert!(!flags.use_system_ca);
+        assert!(flags.cli_use_system_ca);
+    }
+
+    #[test]
+    fn test_clean_args_removes_use_system_ca() {
+        let cleaned = clean_args(&args("--use-system-ca false read https://example.com"));
+        assert_eq!(cleaned, vec!["read", "https://example.com"]);
+    }
+
+    #[test]
+    fn test_config_merge_use_system_ca() {
+        let user = Config {
+            use_system_ca: Some(true),
+            ..Config::default()
+        };
+        assert_eq!(user.merge(Config::default()).use_system_ca, Some(true));
+        let user = Config {
+            use_system_ca: Some(true),
+            ..Config::default()
+        };
+        let project = Config {
+            use_system_ca: Some(false),
+            ..Config::default()
+        };
+        assert_eq!(user.merge(project).use_system_ca, Some(false));
     }
 
     #[test]

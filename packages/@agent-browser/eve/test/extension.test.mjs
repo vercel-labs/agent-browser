@@ -131,6 +131,7 @@ test("applies config-level safety flags to every command", async () => {
     allowedDomains: ["example.com", "*.example.com"],
     caCert: "/etc/ssl/certs/proxy-ca.pem",
     clearCaCert: false,
+    useSystemCa: true,
     maxOutputChars: 5000,
     proxy: "http://proxy.example.com:8080",
   });
@@ -139,6 +140,7 @@ test("applies config-level safety flags to every command", async () => {
   const command = sandbox.commands.at(-1);
   assert.ok(command.includes("--allowed-domains 'example.com,*.example.com'"), command);
   assert.ok(command.includes("--ca-cert /etc/ssl/certs/proxy-ca.pem"), command);
+  assert.ok(command.includes("--use-system-ca true"), command);
   assert.ok(command.includes("--max-output 5000"), command);
   assert.ok(command.includes("--proxy http://proxy.example.com:8080"), command);
   resetConfig();
