@@ -273,7 +273,7 @@ pub async fn type_text_into_active_context(
                         text: text_str.clone(),
                         unmodified_text: text_str,
                         windows_virtual_key_code: Some(key_code),
-                        native_virtual_key_code: Some(key_code),
+                        native_virtual_key_code: native_virtual_key_code(key_code),
                         modifiers: None,
                     },
                     Some(session_id),
@@ -290,7 +290,7 @@ pub async fn type_text_into_active_context(
                         text: None,
                         unmodified_text: None,
                         windows_virtual_key_code: Some(key_code),
-                        native_virtual_key_code: Some(key_code),
+                        native_virtual_key_code: native_virtual_key_code(key_code),
                         modifiers: None,
                     },
                     Some(session_id),
@@ -357,7 +357,7 @@ pub async fn press_key_with_modifiers(
                 text: text.clone(),
                 unmodified_text: text.clone(),
                 windows_virtual_key_code: Some(key_code),
-                native_virtual_key_code: Some(key_code),
+                native_virtual_key_code: native_virtual_key_code(key_code),
                 modifiers,
             },
             Some(session_id),
@@ -374,7 +374,7 @@ pub async fn press_key_with_modifiers(
                 text: None,
                 unmodified_text: None,
                 windows_virtual_key_code: Some(key_code),
-                native_virtual_key_code: Some(key_code),
+                native_virtual_key_code: native_virtual_key_code(key_code),
                 modifiers,
             },
             Some(session_id),
@@ -1235,7 +1235,6 @@ fn key_text(key_name: &str) -> Option<String> {
         "Tab" => Some("\t".to_string()),
         " " => Some(" ".to_string()),
         _ => {
-            // Single printable characters carry themselves as text.
             if key_name.len() == 1 {
                 Some(key_name.to_string())
             } else {
@@ -1243,6 +1242,13 @@ fn key_text(key_name: &str) -> Option<String> {
             }
         }
     }
+}
+
+fn native_virtual_key_code(_windows_vk: i32) -> Option<i32> {
+    #[cfg(target_os = "windows")]
+    return Some(_windows_vk);
+    #[cfg(not(target_os = "windows"))]
+    return None;
 }
 
 fn named_key_info(key: &str) -> (String, String, i32) {
