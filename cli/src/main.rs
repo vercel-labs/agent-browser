@@ -468,6 +468,15 @@ struct ParsedProxy {
     password: Option<String>,
 }
 
+/// Credentials in a proxy URL are percent-encoded (`p%40ss` for `p@ss`); the
+/// proxy expects the decoded value. A sequence that does not decode to UTF-8
+/// is kept as written.
+fn decode_proxy_credential(raw: &str) -> String {
+    urlencoding::decode(raw)
+        .map(|decoded| decoded.into_owned())
+        .unwrap_or_else(|_| raw.to_string())
+}
+
 fn parse_proxy(proxy_str: &str) -> ParsedProxy {
     let Some(protocol_end) = proxy_str.find("://") else {
         return ParsedProxy {
@@ -499,12 +508,12 @@ fn parse_proxy(proxy_str: &str) -> ParsedProxy {
                 if u.is_empty() {
                     None
                 } else {
-                    Some(u.to_string())
+                    Some(decode_proxy_credential(u))
                 },
                 if p.is_empty() {
                     None
                 } else {
-                    Some(p.to_string())
+                    Some(decode_proxy_credential(p))
                 },
             )
         }
@@ -512,7 +521,7 @@ fn parse_proxy(proxy_str: &str) -> ParsedProxy {
             if creds.is_empty() {
                 None
             } else {
-                Some(creds.to_string())
+                Some(decode_proxy_credential(creds))
             },
             None,
         ),
@@ -2509,6 +2518,27 @@ mod tests {
         assert_eq!(result.server, "http://proxy.com:8080");
         assert_eq!(result.username.as_deref(), Some("user"));
         assert_eq!(result.password.as_deref(), Some("p@ss:w0rd"));
+    }
+
+    #[test]
+    fn test_parse_proxy_percent_encoded_credentials() {
+        let result = parse_proxy("http://user-country-us:p%23ss%2Fw%3Fr%40d%25@proxy.com:8080");
+        assert_eq!(result.server, "http://proxy.com:8080");
+        assert_eq!(result.username.as_deref(), Some("user-country-us"));
+        assert_eq!(result.password.as_deref(), Some("p#ss/w?r@d%"));
+    }
+
+    #[test]
+    fn test_parse_proxy_percent_encoded_username_only() {
+        let result = parse_proxy("socks5://us%40er@proxy.com:1080");
+        assert_eq!(result.username.as_deref(), Some("us@er"));
+        assert!(result.password.is_none());
+    }
+
+    #[test]
+    fn test_parse_proxy_invalid_percent_sequence_kept() {
+        let result = parse_proxy("http://user:100%off@proxy.com:8080");
+        assert_eq!(result.password.as_deref(), Some("100%off"));
     }
 
     #[test]
