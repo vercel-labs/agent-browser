@@ -11038,9 +11038,11 @@ async fn handle_waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<
         .ok_or("Browser not launched")?
         .client
         .subscribe();
+    // Events that arrived after the per-command drain, such as during the
+    // liveness check, are not delivered to the new receiver. Drain them into
+    // the ledger now so a download that already finished is claimed (#561).
+    state.drain_cdp_events_background().await?;
 
-    // Events up to this command were drained into the ledger before it ran,
-    // so a download that already finished is claimed here (#561).
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
     let record = loop {
         if let Some(record) = state.downloads.claim_finished() {
@@ -11080,6 +11082,11 @@ async fn handle_waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<
     let Some(path_str) = path_arg else {
         return Ok(json!({ "path": saved.to_string_lossy() }));
     };
+    // A bad destination must not consume the download, so a retry can claim it.
+    move_download(&saved, path_str).inspect_err(|_| state.downloads.release(&record.guid))
+}
+
+fn move_download(saved: &std::path::Path, path_str: &str) -> Result<Value, String> {
     let dest = if std::path::Path::new(path_str).is_absolute() {
         PathBuf::from(path_str)
     } else {
@@ -11091,10 +11098,10 @@ async fn handle_waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<
         fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create download directory: {}", e))?;
     }
-    if fs::rename(&saved, &dest).is_err() {
+    if fs::rename(saved, &dest).is_err() {
         // rename fails across filesystems; copy, then remove the original.
-        fs::copy(&saved, &dest).map_err(|e| format!("Failed to move downloaded file: {}", e))?;
-        let _ = fs::remove_file(&saved);
+        fs::copy(saved, &dest).map_err(|e| format!("Failed to move downloaded file: {}", e))?;
+        let _ = fs::remove_file(saved);
     }
     Ok(json!({ "path": dest.to_string_lossy() }))
 }
@@ -13736,6 +13743,92 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    async fn start_finished_download(
+        state: &mut super::DaemonState,
+        download_dir: &std::path::Path,
+    ) -> std::path::PathBuf {
+        for cmd in [
+            serde_json::json!({ "id": "1", "action": "launch", "headless": true,
+                "downloadPath": download_dir.to_string_lossy() }),
+            serde_json::json!({ "id": "2", "action": "navigate", "url":
+                "data:text/html,<a id=dl download=report.bin href='data:application/octet-stream,report'>dl</a>" }),
+            serde_json::json!({ "id": "3", "action": "evaluate",
+                "script": "document.getElementById('dl').click()" }),
+        ] {
+            let resp = super::execute_command(&cmd, state).await;
+            assert_eq!(resp["success"], true, "{resp}");
+        }
+        let saved = download_dir.join("report.bin");
+        for _ in 0..50 {
+            if saved.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            saved.exists(),
+            "download should land in the configured directory"
+        );
+        saved
+    }
+
+    /// Events that arrive after the per-command drain, for example during the
+    /// liveness check, are still in the daemon's receiver when the wait starts.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_wait_download_claims_a_completion_left_in_the_daemon_receiver() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = super::DaemonState::new();
+        start_finished_download(&mut state, &dir.path().join("downloads")).await;
+
+        let result = super::handle_waitfordownload(
+            &serde_json::json!({ "action": "waitfordownload", "timeout": 2000 }),
+            &mut state,
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        super::execute_command(
+            &serde_json::json!({ "id": "9", "action": "close" }),
+            &mut state,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_wait_download_failed_move_leaves_the_download_claimable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = super::DaemonState::new();
+        let saved = start_finished_download(&mut state, &dir.path().join("downloads")).await;
+
+        // A regular file as the parent directory makes the destination invalid.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "").unwrap();
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "4", "action": "waitfordownload",
+                "path": blocker.join("report.bin").to_string_lossy(), "timeout": 2000 }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false, "{resp}");
+        assert!(saved.exists(), "a failed move keeps the source file");
+
+        let dest = dir.path().join("out").join("report.bin");
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "5", "action": "waitfordownload",
+                "path": dest.to_string_lossy(), "timeout": 2000 }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "report");
+        super::execute_command(
+            &serde_json::json!({ "id": "9", "action": "close" }),
+            &mut state,
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn test_auth_login_releases_remote_objects_after_failures() {
         use futures_util::{SinkExt, StreamExt};

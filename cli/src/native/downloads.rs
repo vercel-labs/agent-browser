@@ -84,6 +84,14 @@ impl DownloadLedger {
         Some(record.clone())
     }
 
+    /// Return a claimed download to the queue, for a wait that failed after
+    /// claiming it.
+    pub fn release(&mut self, guid: &str) {
+        if let Some(record) = self.records.iter_mut().find(|r| r.guid == guid) {
+            record.claimed = false;
+        }
+    }
+
     /// Mark a download as handled elsewhere, so `wait --download` never
     /// claims it. `download <selector> <path>` owns its own file.
     pub fn mark_claimed(&mut self, guid: &str) {
@@ -128,6 +136,17 @@ mod tests {
             ledger.claim_finished().is_none(),
             "a download is claimed once"
         );
+    }
+
+    #[test]
+    fn a_released_download_can_be_claimed_again() {
+        let mut ledger = DownloadLedger::default();
+        completed(&mut ledger, "a", "/dl/a.bin");
+        let record = ledger.claim_finished().expect("finished download");
+        ledger.release(&record.guid);
+        let again = ledger.claim_finished().expect("released download");
+        assert_eq!(again.guid, "a");
+        assert!(ledger.claim_finished().is_none());
     }
 
     #[test]
