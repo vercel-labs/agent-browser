@@ -59,18 +59,31 @@ pub(super) fn disk_free_bytes(_path: &Path) -> Option<u64> {
 }
 
 pub(super) fn which_exists(name: &str) -> bool {
+    which_path(name).is_some()
+}
+
+/// Resolve `name` on PATH via `which` / `where`, returning the first match.
+pub(super) fn which_path(name: &str) -> Option<std::path::PathBuf> {
     let probe = if cfg!(target_os = "windows") {
         "where"
     } else {
         "which"
     };
-    std::process::Command::new(probe)
+    let output = std::process::Command::new(probe)
         .arg(name)
-        .stdout(std::process::Stdio::null())
+        .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(std::path::PathBuf::from)
 }
 
 pub(super) fn parse_json_file(path: &Path) -> Result<(), String> {
@@ -142,6 +155,19 @@ mod tests {
         assert!(!which_exists(
             "agent-browser-this-does-not-exist-please-dont-install-it"
         ));
+    }
+
+    #[test]
+    fn test_which_path_returns_an_existing_binary() {
+        let probe = if cfg!(target_os = "windows") {
+            "cmd"
+        } else {
+            "sh"
+        };
+        let path = which_path(probe).expect("probe binary should resolve");
+        assert!(path.is_absolute(), "got {}", path.display());
+        assert!(path.exists(), "got {}", path.display());
+        assert!(which_path("agent-browser-this-does-not-exist-please-dont-install-it").is_none());
     }
 
     #[test]

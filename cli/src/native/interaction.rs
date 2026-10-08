@@ -4,7 +4,9 @@ use serde_json::Value;
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
-use super::element::{resolve_element_center, resolve_element_object_id, RefMap};
+use super::element::{
+    resolve_element_center, resolve_element_object_id, session_viewport_offset, RefMap,
+};
 
 /// Outcome of a click. `dialog_opened` is true if a JavaScript dialog opened
 /// mid-sequence (the page is then blocked until `dialog accept`/`dismiss`).
@@ -14,8 +16,13 @@ use super::element::{resolve_element_center, resolve_element_object_id, RefMap};
 /// next click would register as a drag or double-click.
 #[derive(Default)]
 pub struct ClickResult {
+    /// Final pointer position in the top-level page viewport, including dialogs.
+    pub position: (f64, f64),
     pub dialog_opened: bool,
     pub pending_release: Option<PendingRelease>,
+    pub x: f64,
+    pub y: f64,
+    pub button_pressed: bool,
 }
 
 pub struct PendingRelease {
@@ -45,7 +52,9 @@ pub async fn click(
     // A click-triggered dialog can fire on the frame's own session (OOPIF) or
     // on the top-level page session; both count as "ours". A dialog on any
     // other session belongs to a background tab and must not abort this click.
-    dispatch_click(
+    let offset =
+        session_viewport_offset(client, session_id, &effective_session_id, iframe_sessions).await?;
+    let mut result = dispatch_click(
         client,
         &effective_session_id,
         &[effective_session_id.as_str(), session_id],
@@ -54,7 +63,11 @@ pub async fn click(
         button,
         click_count,
     )
-    .await
+    .await?;
+    // Compute before dispatch: a click may navigate or open a blocking dialog.
+    result.position = (x + offset.0, y + offset.1);
+    (result.x, result.y) = result.position;
+    Ok(result)
 }
 
 pub async fn dblclick(
@@ -82,7 +95,7 @@ pub async fn hover(
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<(f64, f64), String> {
     let (x, y, effective_session_id) = resolve_element_center(
         client,
         session_id,
@@ -91,6 +104,8 @@ pub async fn hover(
         iframe_sessions,
     )
     .await?;
+    let offset =
+        session_viewport_offset(client, session_id, &effective_session_id, iframe_sessions).await?;
     client
         .send_command_typed::<_, Value>(
             "Input.dispatchMouseEvent",
@@ -108,7 +123,7 @@ pub async fn hover(
             Some(&effective_session_id),
         )
         .await?;
-    Ok(())
+    Ok((x + offset.0, y + offset.1))
 }
 
 pub async fn fill(
@@ -442,18 +457,40 @@ pub async fn select_option(
     // selects a misspelled option otherwise sees "Done", and only discovers
     // the page state is wrong after more commands. List what was available.
     let js = r#"function(vals) {
+            const normalize = (value) => String(value ?? '')
+                .replace(/[\u200B\u200C\u200D\u2060\uFEFF]/g, '')
+                .replace(/\s+/g, ' ')
+                .trim();
             const options = Array.from(this.options);
-            let matched = 0;
-            for (const opt of options) {
-                opt.selected = vals.includes(opt.value) || vals.includes(opt.textContent.trim());
-                if (opt.selected) matched += 1;
+            const wanted = new Set();
+            for (const value of vals) {
+                let matches = options.filter((opt) =>
+                    value === opt.value ||
+                    value === opt.label.trim() ||
+                    value === opt.textContent.trim()
+                );
+                if (matches.length === 0) {
+                    const normalizedValue = normalize(value);
+                    matches = options.filter((opt) =>
+                        normalize(opt.label) === normalizedValue
+                    );
+                    if (matches.length > 1) {
+                        return { error: 'Multiple options matched ' + JSON.stringify(value) + ' after whitespace normalization' };
+                    }
+                }
+                if (matches.length === 0) {
+                    const available = options.map(o => o.value + ' ("' + normalize(o.label) + '")').join(', ');
+                    return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
+                }
+                for (const opt of matches) wanted.add(opt);
             }
-            if (matched === 0) {
-                const available = options.map(o => o.value + ' ("' + o.textContent.trim() + '")').join(', ');
+            if (wanted.size === 0) {
+                const available = options.map(o => o.value + ' ("' + normalize(o.label) + '")').join(', ');
                 return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
             }
+            for (const opt of options) opt.selected = wanted.has(opt);
             this.dispatchEvent(new Event('change', { bubbles: true }));
-            return { matched };
+            return { matched: wanted.size };
         }"#
     .to_string();
 
@@ -492,7 +529,8 @@ pub async fn check(
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<Option<(f64, f64)>, String> {
+    let mut position = None;
     let is_checked = super::element::is_element_checked(
         client,
         session_id,
@@ -502,7 +540,7 @@ pub async fn check(
     )
     .await?;
     if !is_checked {
-        click(
+        let result = click(
             client,
             session_id,
             ref_map,
@@ -512,6 +550,7 @@ pub async fn check(
             iframe_sessions,
         )
         .await?;
+        position = Some(result.position);
 
         // Verify the click changed the state (Playwright parity: _setChecked re-checks).
         // If the coordinate-based click missed (e.g. hidden input, overlay), retry
@@ -535,7 +574,7 @@ pub async fn check(
             .await?;
         }
     }
-    Ok(())
+    Ok(position)
 }
 
 pub async fn uncheck(
@@ -544,7 +583,8 @@ pub async fn uncheck(
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<(), String> {
+) -> Result<Option<(f64, f64)>, String> {
+    let mut position = None;
     let is_checked = super::element::is_element_checked(
         client,
         session_id,
@@ -554,7 +594,7 @@ pub async fn uncheck(
     )
     .await?;
     if is_checked {
-        click(
+        let result = click(
             client,
             session_id,
             ref_map,
@@ -564,6 +604,7 @@ pub async fn uncheck(
             iframe_sessions,
         )
         .await?;
+        position = Some(result.position);
 
         // Same verify-and-retry as check().
         if super::element::is_element_checked(
@@ -585,7 +626,7 @@ pub async fn uncheck(
             .await?;
         }
     }
-    Ok(())
+    Ok(position)
 }
 
 /// Fallback for when the coordinate-based CDP click did not toggle the
@@ -1017,8 +1058,12 @@ async fn dispatch_click(
     {
         // No button was pressed yet, nothing to release.
         return Ok(ClickResult {
+            position: (x, y),
             dialog_opened: true,
             pending_release: None,
+            x,
+            y,
+            button_pressed: false,
         });
     }
 
@@ -1051,6 +1096,7 @@ async fn dispatch_click(
         // release will never arrive on its own. Hand the caller what it needs
         // to release once the dialog is resolved.
         return Ok(ClickResult {
+            position: (x, y),
             dialog_opened: true,
             pending_release: Some(PendingRelease {
                 session_id: session_id.to_string(),
@@ -1058,6 +1104,9 @@ async fn dispatch_click(
                 y,
                 button: button.to_string(),
             }),
+            x,
+            y,
+            button_pressed: true,
         });
     }
 
@@ -1081,8 +1130,12 @@ async fn dispatch_click(
     )
     .await?;
     Ok(ClickResult {
+        position: (x, y),
         dialog_opened,
         pending_release: None,
+        x,
+        y,
+        button_pressed: true,
     })
 }
 

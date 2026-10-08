@@ -1,5 +1,10 @@
+#[cfg(windows)]
+use super::windows_process::Child;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
@@ -819,7 +824,9 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
     #[cfg(target_os = "linux")]
     let xvfb = maybe_start_xvfb(options);
 
+    #[cfg(not(windows))]
     let mut cmd = Command::new(chrome_path);
+    #[cfg(not(windows))]
     cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -859,7 +866,11 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         }
     }
 
-    let mut child = cmd.spawn().map_err(|e| {
+    #[cfg(not(windows))]
+    let spawned = cmd.spawn();
+    #[cfg(windows)]
+    let spawned = Child::spawn(chrome_path, &args, options.effectively_headless());
+    let mut child = spawned.map_err(|e| {
         cleanup_temp_dir(&temp_user_data_dir);
         format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
     })?;
@@ -893,6 +904,17 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
             }
         }
     };
+
+    // Chrome blocks on stderr writes once the pipe buffer fills, so keep draining it
+    // after readiness. The fallback path has already taken stderr.
+    if let Some(stderr) = child.stderr.take() {
+        let _ = std::thread::Builder::new()
+            .name("chrome-stderr-drain".into())
+            .spawn(move || {
+                let mut stderr = stderr;
+                let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+            });
+    }
 
     #[cfg(unix)]
     let pgid = {
@@ -947,7 +969,7 @@ fn wait_for_devtools_active_port(
 }
 
 fn wait_for_ws_url_until(
-    reader: BufReader<std::process::ChildStderr>,
+    reader: impl BufRead,
     deadline: std::time::Instant,
 ) -> Result<String, String> {
     let prefix = "DevTools listening on ";
@@ -1142,8 +1164,17 @@ pub async fn auto_connect_cdp() -> Result<String, String> {
 
     for dir in &user_data_dirs {
         if let Some((port, ws_path)) = read_devtools_active_port(dir) {
-            if let Ok(ws_url) = resolve_cdp_from_active_port(port, &ws_path).await {
-                return Ok(ws_url);
+            match resolve_cdp_from_active_port(port, &ws_path).await {
+                Ok(ws_url) => return Ok(ws_url),
+                // Chrome is alive and still showing the permission prompt.
+                // Probing further would open another prompt (#1365).
+                Err(ActivePortError::AwaitingApproval) => {
+                    return Err(format!(
+                        "Chrome is waiting for remote-debugging approval on port {}. Approve the prompt in Chrome and retry.",
+                        port
+                    ));
+                }
+                Err(ActivePortError::Unreachable(_)) => {}
             }
             // Port is dead — remove the stale file so future runs skip it.
             let stale = dir.join("DevToolsActivePort");
@@ -1167,10 +1198,28 @@ pub async fn auto_connect_cdp() -> Result<String, String> {
 /// prompt on M144+), then falls back to legacy HTTP discovery for older
 /// Chrome versions. This order avoids triggering duplicate remote-debugging
 /// permission prompts (#1210, #1206).
-async fn resolve_cdp_from_active_port(port: u16, ws_path: &str) -> Result<String, String> {
+async fn resolve_cdp_from_active_port(port: u16, ws_path: &str) -> Result<String, ActivePortError> {
+    resolve_cdp_from_active_port_within(port, ws_path, AUTO_CONNECT_WS_VERIFY_TIMEOUT).await
+}
+
+#[derive(Debug, PartialEq)]
+enum ActivePortError {
+    /// The handshake stayed open past the timeout: Chrome is holding it for
+    /// the remote-debugging permission prompt.
+    AwaitingApproval,
+    Unreachable(String),
+}
+
+async fn resolve_cdp_from_active_port_within(
+    port: u16,
+    ws_path: &str,
+    timeout: Duration,
+) -> Result<String, ActivePortError> {
     let ws_url = format!("ws://127.0.0.1:{}{}", port, ws_path);
-    if verify_ws_endpoint(&ws_url).await {
-        return Ok(ws_url);
+    match verify_ws_endpoint(&ws_url, timeout).await {
+        WsVerify::Live => return Ok(ws_url),
+        WsVerify::TimedOut => return Err(ActivePortError::AwaitingApproval),
+        WsVerify::Failed => {}
     }
 
     // Pre-M144 fallback: HTTP endpoints (/json/version, /json/list, etc.)
@@ -1178,19 +1227,31 @@ async fn resolve_cdp_from_active_port(port: u16, ws_path: &str) -> Result<String
         return Ok(ws_url);
     }
 
-    Err(format!(
+    Err(ActivePortError::Unreachable(format!(
         "Cannot connect to Chrome on port {}: both direct WebSocket and HTTP discovery failed",
         port
-    ))
+    )))
+}
+
+/// How long `--auto-connect` keeps the direct WebSocket handshake open.
+/// Chrome 144+ holds the handshake while it shows the remote-debugging
+/// permission prompt, so this must leave time to approve it (#1365). It stays
+/// below the client's 30s read timeout (`connection::read_timeout_for`) so the
+/// daemon answers before the client gives up and retries.
+const AUTO_CONNECT_WS_VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
+
+enum WsVerify {
+    Live,
+    TimedOut,
+    Failed,
 }
 
 /// Verify that a WebSocket endpoint is a live CDP server by sending
 /// `Browser.getVersion` and checking for a valid response.
-async fn verify_ws_endpoint(ws_url: &str) -> bool {
+async fn verify_ws_endpoint(ws_url: &str, timeout: Duration) -> WsVerify {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 
-    let timeout = Duration::from_secs(2);
     let result = tokio::time::timeout(timeout, async {
         let (mut ws, _) = tokio_tungstenite::connect_async(ws_url).await.ok()?;
         let cmd = r#"{"id":1,"method":"Browser.getVersion"}"#;
@@ -1208,7 +1269,11 @@ async fn verify_ws_endpoint(ws_url: &str) -> bool {
         None
     })
     .await;
-    matches!(result, Ok(Some(())))
+    match result {
+        Ok(Some(())) => WsVerify::Live,
+        Ok(None) => WsVerify::Failed,
+        Err(_) => WsVerify::TimedOut,
+    }
 }
 
 /// Returns the default Chrome user-data directory paths for the current platform.
@@ -1550,14 +1615,44 @@ fn should_disable_sandbox(existing_args: &[String]) -> bool {
     false
 }
 
-/// Returns true if Chrome should use disk instead of /dev/shm for shared memory.
-/// On CI runners and containers, /dev/shm is often too small (64MB default),
-/// which causes Chrome to crash mid-session.
+#[cfg(any(target_os = "linux", test))]
+const MIN_DEV_SHM_AVAILABLE_BYTES: u64 = 256 * 1024 * 1024;
+
+#[cfg(target_os = "linux")]
+fn available_filesystem_bytes(path: &Path) -> Option<u64> {
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+
+    // SAFETY: `path` is a valid, NUL-terminated C string and `stats` points to
+    // writable storage for a `statvfs` value. A successful call initializes it.
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return None;
+    }
+
+    let stats = unsafe { stats.assume_init() };
+    let available_bytes = u128::from(stats.f_bavail).saturating_mul(u128::from(stats.f_frsize));
+    Some(u64::try_from(available_bytes).unwrap_or(u64::MAX))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn dev_shm_is_too_small(available_bytes: u64) -> bool {
+    available_bytes < MIN_DEV_SHM_AVAILABLE_BYTES
+}
+
+/// Returns true if Chrome should use disk instead of `/dev/shm` for shared memory.
+/// Prefer the actual filesystem capacity over environment markers because some
+/// container runtimes expose no conventional marker and others provision a large mount.
 fn should_disable_dev_shm(existing_args: &[String]) -> bool {
     if existing_args.iter().any(|a| a == "--disable-dev-shm-usage") {
         return false;
     }
 
+    #[cfg(target_os = "linux")]
+    if let Some(available_bytes) = available_filesystem_bytes(Path::new("/dev/shm")) {
+        return dev_shm_is_too_small(available_bytes);
+    }
+
+    // Preserve the existing safe fallback when `/dev/shm` cannot be inspected.
     if std::env::var("CI").is_ok() {
         return true;
     }
@@ -1735,6 +1830,78 @@ mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
 
+    #[test]
+    fn test_dev_shm_capacity_threshold() {
+        assert!(dev_shm_is_too_small(64 * 1024 * 1024));
+        assert!(dev_shm_is_too_small(128 * 1024 * 1024));
+        assert!(!dev_shm_is_too_small(256 * 1024 * 1024));
+        assert!(!dev_shm_is_too_small(1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_existing_disable_dev_shm_arg_is_not_duplicated() {
+        assert!(!should_disable_dev_shm(&[
+            "--disable-dev-shm-usage".to_string()
+        ]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stderr_drained_after_port_readiness() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let executable = fixture.path().join("chrome");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+set -eu
+for arg do
+    case "$arg" in --user-data-dir=*) profile="${arg#*=}" ;; esac
+done
+printf '9222\n/devtools/browser/stderr-test\n' > "$profile/DevToolsActivePort"
+for round in 1 2; do
+    while [ ! -f "$profile/request-$round" ]; do sleep 0.01; done
+    printf '\377' >&2
+    head -c 2097152 /dev/zero >&2
+    touch "$profile/drained-$round"
+done
+exec sleep 60
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let options = LaunchOptions {
+            headless: true,
+            ..Default::default()
+        };
+        let mut chrome = try_launch_chrome(&executable, &options).unwrap();
+        let profile = chrome.temp_user_data_dir.clone().unwrap();
+        assert_eq!(
+            chrome.ws_url,
+            "ws://127.0.0.1:9222/devtools/browser/stderr-test"
+        );
+        for round in 1..=2 {
+            std::fs::write(profile.join(format!("request-{round}")), b"").unwrap();
+            let drained = profile.join(format!("drained-{round}"));
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !drained.exists() && std::time::Instant::now() < deadline {
+                assert!(
+                    !chrome.has_exited(),
+                    "writer exited before completing stderr"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                drained.exists(),
+                "stderr burst {round} blocked after readiness"
+            );
+            assert!(!chrome.has_exited());
+        }
+        drop(chrome);
+        assert!(!profile.exists());
+    }
+
     fn prepared_nss_home() -> PreparedNssHome {
         let path = std::env::temp_dir().join(format!(
             "agent-browser-prepared-nss-test-{}",
@@ -1798,13 +1965,8 @@ mod tests {
 
     #[cfg(windows)]
     fn spawn_noop_child() -> Child {
-        Command::new("cmd.exe")
-            .args(["/C", "exit 0"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap()
+        let cmd = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe");
+        Child::spawn(&cmd, &["/C".into(), "exit 0".into()], false).unwrap()
     }
 
     #[test]
@@ -2718,6 +2880,39 @@ mod tests {
         server.await.unwrap();
     }
 
+    /// Chrome 144+ holds the WebSocket handshake while the remote-debugging
+    /// permission prompt is open. A handshake that completes after a few
+    /// seconds must still resolve through the exact ws_path (#1365).
+    #[tokio::test]
+    async fn test_resolve_cdp_from_active_port_waits_for_permission_prompt() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as WsMsg;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let ws_path = "/devtools/browser/prompt-uuid".to_string();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            if let Some(Ok(WsMsg::Text(text))) = ws.next().await {
+                let req: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let id = req.get("id").unwrap();
+                let reply = format!(
+                    r#"{{"id":{},"result":{{"protocolVersion":"1.3","product":"Chrome/148"}}}}"#,
+                    id
+                );
+                ws.send(WsMsg::Text(reply)).await.unwrap();
+            }
+            let _ = ws.close(None).await;
+        });
+
+        let result = resolve_cdp_from_active_port(port, &ws_path).await;
+        assert_eq!(result, Ok(format!("ws://127.0.0.1:{}{}", port, ws_path)));
+        server.await.unwrap();
+    }
+
     /// When the exact ws_path connection fails, `resolve_cdp_from_active_port`
     /// should fall back to HTTP discovery.
     #[tokio::test]
@@ -2767,6 +2962,44 @@ mod tests {
         drop(listener);
 
         let result = resolve_cdp_from_active_port(port, "/devtools/browser/dead").await;
-        assert!(result.is_err(), "should fail when nothing is listening");
+        assert!(
+            matches!(result, Err(ActivePortError::Unreachable(_))),
+            "should fail when nothing is listening: {:?}",
+            result
+        );
+    }
+
+    /// A handshake still held open when the timeout expires means Chrome is
+    /// showing the permission prompt. Resolution must stop without HTTP
+    /// discovery, which would open a second prompt (#1365).
+    #[tokio::test]
+    async fn test_resolve_cdp_from_active_port_stops_while_prompt_is_open() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (held, _) = listener.accept().await.unwrap();
+            let second = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
+            drop(held);
+            second.is_ok()
+        });
+
+        let result = resolve_cdp_from_active_port_within(
+            port,
+            "/devtools/browser/prompt",
+            Duration::from_millis(300),
+        )
+        .await;
+        assert_eq!(result, Err(ActivePortError::AwaitingApproval));
+        assert!(
+            !server.await.unwrap(),
+            "HTTP discovery must not run while the prompt is open"
+        );
+    }
+
+    #[test]
+    fn auto_connect_wait_stays_below_client_read_timeout() {
+        let client_floor = crate::connection::read_timeout_for(&serde_json::json!({}));
+        assert!(AUTO_CONNECT_WS_VERIFY_TIMEOUT < client_floor);
     }
 }

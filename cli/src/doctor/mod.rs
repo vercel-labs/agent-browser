@@ -1,8 +1,8 @@
 //! Diagnose an agent-browser installation.
 //!
-//! Runs a battery of checks across environment, Chrome install, daemon
-//! state, config files, encryption, providers, network reachability, and
-//! a live headless browser launch test.
+//! Runs a battery of checks across environment, Chrome install, the ffmpeg
+//! install `record` needs, daemon state, config files, encryption,
+//! providers, network reachability, and a live headless browser launch test.
 //!
 //! Auto-cleans stale daemon socket/pid/version sidecar files. Destructive
 //! repairs (reinstalling Chrome, purging old state files, generating a
@@ -12,6 +12,7 @@ mod chrome;
 mod config;
 mod daemon;
 mod environment;
+mod ffmpeg;
 mod fix;
 mod helpers;
 mod launch;
@@ -108,6 +109,7 @@ pub fn run_doctor(opts: DoctorOptions) -> i32 {
 
     environment::check(&mut checks);
     chrome::check(&mut checks);
+    ffmpeg::check(&mut checks);
     daemon::check(&mut checks);
     config::check(&mut checks);
     security::check(&mut checks);

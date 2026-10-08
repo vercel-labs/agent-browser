@@ -41,6 +41,42 @@ jobs:
       - name: Run launcher tests
         run: pnpm run test:launcher
 
+  docs:
+    name: Docs (${{ matrix.environment }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: [production, preview]
+    env:
+      VERCEL_ENV: ${{ matrix.environment }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test original documentation contract
+        run: pnpm --filter docs test
+
+      - name: Typecheck documentation
+        run: pnpm --filter docs type-check
+
+      - name: Build documentation
+        run: pnpm --filter docs build
+
+      - name: Verify public documentation routes
+        run: pnpm --filter docs test:routes ${{ matrix.environment == 'preview' && '--preview' || '' }}
+
   rust:
     name: Rust
     runs-on: ubuntu-latest

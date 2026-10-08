@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>WebMCP context probe</title></head>
+  <body>
+    <button id="register">Register tool</button>
+    <button id="remove">Remove tool</button>
+    <label>Tool description <input id="description" /></label>
+    <output id="result">idle</output>
+    <script>
+      let controller;
+      function register(description = "Set the visible message") {
+        controller?.abort();
+        controller = new AbortController();
+        document.modelContext.registerTool({
+          name: "set_message", description,
+          inputSchema: {
+            type: "object",
+            properties: { message: { type: "string" } },
+            required: ["message"], additionalProperties: false
+          },
+          execute: async ({ message }) => {
+            document.getElementById("result").textContent = message;
+            return { message };
+          }
+        }, { signal: controller.signal });
+      }
+      document.getElementById("register").onclick = () => register();
+      document.getElementById("description").oninput = (event) => register(event.target.value);
+      document.getElementById("remove").onclick = () => {
+        controller?.abort();
+        controller = undefined;
+      };
+    </script>
+  </body>
+</html>

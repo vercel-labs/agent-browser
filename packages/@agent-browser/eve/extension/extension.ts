@@ -11,6 +11,8 @@ export default defineExtension({
     binary: z.string().default("agent-browser"),
     caCert: z.string().optional(),
     clearCaCert: z.boolean().default(false),
+    /** Use the OS trust store for the CLI's own HTTPS requests, such as `read`. */
+    useSystemCa: z.boolean().optional(),
     /** Wrap page output in boundary markers so the model can tell tool output from page content. */
     contentBoundaries: z.boolean().default(false),
     /** Download Chromium during auto-install. */

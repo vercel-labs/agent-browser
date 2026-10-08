@@ -152,6 +152,9 @@ function configArgs(): string[] {
   } else if (config.clearCaCert) {
     args.push("--no-ca-cert");
   }
+  if (config.useSystemCa !== undefined) {
+    args.push("--use-system-ca", String(config.useSystemCa));
+  }
   if (config.contentBoundaries) {
     args.push("--content-boundaries");
   }

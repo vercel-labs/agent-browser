@@ -51,7 +51,7 @@ Start a named session:
 
 ```bash
 agent-browser --session {SESSION} open {TARGET_URL}
-agent-browser --session {SESSION} wait --load networkidle
+agent-browser --session {SESSION} wait --load domcontentloaded
 ```
 
 ### 2. Authenticate
@@ -64,7 +64,11 @@ agent-browser --session {SESSION} snapshot -i
 agent-browser --session {SESSION} fill @e1 "{EMAIL}"
 agent-browser --session {SESSION} fill @e2 "{PASSWORD}"
 agent-browser --session {SESSION} click @e3
-agent-browser --session {SESSION} wait --load networkidle
+# Replace this with the target app's post-login URL, text, or JS condition:
+agent-browser --session {SESSION} wait --url "{POST_LOGIN_URL_PATTERN}"
+# Or:
+# agent-browser --session {SESSION} wait --text "{POST_LOGIN_TEXT}"
+# agent-browser --session {SESSION} wait --fn "{POST_LOGIN_CONDITION}"
 ```
 
 For OTP/email codes: ask the user, wait for their response, then enter the code.
