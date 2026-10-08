@@ -6,6 +6,7 @@
 ### New Features
 
 - Added an experimental **Obscura engine** (`--engine obscura`), launched and cleaned up locally like Chrome with bounded startup and CLI/MCP support. Obscura still has accessibility and rendering gaps, so review the engine page before choosing it (#1876)
+- Added **private CA trust for CLI HTTPS requests** so `read`, `install`, `upgrade` and `doctor` work behind TLS inspection. `--ca-cert` now applies to them on every platform, the new `--use-system-ca` uses the operating system trust store, and `SSL_CERT_FILE` is a fallback. Certificate verification always stays on (#2006)
 
 ### Bug Fixes
 
@@ -25,6 +26,7 @@
 - @SUSINDRAREDDY
 - @godtail
 - @jadenfix
+- @niieani
 <!-- release:end -->
 
 ## 0.38.2
