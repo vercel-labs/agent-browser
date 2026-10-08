@@ -1666,8 +1666,8 @@ mod tests {
             padding: vec![],
             border: vec![],
             margin: vec![],
-            width: 100,
-            height: 40,
+            width: 100.0,
+            height: 40.0,
         };
         let (x, y) = box_model_center(&model);
         assert!((x - 60.0).abs() < 0.01);
