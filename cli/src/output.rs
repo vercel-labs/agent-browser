@@ -3500,9 +3500,10 @@ agent-browser batch - Execute multiple commands sequentially
 Usage: agent-browser batch [options] "<cmd1>" "<cmd2>" ...
        echo '<json>' | agent-browser batch [options]
 
-Runs multiple commands in sequence. Commands can be passed as quoted
-arguments or piped as JSON via stdin. Results are printed in order,
-separated by blank lines (or as a JSON array with --json).
+Runs multiple commands in sequence in a single daemon request. Commands
+can be passed as quoted arguments or piped as JSON via stdin. Results are
+printed in order, separated by blank lines (or as a JSON array with --json).
+A close, or a command that needs confirmation, stops the rest of the batch.
 
 Options:
   --bail               Stop on first error (default: continue all commands)

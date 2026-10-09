@@ -19,6 +19,7 @@ use crate::test_utils::EnvGuard;
 use super::actions::{
     close_current_browser, execute_command, maybe_autosave_restore_state, DaemonState,
 };
+use super::daemon::execute_batch_command;
 
 fn assert_success(resp: &Value) {
     assert_eq!(
@@ -778,6 +779,55 @@ fn native_test_fixture_url(name: &str) -> String {
         "data:text/html;base64,{}",
         STANDARD.encode(native_test_fixture_html(name))
     )
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_batch_runs_in_one_request() {
+    let mut state = DaemonState::new();
+    let response = execute_batch_command(
+        &json!({
+            "id": "e2e-batch",
+            "action": "batch",
+            "bail": true,
+            "entries": [
+                {
+                    "command": ["open"],
+                    "request": {
+                        "id": "launch",
+                        "action": "launch",
+                        "headless": true,
+                        "args": ["--no-sandbox", "--disable-dev-shm-usage"]
+                    }
+                },
+                {
+                    "command": ["open", "data:text/html,<title>Daemon Batch</title>"],
+                    "request": {
+                        "id": "navigate",
+                        "action": "navigate",
+                        "url": "data:text/html,<title>Daemon Batch</title>"
+                    }
+                },
+                {
+                    "command": ["get", "title"],
+                    "request": { "id": "title", "action": "title" }
+                },
+                {
+                    "command": ["close"],
+                    "request": { "id": "close", "action": "close" }
+                },
+                { "command": ["not-run"], "parseError": "close must stop the batch" }
+            ]
+        }),
+        &mut state,
+    )
+    .await;
+
+    assert_success(&response);
+    let results = response["data"]["results"].as_array().unwrap();
+    assert_eq!(results.len(), 4, "close must stop the remaining batch");
+    assert_eq!(results[2]["result"]["title"], "Daemon Batch");
+    assert_eq!(response["data"]["closed"], true);
 }
 
 async fn create_storage_state_with_cookie(path: &str, cookie_name: &str, cookie_value: &str) {

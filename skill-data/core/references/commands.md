@@ -40,6 +40,8 @@ agent-browser batch \
 
 `open` with no URL gives you a clean launch so any interception, cookies, or init scripts you register take effect on the *first* real navigation. Use for SSR-only debug (`--resource-type script`), protected-origin auth, or capturing fresh `react suspense`/`vitals` state without noise from a prior page.
 
+A batch runs in one daemon request. A `close`, or a command that needs confirmation, stops the rest of the batch, and a batch that was already sent is never retried.
+
 ## Snapshot (page analysis)
 
 ```bash

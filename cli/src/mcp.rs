@@ -1630,7 +1630,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_BATCH,
             "Batch",
-            "Run multiple commands sequentially.",
+            "Run multiple commands sequentially in one daemon request. A close or a confirmation prompt stops the rest.",
             json!({ "commands": { "type": "array", "items": { "type": "array", "items": { "type": "string" }, "minItems": 1 }, "minItems": 1 }, "bail": { "type": "boolean" } }),
             &["commands"],
         ),

@@ -583,7 +583,11 @@ async fn handle_connection<S>(
 
                 let response = {
                     let mut s = state.lock().await;
-                    let response = execute_command(&cmd, &mut s).await;
+                    let response = if action == "batch" {
+                        execute_batch_command(&cmd, &mut s).await
+                    } else {
+                        execute_command(&cmd, &mut s).await
+                    };
                     // Refresh while the state lock is still held. An idle
                     // timer waiting on this command will observe the updated
                     // clock as soon as it acquires the lock.
@@ -597,7 +601,12 @@ async fn handle_connection<S>(
                     break;
                 }
 
-                if close_completed_response(&action, &response) {
+                let closed = if action == "batch" {
+                    response["data"]["closed"] == true
+                } else {
+                    close_completed_response(&action, &response)
+                };
+                if closed {
                     if let Some(ref path) = stream_file_cleanup {
                         let _ = fs::remove_file(path);
                     }
@@ -612,6 +621,76 @@ async fn handle_connection<S>(
             Err(_) => break,
         }
     }
+}
+
+/// Runs a batch prepared by the CLI, holding the session state for the whole
+/// batch. Each entry has either a parsed `request` or the CLI's `parseError`,
+/// so results stay in the original order.
+pub(crate) async fn execute_batch_command(cmd: &Value, state: &mut DaemonState) -> Value {
+    let id = cmd.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let bail = cmd.get("bail").and_then(|v| v.as_bool()).unwrap_or(false);
+    let Some(entries) = cmd.get("entries").and_then(|v| v.as_array()) else {
+        return serde_json::json!({
+            "id": id,
+            "success": false,
+            "error": "Invalid batch request: entries must be an array",
+        });
+    };
+
+    let mut results = Vec::with_capacity(entries.len());
+    let mut had_error = false;
+    let mut closed = false;
+
+    for entry in entries {
+        let request = entry.get("request").filter(|v| v.is_object());
+        let action = request
+            .and_then(|r| r.get("action"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let response = if let Some(error) = entry.get("parseError") {
+            serde_json::json!({ "success": false, "error": error })
+        } else if action == "batch" {
+            serde_json::json!({ "success": false, "error": "Nested batch commands are not supported" })
+        } else if let Some(request) = request {
+            execute_command(request, state).await
+        } else {
+            serde_json::json!({ "success": false, "error": "Invalid batch entry: missing request" })
+        };
+
+        let success = response["success"] == true;
+        let mut result = serde_json::json!({
+            "command": entry.get("command").cloned().unwrap_or(Value::Null),
+            "success": success,
+            "result": response.get("data").cloned().unwrap_or(Value::Null),
+            "error": response.get("error").cloned().unwrap_or(Value::Null),
+        });
+        for key in ["code", "warning"] {
+            if let Some(value) = response.get(key) {
+                result[key] = value.clone();
+            }
+        }
+        results.push(result);
+        had_error |= !success;
+
+        // Don't run past a command waiting for confirmation or a closed
+        // session.
+        if response["data"]["confirmation_required"] == true {
+            break;
+        }
+        if close_completed_response(action, &response) {
+            closed = true;
+            break;
+        }
+        if !success && bail {
+            break;
+        }
+    }
+
+    serde_json::json!({
+        "id": id,
+        "success": !had_error,
+        "data": { "results": results, "closed": closed },
+    })
 }
 
 fn looks_like_http(line: &str) -> bool {
@@ -864,6 +943,132 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(1), state.lock())
             .await
             .expect("background tick should release the state lock");
+    }
+
+    fn batch_test_state() -> DaemonState {
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        state
+    }
+
+    #[tokio::test]
+    async fn test_batch_keeps_order_and_honors_bail() {
+        let mut state = batch_test_state();
+        let entries = serde_json::json!([
+            { "command": ["bad-one"], "parseError": "first error" },
+            { "command": ["stream", "status"], "request": { "id": "s", "action": "stream_status" } },
+            { "command": ["bad-three"], "parseError": "third error" }
+        ]);
+
+        let all = execute_batch_command(
+            &serde_json::json!({ "id": "b", "action": "batch", "entries": entries }),
+            &mut state,
+        )
+        .await;
+        let results = all["data"]["results"].as_array().unwrap();
+        assert_eq!(all["success"], false);
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0]["error"], "first error");
+        assert_eq!(results[1]["success"], true);
+        assert_eq!(results[2]["command"], serde_json::json!(["bad-three"]));
+
+        let bailed = execute_batch_command(
+            &serde_json::json!({ "id": "b", "action": "batch", "entries": entries, "bail": true }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(bailed["data"]["results"].as_array().unwrap().len(), 1);
+        assert_eq!(bailed["data"]["closed"], false);
+    }
+
+    #[tokio::test]
+    async fn test_batch_rejects_nesting_and_stops_for_confirmation() {
+        let mut state = batch_test_state();
+        state.confirm_actions = Some(crate::native::policy::ConfirmActions {
+            categories: std::collections::HashSet::from(["stream_status".to_string()]),
+        });
+        let response = execute_batch_command(
+            &serde_json::json!({
+                "id": "b",
+                "action": "batch",
+                "entries": [
+                    { "command": ["batch"], "request": { "id": "n", "action": "batch", "entries": [] } },
+                    { "command": ["stream", "status"], "request": { "id": "s", "action": "stream_status" } },
+                    { "command": ["not-run"], "parseError": "must not run" }
+                ]
+            }),
+            &mut state,
+        )
+        .await;
+
+        let results = response["data"]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0]["error"],
+            "Nested batch commands are not supported"
+        );
+        assert_eq!(results[1]["result"]["confirmation_required"], true);
+        assert_eq!(response["data"]["closed"], false);
+    }
+
+    #[tokio::test]
+    async fn test_batch_stops_after_close() {
+        let mut state = batch_test_state();
+        let response = execute_batch_command(
+            &serde_json::json!({
+                "id": "b",
+                "action": "batch",
+                "entries": [
+                    { "command": ["bad"], "parseError": "earlier error" },
+                    { "command": ["close"], "request": { "id": "c", "action": "close" } },
+                    { "command": ["not-run"], "parseError": "must not run" }
+                ]
+            }),
+            &mut state,
+        )
+        .await;
+
+        assert_eq!(response["success"], false);
+        assert_eq!(response["data"]["results"].as_array().unwrap().len(), 2);
+        assert_eq!(response["data"]["closed"], true);
+    }
+
+    #[tokio::test]
+    async fn test_batch_is_one_request_on_the_socket() {
+        let (mut client, server) = tokio::io::duplex(16 * 1024);
+        let state = Arc::new(tokio::sync::Mutex::new(batch_test_state()));
+        let server_task = tokio::spawn(handle_connection(
+            server,
+            state,
+            Arc::new(IdleActivity::new()),
+            None,
+            Arc::new(Notify::new()),
+        ));
+        let request = serde_json::json!({
+            "id": "one",
+            "action": "batch",
+            "entries": [
+                { "command": ["bad"], "parseError": "bad command" },
+                { "command": ["stream", "status"], "request": { "id": "s", "action": "stream_status" } }
+            ]
+        });
+        let mut wire = serde_json::to_vec(&request).unwrap();
+        wire.push(b'\n');
+        client.write_all(&wire).await.unwrap();
+
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["id"], "one");
+        assert_eq!(response["data"]["results"].as_array().unwrap().len(), 2);
+
+        drop(reader);
+        tokio::time::timeout(Duration::from_secs(1), server_task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     /// Guard against re-introducing `waitpid(-1)` in daemon code.
