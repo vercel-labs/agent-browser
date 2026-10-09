@@ -45,6 +45,13 @@ const WS_KEEPALIVE_INTERVAL_SECS: u64 = 30;
 const TRANSPORT_CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
 const CONNECTION_CLOSED_ERROR: &str = "CDP connection closed";
 
+/// Upper bound on the CDP WebSocket handshake (TCP connect plus HTTP upgrade).
+/// An endpoint that accepts the TCP connection but never answers the upgrade
+/// request would otherwise park the caller, and one layer up the whole daemon
+/// command loop, forever (#1713). Matches the 30s per-command response
+/// timeout in `send_command`.
+const CDP_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn normalize_websocket_root_path(url: &str) -> String {
     let Some(scheme_end) = url.find("://").map(|index| index + 3) else {
         return url.to_string();
@@ -223,21 +230,31 @@ impl CdpClient {
             ..Default::default()
         };
 
-        Self::connect_request(request, ws_config, None).await
+        Self::connect_request(request, ws_config, None, CDP_HANDSHAKE_TIMEOUT).await
     }
 
     async fn connect_request(
         request: Request<()>,
         ws_config: WebSocketConfig,
         connector: Option<Connector>,
+        handshake_timeout: Duration,
     ) -> Result<Self, String> {
-        let (ws_stream, _) = tokio_tungstenite::connect_async_tls_with_config(
-            request,
-            Some(ws_config),
-            false,
-            connector,
+        let (ws_stream, _) = tokio::time::timeout(
+            handshake_timeout,
+            tokio_tungstenite::connect_async_tls_with_config(
+                request,
+                Some(ws_config),
+                false,
+                connector,
+            ),
         )
         .await
+        .map_err(|_| {
+            format!(
+                "CDP WebSocket connect failed: no handshake response within {}s (endpoint accepted the connection but never completed the WebSocket upgrade)",
+                handshake_timeout.as_secs()
+            )
+        })?
         .map_err(|e| format!("CDP WebSocket connect failed: {}", e))?;
 
         enable_tcp_keepalive(ws_stream.get_ref());
@@ -1057,13 +1074,62 @@ mod tests {
             max_frame_size: None,
             ..Default::default()
         };
-        let client =
-            CdpClient::connect_request(request, config, Some(Connector::Rustls(client_config)))
-                .await
-                .unwrap();
+        let client = CdpClient::connect_request(
+            request,
+            config,
+            Some(Connector::Rustls(client_config)),
+            CDP_HANDSHAKE_TIMEOUT,
+        )
+        .await
+        .unwrap();
 
         client.close().await;
         server.join().unwrap();
+    }
+
+    /// Regression for #1713: a TCP endpoint that accepts but never answers the
+    /// WebSocket upgrade must produce a bounded error instead of parking the
+    /// caller (and, one layer up, the daemon command loop) forever.
+    #[tokio::test]
+    async fn connect_silent_endpoint_handshake_times_out() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Accept the connection and hold it silent — no HTTP 101 ever comes,
+        // mirroring the deterministic wedge from the issue report.
+        let holder = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let request = format!("ws://{}", addr)
+            .into_client_request()
+            .expect("valid ws url");
+        let started = std::time::Instant::now();
+        let err = match CdpClient::connect_request(
+            request,
+            WebSocketConfig::default(),
+            None,
+            Duration::from_millis(200),
+        )
+        .await
+        {
+            Ok(_) => panic!("silent endpoint must fail with a handshake timeout"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.contains("handshake response"),
+            "unexpected error: {}",
+            err
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "handshake error must be bounded, took {:?}",
+            started.elapsed()
+        );
+
+        holder.abort();
     }
 
     #[test]
