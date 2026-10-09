@@ -28,12 +28,20 @@ agent-browser --cdp "wss://browser-service.com/cdp?token=..." snapshot
 
 # Works with any CDP-compatible service
 agent-browser --cdp "ws://localhost:9222/devtools/browser/abc123" open example.com
+
+# Authenticated CDP WebSocket (e.g. Cloudflare Browser Rendering)
+agent-browser --cdp "wss://api.cloudflare.com/.../devtools/browser" \
+  --cdp-headers '{"Authorization":"Bearer YOUR_API_TOKEN"}' snapshot
 ```
 
 The `--cdp` flag accepts either:
 
 - A port number (e.g., `9222`) for local connections via `http://localhost:{port}`
 - A full WebSocket URL (e.g., `wss://...` or `ws://...`) for remote browser services
+
+Use `--cdp-headers` (or `AGENT_BROWSER_CDP_HEADERS`) when the service authenticates the WebSocket handshake instead of the URL. It takes a JSON object with string values and is sent on HTTP discovery (`/json/version`, `/json/list`) and on the WebSocket handshake, for URLs and port numbers alike. It is separate from `--headers`, which sets HTTP headers on page requests.
+
+For an `https://` CDP URL, discovery keeps the encryption of the input: requests go over `https://`/`wss://`, so credentials are never sent in plaintext, and there is no fallback to an unencrypted scheme. Only pass `--cdp-headers` with `http://`/`ws://` targets on networks you trust.
 
 Root WebSocket endpoints accept query strings with or without an explicit slash, so both `wss://browser-service.com?token=...` and `wss://browser-service.com/?token=...` work.
 

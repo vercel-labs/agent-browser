@@ -328,6 +328,20 @@ fn parse_cookie_header(header: &str) -> Result<Vec<Value>, String> {
     Ok(out)
 }
 
+/// Parses `--cdp-headers`: a JSON object of string values sent on the CDP
+/// WebSocket handshake (distinct from page-level `--headers`).
+pub fn parse_cdp_headers(raw: &str) -> Result<Value, String> {
+    let headers = serde_json::from_str::<Value>(raw)
+        .map_err(|e| format!("Invalid JSON for --cdp-headers at column {}", e.column()))?;
+    let valid = headers
+        .as_object()
+        .is_some_and(|map| map.values().all(Value::is_string));
+    if !valid {
+        return Err("--cdp-headers must be a JSON object with string values".to_string());
+    }
+    Ok(headers)
+}
+
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
     let mut result = parse_command_inner(args, flags)?;
 
@@ -1289,7 +1303,15 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 || endpoint.starts_with("http://")
                 || endpoint.starts_with("https://")
             {
-                Ok(json!({ "id": id, "action": "launch", "cdpUrl": endpoint }))
+                let mut cmd = json!({ "id": id, "action": "launch", "cdpUrl": endpoint });
+                if let Some(ref raw) = flags.cdp_headers {
+                    cmd["cdpHeaders"] =
+                        parse_cdp_headers(raw).map_err(|message| ParseError::InvalidValue {
+                            message,
+                            usage: r#"connect <url> --cdp-headers '{"Authorization":"Bearer <token>"}'"#,
+                        })?;
+                }
+                Ok(cmd)
             } else {
                 // It's a port number - validate and use cdpPort field
                 let port: u16 = match endpoint.parse::<u32>() {
@@ -3589,6 +3611,7 @@ mod tests {
             init_scripts: Vec::new(),
             enable: Vec::new(),
             cdp: None,
+            cdp_headers: None,
             profile: None,
             state: None,
             proxy: None,
@@ -5817,6 +5840,36 @@ mod tests {
         assert_eq!(cmd["action"], "launch");
         assert_eq!(cmd["cdpPort"], 9222);
         assert!(cmd.get("cdpUrl").is_none());
+    }
+
+    #[test]
+    fn test_connect_with_cdp_headers() {
+        let mut flags = default_flags();
+        flags.cdp_headers = Some(r#"{"Authorization":"Bearer t"}"#.to_string());
+        let cmd = parse_command(&args("connect wss://example.com/cdp"), &flags).unwrap();
+        assert_eq!(cmd["action"], "launch");
+        assert_eq!(cmd["cdpUrl"], "wss://example.com/cdp");
+        assert_eq!(cmd["cdpHeaders"]["Authorization"], "Bearer t");
+    }
+
+    #[test]
+    fn test_parse_cdp_headers_rejects_invalid_shapes() {
+        assert!(parse_cdp_headers(r#"{"Authorization":"Bearer t"}"#).is_ok());
+        assert!(parse_cdp_headers("{bad").is_err());
+        assert!(parse_cdp_headers(r#"["x"]"#).is_err());
+        assert!(parse_cdp_headers(r#"{"Authorization":123}"#).is_err());
+    }
+
+    #[test]
+    fn test_parse_cdp_headers_errors_never_echo_values() {
+        for raw in [
+            r#"{"Authorization":"Bearer SECRET",}"#,
+            r#"{"Authorization":"Bearer SECRET","n":1}"#,
+            r#"["Bearer SECRET"]"#,
+        ] {
+            let err = parse_cdp_headers(raw).unwrap_err();
+            assert!(!err.contains("SECRET"), "{err}");
+        }
     }
 
     #[test]
