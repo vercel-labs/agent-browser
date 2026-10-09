@@ -664,16 +664,20 @@ impl BrowserManager {
                 .await;
         }
 
-        if let Some(ref path) = download_path {
-            let _ = manager
-                .client
-                .send_command(
-                    "Browser.setDownloadBehavior",
-                    Some(json!({ "behavior": "allow", "downloadPath": path })),
-                    None,
-                )
-                .await;
-        }
+        // Always ask Chrome for download events: `waitfordownload` relies on them, and
+        // `behavior: default` keeps Chrome's own handling when no download path is set.
+        let download_behavior = match download_path {
+            Some(ref path) => json!({
+                "behavior": "allow",
+                "downloadPath": path,
+                "eventsEnabled": true,
+            }),
+            None => json!({ "behavior": "default", "eventsEnabled": true }),
+        };
+        let _ = manager
+            .client
+            .send_command("Browser.setDownloadBehavior", Some(download_behavior), None)
+            .await;
 
         Ok(manager)
     }
