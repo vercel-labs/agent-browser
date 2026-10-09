@@ -664,16 +664,7 @@ impl BrowserManager {
                 .await;
         }
 
-        if let Some(ref path) = download_path {
-            let _ = manager
-                .client
-                .send_command(
-                    "Browser.setDownloadBehavior",
-                    Some(json!({ "behavior": "allow", "downloadPath": path })),
-                    None,
-                )
-                .await;
-        }
+        manager.enable_download_events().await;
 
         Ok(manager)
     }
@@ -741,6 +732,9 @@ impl BrowserManager {
                 .close_with_timeout(Some(FAILED_INITIALIZATION_CLOSE_TIMEOUT))
                 .await;
             return Err(error);
+        }
+        if !direct_page {
+            manager.enable_download_events().await;
         }
         Ok(manager)
     }
@@ -2275,6 +2269,23 @@ impl BrowserManager {
 
     pub fn visited_origins(&self) -> &HashSet<String> {
         &self.visited_origins
+    }
+
+    /// Keep the configured download location and turn on `Browser.download*`
+    /// events, which carry the saved file's path, so `wait --download` can
+    /// find the file. Without `eventsEnabled` Chrome sends only `Page.*`
+    /// download events, which have no path.
+    pub async fn enable_download_events(&self) {
+        let params = match self.download_path {
+            Some(ref path) => {
+                json!({ "behavior": "allow", "downloadPath": path, "eventsEnabled": true })
+            }
+            None => json!({ "behavior": "default", "eventsEnabled": true }),
+        };
+        let _ = self
+            .client
+            .send_command("Browser.setDownloadBehavior", Some(params), None)
+            .await;
     }
 
     pub async fn set_download_behavior(&self, download_path: &str) -> Result<(), String> {

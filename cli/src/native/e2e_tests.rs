@@ -13022,3 +13022,58 @@ async fn e2e_mouse_interpolation_starts_at_last_element_interaction() {
     }
     assert_success(&execute_command(&json!({"id": "99", "action": "close"}), &mut state).await);
 }
+
+// ---------------------------------------------------------------------------
+// wait --download (#561, #1300)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_wait_download_claims_a_finished_download_and_moves_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let download_dir = dir.path().join("downloads");
+    let dest = dir.path().join("out").join("report.bin");
+    let mut state = DaemonState::new();
+
+    for cmd in [
+        json!({ "id": "1", "action": "launch", "headless": true,
+                "downloadPath": download_dir.to_string_lossy() }),
+        json!({ "id": "2", "action": "navigate", "url":
+                "data:text/html,<a id=dl download=report.bin href='data:application/octet-stream,report'>dl</a>" }),
+        json!({ "id": "3", "action": "evaluate", "script": "document.getElementById('dl').click()" }),
+    ] {
+        assert_success(&execute_command(&cmd, &mut state).await);
+    }
+
+    // Let the download finish before the wait arrives, which used to time out.
+    let saved = download_dir.join("report.bin");
+    for _ in 0..50 {
+        if saved.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        saved.exists(),
+        "download should land in the configured directory"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "waitfordownload", "path": dest.to_string_lossy(), "timeout": 5000 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["path"], json!(dest.to_string_lossy()));
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "report");
+    assert!(!saved.exists(), "the file is moved, not copied");
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "waitfordownload", "timeout": 1000 }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "a download is claimed only once");
+
+    execute_command(&json!({ "id": "6", "action": "close" }), &mut state).await;
+}
