@@ -5423,6 +5423,12 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             wb.navigate(url).await?;
             let new_url = wb.get_url().await.unwrap_or_else(|_| url.to_string());
             let title = wb.get_title().await.unwrap_or_default();
+            if title == "Blocked" {
+                return Err(format!(
+                    "Navigation blocked: redirect to '{}' is not allowed by domain filter",
+                    new_url
+                ));
+            }
             return Ok(json!({ "url": new_url, "title": title }));
         }
     }
@@ -5477,7 +5483,24 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         }
     }
 
-    navigate_active_page(state, url, wait_until).await
+    let result = navigate_active_page(state, url, wait_until).await?;
+
+    let title = result
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if title == "Blocked" {
+        let page_url = result
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or(url);
+        return Err(format!(
+            "Navigation blocked: redirect to '{}' is not allowed by domain filter",
+            page_url
+        ));
+    }
+
+    Ok(result)
 }
 
 /// Navigate the active page and drop element refs and frame scope. Every
