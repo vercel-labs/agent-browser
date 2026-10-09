@@ -917,10 +917,7 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Network.enable", Some(session_id))
             .await?;
-        let _ = self
-            .client
-            .send_command_no_params("WebMCP.enable", Some(session_id))
-            .await;
+        let _ = super::webmcp::enable_domain(&self.client, Some(session_id)).await;
         // Enable auto-attach for cross-origin iframe support.
         // flatten: true gives each iframe its own session_id.
         // waitForDebuggerOnStart keeps child targets paused until the daemon
@@ -1072,10 +1069,7 @@ impl BrowserManager {
         self.client
             .send_command_no_params("Network.enable", None)
             .await?;
-        let _ = self
-            .client
-            .send_command_no_params("WebMCP.enable", None)
-            .await;
+        let _ = super::webmcp::enable_domain(&self.client, None).await;
         Ok(())
     }
 
@@ -2635,6 +2629,7 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::webmcp;
     use tokio::time::sleep;
 
     #[tokio::test]
@@ -3335,6 +3330,24 @@ mod tests {
             bound_target_gone: None,
             headless: true,
         }
+    }
+
+    #[tokio::test]
+    async fn test_webmcp_enable_probe_does_not_wait_for_default_cdp_timeout() {
+        let mut manager = test_manager(Vec::new()).await;
+        let started = Instant::now();
+
+        let error = webmcp::enable_domain(&manager.client, Some("session-1"))
+            .await
+            .unwrap_err();
+
+        assert!(error.starts_with(webmcp::ERR_UNSUPPORTED), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "optional WebMCP probe took {:?}",
+            started.elapsed()
+        );
+        manager.close().await.unwrap();
     }
 
     #[tokio::test]

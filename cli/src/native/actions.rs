@@ -9390,10 +9390,7 @@ async fn collect_webmcp_tools(state: &mut DaemonState) -> Result<Vec<webmcp::Too
             .webmcp
             .update_frame_origin(&session_id, frame_id, frame_origin.as_str());
     }
-    client
-        .send_command_no_params("WebMCP.enable", Some(&session_id))
-        .await
-        .map_err(|error| webmcp::unsupported_error(&error))?;
+    webmcp::enable_domain(&client, Some(&session_id)).await?;
 
     state.webmcp.observations.insert(session_id.clone(), Ok(()));
 
@@ -9453,9 +9450,7 @@ async fn enable_webmcp_events(state: &mut DaemonState) -> Result<(), String> {
         let tree = client
             .send_command_no_params("Page.getFrameTree", Some(&session_id))
             .await?;
-        client
-            .send_command_no_params("WebMCP.enable", Some(&session_id))
-            .await?;
+        webmcp::enable_domain(&client, Some(&session_id)).await?;
         fn update_origins(state: &mut webmcp::RuntimeState, session: &str, tree: &Value) {
             if let (Some(id), Some(origin)) = (
                 tree["frame"]["id"].as_str(),
