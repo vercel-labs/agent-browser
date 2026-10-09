@@ -6,6 +6,7 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::connection::get_socket_dir;
+use crate::validation::{is_valid_session_name, session_name_error};
 
 use super::chat::{chat_status_json, handle_chat_request, handle_models_request};
 use super::discovery::discover_sessions;
@@ -937,6 +938,27 @@ async fn exec_cli(body: &str) -> Result<String, String> {
     .to_string())
 }
 
+/// Validate a caller-supplied session name before it is used to build a path or
+/// spawned as a session.
+///
+/// The name is rejected rather than rewritten: silently killing a different
+/// session than the caller named would be worse than an error. A valid name is a
+/// single plain path component - every `.`-separated segment must satisfy
+/// [`is_valid_session_name`], which allows only alphanumerics, `-` and `_`. That
+/// excludes `/`, `\`, NUL, absolute paths and the `.`/`..` traversal segments, so
+/// `dir.join(format!("{}.pid", name))` can never escape `dir`.
+fn validated_session_name(session: &str) -> Result<String, String> {
+    if session.is_empty() || session.len() > 64 {
+        return Err("Session name must be 1-64 characters".to_string());
+    }
+
+    if !session.split('.').all(is_valid_session_name) {
+        return Err(session_name_error(session));
+    }
+
+    Ok(session.to_string())
+}
+
 async fn kill_session(body: &str) -> Result<String, String> {
     let parsed: Value = serde_json::from_str(body).map_err(|e| format!("Invalid JSON: {}", e))?;
     let session = parsed
@@ -944,9 +966,8 @@ async fn kill_session(body: &str) -> Result<String, String> {
         .and_then(|v| v.as_str())
         .ok_or("Missing \"session\" field")?;
 
-    if session.is_empty() || session.len() > 64 {
-        return Err("Session name must be 1-64 characters".to_string());
-    }
+    let session = validated_session_name(session)?;
+    let session = session.as_str();
 
     let dir = get_socket_dir();
     let pid_path = dir.join(format!("{}.pid", session));
@@ -989,9 +1010,8 @@ pub(super) async fn spawn_session(body: &str) -> Result<String, String> {
         .and_then(|v| v.as_str())
         .ok_or("Missing \"session\" field")?;
 
-    if session.is_empty() || session.len() > 64 {
-        return Err("Session name must be 1-64 characters".to_string());
-    }
+    let session = validated_session_name(session)?;
+    let session = session.as_str();
 
     let exe = std::env::current_exe().map_err(|e| format!("Cannot resolve executable: {}", e))?;
 
@@ -1544,6 +1564,39 @@ mod tests {
     fn test_no_origin_header_allowed() {
         let req = "GET /api/session/9222/stream HTTP/1.1\r\nHost: localhost:4848\r\nUpgrade: websocket\r\n\r\n";
         assert!(is_same_origin_ws_request(req));
+    }
+
+    #[test]
+    fn validated_session_name_rejects_path_traversal() {
+        assert!(validated_session_name("../x").is_err());
+        assert!(validated_session_name("..").is_err());
+        assert!(validated_session_name(".").is_err());
+        assert!(validated_session_name("../../../root/traversal/victim").is_err());
+        assert!(validated_session_name("/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn validated_session_name_rejects_separators_and_nul() {
+        assert!(validated_session_name("a/b").is_err());
+        assert!(validated_session_name("a\\b").is_err());
+        assert!(validated_session_name("a\0b").is_err());
+    }
+
+    #[test]
+    fn validated_session_name_rejects_empty_and_overlong_names() {
+        assert!(validated_session_name("").is_err());
+        assert!(validated_session_name(&"a".repeat(65)).is_err());
+        assert!(validated_session_name(&"a".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn validated_session_name_accepts_plain_names() {
+        assert_eq!(validated_session_name("default").unwrap(), "default");
+        assert_eq!(validated_session_name("fa-1").unwrap(), "fa-1");
+        assert_eq!(
+            validated_session_name("my_session.2").unwrap(),
+            "my_session.2"
+        );
     }
 
     #[test]
