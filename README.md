@@ -39,13 +39,6 @@ brew install agent-browser
 agent-browser install  # Download Chrome from Chrome for Testing (first time only)
 ```
 
-### Cargo (Rust)
-
-```bash
-cargo install agent-browser
-agent-browser install  # Download Chrome from Chrome for Testing (first time only)
-```
-
 ### From Source
 
 Requires Node.js 24+, pnpm 11+, and Rust.
