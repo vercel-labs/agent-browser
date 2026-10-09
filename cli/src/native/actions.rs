@@ -1313,7 +1313,7 @@ impl DaemonState {
 
                     let mut page_url = target_info.url.clone();
                     if let Some(ref filter) = filter {
-                        if should_blank_existing_url(&page_url, filter) {
+                        if network::should_blank_existing_url(&page_url, filter) {
                             let _ = mgr
                                 .client
                                 .send_command(
@@ -1450,7 +1450,7 @@ impl DaemonState {
 
                     let mut page_url = te.target_info.url.clone();
                     if let Some(ref filter) = filter {
-                        if should_blank_existing_url(&page_url, filter) {
+                        if network::should_blank_existing_url(&page_url, filter) {
                             let _ = mgr
                                 .client
                                 .send_command(
@@ -3476,23 +3476,9 @@ fn network_control_session_ids(mgr: &BrowserManager) -> Result<Vec<String>, Stri
     network_control_session_ids_from_pages(&pages, active_session_id)
 }
 
-fn should_blank_existing_url(url: &str, filter: &DomainFilter) -> bool {
-    if url.is_empty() || url == "about:blank" {
-        return false;
-    }
-    url::Url::parse(url)
-        .ok()
-        .and_then(|parsed| {
-            parsed
-                .host_str()
-                .map(|hostname| !filter.is_allowed(hostname))
-        })
-        .unwrap_or(false)
-}
-
 fn check_url_allowed_by_filter(filter: Option<&DomainFilter>, url: &str) -> Result<(), String> {
     if let Some(filter) = filter {
-        if url != "about:blank" {
+        if url != "about:blank" && !url.starts_with("chrome-extension://") {
             filter.check_url(url)?;
         }
     }
@@ -5410,9 +5396,7 @@ async fn handle_navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 
     {
         let df = state.domain_filter.read().await;
-        if let Some(ref filter) = *df {
-            filter.check_url(url)?;
-        }
+        check_url_allowed_by_filter(df.as_ref(), url)?;
     }
 
     // WebDriver backend path
@@ -11756,7 +11740,9 @@ async fn resolve_fetch_paused(
             let scheme = parsed.scheme();
             let enforce_host = matches!(scheme, "http" | "https" | "ws" | "wss");
             if !enforce_host {
-                if paused.resource_type.eq_ignore_ascii_case("document") {
+                if scheme != "chrome-extension"
+                    && paused.resource_type.eq_ignore_ascii_case("document")
+                {
                     let _ = client
                         .send_command(
                             "Fetch.failRequest",
@@ -13690,6 +13676,46 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn test_extension_document_is_not_blocked_by_domain_filter() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let request = match ws.next().await.unwrap().unwrap() {
+                Message::Text(text) => serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+                message => panic!("Unexpected CDP message: {message:?}"),
+            };
+            ws.send(Message::Text(
+                json!({ "id": request["id"], "result": {} }).to_string(),
+            ))
+            .await
+            .unwrap();
+            request["method"].as_str().unwrap().to_string()
+        });
+        let client = super::CdpClient::connect(&url).await.unwrap();
+        super::resolve_fetch_paused(
+            &client,
+            Some(&super::DomainFilter::new("example.com")),
+            &[],
+            &std::collections::HashMap::new(),
+            &super::FetchPausedRequest {
+                request_id: "request-1".to_string(),
+                url: "chrome-extension://abc123/popup.html".to_string(),
+                resource_type: "Document".to_string(),
+                session_id: "session-1".to_string(),
+                request_headers: None,
+            },
+        )
+        .await;
+        client.close().await;
+        assert_eq!(server.await.unwrap(), "Fetch.continueRequest");
+    }
+
     #[tokio::test]
     async fn test_auth_login_releases_remote_objects_after_failures() {
         use futures_util::{SinkExt, StreamExt};
@@ -16758,6 +16784,17 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         )
         .unwrap_err();
         assert!(error.contains("blocked.com"), "got: {}", error);
+    }
+
+    #[test]
+    fn test_domain_filter_allows_extension_pages_but_rejects_other_domains() {
+        let filter = DomainFilter::new("example.com");
+        assert!(check_url_allowed_by_filter(
+            Some(&filter),
+            "chrome-extension://abc123/popup.html#/approve/connect"
+        )
+        .is_ok());
+        assert!(check_url_allowed_by_filter(Some(&filter), "https://blocked.com").is_err());
     }
 
     #[test]

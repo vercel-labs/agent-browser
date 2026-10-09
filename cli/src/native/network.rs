@@ -125,6 +125,21 @@ impl DomainFilter {
     }
 }
 
+pub(crate) fn should_blank_existing_url(url: &str, filter: &DomainFilter) -> bool {
+    if url.is_empty() || url == "about:blank" {
+        return false;
+    }
+    url::Url::parse(url)
+        .ok()
+        .filter(|parsed| parsed.scheme() != "chrome-extension")
+        .and_then(|parsed| {
+            parsed
+                .host_str()
+                .map(|hostname| !filter.is_allowed(hostname))
+        })
+        .unwrap_or(false)
+}
+
 fn parse_domain_list(input: &str) -> Vec<String> {
     input
         .split(',')
@@ -139,21 +154,14 @@ pub async fn sanitize_existing_pages(
     filter: &DomainFilter,
 ) {
     for page in pages {
-        if page.url.is_empty() || page.url == "about:blank" {
-            continue;
-        }
-        if let Ok(parsed) = url::Url::parse(&page.url) {
-            if let Some(hostname) = parsed.host_str() {
-                if !filter.is_allowed(hostname) {
-                    let _ = client
-                        .send_command(
-                            "Page.navigate",
-                            Some(json!({ "url": "about:blank" })),
-                            Some(&page.session_id),
-                        )
-                        .await;
-                }
-            }
+        if should_blank_existing_url(&page.url, filter) {
+            let _ = client
+                .send_command(
+                    "Page.navigate",
+                    Some(json!({ "url": "about:blank" })),
+                    Some(&page.session_id),
+                )
+                .await;
         }
     }
 }
@@ -677,6 +685,16 @@ mod tests {
         assert!(filter.is_allowed("api.example.com"));
         assert!(filter.is_allowed("sub.api.example.com"));
         assert!(!filter.is_allowed("other.com"));
+    }
+
+    #[test]
+    fn test_extension_pages_survive_domain_filter_sanitization() {
+        let filter = DomainFilter::new("example.com");
+        assert!(!should_blank_existing_url(
+            "chrome-extension://abc123/popup.html#/approve/connect",
+            &filter
+        ));
+        assert!(should_blank_existing_url("https://other.com", &filter));
     }
 
     #[test]
