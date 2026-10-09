@@ -2900,7 +2900,14 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             if state.browser.is_some() || state.active_provider_session.is_some() {
                 let _ = auto_save_restore_state(state).await;
             }
-            if let Err(e) = auto_launch(state, plugins_from_command_or_env(cmd)).await {
+            let first_command_selects_tab = command_selects_existing_tab(action, cmd);
+            if let Err(e) = auto_launch(
+                state,
+                plugins_from_command_or_env(cmd),
+                first_command_selects_tab,
+            )
+            .await
+            {
                 let context = auto_launch_error_context(env::var("AGENT_BROWSER_CDP").is_ok());
                 return error_response(&id, &format!("{}: {}", context, e));
             }
@@ -3320,7 +3327,22 @@ fn maybe_persist_tab_binding(state: &mut DaemonState) -> Option<String> {
 /// re-bound to the persisted target, entered the `tab_gone` state (pin-tab,
 /// bound tab dead), or bound to a fresh tab (pin-tab, no prior binding).
 /// Returns false when no binding existed and the legacy selection stands.
-async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, String> {
+fn should_create_fresh_pinned_tab(
+    pin: bool,
+    has_binding: bool,
+    first_command_selects_tab: bool,
+) -> bool {
+    pin && !has_binding && !first_command_selects_tab
+}
+
+fn command_selects_existing_tab(action: &str, cmd: &Value) -> bool {
+    action == "tab_switch" && cmd.get("tabId").and_then(Value::as_str).is_some()
+}
+
+async fn apply_tab_binding_on_attach(
+    state: &mut DaemonState,
+    first_command_selects_tab: bool,
+) -> Result<bool, String> {
     let session = state.session_id.clone();
     // A corrupt or unreadable binding file is a recovery error, not a
     // first-time session: it may have carried pinned=true, and silently
@@ -3336,6 +3358,8 @@ async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, St
         state.pin_tab = true;
     }
     let pin = state.pin_tab;
+    let create_fresh_pinned_tab =
+        should_create_fresh_pinned_tab(pin, binding.is_some(), first_command_selects_tab);
     if state.browser.is_none() {
         return Ok(false);
     }
@@ -3373,7 +3397,7 @@ async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, St
             }
         }
         None => {
-            if pin {
+            if create_fresh_pinned_tab {
                 // A pinned session never implicitly adopts an existing tab:
                 // start it on a fresh one.
                 if let Some(ref mut mgr) = state.browser {
@@ -3406,8 +3430,11 @@ async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, St
 /// rollback a binding-recovery error would leave a live but un-recovered
 /// browser, and the next command would skip the attach path and act on the
 /// wrong tab.
-async fn apply_tab_binding_on_attach_or_rollback(state: &mut DaemonState) -> Result<bool, String> {
-    match apply_tab_binding_on_attach(state).await {
+async fn apply_tab_binding_on_attach_or_rollback(
+    state: &mut DaemonState,
+    first_command_selects_tab: bool,
+) -> Result<bool, String> {
+    match apply_tab_binding_on_attach(state, first_command_selects_tab).await {
         Ok(v) => Ok(v),
         Err(e) => {
             let _ = rollback_failed_launch(state).await;
@@ -4025,20 +4052,21 @@ async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Resul
 async fn auto_launch(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
+    first_command_selects_tab: bool,
 ) -> Result<(), String> {
     if env::var("AGENT_BROWSER_CDP").is_ok()
         || env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok()
         || !env::var("AGENT_BROWSER_PROVIDER")
             .is_ok_and(|provider| provider_is_browser_use(&provider))
     {
-        return auto_launch_inner(state, plugins).await;
+        return auto_launch_inner(state, plugins, first_command_selects_tab).await;
     }
     let credentials = state.proxy_credentials.read().await.clone();
     let scripts = state.plugin_init_scripts.clone();
     let setup = state.session_setup.clone();
     let result = match tokio::time::timeout(
         BROWSER_USE_SETUP_DEADLINE,
-        auto_launch_inner(state, plugins),
+        auto_launch_inner(state, plugins, first_command_selects_tab),
     )
     .await
     {
@@ -4056,6 +4084,7 @@ async fn auto_launch(
 async fn auto_launch_inner(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
+    first_command_selects_tab: bool,
 ) -> Result<(), String> {
     if has_active_browser_session(state) {
         close_before_implicit_relaunch(state).await?;
@@ -4132,7 +4161,7 @@ async fn auto_launch_inner(
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
-        apply_tab_binding_on_attach_or_rollback(state).await?;
+        apply_tab_binding_on_attach_or_rollback(state, first_command_selects_tab).await?;
         state.update_stream_client().await;
         install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
@@ -4165,7 +4194,9 @@ async fn auto_launch_inner(
         );
         state.reset_input_state();
         state.browser = Some(BrowserManager::connect_auto().await?);
-        if !apply_tab_binding_on_attach_or_rollback(state).await? {
+        if !apply_tab_binding_on_attach_or_rollback(state, first_command_selects_tab).await?
+            && !first_command_selects_tab
+        {
             if let Err(e) = open_fresh_tab_for_auto_connect(state).await {
                 let _ = rollback_failed_launch(state).await;
                 return Err(e);
@@ -5141,7 +5172,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
-        apply_tab_binding_on_attach_or_rollback(state).await?;
+        apply_tab_binding_on_attach_or_rollback(state, false).await?;
         state.update_stream_client().await;
         install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
@@ -5158,7 +5189,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
-        apply_tab_binding_on_attach_or_rollback(state).await?;
+        apply_tab_binding_on_attach_or_rollback(state, false).await?;
         state.update_stream_client().await;
         install_network_controls_or_close(state, has_proxy_auth).await?;
         apply_launch_init_scripts(state, &enable_features, &init_script_paths).await;
@@ -5171,7 +5202,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
     if auto_connect {
         state.reset_input_state();
         state.browser = Some(BrowserManager::connect_auto().await?);
-        if !apply_tab_binding_on_attach_or_rollback(state).await? {
+        if !apply_tab_binding_on_attach_or_rollback(state, false).await? {
             if let Err(e) = open_fresh_tab_for_auto_connect(state).await {
                 let _ = rollback_failed_launch(state).await;
                 return Err(e);
@@ -13905,7 +13936,7 @@ mod tests {
         .unwrap();
         state.launch_hash = Some(42);
 
-        let err = apply_tab_binding_on_attach_or_rollback(&mut state)
+        let err = apply_tab_binding_on_attach_or_rollback(&mut state, false)
             .await
             .expect_err("a corrupt binding file is a recovery failure");
 
@@ -13918,6 +13949,26 @@ mod tests {
             state.launch_hash.is_none(),
             "the failed attach must be rolled back, not left committed"
         );
+    }
+
+    #[test]
+    fn explicit_first_tab_selection_does_not_need_a_fresh_pinned_tab() {
+        let select_existing = json!({"action": "tab_switch", "tabId": "existing-target"});
+        let first_command_selects_tab =
+            command_selects_existing_tab("tab_switch", &select_existing);
+
+        assert!(first_command_selects_tab);
+        assert!(!should_create_fresh_pinned_tab(
+            true,
+            false,
+            first_command_selects_tab
+        ));
+        assert!(!command_selects_existing_tab(
+            "tab_list",
+            &json!({"action": "tab_list"})
+        ));
+        assert!(should_create_fresh_pinned_tab(true, false, false));
+        assert!(!should_create_fresh_pinned_tab(true, true, true));
     }
 
     /// `find --help`, the MCP tool schema, and the docs/skill references are
@@ -15519,7 +15570,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 .await
                 .map(|_| ())
             } else {
-                auto_launch(&mut state, Vec::new()).await
+                auto_launch(&mut state, Vec::new(), false).await
             };
             assert!(result.is_err());
             assert_eq!(current_allowed_domains(&state).await, vec!["example.com"]);
@@ -17071,7 +17122,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         guard.remove("AGENT_BROWSER_PROVIDER");
 
         let mut state = DaemonState::new();
-        let error = auto_launch(&mut state, Vec::new()).await.unwrap_err();
+        let error = auto_launch(&mut state, Vec::new(), false)
+            .await
+            .unwrap_err();
 
         assert!(error.contains("--profile"), "got: {}", error);
         assert!(
@@ -17110,7 +17163,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         guard.remove("AGENT_BROWSER_PROVIDER");
 
         let mut state = DaemonState::new();
-        let error = auto_launch(&mut state, Vec::new()).await.unwrap_err();
+        let error = auto_launch(&mut state, Vec::new(), false)
+            .await
+            .unwrap_err();
 
         assert!(error.contains("--args"), "got: {}", error);
         assert!(error.contains("--user-data-dir"), "got: {}", error);
@@ -17142,7 +17197,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         guard.remove("AGENT_BROWSER_PROVIDER");
 
         let mut state = DaemonState::new();
-        let error = auto_launch(&mut state, Vec::new()).await.unwrap_err();
+        let error = auto_launch(&mut state, Vec::new(), false)
+            .await
+            .unwrap_err();
 
         assert!(error.contains("--restore"), "got: {}", error);
         assert!(
@@ -17173,7 +17230,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         guard.remove("AGENT_BROWSER_PROVIDER");
 
         let mut state = DaemonState::new();
-        let error = auto_launch(&mut state, Vec::new()).await.unwrap_err();
+        let error = auto_launch(&mut state, Vec::new(), false)
+            .await
+            .unwrap_err();
 
         assert!(error.contains("--state/storageState"), "got: {}", error);
         assert!(
