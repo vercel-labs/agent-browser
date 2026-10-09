@@ -3910,6 +3910,7 @@ WebMCP (experimental):
   webmcp result <id>         Wait for a detached invocation result
   webmcp cancel <id>         Cancel an active invocation
   Brief untrusted summaries appear only on discovery or change; no schemas
+  Optional CDP domain probes are bounded to one second on unsupported browsers
 
 React (requires `open --enable react-devtools`):
   react tree                 Full React component tree (depth id parent name columns)
