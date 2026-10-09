@@ -1368,6 +1368,25 @@ fn run_close_all(flags: &Flags) {
 }
 
 fn main() {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+
+        // The invoking process may have made our standard handles inheritable.
+        // Detached daemons must not retain those original pipes: an MCP caller
+        // otherwise waits for EOF until the browser closes, after this CLI has
+        // already exited. Command creates the handles its children actually need.
+        for handle in [
+            std::io::stdin().as_raw_handle(),
+            std::io::stdout().as_raw_handle(),
+            std::io::stderr().as_raw_handle(),
+        ] {
+            // SAFETY: These are borrowed standard handles; clearing the
+            // inheritance flag neither closes them nor changes their access.
+            unsafe { SetHandleInformation(handle as HANDLE, HANDLE_FLAG_INHERIT, 0) };
+        }
+    }
     // Rust ignores SIGPIPE by default, causing println! to panic on broken pipes.
     // Reset to SIG_DFL so the OS terminates the process cleanly instead.
     #[cfg(unix)]
