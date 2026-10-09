@@ -527,6 +527,14 @@ fn kernel_profile_from_env() -> Option<Value> {
     Some(json!({ "name": name, "save_changes": save_changes }))
 }
 
+fn kernel_profile_from_env() -> Option<Value> {
+    let profile = env::var("KERNEL_PROFILE_NAME").ok()?;
+    if profile.is_empty() {
+        return None;
+    }
+    Some(json!({ "name": profile, "save_changes": true }))
+}
+
 async fn connect_kernel() -> Result<(String, Option<ProviderSession>), String> {
     let api_key = env::var("KERNEL_API_KEY").ok();
     let endpoint =
@@ -1270,6 +1278,27 @@ mod tests {
         assert_eq!(
             body["profile"],
             json!({ "name": "my-profile", "save_changes": false })
+        );
+    }
+
+    #[test]
+    fn test_kernel_profile_from_env_unset_or_empty() {
+        let guard = EnvGuard::new(&["KERNEL_PROFILE_NAME"]);
+        guard.remove("KERNEL_PROFILE_NAME");
+        assert_eq!(kernel_profile_from_env(), None);
+
+        guard.set("KERNEL_PROFILE_NAME", "");
+        assert_eq!(kernel_profile_from_env(), None);
+    }
+
+    #[test]
+    fn test_kernel_profile_from_env_is_object_not_string() {
+        let guard = EnvGuard::new(&["KERNEL_PROFILE_NAME"]);
+        guard.set("KERNEL_PROFILE_NAME", "my-profile");
+
+        assert_eq!(
+            kernel_profile_from_env(),
+            Some(json!({ "name": "my-profile", "save_changes": true })),
         );
     }
 
