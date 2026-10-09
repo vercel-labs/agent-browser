@@ -6,7 +6,7 @@ use std::time::Duration;
 use futures_util::stream::SplitStream;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, watch, Mutex, Notify, RwLock};
+use tokio::sync::{broadcast, mpsc, watch, Mutex, Notify, RwLock};
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
@@ -332,6 +332,8 @@ async fn handle_ws_client(
     // select! below instead of leaving it asleep on a stale deadline.
     let (config_tx, mut config_rx) = watch::channel::<ClientConfig>(initial_config);
     let (ack_tx, mut ack_rx) = watch::channel::<u64>(0);
+    // Replies produced by spawned client-message handlers (clipboard reads).
+    let (reply_tx, mut reply_rx) = mpsc::channel::<String>(8);
     // Spawned before the status, tabs and seed writes below: those are
     // unbounded sends, and a full receive queue would otherwise hold input
     // behind the whole handshake.
@@ -342,6 +344,7 @@ async fn handle_ws_client(
         config_tx,
         ack_tx,
         idle_activity.clone(),
+        reply_tx,
     )));
 
     {
@@ -420,6 +423,14 @@ async fn handle_ws_client(
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            reply = reply_rx.recv() => {
+                // reply_tx moved into the reader, which lives as long as this
+                // loop, so None is unreachable.
+                let Some(reply) = reply else { break };
+                if ws_tx.send(Message::Text(reply)).await.is_err() {
+                    break;
                 }
             }
             changed = frame_watch.changed(), if !pending_frame => {
@@ -502,6 +513,7 @@ async fn reader_loop(
     config: watch::Sender<ClientConfig>,
     ack: watch::Sender<u64>,
     idle_activity: Arc<IdleActivity>,
+    reply_tx: mpsc::Sender<String>,
 ) {
     while let Some(msg) = ws_rx.next().await {
         match msg {
@@ -547,6 +559,12 @@ async fn reader_loop(
                         idle_activity.mark();
                     }
                     let sid = cdp_session_id.read().await;
+                    if msg_type == "input_read_clipboard" {
+                        // The one message needing a CDP response; spawned so
+                        // a slow read cannot stall this reader's later input.
+                        spawn_clipboard_read(Arc::clone(client), sid.clone(), reply_tx.clone());
+                        continue;
+                    }
                     dispatch_input(msg_type, &parsed, client.as_ref(), sid.as_deref()).await;
                 }
             }
@@ -554,6 +572,48 @@ async fn reader_loop(
             _ => {}
         }
     }
+}
+
+/// Reads the remote clipboard and sends the text (or error) back through
+/// `reply_tx` for the writer loop to forward to the client.
+///
+/// Spawned because Runtime.evaluate waits for the page's main thread;
+/// awaiting it in the reader would stall all later input from this client
+/// behind a busy page (up to the 30s CDP command timeout).
+fn spawn_clipboard_read(
+    client: Arc<CdpClient>,
+    session_id: Option<String>,
+    reply_tx: mpsc::Sender<String>,
+) {
+    tokio::spawn(async move {
+        let result = client
+            .send_command(
+                "Runtime.evaluate",
+                Some(json!({
+                    "expression": "navigator.clipboard.readText().then(t => ({ ok: t }), e => ({ err: String(e) }))",
+                    "awaitPromise": true,
+                    "returnByValue": true,
+                })),
+                session_id.as_deref(),
+            )
+            .await;
+        let reply = match result {
+            Ok(result) => {
+                let value = result.get("result").and_then(|r| r.get("value"));
+                if let Some(text) = value.and_then(|v| v.get("ok")).and_then(|v| v.as_str()) {
+                    json!({ "type": "clipboard", "text": text }).to_string()
+                } else {
+                    let err = value
+                        .and_then(|v| v.get("err"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("clipboard read failed");
+                    json!({ "type": "clipboard", "error": err }).to_string()
+                }
+            }
+            Err(e) => json!({ "type": "clipboard", "error": e }).to_string(),
+        };
+        let _ = reply_tx.send(reply).await;
+    });
 }
 
 /// Aborts its task on drop.
@@ -660,13 +720,33 @@ async fn dispatch_input(
                 )
                 .await;
         }
+        "input_insert_text" => {
+            // Paste bridge: insert local clipboard text at the focused element.
+            let text = parsed.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            if !text.is_empty() {
+                let _ = client
+                    .send_command_no_wait(
+                        "Input.insertText",
+                        Some(json!({ "text": text })),
+                        session_id,
+                    )
+                    .await;
+            }
+        }
         "status" => {}
         _ => {}
     }
 }
 
 fn is_user_input_message_type(msg_type: &str) -> bool {
-    matches!(msg_type, "input_mouse" | "input_keyboard" | "input_touch")
+    matches!(
+        msg_type,
+        "input_mouse"
+            | "input_keyboard"
+            | "input_touch"
+            | "input_insert_text"
+            | "input_read_clipboard"
+    )
 }
 
 #[cfg(test)]
@@ -675,7 +755,13 @@ mod tests {
 
     #[test]
     fn dashboard_input_messages_count_as_user_activity() {
-        for msg_type in ["input_mouse", "input_keyboard", "input_touch"] {
+        for msg_type in [
+            "input_mouse",
+            "input_keyboard",
+            "input_touch",
+            "input_insert_text",
+            "input_read_clipboard",
+        ] {
             assert!(is_user_input_message_type(msg_type));
         }
         assert!(!is_user_input_message_type("status"));
