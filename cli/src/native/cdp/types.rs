@@ -486,8 +486,9 @@ pub struct DispatchKeyEventParams {
     pub unmodified_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub windows_virtual_key_code: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub native_virtual_key_code: Option<i32>,
+    // `nativeVirtualKeyCode` is deliberately not modelled: it is an OS-native key code (macOS key
+    // codes differ from Windows virtual-key codes), and sending the Windows code to Chrome on macOS
+    // makes it dispatch a different physical key and flood the page with keydown events.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modifiers: Option<i32>,
 }
@@ -583,4 +584,26 @@ pub struct BrowserVersionInfo {
 #[allow(clippy::upper_case_acronyms)]
 pub mod generated {
     include!(concat!(env!("OUT_DIR"), "/cdp_generated.rs"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_key_event_omits_native_virtual_key_code() {
+        let value = serde_json::to_value(DispatchKeyEventParams {
+            event_type: "keyDown".to_string(),
+            key: Some("a".to_string()),
+            code: Some("KeyA".to_string()),
+            text: Some("a".to_string()),
+            unmodified_text: Some("a".to_string()),
+            windows_virtual_key_code: Some(65),
+            modifiers: None,
+        })
+        .unwrap();
+
+        assert_eq!(value["windowsVirtualKeyCode"], 65);
+        assert!(value.get("nativeVirtualKeyCode").is_none());
+    }
 }
