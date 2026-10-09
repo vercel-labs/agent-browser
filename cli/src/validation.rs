@@ -57,4 +57,12 @@ mod tests {
     fn sanitize_session_component_trims_separators() {
         assert_eq!(sanitize_session_component(" --Agent__ "), "agent");
     }
+
+    #[test]
+    fn is_valid_session_name_rejects_path_traversal() {
+        assert!(!is_valid_session_name("../../etc/foo"));
+        assert!(!is_valid_session_name("..\\..\\evil"));
+        assert!(is_valid_session_name("my-session"));
+        assert!(is_valid_session_name("work_123"));
+    }
 }
