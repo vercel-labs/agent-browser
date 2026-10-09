@@ -143,20 +143,9 @@ pub async fn fill(
     )
     .await?;
 
-    // Focus the element
-    client
-        .send_command_typed::<_, Value>(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: "function() { this.focus(); }".to_string(),
-                object_id: Some(object_id.clone()),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&effective_session_id),
-        )
-        .await?;
+    if prepare_text_entry(client, &effective_session_id, &object_id, Some(value)).await? {
+        return Ok(());
+    }
 
     // Select all + delete to clear
     client
@@ -164,9 +153,10 @@ pub async fn fill(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
                 function_declaration: r#"function() {
-                    this.select && this.select();
-                    this.value = '';
-                    this.dispatchEvent(new Event('input', { bubbles: true }));
+                    const el = this.localName === 'label' && this.control && !this.isContentEditable ? this.control : this;
+                    el.select && el.select();
+                    el.value = '';
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
                 }"#
                 .to_string(),
                 object_id: Some(object_id),
@@ -212,20 +202,7 @@ pub async fn type_text(
     )
     .await?;
 
-    // Focus
-    client
-        .send_command_typed::<_, Value>(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: "function() { this.focus(); }".to_string(),
-                object_id: Some(object_id.clone()),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&effective_session_id),
-        )
-        .await?;
+    prepare_text_entry(client, &effective_session_id, &object_id, None).await?;
 
     if clear {
         client
@@ -233,9 +210,10 @@ pub async fn type_text(
                 "Runtime.callFunctionOn",
                 &CallFunctionOnParams {
                     function_declaration: r#"function() {
-                        this.select && this.select();
-                        this.value = '';
-                        this.dispatchEvent(new Event('input', { bubbles: true }));
+                        const el = this.localName === 'label' && this.control && !this.isContentEditable ? this.control : this;
+                        el.select && el.select();
+                        el.value = '';
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
                     }"#
                     .to_string(),
                     object_id: Some(object_id),
@@ -249,6 +227,102 @@ pub async fn type_text(
     }
 
     type_text_into_active_context(client, session_id, text, delay_ms).await
+}
+
+/// Focuses the element for `fill` (`fill_value` set) or `type`, after refusing
+/// the ones that cannot take text, which would otherwise send it into the field
+/// that last had focus. Follows Playwright's fill contract: selects, buttons,
+/// non-text inputs and disabled fields are refused before any field is touched,
+/// a label stands for its control, and fill sets date-like, color and range
+/// inputs directly because Chrome drops inserted text there. Returns true when
+/// the value is already set and no text needs to be inserted.
+async fn prepare_text_entry(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+    fill_value: Option<&str>,
+) -> Result<bool, String> {
+    let js = r#"function(value) {
+        const filling = typeof value === 'string';
+        const verb = filling ? 'filled' : 'typed into';
+        // A label stands for its control unless it is editable itself, as in
+        // Playwright, and a part of a date or time input, which is what a
+        // snapshot ref points at, stands for the input
+        const host = this.getRootNode().host;
+        const el = this.localName === 'label' && this.control && !this.isContentEditable ? this.control
+            : host?.localName === 'input' ? host : this;
+        const tag = el.localName;
+        if ((tag === 'select' || tag === 'button') && !el.isContentEditable) {
+            return { error: `Element <${tag}> cannot be ${verb}` };
+        }
+        if ((tag === 'input' || tag === 'textarea') && el.matches(':disabled')) {
+            return { error: `Disabled <${tag}> cannot be ${verb}` };
+        }
+        const type = tag === 'input' ? el.type : '';
+        if (['checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'image', 'hidden'].includes(type)) {
+            return { error: `Input of type "${type}" cannot be ${verb}` };
+        }
+        const formats = {
+            color: '#rrggbb', date: 'YYYY-MM-DD', time: 'HH:MM or HH:MM:SS',
+            'datetime-local': 'YYYY-MM-DDTHH:MM', month: 'YYYY-MM', week: 'YYYY-Www',
+            range: `a number from ${el.min || 0} to ${el.max || 100} in steps of ${el.step || 1}`,
+        };
+        if (type in formats) {
+            if (!filling) {
+                return { error: `Input of type "${type}" cannot be typed into; use fill` };
+            }
+            // Chrome sanitizes a value it cannot parse instead of throwing:
+            // date-like types become empty, color becomes #000000 and range
+            // falls back to its midpoint, which can equal Number(text) for
+            // text like "+50", hence the number syntax check.
+            const text = value.trim();
+            const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+            const old = el.value;
+            setValue.call(el, text);
+            const accepted = type === 'color' ? el.value === text.toLowerCase()
+                : type === 'range' ? /^-?(\d+(\.\d+)?|\.\d+)([eE][-+]?\d+)?$/.test(text) && Number(el.value) === Number(text)
+                : el.value !== '' || text === '';
+            setValue.call(el, old);
+            if (!accepted) {
+                return { error: `Malformed value ${JSON.stringify(value)} for input of type "${type}": expected ${formats[type]}` };
+            }
+            // Focus before setting, as Playwright does: a focus or blur handler
+            // that re-renders the field would put the old value back.
+            el.focus();
+            setValue.call(el, text);
+            el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            return { done: true };
+        }
+        el.focus();
+        return { done: false };
+    }"#;
+
+    let result = client
+        .send_command_typed::<_, Value>(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: js.to_string(),
+                object_id: Some(object_id.to_string()),
+                arguments: Some(vec![CallArgument {
+                    value: Some(serde_json::json!(fill_value)),
+                    object_id: None,
+                }]),
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await?;
+
+    let outcome = result.get("result").and_then(|r| r.get("value"));
+    if let Some(error) = outcome.and_then(|v| v.get("error")).and_then(Value::as_str) {
+        return Err(error.to_string());
+    }
+    Ok(outcome
+        .and_then(|v| v.get("done"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false))
 }
 
 pub async fn type_text_into_active_context(

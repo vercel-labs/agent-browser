@@ -2076,6 +2076,178 @@ async fn e2e_form_interaction() {
     assert_success(&resp);
 }
 
+/// Runs fill or type and returns `[success, error]`.
+async fn fill_or_type(state: &mut DaemonState, action: &str, selector: &str, text: &str) -> Value {
+    let key = if action == "fill" { "value" } else { "text" };
+    let resp = execute_command(
+        &json!({ "id": action, "action": action, "selector": selector, key: text }),
+        state,
+    )
+    .await;
+    json!([resp["success"], resp["error"]])
+}
+
+async fn evaluate_value(state: &mut DaemonState, script: &str) -> Value {
+    let resp = execute_command(
+        &json!({ "id": "eval", "action": "evaluate", "script": script }),
+        state,
+    )
+    .await;
+    assert_success(&resp);
+    get_data(&resp)["result"].clone()
+}
+
+// Chrome drops inserted text on date-like, color and range inputs, so fill
+// sets their value directly (#2000). Selects, buttons, non-text inputs and
+// disabled fields are refused instead of typing into whichever field last had
+// focus (#2055).
+#[tokio::test]
+#[ignore]
+async fn e2e_fill_and_type_inputs_without_text_entry() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let html = concat!(
+        "data:text/html,<html><body><input id='prev'>",
+        "<input id='date' type='date'><input id='dtl' type='datetime-local'>",
+        "<input id='dts' type='datetime-local'><input id='time' type='time'>",
+        "<input id='month' type='month'><input id='week' type='week'>",
+        "<input id='color' type='color'><input id='range' type='range'>",
+        "<select id='select'><option>a</option></select><input id='checkbox' type='checkbox'>",
+        "<button id='button'>b</button><input id='disabled' disabled>",
+        "<textarea id='disabled-area' disabled></textarea>",
+        "<input id='rdate' type='date' value='2024-01-01'>",
+        "<label id='lab-cb' for='checkbox'>agree</label>",
+        "<label id='lab-date' for='date2'>when</label><input id='date2' type='date'>",
+        "<label id='lab-who' for='who'>who</label><input id='who' value='old'>",
+        "<label id='celab' for='who' contenteditable>Name</label><button id='cebtn' contenteditable>Save</button>",
+        "<script>rdate.onfocus = () => rdate.value = '2024-01-01';",
+        "for (const el of document.querySelectorAll('input')) { el.dataset.events = '';",
+        " el.oninput = () => el.dataset.events += 'i'; el.onchange = () => el.dataset.events += 'c'; }",
+        "</script></body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let state_of = |selector: &str| {
+        format!("(el => [prev.value, el.value ?? null, el.dataset.events ?? null])(document.querySelector('{selector}'))")
+    };
+
+    let mut failures = Vec::new();
+    // Values the input accepts, including ones Chrome only normalizes.
+    for (selector, value, expected) in [
+        ("#date", "2024-01-15", "2024-01-15"),
+        ("#dtl", "2024-01-15T10:30", "2024-01-15T10:30"),
+        ("#dts", "2024-01-15T10:30:00", "2024-01-15T10:30"),
+        ("#time", "09:30", "09:30"),
+        ("#month", "2024-01", "2024-01"),
+        ("#week", "2024-W03", "2024-W03"),
+        ("#color", "#FF0000", "#ff0000"),
+        ("#range", "75", "75"),
+        // A focus handler that re-renders the field must not undo the value.
+        ("#rdate", "2024-03-03", "2024-03-03"),
+    ] {
+        let outcome = fill_or_type(&mut state, "fill", selector, value).await;
+        let after = evaluate_value(&mut state, &state_of(selector)).await;
+        if outcome != json!([true, null]) || after[1] != expected || after[2] != "ic" {
+            failures.push(format!("fill {selector} {value:?}: {outcome} -> {after}"));
+        }
+    }
+    // Refusals touch neither the target nor the field that had focus.
+    for (action, selector, text, error) in [
+        ("fill", "#date", "01/15/2024", "expected YYYY-MM-DD"),
+        ("fill", "#color", "leak", "expected #rrggbb"),
+        ("type", "#color", "leak", "cannot be typed into; use fill"),
+        ("fill", "#range", "+50", "expected a number from 0 to 100"),
+        ("fill", "#range", "150", "expected a number from 0 to 100"),
+        ("type", "#range", "leak", "cannot be typed into; use fill"),
+        ("fill", "#select", "leak", "<select> cannot be filled"),
+        ("type", "#select", "leak", "<select> cannot be typed into"),
+        (
+            "fill",
+            "#checkbox",
+            "leak",
+            "Input of type \"checkbox\" cannot be filled",
+        ),
+        ("type", "#checkbox", "leak", "cannot be typed into"),
+        ("fill", "#button", "leak", "<button> cannot be filled"),
+        ("type", "#button", "leak", "<button> cannot be typed into"),
+        ("fill", "#disabled", "leak", "Disabled <input>"),
+        ("type", "#disabled", "leak", "Disabled <input>"),
+        ("fill", "#disabled-area", "leak", "Disabled <textarea>"),
+        ("type", "#disabled-area", "leak", "Disabled <textarea>"),
+        (
+            "fill",
+            "#lab-cb",
+            "leak",
+            "Input of type \"checkbox\" cannot be filled",
+        ),
+    ] {
+        evaluate_value(&mut state, "prev.value = 'kept'; prev.focus()").await;
+        let before = evaluate_value(&mut state, &state_of(selector)).await;
+        let outcome = fill_or_type(&mut state, action, selector, text).await;
+        let after = evaluate_value(&mut state, &state_of(selector)).await;
+        let refused = outcome[0] == false && outcome[1].as_str().is_some_and(|m| m.contains(error));
+        if !refused || after != before {
+            failures.push(format!(
+                "{action} {selector} {text:?}: {outcome}, {before} -> {after}"
+            ));
+        }
+    }
+    // A label stands for its control unless it is editable itself, and an
+    // editable button takes text.
+    for (action, selector, text, script, expected) in [
+        (
+            "fill",
+            "#lab-date",
+            "2024-02-01",
+            "date2.value",
+            "2024-02-01",
+        ),
+        ("fill", "#lab-who", "new", "who.value", "new"),
+        ("type", "#celab", "X", "celab.textContent", "XName"),
+        ("type", "#cebtn", "X", "cebtn.textContent", "XSave"),
+    ] {
+        let outcome = fill_or_type(&mut state, action, selector, text).await;
+        let got = evaluate_value(&mut state, script).await;
+        if outcome != json!([true, null]) || got != expected {
+            failures.push(format!("{action} {selector}: {outcome} -> {got}"));
+        }
+    }
+    // A snapshot ref for a date input points at its month, day or year field,
+    // which stands for the input.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": "data:text/html,<input id='due' type='date'>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let snapshot = execute_command(&json!({ "id": "4", "action": "snapshot" }), &mut state).await;
+    assert_success(&snapshot);
+    let field = get_data(&snapshot)["refs"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, node)| node["role"] == "spinbutton")
+        .map(|(ref_id, _)| format!("@{ref_id}"))
+        .unwrap();
+    let outcome = fill_or_type(&mut state, "fill", &field, "2024-05-06").await;
+    let due = evaluate_value(&mut state, "due.value").await;
+    if outcome != json!([true, null]) || due != "2024-05-06" {
+        failures.push(format!("fill {field}: {outcome} -> {due}"));
+    }
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_select_option_label_override_names() {
