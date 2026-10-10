@@ -7,6 +7,8 @@ pub mod auth;
 #[allow(dead_code)]
 pub mod browser;
 #[allow(dead_code)]
+pub mod browser_profiles;
+#[allow(dead_code)]
 pub mod cdp;
 #[allow(dead_code)]
 pub mod cookies;

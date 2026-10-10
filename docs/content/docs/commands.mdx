@@ -240,6 +240,7 @@ See [Network](/network) for pre-navigation routing, request filters, HAR export,
 
 ```bash
 agent-browser tab                              # List tabs (each row shows tabId and label)
+agent-browser tab list --profiles              # Also name each tab's browser profile
 agent-browser tab new [url]                    # New tab
 agent-browser tab new --label docs [url]       # New tab with a user-assigned label
 agent-browser tab <t<N>|label>                 # Switch to a tab by id or label
@@ -269,6 +270,8 @@ Labels are never auto-generated and never rewritten on navigation — an agent t
 Tabs opened through `tab new` or `click --new-tab` inherit the session's setup before their first document loads: user agent, `set headers`, `set credentials`, origin-scoped `--headers`, init scripts, `route` rules, and emulation overrides (color scheme, timezone, locale, geolocation, offline). Turning offline mode off or setting headers to `{}` restores the default setup for future tabs.
 
 `tab list --json` also reports each tab's CDP `targetId`, and target ids are accepted anywhere a tab ref is accepted (`tab <targetId>`, `tab close <targetId>`). Unlike `t<N>` ids, which are per-daemon counters, target ids stay stable across daemon restarts. Each session is bound to its active tab by target id and returns to it after a daemon restart; with `--pin-tab` the binding is strict and a closed bound tab produces a `tab_gone` error instead of a silent fallback. JSON errors include <code>code: "tab_gone"</code>, <code>data.targetId</code>, and optional sanitized <code>data.lastUrl</code>. Batch output carries the recovery object under <code>result</code>. See [CDP Mode](/cdp-mode) for the multi-session workflow.
+
+When attached to a browser with several profiles open (for example `--cdp 9222` or `--auto-connect` against your everyday Chrome or Brave), the tabs of every profile appear in one list. `tab list --json` reports each tab's `browserContextId`, which tabs of the same profile share. `tab list --profiles` also names each tab's profile: text output shows the name in parentheses after the tab id, and JSON adds `profile.name` (the display name from the browser's `Local State`), `profile.directory` (such as `Default` or `Profile 1`), and `profile.path`. CDP cannot ask a context which profile it is, so the first `--profiles` call for each profile briefly opens a tab in it from one of its pages, reads the profile path from `chrome://version`, and closes the tab again; the result is cached for the session. To work inside a specific profile, switch to one of its tabs with `tab <targetId>`. Tabs created by `tab new` open in the browser's default context. See [CDP Mode](/cdp-mode#browser-profiles).
 
 Refs (`@e1`, etc.) are scoped to the tab that was active when the snapshot ran, so switch tabs first, then snapshot and interact:
 
