@@ -1596,7 +1596,27 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     }
                     Ok(cmd)
                 }
-                Some("list") => Ok(json!({ "id": id, "action": "tab_list" })),
+                Some("list") | Some("--profiles") => {
+                    // Accepted forms: tab list [--profiles], tab --profiles
+                    let flags = if rest[0] == "list" {
+                        &rest[1..]
+                    } else {
+                        &rest[..]
+                    };
+                    let mut cmd = json!({ "id": id, "action": "tab_list" });
+                    for flag in flags {
+                        match *flag {
+                            "--profiles" => cmd["profiles"] = json!(true),
+                            other => {
+                                return Err(ParseError::UnknownSubcommand {
+                                    subcommand: other.to_string(),
+                                    valid_options: &["--profiles"],
+                                });
+                            }
+                        }
+                    }
+                    Ok(cmd)
+                }
                 Some("close") => {
                     let mut cmd = json!({ "id": id, "action": "tab_close" });
                     if let Some(tab_ref) = rest.get(1) {
@@ -4560,6 +4580,17 @@ mod tests {
     fn test_tab_list() {
         let cmd = parse_command(&args("tab list"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_list");
+        assert!(cmd.get("profiles").is_none());
+    }
+
+    #[test]
+    fn test_tab_list_profiles() {
+        for input in ["tab list --profiles", "tab --profiles"] {
+            let cmd = parse_command(&args(input), &default_flags()).unwrap();
+            assert_eq!(cmd["action"], "tab_list", "{}", input);
+            assert_eq!(cmd["profiles"], true, "{}", input);
+        }
+        assert!(parse_command(&args("tab list --profile"), &default_flags()).is_err());
     }
 
     #[test]

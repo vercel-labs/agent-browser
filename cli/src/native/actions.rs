@@ -16,6 +16,7 @@ use crate::validation::{is_valid_session_name, session_name_error};
 use super::a11y;
 use super::auth;
 use super::browser::{should_track_target, BrowserManager, WaitUntil};
+use super::browser_profiles::{self, ProfileIdentity};
 use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
@@ -574,6 +575,12 @@ pub struct DaemonState {
     pub recording_state: RecordingState,
     event_rx: Option<broadcast::Receiver<CdpEvent>>,
     pub webmcp: webmcp::RuntimeState,
+    /// Profiles identified by `tab list --profiles`, keyed by
+    /// `browserContextId`. Context ids stay fixed while the browser runs.
+    pub profile_identities: HashMap<String, ProfileIdentity>,
+    /// Throwaway tabs opened to identify a profile. The event drain ignores
+    /// them so they are never adopted (or activated) as session tabs.
+    pub profile_probe_targets: HashSet<String>,
     /// Whether the active launch opted into Chrome's experimental WebMCP features.
     pub webmcp_enabled: bool,
     pub screencasting: bool,
@@ -725,6 +732,8 @@ impl DaemonState {
             recording_state: RecordingState::new(),
             event_rx: None,
             webmcp: webmcp::RuntimeState::default(),
+            profile_identities: HashMap::new(),
+            profile_probe_targets: HashSet::new(),
             webmcp_enabled: false,
             screencasting: false,
             policy: ActionPolicy::load_if_exists(),
@@ -1628,6 +1637,9 @@ impl DaemonState {
             match rx.try_recv() {
                 Ok(event) => {
                     // Target events are not session-scoped; handle them first
+                    if is_profile_probe_event(&event, &self.profile_probe_targets) {
+                        continue;
+                    }
                     match event.method.as_str() {
                         "Target.targetCreated" => {
                             if let Ok(te) =
@@ -3051,7 +3063,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "recording_stop" => handle_recording_stop(state).await,
         "recording_restart" => handle_recording_restart(cmd, state).await,
         "pdf" => handle_pdf(cmd, state).await,
-        "tab_list" => handle_tab_list(state).await,
+        "tab_list" => handle_tab_list(cmd, state).await,
         "tab_new" => handle_tab_new(cmd, state).await,
         "tab_switch" => handle_tab_switch(cmd, state).await,
         "tab_close" => handle_tab_close(cmd, state).await,
@@ -7517,10 +7529,89 @@ async fn handle_keyboard(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
 // Phase 5 handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_tab_list(state: &DaemonState) -> Result<Value, String> {
+async fn handle_tab_list(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let with_profiles = cmd
+        .get("profiles")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let tabs = mgr.tab_list();
+    let mut tabs = mgr.tab_list();
+    let client = mgr.client.clone();
+    // Best effort: a CDP socket scoped to one page cannot list targets.
+    let Some(contexts) = browser_profiles::target_contexts(&client).await else {
+        return Ok(json!({ "tabs": tabs }));
+    };
+
+    // Pages that can open the throwaway tab, per not-yet-identified context.
+    let mut openers: HashMap<String, Vec<(u8, String)>> = HashMap::new();
+    for tab in &mut tabs {
+        let Some(target_id) = tab.get("targetId").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(context_id) = contexts.get(target_id) else {
+            continue;
+        };
+        if with_profiles && !state.profile_identities.contains_key(context_id) {
+            if let Some(session_id) = mgr.session_id_for_target(target_id) {
+                let url = tab.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                openers
+                    .entry(context_id.clone())
+                    .or_default()
+                    .push((browser_profiles::opener_rank(url), session_id.to_string()));
+            }
+        }
+        tab["browserContextId"] = json!(context_id);
+    }
+
+    // `openers` is empty unless --profiles was passed.
+    let mut openers: Vec<_> = openers.into_iter().collect();
+    openers.sort();
+    for (context_id, mut candidates) in openers {
+        candidates.sort();
+        // A tab can refuse to open popups (e.g. a JavaScript dialog is
+        // open), so try a second page of the same context.
+        for (_, session_id) in candidates.iter().take(2) {
+            if let Ok(identity) = browser_profiles::probe_context_profile(
+                &client,
+                session_id,
+                &context_id,
+                &mut state.profile_probe_targets,
+            )
+            .await
+            {
+                state
+                    .profile_identities
+                    .insert(context_id.clone(), identity);
+                break;
+            }
+        }
+    }
+    // Profiles identified earlier in this session cost nothing to report, so
+    // plain `tab list` includes them too.
+    for tab in &mut tabs {
+        let identity = tab
+            .get("browserContextId")
+            .and_then(|v| v.as_str())
+            .and_then(|ctx| state.profile_identities.get(ctx));
+        if let Some(identity) = identity {
+            tab["profile"] = identity.to_json();
+        }
+    }
     Ok(json!({ "tabs": tabs }))
+}
+
+/// True for target events about a throwaway tab opened by
+/// `tab list --profiles`, which must not be adopted as a session tab.
+fn is_profile_probe_event(event: &CdpEvent, probe_targets: &HashSet<String>) -> bool {
+    if probe_targets.is_empty() || !event.method.starts_with("Target.") {
+        return false;
+    }
+    let target_id = event
+        .params
+        .get("targetId")
+        .or_else(|| event.params.pointer("/targetInfo/targetId"))
+        .and_then(|v| v.as_str());
+    target_id.is_some_and(|id| probe_targets.contains(id))
 }
 
 async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -13690,6 +13781,36 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn profile_probe_events_are_skipped_by_target_id() {
+        let probes: HashSet<String> = ["PROBE".to_string()].into();
+        let event = |method: &str, params: Value| CdpEvent {
+            method: method.to_string(),
+            params,
+            session_id: None,
+        };
+        let info = |id: &str| json!({ "targetInfo": { "targetId": id, "type": "page" } });
+        for method in [
+            "Target.targetCreated",
+            "Target.targetInfoChanged",
+            "Target.attachedToTarget",
+        ] {
+            assert!(is_profile_probe_event(
+                &event(method, info("PROBE")),
+                &probes
+            ));
+            assert!(!is_profile_probe_event(
+                &event(method, info("USER")),
+                &probes
+            ));
+        }
+        let destroyed = event("Target.targetDestroyed", json!({ "targetId": "PROBE" }));
+        assert!(is_profile_probe_event(&destroyed, &probes));
+        assert!(!is_profile_probe_event(&destroyed, &HashSet::new()));
+        let page_event = event("Page.loadEventFired", json!({ "targetId": "PROBE" }));
+        assert!(!is_profile_probe_event(&page_event, &probes));
+    }
+
     #[tokio::test]
     async fn test_auth_login_releases_remote_objects_after_failures() {
         use futures_util::{SinkExt, StreamExt};
