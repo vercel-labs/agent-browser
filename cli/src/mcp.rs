@@ -5270,6 +5270,27 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_preserves_outcome_unknown_code() {
+        let run = CliRun {
+            exit_code: Some(1),
+            stdout: json!({
+                "success": false,
+                "error": "Failed to read: Connection reset by peer (os error 54) (the command reached the daemon but no response came back; it may or may not have run, so it was not retried)",
+                "code": "outcome_unknown"
+            })
+            .to_string(),
+            stderr: String::new(),
+        };
+
+        let result = tool_result_from_run(run);
+        assert_eq!(result["isError"], true);
+        assert_eq!(
+            result["structuredContent"]["response"]["code"],
+            "outcome_unknown"
+        );
+    }
+
+    #[test]
     fn tool_result_preserves_tab_gone_recovery_data() {
         let run = CliRun {
             exit_code: Some(1),

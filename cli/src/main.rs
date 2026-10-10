@@ -61,6 +61,19 @@ fn print_json_error(message: impl AsRef<str>) {
     }));
 }
 
+/// Like print_json_error, but keeps a machine-readable code such as
+/// `outcome_unknown` from a failed daemon response.
+fn print_json_error_with_code(message: impl AsRef<str>, code: Option<&str>) {
+    let mut value = json!({
+        "success": false,
+        "error": message.as_ref(),
+    });
+    if let Some(code) = code {
+        value["code"] = json!(code);
+    }
+    print_json_value(value);
+}
+
 fn print_json_error_with_type(message: impl AsRef<str>, error_type: &str) {
     print_json_value(json!({
         "success": false,
@@ -1310,7 +1323,16 @@ fn run_close_all(flags: &Flags) {
 
     for (session, pid) in &sessions {
         let cmd = json!({ "id": gen_id(), "action": "close" });
-        match send_command(cmd, session) {
+        // A close whose response was lost leaves the daemon in an unknown
+        // state; force-kill it like an unreachable one.
+        let result = send_command(cmd, session).and_then(|resp| {
+            if resp.code.as_deref() == Some("outcome_unknown") {
+                Err(resp.error.unwrap_or_default())
+            } else {
+                Ok(resp)
+            }
+        });
+        match result {
             Ok(resp) if resp.success => {
                 tls::clear_session(session);
                 closed.push(session.clone());
@@ -1833,16 +1855,17 @@ fn main() {
 
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
-            Ok(resp) => Some(
+            Ok(resp) => Some((
                 resp.error
                     .unwrap_or_else(|| "Auto-connect failed".to_string()),
-            ),
-            Err(e) => Some(e.to_string()),
+                resp.code,
+            )),
+            Err(e) => Some((e.to_string(), None)),
         };
 
-        if let Some(msg) = err {
+        if let Some((msg, code)) = err {
             if flags.json {
-                print_json_error(msg);
+                print_json_error_with_code(msg, code.as_deref());
             } else {
                 eprintln!("{} {}", color::error_indicator(), msg);
             }
@@ -1934,16 +1957,17 @@ fn main() {
 
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
-            Ok(resp) => Some(
+            Ok(resp) => Some((
                 resp.error
                     .unwrap_or_else(|| "CDP connection failed".to_string()),
-            ),
-            Err(e) => Some(e.to_string()),
+                resp.code,
+            )),
+            Err(e) => Some((e.to_string(), None)),
         };
 
-        if let Some(msg) = err {
+        if let Some((msg, code)) = err {
             if flags.json {
-                print_json_error(msg);
+                print_json_error_with_code(msg, code.as_deref());
             } else {
                 eprintln!("{} {}", color::error_indicator(), msg);
             }
@@ -1957,16 +1981,17 @@ fn main() {
 
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
-            Ok(resp) => Some(
+            Ok(resp) => Some((
                 resp.error
                     .unwrap_or_else(|| "Provider connection failed".to_string()),
-            ),
-            Err(e) => Some(e.to_string()),
+                resp.code,
+            )),
+            Err(e) => Some((e.to_string(), None)),
         };
 
-        if let Some(msg) = err {
+        if let Some((msg, code)) = err {
             if flags.json {
-                print_json_error(msg);
+                print_json_error_with_code(msg, code.as_deref());
             } else {
                 eprintln!("{} {}", color::error_indicator(), msg);
             }
@@ -2100,7 +2125,7 @@ fn main() {
                     .error
                     .unwrap_or_else(|| "Browser launch failed".to_string());
                 if flags.json {
-                    print_json_error(error_msg);
+                    print_json_error_with_code(error_msg, resp.code.as_deref());
                 } else {
                     eprintln!("{} {}", color::error_indicator(), error_msg);
                 }

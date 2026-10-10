@@ -1010,8 +1010,58 @@ fn connect(session: &str) -> Result<Connection, String> {
     }
 }
 
+/// Failure of a single request attempt, split by whether the daemon may have
+/// received the request.
+#[derive(Debug)]
+enum SendError {
+    /// Connecting failed, or the write failed before any byte was accepted.
+    NotSent(String),
+    /// At least part of the request was written, then the write, the read, or
+    /// response parsing failed. The daemon may already have executed it.
+    OutcomeUnknown(String),
+}
+
+/// Actions that only read state, so re-sending one after a lost response
+/// cannot change the page. Anything not listed is treated as mutating.
+const READ_ONLY_ACTIONS: &[&str] = &[
+    "url",
+    "title",
+    "snapshot",
+    "gettext",
+    "getattribute",
+    "isvisible",
+    "isenabled",
+    "ischecked",
+    "boundingbox",
+    "innerhtml",
+    "inputvalue",
+    "count",
+    "styles",
+    "cookies_get",
+    "storage_get",
+    "tab_list",
+    "cdp_url",
+    "stream_status",
+];
+
+fn is_read_only(cmd: &Value) -> bool {
+    cmd.get("action")
+        .and_then(Value::as_str)
+        .is_some_and(|action| READ_ONLY_ACTIONS.contains(&action))
+}
+
 pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
-    // Retry logic for transient errors (EAGAIN/EWOULDBLOCK/connection issues)
+    send_with_retry(is_read_only(&cmd), || send_command_once(&cmd, session))
+}
+
+/// Retry transient errors (EAGAIN/EWOULDBLOCK/connection issues). Once a
+/// request was written, only read-only actions are re-sent; a mutating one
+/// (click, fill, eval, navigation) could otherwise run twice, so it fails with
+/// code `outcome_unknown` instead.
+fn send_with_retry(
+    read_only: bool,
+    mut send_once: impl FnMut() -> Result<Response, SendError>,
+) -> Result<Response, String> {
     const MAX_RETRIES: u32 = 5;
     const RETRY_DELAY_MS: u64 = 200;
 
@@ -1022,17 +1072,26 @@ pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
             thread::sleep(Duration::from_millis(RETRY_DELAY_MS * (attempt as u64)));
         }
 
-        match send_command_once(&cmd, session) {
+        let e = match send_once() {
             Ok(response) => return Ok(response),
-            Err(e) => {
-                if is_transient_error(&e) {
-                    last_error = e;
-                    continue;
-                }
-                // Non-transient error, fail immediately
-                return Err(e);
+            Err(SendError::OutcomeUnknown(e)) if !read_only => {
+                return Ok(Response {
+                    success: false,
+                    error: Some(format!(
+                        "{} (the command reached the daemon but no response came back; \
+                         it may or may not have run, so it was not retried)",
+                        e
+                    )),
+                    code: Some("outcome_unknown".to_string()),
+                    ..Default::default()
+                });
             }
+            Err(SendError::OutcomeUnknown(e)) | Err(SendError::NotSent(e)) => e,
+        };
+        if !is_transient_error(&e) {
+            return Err(e);
         }
+        last_error = e;
     }
 
     Err(format!(
@@ -1087,7 +1146,7 @@ fn has_os_error(error: &str, code: u32) -> bool {
 /// parse_command stamps with AGENT_BROWSER_DEFAULT_TIMEOUT when no explicit
 /// --timeout is given) get that timeout plus margin, so the daemon can report
 /// a proper operation timeout instead of the client dying with EAGAIN at 30s
-/// and the retry loop re-sending the whole long-running command.
+/// and a mutating command failing with outcome_unknown while it still runs.
 ///
 /// The env var is deliberately NOT consulted here. Reading it would apply a
 /// long wait budget to every command, so a genuinely hung daemon on a simple
@@ -1103,32 +1162,248 @@ pub(crate) fn read_timeout_for(cmd: &Value) -> Duration {
     Duration::from_millis(op_ms.saturating_add(10_000).max(30_000))
 }
 
-fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
-    let mut stream = connect(session)?;
+fn send_command_once(cmd: &Value, session: &str) -> Result<Response, SendError> {
+    let mut json_str = serde_json::to_string(cmd).map_err(|e| SendError::NotSent(e.to_string()))?;
+    json_str.push('\n');
+
+    let stream = connect(session).map_err(SendError::NotSent)?;
 
     stream.set_read_timeout(Some(read_timeout_for(cmd))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
-    let mut json_str = serde_json::to_string(cmd).map_err(|e| e.to_string())?;
-    json_str.push('\n');
+    exchange(stream, json_str.as_bytes())
+}
 
-    stream
-        .write_all(json_str.as_bytes())
-        .map_err(|e| format!("Failed to send: {}", e))?;
+/// Write one request line and read one response line. Unlike write_all, the
+/// write loop tracks whether any byte was accepted, which decides whether a
+/// failure is safe to retry.
+fn exchange<S: Read + Write>(mut stream: S, request: &[u8]) -> Result<Response, SendError> {
+    let mut written = 0;
+    while written < request.len() {
+        let err = match stream.write(&request[written..]) {
+            Ok(0) => std::io::Error::from(std::io::ErrorKind::WriteZero),
+            Ok(n) => {
+                written += n;
+                continue;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => e,
+        };
+        let msg = format!("Failed to send: {}", err);
+        return Err(if written == 0 {
+            SendError::NotSent(msg)
+        } else {
+            SendError::OutcomeUnknown(msg)
+        });
+    }
 
     let mut reader = BufReader::new(stream);
     let mut response_line = String::new();
     reader
         .read_line(&mut response_line)
-        .map_err(|e| format!("Failed to read: {}", e))?;
+        .map_err(|e| SendError::OutcomeUnknown(format!("Failed to read: {}", e)))?;
 
-    serde_json::from_str(&response_line).map_err(|e| format!("Invalid response: {}", e))
+    serde_json::from_str(&response_line)
+        .map_err(|e| SendError::OutcomeUnknown(format!("Invalid response: {}", e)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
+
+    /// Repro for #2032: a daemon that reads the request and closes without
+    /// replying must see the request once.
+    #[test]
+    #[cfg(unix)]
+    fn send_command_does_not_resend_when_response_is_lost() {
+        use std::os::unix::net::UnixListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let dir = std::env::temp_dir().join(format!("ab-lost-resp-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.to_str().unwrap());
+
+        let session = "lost-resp";
+        let socket_path = get_socket_path(session);
+        let _ = fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+
+        let requests = Arc::new(AtomicUsize::new(0));
+        let seen = requests.clone();
+        let daemon = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(2500);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        let mut line = String::new();
+                        BufReader::new(&stream).read_line(&mut line).unwrap();
+                        seen.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Err(_) => thread::sleep(Duration::from_millis(10)),
+                }
+            }
+        });
+
+        let resp = send_command(json!({"id": "1", "action": "click"}), session)
+            .expect("outcome_unknown is a failed response, not a send error");
+        daemon.join().unwrap();
+        let _ = fs::remove_file(&socket_path);
+        let _ = fs::remove_dir(&dir);
+
+        assert_eq!(requests.load(Ordering::SeqCst), 1, "request was re-sent");
+        assert!(!resp.success);
+        assert_eq!(resp.code.as_deref(), Some("outcome_unknown"));
+    }
+
+    /// In-memory stream: accepts at most `accept` bytes, then fails writes
+    /// with `write_err`; reads return `response`.
+    struct MockStream {
+        accept: usize,
+        write_err: std::io::ErrorKind,
+        written: usize,
+        response: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl MockStream {
+        fn new(response: &str) -> Self {
+            Self {
+                accept: usize::MAX,
+                write_err: std::io::ErrorKind::BrokenPipe,
+                written: 0,
+                response: std::io::Cursor::new(response.as_bytes().to_vec()),
+            }
+        }
+    }
+
+    impl Read for MockStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.response.read(buf)
+        }
+    }
+
+    impl Write for MockStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let room = self.accept - self.written;
+            if room == 0 {
+                return Err(self.write_err.into());
+            }
+            let n = buf.len().min(room);
+            self.written += n;
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn exchange_classifies_failures_by_whether_bytes_were_written() {
+        let eof = exchange(MockStream::new(""), b"{}\n");
+        assert!(matches!(eof, Err(SendError::OutcomeUnknown(_))));
+
+        let garbage = exchange(MockStream::new("garbage\n"), b"{}\n");
+        assert!(matches!(garbage, Err(SendError::OutcomeUnknown(_))));
+
+        let mut partial = MockStream::new("");
+        partial.accept = 1;
+        let partial = exchange(partial, b"{}\n");
+        assert!(matches!(partial, Err(SendError::OutcomeUnknown(_))));
+
+        let mut blocked = MockStream::new("");
+        blocked.accept = 0;
+        blocked.write_err = std::io::ErrorKind::WouldBlock;
+        let blocked = exchange(blocked, b"{}\n");
+        assert!(matches!(blocked, Err(SendError::NotSent(_))));
+
+        let ok = exchange(MockStream::new("{\"success\":true}\n"), b"{}\n");
+        assert!(ok.unwrap().success);
+    }
+
+    fn ok_response() -> Response {
+        Response {
+            success: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn mutating_command_is_not_resent_after_write() {
+        for err in [
+            "Invalid response: EOF while parsing a value at line 1 column 0",
+            "Failed to read: Connection reset by peer (os error 104)",
+            "Failed to read: Resource temporarily unavailable (os error 11)",
+        ] {
+            assert!(is_transient_error(err));
+            let mut calls = 0;
+            let resp = send_with_retry(false, || {
+                calls += 1;
+                Err(SendError::OutcomeUnknown(err.to_string()))
+            })
+            .unwrap();
+            assert_eq!(calls, 1, "re-sent after: {}", err);
+            assert_eq!(resp.code.as_deref(), Some("outcome_unknown"));
+            assert!(!daemon_unreachable(resp.error.as_deref().unwrap()));
+        }
+    }
+
+    #[test]
+    fn read_only_command_is_resent_after_lost_response() {
+        let mut calls = 0;
+        let resp = send_with_retry(true, || {
+            calls += 1;
+            if calls < 3 {
+                Err(SendError::OutcomeUnknown(
+                    "Invalid response: EOF while parsing a value at line 1 column 0".to_string(),
+                ))
+            } else {
+                Ok(ok_response())
+            }
+        });
+        assert!(resp.unwrap().success);
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn unsent_request_is_retried_for_any_command() {
+        let mut calls = 0;
+        let resp = send_with_retry(false, || {
+            calls += 1;
+            if calls < 3 {
+                Err(SendError::NotSent(
+                    "Failed to send: Resource temporarily unavailable (os error 11)".to_string(),
+                ))
+            } else {
+                Ok(ok_response())
+            }
+        });
+        assert!(resp.unwrap().success);
+        assert_eq!(calls, 3);
+
+        let mut calls = 0;
+        let refused = send_with_retry(false, || {
+            calls += 1;
+            Err(SendError::NotSent(
+                "Failed to connect: Connection refused (os error 111)".to_string(),
+            ))
+        });
+        assert_eq!(calls, 1);
+        assert!(daemon_unreachable(&refused.err().unwrap()));
+    }
+
+    #[test]
+    fn only_listed_actions_count_as_read_only() {
+        assert!(is_read_only(&json!({"action": "snapshot"})));
+        assert!(is_read_only(&json!({"action": "url"})));
+        assert!(!is_read_only(&json!({"action": "click"})));
+        assert!(!is_read_only(&json!({"action": "evaluate"})));
+        assert!(!is_read_only(&json!({"action": "some_future_action"})));
+        assert!(!is_read_only(&json!({})));
+    }
 
     #[test]
     fn long_mouse_movement_gets_its_requested_time_budget() {
