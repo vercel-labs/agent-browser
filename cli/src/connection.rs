@@ -6,7 +6,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -789,7 +789,58 @@ fn stop_existing_daemon_for_restart(session: &str) {
     }
 }
 
+/// Hold a session-local OS file lock until startup (or restart) is complete.
+/// The lock file must remain in place: unlinking it lets a new caller lock a
+/// different inode while another caller still holds the original lock.
+fn acquire_startup_lock(path: &Path, timeout: Duration) -> Result<fs::File, String> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|e| {
+            format!(
+                "Failed to open daemon startup lock '{}': {}",
+                path.display(),
+                e
+            )
+        })?;
+    let start = Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(fs::TryLockError::WouldBlock) => {
+                if start.elapsed() >= timeout {
+                    return Err(format!(
+                        "Timed out waiting for daemon startup lock '{}'",
+                        path.display()
+                    ));
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(fs::TryLockError::Error(e)) => {
+                return Err(format!(
+                    "Failed to acquire daemon startup lock '{}': {}",
+                    path.display(),
+                    e
+                ));
+            }
+        }
+    }
+}
+
+/// Serialize session readiness checks, cleanup, spawning and configuration
+/// publication across CLI processes. Dropping the guard releases the lock
+/// before the caller sends its command; different sessions never share a lock.
 pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
+    let socket_dir = get_socket_dir();
+    fs::create_dir_all(&socket_dir)
+        .map_err(|e| format!("Failed to create socket directory: {}", e))?;
+    let _startup_lock = acquire_startup_lock(
+        &socket_dir.join(format!("{}.startup.lock", session)),
+        Duration::from_secs(10),
+    )?;
     let mut restarted = false;
 
     // Socket connectivity is the sole liveness check — no PID check — so
@@ -825,13 +876,6 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
 
     // Clean up any stale socket/pid files before starting fresh
     cleanup_stale_files(session);
-
-    // Ensure socket directory exists
-    let socket_dir = get_socket_dir();
-    if !socket_dir.exists() {
-        fs::create_dir_all(&socket_dir)
-            .map_err(|e| format!("Failed to create socket directory: {}", e))?;
-    }
 
     // Pre-flight check: Validate socket path length (Unix limit is 104 bytes including null terminator)
     #[cfg(unix)]
@@ -1129,6 +1173,38 @@ fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
 mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
+
+    #[test]
+    fn startup_lock_is_bounded_and_session_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("one.startup.lock");
+        let lock = acquire_startup_lock(&path, Duration::ZERO).unwrap();
+        let error = acquire_startup_lock(&path, Duration::from_millis(30)).unwrap_err();
+        assert!(
+            error.contains("Timed out waiting for daemon startup lock"),
+            "{error}"
+        );
+        let other =
+            acquire_startup_lock(&dir.path().join("two.startup.lock"), Duration::ZERO).unwrap();
+        drop(other);
+        drop(lock);
+        assert!(path.exists(), "dropping the guard must not unlink the lock");
+        assert!(acquire_startup_lock(&path, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn startup_lock_waits_until_owner_releases_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("one.startup.lock");
+        let lock = acquire_startup_lock(&path, Duration::ZERO).unwrap();
+        let owner = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            drop(lock);
+        });
+        let next = acquire_startup_lock(&path, Duration::from_secs(2)).unwrap();
+        owner.join().unwrap();
+        drop(next);
+    }
 
     #[test]
     fn long_mouse_movement_gets_its_requested_time_budget() {
