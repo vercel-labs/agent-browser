@@ -789,7 +789,81 @@ fn stop_existing_daemon_for_restart(session: &str) {
     }
 }
 
+/// How long a caller waits for another process to finish starting the same
+/// session's daemon. One start is bounded well below this (a graceful
+/// restart, a spawn and its readiness wait); past it the caller proceeds
+/// without the lock rather than failing.
+const DAEMON_STARTUP_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn get_startup_lock_path(session: &str) -> PathBuf {
+    get_socket_dir().join(format!("{}.lock", session))
+}
+
+/// Exclusive per-session lock held while a CLI process starts, restarts or
+/// adopts a session's daemon (#2074).
+///
+/// Without it, two commands that start the same session at once both find no
+/// daemon, both clear the session files and both spawn one. Each daemon then
+/// removes the other's socket and pid files, so both commands fail and the
+/// surviving daemon is unreachable. With the lock, the second caller waits,
+/// finds the first caller's daemon ready and reuses it.
+///
+/// The operating system releases the lock when the file is closed, including
+/// when the holder dies, so a crashed caller cannot wedge the session. The
+/// lock file itself is never removed: deleting it while another process waits
+/// on it would let a third process lock a new file and run concurrently.
+struct DaemonStartupLock {
+    _file: fs::File,
+}
+
+impl DaemonStartupLock {
+    /// Wait for the session's startup lock. Returns `None` when the lock
+    /// cannot be used (for example on a filesystem without file locks) or is
+    /// still held after `DAEMON_STARTUP_LOCK_TIMEOUT`, in which case the caller
+    /// proceeds unserialized, as it did before the lock existed.
+    fn acquire(session: &str) -> Option<Self> {
+        let _ = fs::create_dir_all(get_socket_dir());
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(get_startup_lock_path(session))
+            .ok()?;
+        let deadline = Instant::now() + DAEMON_STARTUP_LOCK_TIMEOUT;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Some(Self { _file: file }),
+                Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+}
+
 pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
+    // Warm path: a ready daemon of this version and configuration is reused
+    // without the startup lock, so commands against a running session never
+    // wait on each other here.
+    if daemon_ready(session)
+        && daemon_version_matches(session)
+        && daemon_config_matches(session, opts)
+    {
+        return Ok(DaemonResult {
+            already_running: true,
+            restarted: false,
+        });
+    }
+
+    // Starting or restarting a daemon, or adopting one that is still
+    // starting, is serialized per session. A caller that waited for the lock
+    // re-checks readiness and reuses the daemon the previous holder started.
+    let _startup_lock = DaemonStartupLock::acquire(session);
+    start_or_reuse_daemon(session, opts)
+}
+
+fn start_or_reuse_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
     let mut restarted = false;
 
     // Socket connectivity is the sole liveness check — no PID check — so
