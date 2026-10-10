@@ -87,11 +87,11 @@ HAR files include request headers, response headers, cookies, POST data, and res
 ## SSR and no-JavaScript debugging
 
 ```bash
-agent-browser batch \
-  '["open"]' \
-  '["network","route","*","--abort","--resource-type","script"]' \
-  '["navigate","http://localhost:3000"]' \
-  '["snapshot","-i"]'
+agent-browser batch --bail \
+  "open" \
+  "network route '*' --abort --resource-type script" \
+  "navigate http://localhost:3000" \
+  "snapshot -i"
 ```
 
 Launching with `open` and no URL leaves the browser on `about:blank`, which gives routes time to register before the first real navigation.

@@ -47,11 +47,11 @@ Runtime init-script identifiers are session-wide. `removeinitscript` removes the
 For flows that need routes, cookies, or scripts installed before the first real navigation, start the browser without a URL:
 
 ```bash
-agent-browser batch \
-  '["open"]' \
-  '["network","route","*","--abort","--resource-type","script"]' \
-  '["cookies","set","--curl","cookies.curl","--domain","localhost"]' \
-  '["navigate","http://localhost:3000/target"]'
+agent-browser batch --bail \
+  "open" \
+  "network route '*' --abort --resource-type script" \
+  "cookies set --curl cookies.curl --domain localhost" \
+  "navigate http://localhost:3000/target"
 ```
 
 `open` with no URL launches the browser on `about:blank`, leaving room to stage state before the target page loads.

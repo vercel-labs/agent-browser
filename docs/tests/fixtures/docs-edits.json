@@ -8,12 +8,28 @@
       {
         "from": "# Clear CA trust retained by the running session",
         "to": "# Clear CA trust retained by the running session\n--use-system-ca          # Use the OS trust store for CLI requests (read, install, upgrade, doctor)"
+      },
+      {
+        "from": "agent-browser batch \\\n  '[\"open\"]' \\\n  '[\"network\",\"route\",\"*\",\"--abort\",\"--resource-type\",\"script\"]' \\\n  '[\"cookies\",\"set\",\"--curl\",\"cookies.curl\",\"--domain\",\"localhost\"]' \\\n  '[\"navigate\",\"http://localhost:3000/target\"]'",
+        "to": "agent-browser batch --bail \\\n  \"open\" \\\n  \"network route '*' --abort --resource-type script\" \\\n  \"cookies set --curl cookies.curl --domain localhost\" \\\n  \"navigate http://localhost:3000/target\""
       }
     ],
     "/configuration": [
       {
         "from": "This initial implementation does not support",
         "to": "Browser trust does not support"
+      }
+    ],
+    "/init-scripts": [
+      {
+        "from": "agent-browser batch \\\n  '[\"open\"]' \\\n  '[\"network\",\"route\",\"*\",\"--abort\",\"--resource-type\",\"script\"]' \\\n  '[\"cookies\",\"set\",\"--curl\",\"cookies.curl\",\"--domain\",\"localhost\"]' \\\n  '[\"navigate\",\"http://localhost:3000/target\"]'",
+        "to": "agent-browser batch --bail \\\n  \"open\" \\\n  \"network route '*' --abort --resource-type script\" \\\n  \"cookies set --curl cookies.curl --domain localhost\" \\\n  \"navigate http://localhost:3000/target\""
+      }
+    ],
+    "/network": [
+      {
+        "from": "agent-browser batch \\\n  '[\"open\"]' \\\n  '[\"network\",\"route\",\"*\",\"--abort\",\"--resource-type\",\"script\"]' \\\n  '[\"navigate\",\"http://localhost:3000\"]' \\\n  '[\"snapshot\",\"-i\"]'",
+        "to": "agent-browser batch --bail \\\n  \"open\" \\\n  \"network route '*' --abort --resource-type script\" \\\n  \"navigate http://localhost:3000\" \\\n  \"snapshot -i\""
       }
     ],
     "/proxy": [

@@ -546,11 +546,11 @@ agent-browser pushstate <url>         # SPA client-side nav; auto-detects window
 Some flows need routes, cookies, or init scripts configured *before* the first navigation (SSR debug, auth on protected origins, etc.). `open` without a URL launches the browser but stays on `about:blank`, leaving room to stage state. `batch` makes it one CLI invocation:
 
 ```bash
-agent-browser batch \
-  '["open"]' \
-  '["network","route","*","--abort","--resource-type","script"]' \
-  '["cookies","set","--curl","cookies.curl","--domain","localhost"]' \
-  '["navigate","http://localhost:3000/target"]'
+agent-browser batch --bail \
+  "open" \
+  "network route '*' --abort --resource-type script" \
+  "cookies set --curl cookies.curl --domain localhost" \
+  "navigate http://localhost:3000/target"
 ```
 
 ## React / Web Vitals
