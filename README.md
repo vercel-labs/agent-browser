@@ -484,11 +484,11 @@ agent-browser pushstate <url>         # SPA client-side nav; auto-detects window
 Some flows (SSR debug, auth cookies for protected origins, init scripts) need state set up *before* the first navigation. Use `open` with no URL to launch the browser, then stage cookies / routes / init scripts, then navigate. `batch` sends it all in one CLI call:
 
 ```bash
-agent-browser batch \
-  '["open"]' \
-  '["network","route","*","--abort","--resource-type","script"]' \
-  '["cookies","set","--curl","cookies.curl","--domain","localhost"]' \
-  '["navigate","http://localhost:3000/target"]'
+agent-browser batch --bail \
+  "open" \
+  "network route '*' --abort --resource-type script" \
+  "cookies set --curl cookies.curl --domain localhost" \
+  "navigate http://localhost:3000/target"
 ```
 
 Without `batch` the same sequence is three commands that all reuse the same daemon (fast, but not one turn).

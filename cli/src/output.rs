@@ -1622,10 +1622,10 @@ Examples:
     # ^ Headers only sent to api.example.com, not other domains
 
   # Pre-navigation setup in one turn:
-  agent-browser batch \
-    '["open"]' \
-    '["network","route","*","--abort","--resource-type","script"]' \
-    '["navigate","http://localhost:3000/target"]'
+  agent-browser batch --bail \
+    "open" \
+    "network route '*' --abort --resource-type script" \
+    "navigate http://localhost:3000/target"
 "##
         }
         "back" => {
