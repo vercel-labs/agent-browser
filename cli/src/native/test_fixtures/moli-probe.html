@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Moli adapter probe</title>
+  <style>body { font-family: sans-serif; padding: 24px; min-height: 1600px; } input, button { padding: 8px; }</style>
+</head>
+<body>
+  <h1>Moli adapter probe</h1>
+  <p id="message">JavaScript pending</p>
+  <label for="name">Name</label>
+  <input id="name" type="text">
+  <button id="submit" onclick="document.querySelector('#message').textContent = 'Hello ' + document.querySelector('#name').value">Submit</button>
+  <script>document.querySelector('#message').textContent = 'JavaScript ready';</script>
+</body>
+</html>

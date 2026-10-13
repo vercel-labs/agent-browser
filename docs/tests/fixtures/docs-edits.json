@@ -68,6 +68,10 @@
       {
         "from": "agent-browser click <sel> # Click element (--new-tab to open in new tab) agent-browser dblclick <sel> # Double-click",
         "to": "agent-browser click <sel> # Click element (--new-tab to open in new tab) agent-browser click <sel> --button right # Right-click (fires contextmenu) agent-browser click <sel> --modifiers control,shift # Hold keys during the click agent-browser dblclick <sel> # Double-click agent-browser dblclick <sel> --modifiers shift # Double-click with Shift held"
+      },
+      {
+        "from": "chrome (default), lightpanda, obscura (experimental)",
+        "to": "chrome (default), lightpanda, obscura (experimental), moli (experimental)"
       }
     ],
     "/configuration": [
@@ -178,6 +182,22 @@
       {
         "from": "anthropic/claude-sonnet-4.6",
         "to": "openai/gpt-6-luna-fast"
+      },
+      {
+        "from": "<code>lightpanda</code>, <code>obscura</code>)",
+        "to": "<code>lightpanda</code>, <code>obscura</code>, <code>moli</code>)"
+      },
+      {
+        "from": "<code>obscura</code> (experimental).",
+        "to": "<code>obscura</code> (experimental), <code>moli</code> (experimental)."
+      },
+      {
+        "from": "string (chrome, lightpanda, obscura)",
+        "to": "string (chrome, lightpanda, obscura, moli)"
+      },
+      {
+        "from": "Browser engine to use: chrome (default), lightpanda, obscura (experimental).",
+        "to": "Browser engine to use: chrome (default), lightpanda, obscura (experimental), moli (experimental)."
       }
     ],
     "/plugins": [
@@ -383,8 +403,8 @@
   },
   "resources": {
     "/schema.json": {
-      "size": 9813,
-      "sha256": "2b250f5cd22c2e91efc2d924be140efe6c4197c3e0e5b2bab3f439134b6dbe12"
+      "size": 9836,
+      "sha256": "4528939c0b4a4db7801296ad90fc45714a9cc67a6acfd2b9bf9b572f7e13b5a6"
     }
   }
 }
