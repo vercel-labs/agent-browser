@@ -59,7 +59,7 @@ import {
   type InputQueue,
 } from "@/lib/viewport-keyboard";
 
-const LIVE_VIEW_ENGINES = new Set(["chrome", "firefox"]);
+const LIVE_VIEW_ENGINES = new Set(["chrome", "firefox", "moli"]);
 
 function cdpModifiers(e: React.MouseEvent | React.WheelEvent): number {
   let m = 0;
