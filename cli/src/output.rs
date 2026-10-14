@@ -2001,7 +2001,8 @@ agent-browser keydown - Press a key down (without release)
 Usage: agent-browser keydown <key>
 
 Presses a key down without releasing it. Use keyup to release.
-Useful for holding modifier keys.
+A held modifier (Alt, Control, Meta, Shift) applies to later mouse
+commands until keyup, like holding it on a real keyboard.
 
 Global Options:
   --json               Output as JSON
@@ -2010,6 +2011,7 @@ Global Options:
 Examples:
   agent-browser keydown Shift
   agent-browser keydown Control
+  agent-browser keydown Alt && agent-browser mouse down && agent-browser mouse move 300 200 && agent-browser mouse up && agent-browser keyup Alt
 "##
         }
         "keyup" => {

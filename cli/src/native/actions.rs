@@ -216,6 +216,10 @@ pub struct MouseState {
     pub x: f64,
     pub y: f64,
     pub buttons: i32,
+    /// CDP modifier bitmask of keys held via `keydown`. CDP does not derive it
+    /// from earlier key events, so every dispatched event must carry it:
+    /// https://chromedevtools.github.io/devtools-protocol/tot/Input/#method-dispatchMouseEvent
+    pub modifiers: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -6419,8 +6423,6 @@ async fn handle_press(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
 /// Parse a key chord string like "Control+a" or "Control+Shift+Enter" into
 /// the actual key name and an optional CDP modifier bitmask.
-///
-/// CDP modifier values: 1 = Alt, 2 = Control, 4 = Meta (Cmd), 8 = Shift.
 fn parse_key_chord(input: &str) -> (String, Option<i32>) {
     let parts: Vec<&str> = input.split('+').collect();
     if parts.len() < 2 {
@@ -6431,12 +6433,9 @@ fn parse_key_chord(input: &str) -> (String, Option<i32>) {
     let mut key_parts: Vec<&str> = Vec::new();
 
     for part in &parts {
-        match part.to_lowercase().as_str() {
-            "alt" => modifiers |= 1,
-            "control" | "ctrl" => modifiers |= 2,
-            "meta" | "cmd" | "command" => modifiers |= 4,
-            "shift" => modifiers |= 8,
-            _ => key_parts.push(part),
+        match modifier_bit(part) {
+            0 => key_parts.push(part),
+            bit => modifiers |= bit,
         }
     }
 
@@ -13144,7 +13143,7 @@ fn build_mouse_event_params(
         click_count,
         delta_x,
         delta_y,
-        modifiers,
+        modifiers: modifiers.or(Some(mouse_state.modifiers)),
     }
 }
 
@@ -13229,36 +13228,52 @@ async fn handle_input_touch(cmd: &Value, state: &DaemonState) -> Result<Value, S
     Ok(json!({ "dispatched": event_type }))
 }
 
-async fn handle_keydown(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_keydown(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let key = cmd
         .get("key")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'key' parameter")?;
+    state.mouse_state.modifiers |= modifier_bit(key);
 
     mgr.client
         .send_command(
             "Input.dispatchKeyEvent",
-            Some(json!({ "type": "keyDown", "key": key })),
+            Some(
+                json!({ "type": "keyDown", "key": key, "modifiers": state.mouse_state.modifiers }),
+            ),
             Some(&session_id),
         )
         .await?;
     Ok(json!({ "keydown": key }))
 }
 
-async fn handle_keyup(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+/// CDP modifier bit for a modifier key name, 0 for any other key.
+/// CDP modifier values: 1 = Alt, 2 = Control, 4 = Meta (Cmd), 8 = Shift.
+fn modifier_bit(key: &str) -> i32 {
+    match key.to_ascii_lowercase().as_str() {
+        "alt" => 1,
+        "control" | "ctrl" => 2,
+        "meta" | "cmd" | "command" => 4,
+        "shift" => 8,
+        _ => 0,
+    }
+}
+
+async fn handle_keyup(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let key = cmd
         .get("key")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'key' parameter")?;
+    state.mouse_state.modifiers &= !modifier_bit(key);
 
     mgr.client
         .send_command(
             "Input.dispatchKeyEvent",
-            Some(json!({ "type": "keyUp", "key": key })),
+            Some(json!({ "type": "keyUp", "key": key, "modifiers": state.mouse_state.modifiers })),
             Some(&session_id),
         )
         .await?;
@@ -16339,6 +16354,41 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         assert_eq!(setup.init_scripts.len(), 2);
         assert_eq!(setup.init_scripts[0].session_identifiers["session-a"], "1");
         assert_eq!(setup.init_scripts[1].session_identifiers["session-b"], "1");
+    }
+
+    #[test]
+    fn test_mouse_event_params_carry_held_modifiers() {
+        let mut mouse_state = MouseState {
+            modifiers: modifier_bit("Alt") | modifier_bit("Shift"),
+            ..MouseState::default()
+        };
+        let held = build_mouse_event_params(
+            &mut mouse_state,
+            "mouseMoved",
+            Some(1.0),
+            Some(1.0),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(held.modifiers, Some(9));
+
+        let explicit = build_mouse_event_params(
+            &mut mouse_state,
+            "mouseMoved",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(2),
+        );
+        assert_eq!(explicit.modifiers, Some(2));
     }
 
     #[test]

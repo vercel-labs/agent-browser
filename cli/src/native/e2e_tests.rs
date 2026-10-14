@@ -3629,6 +3629,74 @@ async fn e2e_mouse_down_move_up_preserves_drag_state() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_held_modifier_reaches_mouse_events() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "evaluate",
+            "script": r#"(() => {
+                window.__mods = [];
+                for (const type of ['keydown', 'pointermove', 'pointerdown', 'pointerup']) {
+                    document.addEventListener(type, (e) => window.__mods.push(`${type}:${e.altKey}:${e.shiftKey}`));
+                }
+                return true;
+            })()"#
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let steps = [
+        json!({ "action": "keydown", "key": "Alt" }),
+        json!({ "action": "mousemove", "x": 20, "y": 20 }),
+        json!({ "action": "mousedown", "button": "left" }),
+        json!({ "action": "mousemove", "x": 60, "y": 60 }),
+        json!({ "action": "mouseup", "button": "left" }),
+        json!({ "action": "keyup", "key": "Alt" }),
+        json!({ "action": "keydown", "key": "Shift" }),
+        json!({ "action": "mousemove", "x": 80, "y": 80 }),
+        json!({ "action": "keyup", "key": "Shift" }),
+        json!({ "action": "mousemove", "x": 90, "y": 90 }),
+    ];
+    for (i, mut step) in steps.into_iter().enumerate() {
+        step["id"] = json!(format!("s{i}"));
+        assert_success(&execute_command(&step, &mut state).await);
+    }
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": "window.__mods" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        json!([
+            "keydown:true:false",
+            "pointermove:true:false",
+            "pointerdown:true:false",
+            "pointermove:true:false",
+            "pointerup:true:false",
+            "keydown:false:true",
+            "pointermove:false:true",
+            "pointermove:false:false",
+        ])
+    );
+
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_mouse_drag_reaches_pointer_capture_target() {
     let mut state = DaemonState::new();
 

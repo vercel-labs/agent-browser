@@ -1009,7 +1009,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_KEYDOWN,
             "Key down",
-            "Press and hold a key.",
+            "Press and hold a key. A held modifier applies to later mouse tools until key up.",
             json!({ "key": key_schema() }),
             &["key"],
         ),
