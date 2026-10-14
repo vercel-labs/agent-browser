@@ -169,6 +169,8 @@ Automatic summaries are limited to 16 tools and 4 KiB of JSON, with descriptions
 
 The daemon subscribes to CDP WebMCP events once per page session and reads its event cache after browser actions. There is no per-action discovery polling or registration grace period. Initial subscription is bounded to one second; unsupported sessions are not repeatedly probed. Explicit `webmcp list` can retry discovery. Asynchronous registrations appear on the next normal browser response after the event arrives. This describes agent-browser's active tab and frames, not a separately opened preview iframe.
 
+Optional WebMCP CDP probes are also bounded to one second, so browsers without the experimental domain do not stall startup or discovery for the generic CDP timeout.
+
 ```bash
 agent-browser open https://example.com  # Brief tool summary, if available
 agent-browser webmcp list search --json # Fetch only the selected tool schema

@@ -3,6 +3,8 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
+use super::cdp::client::CdpClient;
+
 pub const MAX_INPUT_BYTES: usize = 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_TOOL_RECORD_BYTES: usize = 256 * 1024;
@@ -11,6 +13,7 @@ pub const MAX_TOOL_COUNT: usize = 512;
 pub const MAX_INVOCATION_HISTORY: usize = 128;
 pub const MAX_EARLY_RESPONSES: usize = 128;
 pub const DISCOVERY_WINDOW_MS: u64 = 250;
+pub const DOMAIN_ENABLE_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_ERROR_BYTES: usize = 64 * 1024;
 
 pub const ERR_UNSUPPORTED: &str = "webmcp_unsupported";
@@ -517,6 +520,21 @@ pub fn unsupported_error(error: &str) -> String {
         "{}: This browser does not expose the experimental CDP WebMCP domain. Use a current agent-browser-managed Chrome session without --no-webmcp. Attached browsers and providers must enable WebMCP at launch. CDP detail: {}",
         ERR_UNSUPPORTED, error
     )
+}
+
+/// Enable the optional WebMCP CDP domain without letting an unsupported backend
+/// stall browser startup for the generic CDP command timeout.
+pub async fn enable_domain(client: &CdpClient, session_id: Option<&str>) -> Result<(), String> {
+    match tokio::time::timeout(
+        DOMAIN_ENABLE_TIMEOUT,
+        client.send_command_no_params("WebMCP.enable", session_id),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(unsupported_error(&error)),
+        Err(_) => Err(unsupported_error("CDP command timed out: WebMCP.enable")),
+    }
 }
 
 pub fn validate_input(input: &Value) -> Result<(), String> {

@@ -372,6 +372,7 @@ agent-browser stream enable           # Start the WebSocket stream server
 agent-browser stream enable --port 9223
 
 # Experimental WebMCP page tools
+# Optional CDP domain probes are bounded to one second on unsupported browsers.
 # Browser results announce brief summaries only when the catalog changes.
 # Choose a relevant tool, fetch its schema, then invoke within the user task.
 agent-browser webmcp list <tool> --frame <frame-id> --json
