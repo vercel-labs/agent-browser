@@ -1793,6 +1793,107 @@ async fn e2e_snapshot_refs_invalidate_iframe_navigation() {
     assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_scoped_snapshot_reports_only_scoped_refs() {
+    use std::collections::{BTreeMap, HashSet};
+
+    let mut state = DaemonState::new();
+    for command in [
+        json!({"action": "launch", "headless": true}),
+        json!({"action": "navigate", "url": "about:blank"}),
+        json!({"action": "setcontent", "html": "<header><a href='#home'>Home</a><nav><a href='#docs'>Docs</a></nav><iframe id='signup'></iframe></header><main><button>Buy</button></main><footer><a href='#privacy'>Privacy</a></footer>"}),
+        json!({"action": "evaluate", "script": "new Promise(resolve => { const f = document.getElementById('signup'); f.onload = () => resolve(true); f.srcdoc = '<button>Subscribe</button>'; })"}),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+
+    // Maps element names to refs, after checking that the response lists
+    // exactly the refs rendered in its tree and that none were dropped.
+    fn reported_refs(response: &Value) -> BTreeMap<String, String> {
+        assert_success(response);
+        let data = get_data(response);
+        let tree = data["snapshot"].as_str().unwrap();
+        let in_tree: HashSet<&str> = tree
+            .split("ref=")
+            .skip(1)
+            .map(|rest| {
+                rest.split(|c: char| !c.is_ascii_alphanumeric())
+                    .next()
+                    .unwrap()
+            })
+            .collect();
+        let refs = data["refs"].as_object().unwrap();
+        assert_eq!(
+            refs.keys().map(String::as_str).collect::<HashSet<_>>(),
+            in_tree,
+            "tree:\n{tree}"
+        );
+        assert_eq!(data["removedRefs"], json!([]));
+        refs.iter()
+            .map(|(ref_id, node)| (node["name"].as_str().unwrap().to_string(), ref_id.clone()))
+            .collect()
+    }
+
+    let full = reported_refs(&execute_command(&json!({"action": "snapshot"}), &mut state).await);
+    for name in ["Home", "Docs", "Subscribe", "Buy", "Privacy"] {
+        assert!(full.contains_key(name), "{name} missing from {full:?}");
+    }
+
+    let header = reported_refs(
+        &execute_command(
+            &json!({"action": "snapshot", "selector": "header"}),
+            &mut state,
+        )
+        .await,
+    );
+    for name in ["Home", "Docs", "Subscribe"] {
+        assert!(header.contains_key(name), "{name} missing from {header:?}");
+    }
+    for name in ["Buy", "Privacy"] {
+        assert!(!header.contains_key(name), "{name} leaked into {header:?}");
+    }
+
+    for scoped in [
+        header,
+        reported_refs(
+            &execute_command(
+                &json!({"action": "snapshot", "selector": "header", "compact": true, "maxDepth": 1}),
+                &mut state,
+            )
+            .await,
+        ),
+        reported_refs(
+            &execute_command(&json!({"action": "snapshot", "maxDepth": 1}), &mut state).await,
+        ),
+        reported_refs(
+            &execute_command(&json!({"action": "snapshot", "maxDepth": 0}), &mut state).await,
+        ),
+    ] {
+        assert!(scoped.len() < full.len(), "scope did not narrow refs: {scoped:?}");
+        for (name, ref_id) in scoped {
+            assert_eq!(full[&name], ref_id, "{name} changed ref inside a scope");
+        }
+    }
+
+    // A ref from the full snapshot that falls outside the scope keeps working.
+    assert_success(
+        &execute_command(
+            &json!({"action": "click", "selector": format!("@{}", full["Privacy"])}),
+            &mut state,
+        )
+        .await,
+    );
+    let hash = execute_command(
+        &json!({"action": "evaluate", "script": "location.hash"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&hash);
+    assert_eq!(get_data(&hash)["result"], "#privacy");
+    assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
+}
+
 // ---------------------------------------------------------------------------
 // Screenshot
 // ---------------------------------------------------------------------------

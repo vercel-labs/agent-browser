@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -104,6 +104,180 @@ mod document_identity_regressions {
     }
 }
 
+#[cfg(test)]
+mod scoped_snapshot_refs {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    fn ax_node(id: i64, role: &str, name: &str, children: &[i64]) -> Value {
+        json!({
+            "nodeId": id.to_string(),
+            "role": {"type": "role", "value": role},
+            "name": {"type": "computedString", "value": name},
+            "childIds": children.iter().map(i64::to_string).collect::<Vec<_>>(),
+            "backendDOMNodeId": id,
+        })
+    }
+
+    /// Snapshot a page whose `<header>` holds a link and a navigation landmark
+    /// with a nested link, and whose footer holds one more link. Returns each
+    /// snapshot with the ref map as it stood right after it.
+    async fn snapshot_page(runs: &[SnapshotOptions]) -> Vec<(SnapshotResult, RefMap)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                let Ok(text) = message.to_text() else {
+                    continue;
+                };
+                let request: Value = serde_json::from_str(text).unwrap();
+                let is_selector_lookup = request["params"]["expression"]
+                    .as_str()
+                    .is_some_and(|js| js.starts_with("document.querySelector("));
+                let result = match request["method"].as_str().unwrap() {
+                    "Page.getFrameTree" => {
+                        json!({"frameTree": {"frame": {"id": "main", "loaderId": "doc"}}})
+                    }
+                    "Accessibility.getFullAXTree" => json!({"nodes": [
+                        ax_node(1, "RootWebArea", "", &[2, 5]),
+                        ax_node(2, "banner", "", &[3, 4]),
+                        ax_node(3, "link", "Home", &[]),
+                        ax_node(4, "navigation", "Main", &[6]),
+                        ax_node(6, "link", "Docs", &[]),
+                        ax_node(5, "contentinfo", "", &[7]),
+                        ax_node(7, "link", "Privacy", &[]),
+                    ]}),
+                    "Runtime.evaluate" if is_selector_lookup => {
+                        json!({"result": {"type": "object", "subtype": "node", "objectId": "header"}})
+                    }
+                    // The cursor-interactive scan finds nothing extra.
+                    "Runtime.evaluate" => json!({"result": {"type": "object", "value": []}}),
+                    "DOM.describeNode" => json!({"node": {"backendNodeId": 2, "children": [
+                        {"backendNodeId": 3},
+                        {"backendNodeId": 4, "children": [{"backendNodeId": 6}]},
+                    ]}}),
+                    _ => json!({}),
+                };
+                ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                    json!({"id": request["id"], "result": result}).to_string(),
+                ))
+                .await
+                .unwrap();
+            }
+        });
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut ref_map = RefMap::new();
+        let mut snapshots = Vec::new();
+        for options in runs {
+            ref_map.begin_snapshot();
+            let result = take_snapshot(
+                &client,
+                "page-session",
+                options,
+                &mut ref_map,
+                None,
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+            snapshots.push((result, ref_map.clone()));
+        }
+        server.abort();
+        snapshots
+    }
+
+    /// Names of the elements behind the refs a snapshot reports, keyed to
+    /// their ref IDs. Also checks the reported refs are exactly the ones
+    /// rendered in the tree.
+    fn reported((result, ref_map): &(SnapshotResult, RefMap)) -> BTreeMap<String, String> {
+        let in_tree: HashSet<String> = result
+            .tree
+            .split("ref=")
+            .skip(1)
+            .map(|rest| {
+                rest.chars()
+                    .take_while(char::is_ascii_alphanumeric)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(result.refs, in_tree, "tree:\n{}", result.tree);
+        result
+            .refs
+            .iter()
+            .map(|ref_id| (ref_map.get(ref_id).unwrap().name.clone(), ref_id.clone()))
+            .collect()
+    }
+
+    fn names(snapshot: &(SnapshotResult, RefMap)) -> Vec<String> {
+        reported(snapshot).into_keys().collect()
+    }
+
+    #[tokio::test]
+    async fn selector_reports_only_refs_inside_the_scope() {
+        let snapshots = snapshot_page(&[SnapshotOptions {
+            selector: Some("header".into()),
+            ..SnapshotOptions::default()
+        }])
+        .await;
+        assert_eq!(names(&snapshots[0]), ["Docs", "Home", "Main"]);
+        // The footer link is still registered, so earlier refs to it keep working.
+        let ref_map = &snapshots[0].1;
+        assert!(ref_map
+            .entries_sorted()
+            .iter()
+            .any(|(_, entry)| entry.name == "Privacy"));
+    }
+
+    #[tokio::test]
+    async fn depth_reports_only_refs_within_the_limit() {
+        let snapshots = snapshot_page(&[SnapshotOptions {
+            depth: Some(1),
+            ..SnapshotOptions::default()
+        }])
+        .await;
+        assert_eq!(names(&snapshots[0]), ["Home", "Main", "Privacy"]);
+    }
+
+    #[tokio::test]
+    async fn selector_and_depth_limits_combine() {
+        let snapshots = snapshot_page(&[SnapshotOptions {
+            selector: Some("header".into()),
+            compact: true,
+            depth: Some(1),
+            ..SnapshotOptions::default()
+        }])
+        .await;
+        assert_eq!(names(&snapshots[0]), ["Home", "Main"]);
+    }
+
+    #[tokio::test]
+    async fn scoped_refs_match_full_snapshot_refs() {
+        let snapshots = snapshot_page(&[
+            SnapshotOptions {
+                selector: Some("header".into()),
+                ..SnapshotOptions::default()
+            },
+            SnapshotOptions::default(),
+            SnapshotOptions {
+                depth: Some(1),
+                ..SnapshotOptions::default()
+            },
+        ])
+        .await;
+        let full = reported(&snapshots[1]);
+        assert_eq!(full.len(), 4);
+        for scoped in [&snapshots[0], &snapshots[2]] {
+            for (name, ref_id) in reported(scoped) {
+                assert_eq!(full[&name], ref_id, "{name} changed ref between snapshots");
+            }
+        }
+    }
+}
+
 const INTERACTIVE_ROLES: &[&str] = &[
     "button",
     "link",
@@ -186,6 +360,13 @@ pub struct SnapshotOptions {
     pub compact: bool,
     pub depth: Option<usize>,
     pub urls: bool,
+}
+
+pub struct SnapshotResult {
+    pub tree: String,
+    /// Refs printed in `tree`, including those in inlined iframes. This may be
+    /// a subset of the refs registered in `RefMap`.
+    pub refs: HashSet<String>,
 }
 
 struct TreeNode {
@@ -325,7 +506,7 @@ pub async fn take_snapshot(
     ref_map: &mut RefMap,
     frame_id: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
-) -> Result<String, String> {
+) -> Result<SnapshotResult, String> {
     client
         .send_command_no_params("DOM.enable", Some(session_id))
         .await?;
@@ -634,9 +815,18 @@ pub async fn take_snapshot(
         }
     }
 
+    // Collect refs as the tree is rendered; ref assignment above remains unchanged.
     let mut output = String::new();
+    let mut rendered_refs = HashSet::new();
     for &root_idx in &effective_roots {
-        render_tree(&tree_nodes, root_idx, 0, &mut output, options);
+        render_tree(
+            &tree_nodes,
+            root_idx,
+            0,
+            &mut output,
+            &mut rendered_refs,
+            options,
+        );
     }
 
     // Recurse into child iframes: for each Iframe node with a backend_node_id,
@@ -644,7 +834,7 @@ pub async fn take_snapshot(
     // We only recurse from the main frame (frame_id == None) to avoid
     // unbounded depth; nested iframes within iframes are not expanded.
     if frame_id.is_none() {
-        let mut iframe_snapshots: Vec<(String, String)> = Vec::new(); // (ref_id, child_snapshot)
+        let mut iframe_snapshots: Vec<(String, SnapshotResult)> = Vec::new(); // (ref_id, child_snapshot)
         for node in tree_nodes.iter() {
             if node.role != "Iframe" || !node.has_ref {
                 continue;
@@ -656,7 +846,7 @@ pub async fn take_snapshot(
             if let Ok(child_fid) = resolve_iframe_frame_id(client, session_id, bid).await {
                 // Snapshot the child frame; errors are silently ignored
                 // (e.g. cross-origin iframes)
-                if let Ok(child_text) = Box::pin(take_snapshot(
+                if let Ok(child) = Box::pin(take_snapshot(
                     client,
                     session_id,
                     options,
@@ -666,18 +856,18 @@ pub async fn take_snapshot(
                 ))
                 .await
                 {
-                    if !child_text.is_empty()
-                        && child_text != "(empty page)"
-                        && child_text != "(no interactive elements)"
+                    if !child.tree.is_empty()
+                        && child.tree != "(empty page)"
+                        && child.tree != "(no interactive elements)"
                     {
-                        iframe_snapshots.push((ref_id.to_string(), child_text));
+                        iframe_snapshots.push((ref_id.to_string(), child));
                     }
                 }
             }
         }
 
         // Insert each child snapshot after its Iframe line in the output
-        for (ref_id, child_text) in iframe_snapshots {
+        for (ref_id, child) in iframe_snapshots {
             let marker = format!("[ref={}]", ref_id);
             if let Some(pos) = output.find(&marker) {
                 // Find the end of the Iframe line
@@ -692,7 +882,8 @@ pub async fn take_snapshot(
                 let child_indent = iframe_indent + 2; // one level deeper
                 let prefix = " ".repeat(child_indent);
 
-                let indented_child: String = child_text
+                let indented_child: String = child
+                    .tree
                     .lines()
                     .map(|line| format!("{}{}\n", prefix, line))
                     .collect();
@@ -704,6 +895,7 @@ pub async fn take_snapshot(
                 } else {
                     output.insert_str(line_end + 1, &indented_child);
                 }
+                rendered_refs.extend(child.refs);
             }
         }
     }
@@ -714,14 +906,18 @@ pub async fn take_snapshot(
 
     let trimmed = output.trim().to_string();
 
-    if trimmed.is_empty() {
-        if options.interactive {
-            return Ok("(no interactive elements)".to_string());
-        }
-        return Ok("(empty page)".to_string());
-    }
+    let tree = if !trimmed.is_empty() {
+        trimmed
+    } else if options.interactive {
+        "(no interactive elements)".to_string()
+    } else {
+        "(empty page)".to_string()
+    };
 
-    Ok(trimmed)
+    Ok(SnapshotResult {
+        tree,
+        refs: rendered_refs,
+    })
 }
 
 /// Resolve the child frame ID for an iframe element given its backendNodeId.
@@ -1225,6 +1421,7 @@ fn render_tree(
     idx: usize,
     indent: usize,
     output: &mut String,
+    rendered_refs: &mut HashSet<String>,
     options: &SnapshotOptions,
 ) {
     let node = &nodes[idx];
@@ -1236,7 +1433,7 @@ fn render_tree(
     {
         // Ignored node -- still render children
         for &child in &node.children {
-            render_tree(nodes, child, indent, output, options);
+            render_tree(nodes, child, indent, output, rendered_refs, options);
         }
         return;
     }
@@ -1252,7 +1449,7 @@ fn render_tree(
     // Skip root WebArea wrapper
     if role == "RootWebArea" || role == "WebArea" {
         for &child in &node.children {
-            render_tree(nodes, child, indent, output, options);
+            render_tree(nodes, child, indent, output, rendered_refs, options);
         }
         return;
     }
@@ -1260,7 +1457,7 @@ fn render_tree(
     if options.interactive && !node.has_ref {
         // In interactive mode, skip non-interactive but render children
         for &child in &node.children {
-            render_tree(nodes, child, indent, output, options);
+            render_tree(nodes, child, indent, output, rendered_refs, options);
         }
         return;
     }
@@ -1318,6 +1515,7 @@ fn render_tree(
 
     if let Some(ref ref_id) = node.ref_id {
         attrs.push(format!("ref={}", ref_id));
+        rendered_refs.insert(ref_id.clone());
     }
 
     if let Some(ref url) = node.url {
@@ -1348,7 +1546,7 @@ fn render_tree(
     output.push('\n');
 
     for &child in &node.children {
-        render_tree(nodes, child, indent + 1, output, options);
+        render_tree(nodes, child, indent + 1, output, rendered_refs, options);
     }
 }
 

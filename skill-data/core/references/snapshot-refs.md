@@ -80,7 +80,7 @@ agent-browser click @e12
 
 ## Ref Lifecycle
 
-Same-document updates preserve refs for surviving DOM elements. Replaced elements and page or iframe document replacements invalidate the corresponding refs. Invalidated IDs are never recycled within the browser session. JSON snapshot responses list refs that disappeared in `removedRefs`. Virtual accessibility nodes have snapshot-local refs.
+Same-document updates preserve refs for surviving DOM elements. Replaced elements and page or iframe document replacements invalidate the corresponding refs. Invalidated IDs are never recycled within the browser session. JSON snapshot responses list refs that disappeared in `removedRefs`. The `refs` map contains only refs shown in the snapshot tree. Virtual accessibility nodes have snapshot-local refs.
 
 ```bash
 # Get initial snapshot

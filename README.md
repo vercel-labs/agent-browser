@@ -981,7 +981,7 @@ Do not put vault tokens or passwords in plugin command args. Use the vault vendo
 
 ## Snapshot Options
 
-Surviving DOM elements keep their refs across snapshots. Take a fresh snapshot after page or iframe navigation.
+Surviving DOM elements keep their refs across snapshots. Take a fresh snapshot after page or iframe navigation. The JSON `refs` map contains only refs shown in the snapshot tree.
 
 Use filters to reduce snapshot output:
 
