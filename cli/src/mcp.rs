@@ -1294,7 +1294,13 @@ fn parity_tools() -> Vec<Value> {
             json!({ "url": { "type": "string" }, "label": { "type": "string" } }),
             &[],
         ),
-        tool(TOOL_TAB_LIST, "Tab list", "List tabs.", json!({}), &[]),
+        tool(
+            TOOL_TAB_LIST,
+            "Tab list",
+            "List tabs. Each tab has a browserContextId (tabs of one browser profile share it). Set profiles=true to also name each tab's profile when attached to a browser with several profiles open; the first call per profile briefly opens and closes a tab in it.",
+            json!({ "profiles": { "type": "boolean" } }),
+            &[],
+        ),
         tool(
             TOOL_TAB_SWITCH,
             "Tab switch",
@@ -2308,7 +2314,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_COOKIES_SET_CURL => call_cookies_set_curl(arguments),
         TOOL_COOKIES_CLEAR => call_literal(arguments, &["cookies", "clear"]),
         TOOL_TAB_NEW => call_tab_new(arguments),
-        TOOL_TAB_LIST => call_literal(arguments, &["tab", "list"]),
+        TOOL_TAB_LIST => call_tab_list(arguments),
         TOOL_TAB_SWITCH => call_one_string(arguments, "tab", "tab"),
         TOOL_TAB_CLOSE => call_optional_one(arguments, &["tab", "close"], "tab"),
         TOOL_WINDOW_NEW => call_literal(arguments, &["window", "new"]),
@@ -3161,6 +3167,18 @@ fn call_tab_new(arguments: &Value) -> Result<Value, ProtocolError> {
         args.push(label);
     }
     call_cli_tool(arguments, args, None)
+}
+
+fn call_tab_list(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, tab_list_args(arguments)?, None)
+}
+
+fn tab_list_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec!["tab".to_string(), "list".to_string()];
+    if optional_bool(arguments, "profiles")?.unwrap_or(false) {
+        args.push("--profiles".to_string());
+    }
+    Ok(args)
 }
 
 fn call_profiler_start(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -5104,6 +5122,16 @@ mod tests {
     fn required_string_reads_present_field() {
         let value = required_string(&json!({ "selector": "@e1" }), "selector").unwrap();
         assert_eq!(value, "@e1");
+    }
+
+    #[test]
+    fn tab_list_profiles_matches_cli_parser() {
+        let args = tab_list_args(&json!({"profiles": true})).unwrap();
+        let parsed =
+            crate::commands::parse_command(&args, &crate::flags::parse_flags(&args)).unwrap();
+        assert_eq!(parsed["action"], "tab_list");
+        assert_eq!(parsed["profiles"], true);
+        assert_eq!(tab_list_args(&json!({})).unwrap(), vec!["tab", "list"]);
     }
 
     #[test]

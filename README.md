@@ -378,6 +378,7 @@ agent-browser network har stop [output.har]    # Stop and save HAR (temp path if
 
 ```bash
 agent-browser tab                              # List tabs (shows `tabId` and optional label)
+agent-browser tab list --profiles              # Also name each tab's browser profile
 agent-browser tab new [url]                    # New tab (optionally with URL)
 agent-browser tab new --label docs [url]       # New tab with a user-assigned label
 agent-browser tab <t<N>|label>                 # Switch to a tab by id or label
@@ -400,6 +401,8 @@ agent-browser tab close docs         # close by label
 Tabs opened through `tab new` or `click --new-tab` inherit the session's user agent, headers, HTTP credentials, init scripts, routes, and emulation overrides before their first document loads.
 
 `tab list --json` also reports each tab's CDP `targetId`, and target ids are accepted anywhere a tab ref is accepted (`tab <targetId>`, `tab close <targetId>`). Unlike `t<N>` ids, which are per-daemon counters, target ids stay stable across daemon restarts, so they're the right handle for scripts coordinating multiple sessions on one browser.
+
+When attached to a browser with several profiles open (for example `--cdp 9222` or `--auto-connect` against your everyday Chrome or Brave), the tabs of every profile appear in one list. `tab list --json` reports each tab's `browserContextId`, which tabs of the same profile share. `tab list --profiles` also names each tab's profile: text output shows the name in parentheses after the tab id, and JSON adds `profile.name` (the display name from the browser's `Local State`), `profile.directory` (such as `Default` or `Profile 1`), and `profile.path`. CDP cannot ask a context which profile it is, so the first `--profiles` call for each profile briefly opens a tab in it from one of its pages, reads the profile path from `chrome://version`, and closes the tab again; the result is cached for the session. To work inside a specific profile, switch to one of its tabs with `tab <targetId>`. Tabs created by `tab new` open in the browser's default context.
 
 Switching to a tab discarded by Chrome's Memory Saver reactivates it, since a discarded tab has no renderer to drive. Reactivation reloads the discarded page and resets its unsaved state, and the switch result reports `"revived": true`. A tab whose page is paused by a JavaScript dialog is alive rather than discarded, so the switch leaves it untouched and reports `"dialogBlocked": true`; resolve the dialog with `dialog accept` or `dialog dismiss` before interacting. Closing the active tab onto a discarded successor revives it the same way and reports `"activeTabRevived": true`.
 

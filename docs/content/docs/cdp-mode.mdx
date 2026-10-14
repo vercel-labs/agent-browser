@@ -88,6 +88,22 @@ The structured <code>lastUrl</code> is emitted only for sanitized HTTP(S) URLs a
 
 When re-running a shared-tab script such as the repro from #1530, add `--pin-tab` to the first command for every session. Without it, `open` intentionally preserves the legacy behavior and navigates the shared active tab, so the original script still collides. The same rule applies when sessions attach with `--auto-connect` instead of `--cdp`.
 
+## Browser profiles
+
+A browser started with `--remote-debugging-port` exposes the tabs of every open profile on the same port, so a session attached to it sees them all in one `tab list`. Each tab's `browserContextId` (in `tab list --json`) tells the profiles apart, and `tab list --profiles` names them:
+
+```bash
+agent-browser --cdp 9222 tab list --profiles
+#   [t1] (Personal) Inbox - https://mail.example.com/
+#   [t2] (Work) Dashboard - https://app.example.com/
+```
+
+JSON output adds a `profile` object per tab with `name` (the display name from the browser's `Local State` file, or the directory name when the browser runs on another machine), `directory` (such as `Default` or `Profile 1`), and `path`.
+
+CDP cannot ask a browser context which profile it belongs to, and it cannot open tabs in the contexts of user profiles. So the first `--profiles` call for each profile opens a tab from one of that profile's pages with `window.open`, reads the profile path from `chrome://version`, and closes the tab again. The tab is visible for about half a second, and the daemon never adopts it as a session tab. Results are cached per session.
+
+To act inside a specific profile, switch to one of its tabs with `tab <targetId>`. Tabs created by `tab new` open in the browser's default context.
+
 ## Color scheme
 
 Use `--color-scheme` to set a persistent preference when connecting via CDP:

@@ -854,10 +854,21 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                 } else {
                     " ".to_string()
                 };
+                // Set by `tab list --profiles`: the browser profile the tab
+                // belongs to, shown before the label/title.
+                let profile = tab
+                    .get("profile")
+                    .and_then(|p| p.get("name"))
+                    .and_then(|v| v.as_str())
+                    .map(|name| format!("{} ", color::dim(&format!("({})", name))))
+                    .unwrap_or_default();
                 if let Some(label) = tab_label {
-                    println!("{} [{}] {} {} - {}", marker, tab_id, label, title, url);
+                    println!(
+                        "{} [{}] {}{} {} - {}",
+                        marker, tab_id, profile, label, title, url
+                    );
                 } else {
-                    println!("{} [{}] {} - {}", marker, tab_id, title, url);
+                    println!("{} [{}] {}{} - {}", marker, tab_id, profile, title, url);
                 }
             }
             return;
@@ -2674,8 +2685,16 @@ optional sanitized data.lastUrl; batch output uses result for the recovery
 object. Recover with `tab new` or `tab list`. The pin is sticky per session;
 pass --no-pin-tab to turn it off again.
 
+Attached to a browser with several profiles open, all profiles' tabs share
+one list. `tab list --json` reports each tab's browserContextId (shared by
+tabs of one profile); --profiles also names each tab's profile. The first
+--profiles call per profile briefly opens and closes a tab in it to read
+chrome://version. `tab new` opens tabs in the default context; to work in
+another profile, switch to one of its tabs.
+
 Operations:
   list                       List open tabs with their ids and labels (default)
+  list --profiles            Also show each tab's browser profile
   new [url]                  Open a new tab
   new --label <name> [url]   Open a new tab with a label like `docs` or `app`
   close [t<N>|label|target]  Close a tab (current if no ref given)
@@ -2697,6 +2716,7 @@ Examples:
   agent-browser tab close t1
   agent-browser tab close docs
   agent-browser tab list --json                        # Includes CDP target ids
+  agent-browser tab list --profiles                    # Name each tab's profile
   agent-browser tab close 4A0B7C4E1F2D3A4B5C6D7E8F90A1B2C3  # Close by target id
 "##
         }
