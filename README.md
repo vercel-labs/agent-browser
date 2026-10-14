@@ -485,10 +485,10 @@ Some flows (SSR debug, auth cookies for protected origins, init scripts) need st
 
 ```bash
 agent-browser batch \
-  '["open"]' \
-  '["network","route","*","--abort","--resource-type","script"]' \
-  '["cookies","set","--curl","cookies.curl","--domain","localhost"]' \
-  '["navigate","http://localhost:3000/target"]'
+  "open" \
+  "network route * --abort --resource-type script" \
+  "cookies set --curl cookies.curl --domain localhost" \
+  "navigate http://localhost:3000/target"
 ```
 
 Without `batch` the same sequence is three commands that all reuse the same daemon (fast, but not one turn).
