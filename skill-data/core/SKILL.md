@@ -502,7 +502,7 @@ EOF
 --namespace <name>      # isolate daemon sockets and restore-state directories
 ```
 
-Engine setup and limits: [Lightpanda](https://agent-browser.dev/engines/lightpanda), [Obscura (experimental)](https://agent-browser.dev/engines/obscura).
+Engine setup and limits: [Lightpanda](https://agent-browser.dev/engines/lightpanda) (0.4.0 or newer; iframes and workers enabled), [Obscura (experimental)](https://agent-browser.dev/engines/obscura).
 
 ## When to load another skill
 

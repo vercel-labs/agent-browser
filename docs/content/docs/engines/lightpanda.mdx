@@ -9,7 +9,7 @@ agent-browser manages Lightpanda the same way it manages Chrome -- spawning the 
 
 ## Installation
 
-Install the Lightpanda binary before using it with agent-browser:
+agent-browser requires Lightpanda 0.4.0 or newer. Install the Lightpanda binary before using it with agent-browser:
 
 <table>
   <thead>
@@ -63,6 +63,12 @@ If the `lightpanda` binary is not in your `PATH`, use `--executable-path`:
 ```bash
 agent-browser --engine lightpanda --executable-path /path/to/lightpanda open example.com
 ```
+
+## Iframes and Workers
+
+Lightpanda does not load iframes or run workers by default. agent-browser starts it with `--load-resources iframe --load-resources worker`, so iframe content appears in snapshots and Web Workers run, as in Chrome.
+
+Lightpanda versions older than 0.4.0 do not support `--load-resources` and exit at startup. Update Lightpanda if the launch fails with an unknown option error.
 
 ## Differences from Chrome
 
