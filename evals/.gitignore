@@ -2,3 +2,7 @@ node_modules/
 dist/
 bun.lockb
 results/
+__pycache__/
+.sandbox-snapshot.json
+.env*.local
+.vercel
