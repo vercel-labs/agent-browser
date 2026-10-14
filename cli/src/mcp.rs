@@ -4005,14 +4005,21 @@ fn tool_result_from_run(run: CliRun) -> Value {
         }
     }
 
+    // `response` already holds stdout once it parses as JSON. Repeating the raw
+    // string doubles every result in the client's context, so keep it only when
+    // it carries something `response` does not.
+    let mut structured = json!({
+        "exitCode": run.exit_code,
+        "stderr": run.stderr,
+        "response": parsed,
+    });
+    if parsed.is_none() {
+        structured["stdout"] = Value::String(run.stdout);
+    }
+
     json!({
         "content": content,
-        "structuredContent": {
-            "exitCode": run.exit_code,
-            "stdout": run.stdout,
-            "stderr": run.stderr,
-            "response": parsed,
-        },
+        "structuredContent": structured,
         "isError": !success,
     })
 }
@@ -5236,7 +5243,7 @@ mod tests {
         assert!(!text.contains("\"webmcp\""));
         assert!(!text.contains("inputSchema"));
         assert_eq!(result["structuredContent"]["response"], response);
-        assert_eq!(result["structuredContent"]["stdout"], response.to_string());
+        assert!(result["structuredContent"].get("stdout").is_none());
         assert_eq!(result["isError"], true);
     }
 
@@ -5266,6 +5273,28 @@ mod tests {
         assert!(!text.contains("Batch result 4:"));
         assert!(!text.contains("\"webmcp\""));
         assert_eq!(result["structuredContent"]["response"], response);
+        assert_eq!(result["isError"], true);
+    }
+
+    #[test]
+    fn tool_result_keeps_stdout_only_when_it_is_not_json() {
+        let response = json!({"success": true, "data": {"waited": 100}});
+        let result = tool_result_from_run(CliRun {
+            exit_code: Some(0),
+            stdout: response.to_string(),
+            stderr: String::new(),
+        });
+        assert_eq!(result["structuredContent"]["response"], response);
+        assert!(result["structuredContent"].get("stdout").is_none());
+
+        let result = tool_result_from_run(CliRun {
+            exit_code: Some(1),
+            stdout: "not json".to_string(),
+            stderr: "boom".to_string(),
+        });
+        assert_eq!(result["structuredContent"]["stdout"], "not json");
+        assert_eq!(result["structuredContent"]["stderr"], "boom");
+        assert!(result["structuredContent"]["response"].is_null());
         assert_eq!(result["isError"], true);
     }
 
