@@ -38,6 +38,8 @@ agent-browser --session auth fill @e1 "user@example.com"
 agent-browser --session public get text body
 ```
 
+Concurrent CLI or MCP calls with the same session and daemon settings serialize daemon startup and reuse the resulting daemon. Run dependent browser actions sequentially or in a batch; the startup lock does not order commands. Use separate sessions for independent workflows.
+
 ## Session Isolation Properties
 
 Each session has independent:

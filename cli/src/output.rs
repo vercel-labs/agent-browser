@@ -3127,7 +3127,8 @@ agent-browser session - Manage sessions
 Usage: agent-browser session [operation]
 
 Manage isolated browser sessions. Each session has its own browser
-instance with separate cookies, storage, and state.
+instance with separate cookies, storage, and state. Concurrent CLI/MCP
+calls serialize daemon startup per session, not browser command order.
 
 Operations:
   (none)               Show current session name

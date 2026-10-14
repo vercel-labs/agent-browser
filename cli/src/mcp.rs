@@ -4,7 +4,8 @@
 //! messages. Tool calls are delegated to the current binary in `--json` mode
 //! so MCP behavior stays aligned with the normal CLI command surface. Daemon
 //! lifecycle settings, including the default idle timeout, use the same CLI
-//! parser and daemon as direct commands.
+//! parser and daemon as direct commands, including the session-local startup
+//! lock shared by concurrent CLI and MCP calls.
 //! Owned Windows Chrome uses the same private headless desktop and Job Object
 //! lifetime through MCP; headed and external-connection semantics are unchanged.
 
@@ -1959,7 +1960,7 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         "session".to_string(),
         json!({
             "type": "string",
-            "description": "Optional isolated browser session name."
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering."
         }),
     );
     props.insert(
