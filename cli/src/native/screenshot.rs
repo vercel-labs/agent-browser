@@ -177,13 +177,7 @@ async fn capture_screenshot_base64(
             .send_command_no_params("Page.getLayoutMetrics", Some(session_id))
             .await?;
 
-        let content_size = metrics
-            .get("contentSize")
-            .or_else(|| metrics.get("cssContentSize"));
-        if let Some(size) = content_size {
-            let width = size.get("width").and_then(|v| v.as_f64()).unwrap_or(1280.0);
-            let height = size.get("height").and_then(|v| v.as_f64()).unwrap_or(720.0);
-
+        if let Some((width, height)) = full_page_clip_size(&metrics) {
             params.clip = Some(Viewport {
                 x: 0.0,
                 y: 0.0,
@@ -211,6 +205,18 @@ async fn capture_screenshot_base64(
         .await?;
 
     Ok(result.data)
+}
+
+/// Size of the full-page clip in CSS pixels, which is the unit
+/// `Page.captureScreenshot` expects. The deprecated `contentSize` is in
+/// physical pixels, so it is only a fallback.
+fn full_page_clip_size(metrics: &Value) -> Option<(f64, f64)> {
+    let size = metrics
+        .get("cssContentSize")
+        .or_else(|| metrics.get("contentSize"))?;
+    let width = size.get("width").and_then(|v| v.as_f64()).unwrap_or(1280.0);
+    let height = size.get("height").and_then(|v| v.as_f64()).unwrap_or(720.0);
+    Some((width, height))
 }
 
 async fn collect_annotations(
@@ -675,5 +681,26 @@ mod tests {
         let projected = project_annotations(&annotations, None, Some((10.0, 1000.0)));
         assert_eq!(projected[0].box_.x, 15);
         assert_eq!(projected[0].box_.y, 1012);
+    }
+
+    #[test]
+    fn full_page_clip_uses_css_pixels_on_high_dpi_displays() {
+        // Page.getLayoutMetrics for a 1280x2500 CSS px page at device scale factor 2.
+        let metrics = serde_json::json!({
+            "contentSize": { "x": 0, "y": 0, "width": 2560, "height": 5000 },
+            "cssContentSize": { "x": 0, "y": 0, "width": 1280, "height": 2500 },
+        });
+
+        assert_eq!(full_page_clip_size(&metrics), Some((1280.0, 2500.0)));
+    }
+
+    #[test]
+    fn full_page_clip_falls_back_to_content_size() {
+        let metrics = serde_json::json!({
+            "contentSize": { "x": 0, "y": 0, "width": 1280, "height": 2500 },
+        });
+
+        assert_eq!(full_page_clip_size(&metrics), Some((1280.0, 2500.0)));
+        assert_eq!(full_page_clip_size(&serde_json::json!({})), None);
     }
 }
