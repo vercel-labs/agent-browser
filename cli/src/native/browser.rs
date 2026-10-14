@@ -242,6 +242,13 @@ pub fn to_ai_friendly_error(error: &str) -> String {
     // flatten such a miss into the wrong guidance.
     if is_locator_miss(&lower) {
         let detail = error.trim_end_matches('.');
+        if let Some(selector) = error.strip_prefix("Element not found: ") {
+            if is_playwright_only_selector(selector) {
+                return format!(
+                    "{detail}. This is Playwright selector syntax, which agent-browser does not support. Use a CSS selector, xpath=..., or a snapshot ref (@e1); to match by text, use `find text \"<text>\" click` (MCP: agent_browser_find)."
+                );
+            }
+        }
         return format!(
             "{detail}. Verify the selector, role, or name is correct and the element exists in the DOM."
         );
@@ -282,6 +289,26 @@ fn is_locator_miss(lower: &str) -> bool {
     lower.starts_with("element not found")
         || lower.starts_with("no element found")
         || lower.starts_with("no element at index")
+}
+
+/// Playwright-only selector engines and pseudo-classes. `document.querySelector`
+/// throws on these, which surfaces as a plain "Element not found" even when the
+/// element is on the page, so agents keep retrying variants of a selector that
+/// can never match.
+fn is_playwright_only_selector(selector: &str) -> bool {
+    let s = selector.trim();
+    ["text=", "role=", "id=", "data-testid="]
+        .iter()
+        .any(|engine| s.starts_with(engine))
+        || [
+            ":has-text(",
+            ":text(",
+            ":text-is(",
+            ":text-matches(",
+            " >> ",
+        ]
+        .iter()
+        .any(|pseudo| s.contains(pseudo))
 }
 
 #[derive(Debug, Clone)]
@@ -3016,6 +3043,37 @@ mod tests {
             to_ai_friendly_error("Element not found"),
             "Element not found. Verify the selector, role, or name is correct and the element exists in the DOM."
         );
+    }
+
+    #[test]
+    fn test_to_ai_friendly_error_playwright_selector_hint() {
+        for selector in [
+            "text=Sign in",
+            "button:has-text(\"Continue\")",
+            "a:text('Docs')",
+            "role=button",
+            "#nav >> text=Home",
+        ] {
+            let out = to_ai_friendly_error(&format!("Element not found: {selector}"));
+            assert!(
+                out.starts_with(&format!("Element not found: {selector}"))
+                    && out.contains("Playwright selector syntax")
+                    && out.contains("find text"),
+                "expected Playwright hint for {selector}, got: {out}"
+            );
+        }
+        // Valid CSS and `find` misses keep the generic guidance.
+        for msg in [
+            "Element not found: input[type=text]",
+            "Element not found: .text-muted",
+            "No element found: getByText('text=Sign in')",
+        ] {
+            let out = to_ai_friendly_error(msg);
+            assert!(
+                !out.contains("Playwright") && out.contains("Verify the selector"),
+                "unexpected hint for {msg}, got: {out}"
+            );
+        }
     }
 
     #[test]
