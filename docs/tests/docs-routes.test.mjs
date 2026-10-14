@@ -33,7 +33,9 @@ assert.ok(
 const noindex = process.env.DOCS_EXPECT_NOINDEX === "1";
 const query = "?utm_source=route-test&value=a%2Fb&value=two";
 const agent = { "user-agent": "ClaudeBot/1.0", accept: "text/markdown" };
-const pageAt = (path) => pages.find((page) => page.path === path);
+const moli = { path: "/engines/moli", markdownTitle: "Moli (experimental)" };
+const indexedPages = [...pages, moli];
+const pageAt = (path) => indexedPages.find((page) => page.path === path);
 const legacyPath = (path) =>
   `/api/docs-markdown?path=${encodeURIComponent(path)}`;
 const htmlCache = new Map();
@@ -52,6 +54,41 @@ async function htmlFor(page) {
     );
   return htmlCache.get(page.path);
 }
+
+test("Moli engine documentation serves HTML metadata and setup instructions", async () => {
+  const html = await htmlFor(moli);
+  assert.match(html, /<title>Moli \| agent-browser<\/title>/);
+  assert.deepEqual(
+    tags(html, "link").filter((tag) => tag.rel === "canonical").map((tag) => tag.href),
+    [canonical(moli.path)],
+  );
+  const main = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1];
+  assert.ok(main);
+  for (const sample of ["--engine moli", "--executable-path", "Windows", "PowerShell", "--hide-scrollbars false"])
+    assert.ok(text(main).includes(sample), sample);
+});
+
+test("Moli engine documentation is available through all Markdown representations", async () => {
+  const bodies = [];
+  for (const [path, headers] of [
+    [apiPath(moli.path), {}],
+    [markdownPath(moli.path), {}],
+    [moli.path, { accept: "text/markdown" }],
+    [legacyPath(moli.path), {}],
+  ]) {
+    const response = await get(path, { headers });
+    responseType(response, "text/markdown");
+    representationHeaders(response);
+    indexing(response);
+    const body = await response.text();
+    assert.ok(body.includes("# Moli (experimental)"));
+    assert.ok(body.includes("agent-browser --engine moli open example.com"));
+    assert.ok(body.includes("moli-installer.ps1"));
+    bodies.push(body);
+  }
+  assert.equal(bodies[0], bodies[1]);
+  assert.equal(bodies[1], bodies[2]);
+});
 
 for (const page of pages) {
   test(`${page.path}: original title, description, OG and Twitter metadata plus canonical links`, async () => {
@@ -641,7 +678,7 @@ test("native search empty and unmatched queries return arrays, not legacy object
   }
 });
 
-test("sitemap contains exactly the 39 canonical production URLs", async () => {
+test("sitemap contains exactly the 40 canonical production URLs", async () => {
   const response = await get("/sitemap.xml", { headers: agent });
   responseType(response, "application/xml");
   indexing(response);
@@ -652,7 +689,7 @@ test("sitemap contains exactly the 39 canonical production URLs", async () => {
   );
   assert.deepEqual(
     locations.sort(),
-    pages.map((page) => canonical(page.path)).sort(),
+    indexedPages.map((page) => canonical(page.path)).sort(),
   );
   assert.ok(
     !xml.includes("/en/") &&
@@ -662,7 +699,7 @@ test("sitemap contains exactly the 39 canonical production URLs", async () => {
 });
 
 for (const path of ["/llms.txt", "/sitemap.md"]) {
-  test(`${path}: agent index exposes all 39 public pages and Markdown alternatives exactly once`, async () => {
+  test(`${path}: agent index exposes all 40 public pages and Markdown alternatives exactly once`, async () => {
     const response = await get(path, { headers: agent });
     responseType(
       response,
@@ -675,7 +712,7 @@ for (const path of ["/llms.txt", "/sitemap.md"]) {
     );
     assert.deepEqual(
       links.sort((a, b) => a[1].localeCompare(b[1])),
-      pages
+      indexedPages
         .map((page) => [page.markdownTitle, canonical(page.path)])
         .sort((a, b) => a[1].localeCompare(b[1])),
     );
@@ -684,7 +721,7 @@ for (const path of ["/llms.txt", "/sitemap.md"]) {
     );
     assert.deepEqual(
       markdownLinks.sort(),
-      pages.map((page) => `${origin}${markdownPath(page.path)}`).sort(),
+      indexedPages.map((page) => `${origin}${markdownPath(page.path)}`).sort(),
     );
     assert.ok(
       !body.includes("/en/") &&

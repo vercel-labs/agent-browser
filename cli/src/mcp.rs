@@ -2049,7 +2049,7 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         json!({
             "type": "array",
             "items": { "type": "string" },
-            "description": "Advanced: extra CLI arguments, including --engine chrome|lightpanda|obscura and --executable-path, preserving full CLI parity. Obscura is experimental and rejects --proxy-bypass (including resolved config/environment settings). Explicit Obscura launches send this invocation's resolved bypass setting even to an existing daemon."
+            "description": "Advanced: extra CLI arguments, including --engine chrome|lightpanda|obscura|moli and --executable-path, preserving full CLI parity. Obscura is experimental and rejects --proxy-bypass (including resolved config/environment settings). Explicit Obscura and Moli launches send this invocation's resolved bypass setting even to an existing daemon."
         }),
     );
     props.insert(
@@ -4728,6 +4728,74 @@ mod tests {
     }
 
     #[test]
+    fn moli_extra_args_use_the_canonical_cli_parser() {
+        let arguments = json!({"url": "https://example.com", "extraArgs": [
+            "--engine", "moli", "--executable-path", "/tmp/moli",
+            "--state", "/tmp/moli state.json",
+            "--args", "--timeout=30,--http-cache-dir=Moli cache",
+            "--proxy", "http://user:p%40ss@127.0.0.1:8080", "--proxy-bypass", "localhost",
+            "--user-agent", "Moli adapter probe", "--ignore-https-errors",
+            "--hide-scrollbars", "false"
+        ]});
+        let args = cli_tool_args(&arguments, open_args(&arguments).unwrap(), None).unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        assert_eq!(flags.engine.as_deref(), Some("moli"));
+        assert_eq!(flags.executable_path.as_deref(), Some("/tmp/moli"));
+        assert_eq!(flags.state.as_deref(), Some("/tmp/moli state.json"));
+        assert_eq!(
+            flags.args.as_deref(),
+            Some("--timeout=30,--http-cache-dir=Moli cache")
+        );
+        assert_eq!(
+            flags.proxy.as_deref(),
+            Some("http://user:p%40ss@127.0.0.1:8080")
+        );
+        assert_eq!(flags.proxy_bypass.as_deref(), Some("localhost"));
+        assert_eq!(flags.user_agent.as_deref(), Some("Moli adapter probe"));
+        assert!(flags.ignore_https_errors);
+        assert!(!flags.hide_scrollbars);
+        let mut launch = json!({"action": "launch"});
+        crate::attach_engine_proxy_bypass(&mut launch, &flags);
+        assert_eq!(launch["proxyBypass"], "localhost");
+        let mut flags = flags;
+        flags.proxy_bypass = None;
+        crate::attach_engine_proxy_bypass(&mut launch, &flags);
+        assert_eq!(launch["proxyBypass"], Value::Null);
+        let tools = tools();
+        let description = tools[0]["inputSchema"]["properties"]["extraArgs"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(description.contains("moli"), "{description}");
+    }
+
+    #[test]
+    fn moli_profile_extra_args_use_the_canonical_cli_parser() {
+        let arguments = json!({"url": "https://example.com", "extraArgs": [
+            "--engine", "moli", "--profile", "/tmp/moli profile"
+        ]});
+        let args = cli_tool_args(&arguments, open_args(&arguments).unwrap(), None).unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        assert_eq!(flags.engine.as_deref(), Some("moli"));
+        assert_eq!(flags.profile.as_deref(), Some("/tmp/moli profile"));
+        assert!(flags.state.is_none());
+    }
+
+    #[test]
+    fn moli_stream_tool_uses_the_canonical_cli_parser() {
+        let args = cli_tool_args(
+            &json!({"extraArgs": ["--engine", "moli"]}),
+            command_parts("stream status"),
+            None,
+        )
+        .unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        assert_eq!(flags.engine.as_deref(), Some("moli"));
+        let command =
+            crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+        assert_eq!(command["action"], "stream_status");
+    }
+
+    #[test]
     fn obscura_extra_args_use_the_canonical_cli_parser() {
         let arguments = json!({"extraArgs": [
             "--engine", "obscura", "--executable-path", "/tmp/obscura",
@@ -4744,19 +4812,19 @@ mod tests {
         assert_eq!(flags.executable_path.as_deref(), Some("/tmp/obscura"));
         assert_eq!(flags.proxy_bypass.as_deref(), Some("localhost"));
         let mut launch = json!({"action": "launch"});
-        crate::attach_obscura_proxy_bypass(&mut launch, &flags);
+        crate::attach_engine_proxy_bypass(&mut launch, &flags);
         assert_eq!(launch["proxyBypass"], "localhost");
         assert!(launch.get("proxy").is_none());
 
         let mut flags = flags;
         flags.proxy_bypass = None;
-        crate::attach_obscura_proxy_bypass(&mut launch, &flags);
+        crate::attach_engine_proxy_bypass(&mut launch, &flags);
         assert_eq!(launch.get("proxyBypass"), Some(&Value::Null));
         for engine in [None, Some("chrome"), Some("lightpanda")] {
             flags.engine = engine.map(String::from);
             flags.proxy_bypass = Some("localhost".into());
             let mut launch = json!({"action": "launch"});
-            crate::attach_obscura_proxy_bypass(&mut launch, &flags);
+            crate::attach_engine_proxy_bypass(&mut launch, &flags);
             assert_eq!(launch, json!({"action": "launch"}));
         }
     }

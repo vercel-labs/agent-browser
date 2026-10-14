@@ -52,4 +52,6 @@ pub mod webmcp;
 #[cfg(test)]
 mod e2e_tests;
 #[cfg(test)]
+mod moli_tests;
+#[cfg(test)]
 mod parity_tests;

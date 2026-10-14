@@ -322,9 +322,9 @@ fn should_send_local_launch_config(flags: &Flags, command: &serde_json::Value) -
         && !command_is_external_launch(command)
 }
 
-/// Sends this invocation's resolved Obscura bypass setting, including an explicit clear.
-fn attach_obscura_proxy_bypass(cmd: &mut serde_json::Value, flags: &Flags) {
-    if flags.engine.as_deref() == Some("obscura") {
+/// Sends this invocation's resolved Obscura/Moli bypass setting, including an explicit clear.
+fn attach_engine_proxy_bypass(cmd: &mut serde_json::Value, flags: &Flags) {
+    if matches!(flags.engine.as_deref(), Some("obscura" | "moli")) {
         cmd["proxyBypass"] = json!(flags.proxy_bypass);
     }
 }
@@ -2116,7 +2116,7 @@ fn main() {
         if let Some(ref engine) = flags.engine {
             launch_cmd["engine"] = json!(engine);
         }
-        attach_obscura_proxy_bypass(&mut launch_cmd, &flags);
+        attach_engine_proxy_bypass(&mut launch_cmd, &flags);
 
         match send_command(launch_cmd, &flags.session) {
             Ok(resp) if !resp.success => {

@@ -5023,7 +5023,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         no_xvfb: no_xvfb_from_launch_cmd(cmd),
         restrict_webrtc,
     };
-    if engine.as_deref() == Some("obscura") {
+    if matches!(engine.as_deref(), Some("obscura" | "moli")) {
         if let Some(bypass) = cmd.get("proxyBypass") {
             launch_options.proxy_bypass = bypass.as_str().map(String::from);
         }

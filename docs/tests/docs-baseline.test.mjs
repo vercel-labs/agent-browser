@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { navigation } from "../src/lib/docs-navigation.ts";
+import { getPageTitle } from "../src/lib/page-titles.ts";
 import {
   baseline,
   pages,
@@ -15,6 +16,20 @@ import {
   assertOriginalResource,
   assertUntrackedHtml,
 } from "./helpers.mjs";
+
+test("Moli has aligned configuration schemas, engine navigation and page metadata", async () => {
+  const [rootSchema, publicSchema, engines] = await Promise.all([
+    readFile(new URL("../../agent-browser.schema.json", import.meta.url), "utf8").then(JSON.parse),
+    readFile(new URL("../public/schema.json", import.meta.url), "utf8").then(JSON.parse),
+    readFile(new URL("../content/docs/engines/meta.json", import.meta.url), "utf8").then(JSON.parse),
+  ]);
+  assert.deepEqual(rootSchema.properties.engine, publicSchema.properties.engine);
+  assert.deepEqual(rootSchema.properties.engine.enum, ["chrome", "lightpanda", "obscura", "moli"]);
+  const links = navigation.find((section) => section.title === "Engines").items;
+  assert.deepEqual(engines.pages, links.map((item) => item.href.slice("/engines/".length)));
+  assert.equal(links.filter((item) => item.href === "/engines/moli").length, 1);
+  assert.equal(getPageTitle("engines/moli"), "Moli");
+});
 
 test("deployment pins the same pnpm version as the workspace", async () => {
   const [workspace, docs] = await Promise.all([
