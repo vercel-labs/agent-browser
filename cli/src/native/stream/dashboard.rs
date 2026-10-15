@@ -9,7 +9,7 @@ use crate::connection::get_socket_dir;
 
 use super::chat::{chat_status_json, handle_chat_request, handle_models_request};
 use super::discovery::discover_sessions;
-use super::http::serve_embedded_file;
+use super::http::{parse_content_length, serve_embedded_file, MAX_BODY_SIZE};
 
 /// Dashboard same-origin proxy endpoints for session metadata and streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -859,21 +859,9 @@ async fn read_post_body(stream: &mut tokio::net::TcpStream, initial: &[u8], n: u
     };
 
     let header_str = String::from_utf8_lossy(&initial[..header_end]);
-    let content_length: usize = header_str
-        .lines()
-        .find_map(|l| {
-            if l.len() > 16 && l[..16].eq_ignore_ascii_case("content-length: ") {
-                l[16..].trim().parse::<usize>().ok()
-            } else {
-                let lower = l.to_lowercase();
-                lower
-                    .strip_prefix("content-length:")
-                    .and_then(|v| v.trim().parse::<usize>().ok())
-            }
-        })
-        .unwrap_or(0);
+    let content_length = parse_content_length(&header_str).unwrap_or(0);
 
-    if content_length == 0 {
+    if content_length == 0 || content_length > MAX_BODY_SIZE {
         return String::new();
     }
 
@@ -1627,5 +1615,59 @@ mod tests {
         assert_eq!(parsed.0, "200 OK");
         assert_eq!(parsed.1, "application/json; charset=utf-8");
         assert_eq!(parsed.2, b"{\"ok\":true}".to_vec());
+    }
+
+    async fn read_post_body_for_request(request: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let request = request.to_string();
+
+        let client = tokio::spawn(async move {
+            let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+            client.write_all(request.as_bytes()).await.unwrap();
+            client.shutdown().await.unwrap();
+        });
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 8192];
+        let n = stream.read(&mut buf).await.unwrap();
+        let body = read_post_body(&mut stream, &buf, n).await;
+        client.await.unwrap();
+
+        body
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_body_is_read_for_standard_content_length_header() {
+        let request = "POST /api/exec HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+
+        assert_eq!(read_post_body_for_request(request).await, "hello");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_body_is_read_for_case_insensitive_header_without_space() {
+        let request = "POST /api/exec HTTP/1.1\r\nCONTENT-LENGTH:5\r\n\r\nhello";
+
+        assert_eq!(read_post_body_for_request(request).await, "hello");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_body_with_multibyte_header_split_at_byte_sixteen_does_not_panic() {
+        let request = format!(
+            "POST /api/exec HTTP/1.1\r\n{}\u{e9}BBBB: 1\r\nContent-Length: 5\r\n\r\nhello",
+            "A".repeat(15)
+        );
+
+        assert_eq!(read_post_body_for_request(&request).await, "hello");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn post_body_larger_than_max_body_size_is_not_read() {
+        let request = format!(
+            "POST /api/exec HTTP/1.1\r\nContent-Length: {}\r\n\r\nhello",
+            MAX_BODY_SIZE + 1
+        );
+
+        assert_eq!(read_post_body_for_request(&request).await, "");
     }
 }
