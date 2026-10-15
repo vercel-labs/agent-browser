@@ -78,7 +78,7 @@ agent-browser drag @e1 @e2        # Drag and drop
 agent-browser upload @e1 file.pdf # Upload files
 ```
 
-Visible-label matching treats non-breaking and ordinary spaces equivalently.
+`select` matches each value against an exact option value or an exact visible label, then, when nothing matched exactly, against the label with whitespace normalized, so non-breaking and ordinary spaces are equivalent. A value that matches more than one option fails and lists the candidates instead of choosing one; pass the exact option value to disambiguate. Extra values select extra options in a `<select multiple>`.
 
 Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, run a fresh snapshot, then retry the original action.
 

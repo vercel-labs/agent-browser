@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use serde::Deserialize;
 use serde_json::Value;
 
 use super::cdp::client::CdpClient;
@@ -436,6 +437,118 @@ pub async fn scroll(
     Ok(())
 }
 
+/// One `<option>` of a `<select>`, as the page reports it.
+#[derive(Debug, Deserialize)]
+struct SelectOptionInfo {
+    /// The option's `value` (the DOM falls back to its text when unset).
+    value: String,
+    /// `option.label`: the `label` attribute when present, else the text.
+    label: String,
+    /// Raw `textContent`, which can differ from `label`.
+    text: String,
+}
+
+/// Collapse whitespace and drop zero-width characters so that labels copied
+/// from a snapshot match labels rendered with non-breaking spaces.
+fn normalize_option_text(text: &str) -> String {
+    text.chars()
+        .filter(|ch| {
+            !matches!(
+                ch,
+                '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}'
+            )
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Render options the way the error messages list them: `value ("label")`.
+fn describe_options(options: &[SelectOptionInfo], indices: &[usize]) -> String {
+    indices
+        .iter()
+        .filter_map(|index| options.get(*index))
+        .map(|opt| format!("{} (\"{}\")", opt.value, normalize_option_text(&opt.label)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn no_match_error(options: &[SelectOptionInfo], values: &[String]) -> String {
+    let all: Vec<usize> = (0..options.len()).collect();
+    format!(
+        "No option matched {}. Available options: {}",
+        serde_json::json!(values),
+        describe_options(options, &all)
+    )
+}
+
+/// Resolve every requested value to exactly one option index.
+///
+/// A request matches on the exact option value or the exact visible label
+/// first; only when nothing matches exactly is the label compared again with
+/// whitespace normalized. A request that matches several distinct options is
+/// an error naming the candidates: the browser keeps only the last selected
+/// option of a single-select, so picking one silently would select an option
+/// the caller never asked for. Several requests still select several options,
+/// which is what `<select multiple>` needs.
+fn resolve_select_matches(
+    options: &[SelectOptionInfo],
+    values: &[String],
+) -> Result<Vec<usize>, String> {
+    let mut selected: Vec<usize> = Vec::new();
+    for value in values {
+        let exact: Vec<usize> = options
+            .iter()
+            .enumerate()
+            .filter(|(_, opt)| {
+                value == &opt.value
+                    || value.as_str() == opt.label.trim()
+                    || value.as_str() == opt.text.trim()
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let matches = if exact.is_empty() {
+            let normalized = normalize_option_text(value);
+            let fallback: Vec<usize> = options
+                .iter()
+                .enumerate()
+                .filter(|(_, opt)| normalize_option_text(&opt.label) == normalized)
+                .map(|(index, _)| index)
+                .collect();
+            if fallback.len() > 1 {
+                return Err(format!(
+                    "Multiple options matched {} after whitespace normalization: {}",
+                    serde_json::json!(value),
+                    describe_options(options, &fallback)
+                ));
+            }
+            fallback
+        } else {
+            exact
+        };
+        match matches.as_slice() {
+            [] => return Err(no_match_error(options, values)),
+            [index] => {
+                if !selected.contains(index) {
+                    selected.push(*index);
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "Multiple options matched {}: {}. Pass the exact option value to choose one.",
+                    serde_json::json!(value),
+                    describe_options(options, &matches)
+                ))
+            }
+        }
+    }
+    if selected.is_empty() {
+        return Err(no_match_error(options, values));
+    }
+    Ok(selected)
+}
+
 pub async fn select_option(
     client: &CdpClient,
     session_id: &str,
@@ -453,42 +566,51 @@ pub async fn select_option(
     )
     .await?;
 
-    // Matching nothing must be an error, not a silent success: an agent that
-    // selects a misspelled option otherwise sees "Done", and only discovers
-    // the page state is wrong after more commands. List what was available.
-    let js = r#"function(vals) {
-            const normalize = (value) => String(value ?? '')
-                .replace(/[\u200B\u200C\u200D\u2060\uFEFF]/g, '')
-                .replace(/\s+/g, ' ')
-                .trim();
+    // Read the options, decide in Rust, then apply the decision. Matching
+    // nothing must be an error, not a silent success: an agent that selects a
+    // misspelled option otherwise sees "Done", and only discovers the page
+    // state is wrong after more commands. List what was available.
+    let read_js = r#"function() {
+            return Array.from(this.options).map((opt) => ({
+                value: opt.value,
+                label: opt.label,
+                text: opt.textContent
+            }));
+        }"#
+    .to_string();
+
+    let result = client
+        .send_command_typed::<_, Value>(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: read_js,
+                object_id: Some(object_id.clone()),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(&effective_session_id),
+        )
+        .await?;
+
+    let options: Vec<SelectOptionInfo> = result
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .ok_or_else(|| "Element is not a <select>".to_string())?;
+
+    let indices = resolve_select_matches(&options, values)?;
+
+    // Apply the resolved indices. The count guards against the options
+    // changing between the two calls, which would shift every index.
+    let apply_js = r#"function(indices, count) {
             const options = Array.from(this.options);
-            const wanted = new Set();
-            for (const value of vals) {
-                let matches = options.filter((opt) =>
-                    value === opt.value ||
-                    value === opt.label.trim() ||
-                    value === opt.textContent.trim()
-                );
-                if (matches.length === 0) {
-                    const normalizedValue = normalize(value);
-                    matches = options.filter((opt) =>
-                        normalize(opt.label) === normalizedValue
-                    );
-                    if (matches.length > 1) {
-                        return { error: 'Multiple options matched ' + JSON.stringify(value) + ' after whitespace normalization' };
-                    }
-                }
-                if (matches.length === 0) {
-                    const available = options.map(o => o.value + ' ("' + normalize(o.label) + '")').join(', ');
-                    return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
-                }
-                for (const opt of matches) wanted.add(opt);
+            if (options.length !== count) {
+                return { error: 'Options changed while the selection was being resolved' };
             }
-            if (wanted.size === 0) {
-                const available = options.map(o => o.value + ' ("' + normalize(o.label) + '")').join(', ');
-                return { error: 'No option matched ' + JSON.stringify(vals) + '. Available options: ' + available };
-            }
-            for (const opt of options) opt.selected = wanted.has(opt);
+            const wanted = new Set(indices);
+            options.forEach((opt, index) => { opt.selected = wanted.has(index); });
             this.dispatchEvent(new Event('change', { bubbles: true }));
             return { matched: wanted.size };
         }"#
@@ -498,12 +620,18 @@ pub async fn select_option(
         .send_command_typed::<_, Value>(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: js,
+                function_declaration: apply_js,
                 object_id: Some(object_id),
-                arguments: Some(vec![CallArgument {
-                    value: Some(serde_json::json!(values)),
-                    object_id: None,
-                }]),
+                arguments: Some(vec![
+                    CallArgument {
+                        value: Some(serde_json::json!(indices)),
+                        object_id: None,
+                    },
+                    CallArgument {
+                        value: Some(serde_json::json!(options.len())),
+                        object_id: None,
+                    },
+                ]),
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
@@ -1275,6 +1403,148 @@ fn named_key_info(key: &str) -> (String, String, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build the option list the page would report for
+    /// `(value, label attribute or None, textContent)` triples.
+    fn options(specs: &[(&str, Option<&str>, &str)]) -> Vec<SelectOptionInfo> {
+        specs
+            .iter()
+            .map(|(value, label, text)| SelectOptionInfo {
+                value: (*value).to_string(),
+                // The DOM `label` getter falls back to the option's text.
+                label: label.unwrap_or(text).to_string(),
+                text: (*text).to_string(),
+            })
+            .collect()
+    }
+
+    fn requests(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    /// The reported bug: one option is labelled "Alpha" while another carries
+    /// "Alpha" as its value. The browser keeps only the last selected option of
+    /// a single-select, so this must be an error naming both candidates.
+    #[test]
+    fn test_select_value_label_collision_is_ambiguous() {
+        let options = options(&[
+            ("a", None, "Alpha"),
+            ("b", None, "Beta"),
+            ("Alpha", None, "TrickyValueIsAlpha"),
+        ]);
+        let error = resolve_select_matches(&options, &requests(&["Alpha"])).unwrap_err();
+        assert!(
+            error.starts_with("Multiple options matched \"Alpha\""),
+            "{error}"
+        );
+        assert!(error.contains("a (\"Alpha\")"), "{error}");
+        assert!(error.contains("Alpha (\"TrickyValueIsAlpha\")"), "{error}");
+    }
+
+    /// Two options sharing one visible label are equally ambiguous.
+    #[test]
+    fn test_select_duplicate_label_is_ambiguous() {
+        let options = options(&[
+            ("us", None, "United States"),
+            ("usa", None, "United States"),
+        ]);
+        let error = resolve_select_matches(&options, &requests(&["United States"])).unwrap_err();
+        assert!(error.contains("us (\"United States\")"), "{error}");
+        assert!(error.contains("usa (\"United States\")"), "{error}");
+    }
+
+    #[test]
+    fn test_select_unambiguous_value_match() {
+        let options = options(&[("red", None, "Red"), ("blue", None, "Blue")]);
+        assert_eq!(
+            resolve_select_matches(&options, &requests(&["blue"])),
+            Ok(vec![1])
+        );
+    }
+
+    #[test]
+    fn test_select_unambiguous_label_match() {
+        let options = options(&[("red", None, "Red"), ("blue", None, "Blue")]);
+        assert_eq!(
+            resolve_select_matches(&options, &requests(&["Blue"])),
+            Ok(vec![1])
+        );
+    }
+
+    /// A label override wins over the text for normalized matching, and a
+    /// label rendered with a non-breaking space still matches a plain space.
+    #[test]
+    fn test_select_normalizes_whitespace_in_labels() {
+        let options = options(&[
+            ("initial", None, "Initial"),
+            ("target", Some("Capital\u{00A0}Federal"), "Target source"),
+            ("zero", None, "Zero\u{200B}Width"),
+        ]);
+        assert_eq!(
+            resolve_select_matches(&options, &requests(&["Capital Federal"])),
+            Ok(vec![1])
+        );
+        assert_eq!(
+            resolve_select_matches(&options, &requests(&["Capital\u{00A0}Federal"])),
+            Ok(vec![1])
+        );
+        assert_eq!(
+            resolve_select_matches(&options, &requests(&["ZeroWidth"])),
+            Ok(vec![2])
+        );
+    }
+
+    /// Exact matching stays ahead of normalization, so an exactly spelled
+    /// label is not reported as colliding with its normalized twin.
+    #[test]
+    fn test_select_exact_label_beats_normalized_twin() {
+        let options = options(&[
+            ("ascii", None, "Alpha Beta"),
+            ("nbsp", None, "Alpha\u{00A0}Beta"),
+        ]);
+        assert_eq!(
+            resolve_select_matches(&options, &requests(&["Alpha Beta"])),
+            Ok(vec![0])
+        );
+        let error = resolve_select_matches(&options, &requests(&["Alpha  Beta"])).unwrap_err();
+        assert!(
+            error.starts_with("Multiple options matched \"Alpha  Beta\" after whitespace"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn test_select_no_match_lists_available_options() {
+        let options = options(&[("red", None, "Red"), ("blue", None, "Blue")]);
+        let error = resolve_select_matches(&options, &requests(&["green"])).unwrap_err();
+        assert_eq!(
+            error,
+            "No option matched [\"green\"]. Available options: red (\"Red\"), blue (\"Blue\")"
+        );
+    }
+
+    /// Several requests still resolve to several options: `<select multiple>`
+    /// keeps working, and repeated requests do not duplicate an index.
+    #[test]
+    fn test_select_multiple_requests_select_several_options() {
+        let options = options(&[("a", None, "One"), ("b", None, "Two"), ("c", None, "Three")]);
+        assert_eq!(
+            resolve_select_matches(&options, &requests(&["One", "c"])),
+            Ok(vec![0, 2])
+        );
+        assert_eq!(
+            resolve_select_matches(&options, &requests(&["a", "One"])),
+            Ok(vec![0])
+        );
+    }
+
+    /// One bad request fails the whole command, leaving the page untouched.
+    #[test]
+    fn test_select_multiple_requests_fail_on_any_miss() {
+        let options = options(&[("a", None, "One"), ("b", None, "Two")]);
+        let error = resolve_select_matches(&options, &requests(&["a", "missing"])).unwrap_err();
+        assert!(error.starts_with("No option matched"), "{error}");
+    }
 
     /// Verify that `char_to_key_info` returns the correct (key, code,
     /// windowsVirtualKeyCode) triple for every character in Playwright's
