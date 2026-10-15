@@ -996,7 +996,7 @@ fn parity_tools() -> Vec<Value> {
             TOOL_UPLOAD,
             "Upload files",
             "Upload files through a file input.",
-            json!({ "selector": selector_schema(), "files": string_array_schema("File paths to upload.") }),
+            json!({ "selector": selector_schema(), "files": string_array_schema("File paths to upload. Each file must already exist; relative paths resolve against the MCP server's working directory, so absolute paths are safest.") }),
             &["selector", "files"],
         ),
         tool(
