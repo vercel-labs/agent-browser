@@ -1294,7 +1294,13 @@ fn parity_tools() -> Vec<Value> {
             json!({ "url": { "type": "string" }, "label": { "type": "string" } }),
             &[],
         ),
-        tool(TOOL_TAB_LIST, "Tab list", "List tabs.", json!({}), &[]),
+        tool(
+            TOOL_TAB_LIST,
+            "Tab list",
+            "List browser tabs, including extension pages.",
+            json!({}),
+            &[],
+        ),
         tool(
             TOOL_TAB_SWITCH,
             "Tab switch",

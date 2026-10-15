@@ -2662,6 +2662,9 @@ referring to the same tab across commands. Optional user-assigned labels
 accepted. CDP target ids (from `tab list --json`) are also accepted as tab
 refs; unlike `t<N>` ids they stay stable across daemon restarts.
 
+Extension pages, including wallet approval prompts, appear in the tab list.
+Extension service workers are not tabs.
+
 Tabs opened with `tab new` or `click --new-tab` inherit the session's user
 agent, headers, HTTP credentials, init scripts, routes, and emulation
 overrides before their first document loads.

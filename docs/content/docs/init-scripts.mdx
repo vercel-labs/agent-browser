@@ -65,6 +65,8 @@ agent-browser --extension ./a --extension ./b open https://example.com
 
 Extensions are launch-time options. They require a local Chromium-based browser and are not supported with CDP connections, cloud providers, or Lightpanda.
 
+Extension pages, including wallet approval prompts, appear in `tab list` and can be selected like other tabs. Extension service workers do not appear as tabs.
+
 ## Safety
 
 Init scripts and extensions run with high privilege in the page context. Only load scripts and extension directories from trusted local paths.

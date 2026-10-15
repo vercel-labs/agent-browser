@@ -1361,6 +1361,8 @@ On Linux hosts with no display (servers, containers), `--headed` still works: wh
 
 > **Note:** Browser extensions work in both headed and headless mode (Chrome's `--headless=new`).
 
+Extension pages, including wallet approval prompts, appear in `tab list` and can be selected like other tabs. Extension service workers do not appear as tabs.
+
 ## WebGPU
 
 Headless Chrome does not expose WebGPU by default, so pages using it (three.js `WebGPURenderer`, Babylon.js, etc.) silently render black. The `--webgpu` flag enables a launch preset that makes WebGPU work, including in GPU-less containers and CI:
