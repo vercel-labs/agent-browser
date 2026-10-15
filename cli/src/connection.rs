@@ -789,6 +789,29 @@ fn stop_existing_daemon_for_restart(session: &str) {
     }
 }
 
+/// On Windows a spawned child inherits every inheritable handle we hold. Our
+/// stdout/stderr may be pipes that a parent reads to EOF (the MCP server's
+/// `run_cli`, or a PowerShell capture). The detached daemon we are about to
+/// spawn is long-lived; if it keeps those write ends open the parent blocks
+/// forever waiting for EOF that never arrives. Mark our own stdio handles
+/// non-inheritable so the daemon cannot hold the pipes open.
+#[cfg(windows)]
+pub(crate) fn prevent_stdio_handle_inheritance() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
+
+    unsafe {
+        for handle in [
+            std::io::stdout().as_raw_handle(),
+            std::io::stderr().as_raw_handle(),
+        ] {
+            if !handle.is_null() {
+                let _ = SetHandleInformation(handle as isize, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+}
+
 pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
     let mut restarted = false;
 
@@ -897,6 +920,8 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+
+        prevent_stdio_handle_inheritance();
 
         let mut cmd = Command::new(&exe_path);
         cmd.env("AGENT_BROWSER_DAEMON", "1");
