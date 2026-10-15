@@ -61,7 +61,7 @@ agent-browser click @e1           # Click
 agent-browser click @e1 --new-tab # Click and open in new tab
 agent-browser dblclick @e1        # Double-click
 agent-browser focus @e1           # Focus element
-agent-browser fill @e2 "text"     # Clear and type
+agent-browser fill @e2 "text"     # Clear and type (sets date, time, color and range inputs directly)
 agent-browser type @e2 "text"     # Type without clearing
 agent-browser press Enter         # Press key (alias: key)
 agent-browser press Control+a     # Key combination
