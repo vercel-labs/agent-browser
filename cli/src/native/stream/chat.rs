@@ -1150,7 +1150,6 @@ mod tests {
         assert_eq!(invoke["params"]["q"], "a; b");
     }
 
-
     const CHAT_ENV: &[&str] = &[
         "AI_GATEWAY_API_KEY",
         "AI_GATEWAY_URL",
