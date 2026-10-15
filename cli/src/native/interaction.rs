@@ -126,6 +126,55 @@ pub async fn hover(
     Ok((x + offset.0, y + offset.1))
 }
 
+/// Selects everything inside an `<input>`, `<textarea>` or contenteditable
+/// host so the next insertText or Delete replaces it. Clearing through real
+/// editing (instead of `value = ''`) is what React and rich editors observe.
+const SELECT_CONTENTS_JS: &str = r#"function selectContents(el) {
+    el.focus();
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+        el.select();
+    } else if (el.isContentEditable) {
+        const range = el.ownerDocument.createRange();
+        range.selectNodeContents(el);
+        const selection = el.ownerDocument.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+    }
+}"#;
+
+async fn call_on_element(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+    function_declaration: String,
+    arguments: Option<Vec<CallArgument>>,
+) -> Result<Option<Value>, String> {
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration,
+                object_id: Some(object_id.to_string()),
+                arguments,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await?;
+    if let Some(details) = result.exception_details {
+        return Err(details
+            .exception
+            .and_then(|e| e.description)
+            .unwrap_or(details.text));
+    }
+    Ok(result.result.value)
+}
+
+/// Replaces the element's contents with `value`. Inputs whose value cannot be
+/// typed (date, color, range, ...) are set directly; everything else is
+/// selected and replaced through `Input.insertText`, or Delete when `value` is
+/// empty, so frameworks see the same events as a user edit.
 pub async fn fill(
     client: &CdpClient,
     session_id: &str,
@@ -143,55 +192,71 @@ pub async fn fill(
     )
     .await?;
 
-    // Focus the element
-    client
-        .send_command_typed::<_, Value>(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: "function() { this.focus(); }".to_string(),
-                object_id: Some(object_id.clone()),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&effective_session_id),
-        )
-        .await?;
+    // The prototype setter bypasses React's per-instance value tracker, so
+    // React treats the following input event as a change.
+    let prepare = format!(
+        r#"function(value) {{
+            const setValueTypes = ['color', 'date', 'datetime-local', 'month', 'range', 'time', 'week'];
+            if (this instanceof HTMLInputElement && setValueTypes.includes(this.type)) {{
+                this.focus();
+                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+                const previous = this.value;
+                setter.call(this, value);
+                if (this.type !== 'range' && this.value.toLowerCase() !== value.toLowerCase()) {{
+                    setter.call(this, previous);
+                    return 'malformed:' + this.type;
+                }}
+                this.dispatchEvent(new Event('input', {{ bubbles: true, composed: true }}));
+                this.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                return 'set';
+            }}
+            ({SELECT_CONTENTS_JS})(this);
+            return 'selected';
+        }}"#
+    );
+    let mode = call_on_element(
+        client,
+        &effective_session_id,
+        &object_id,
+        prepare,
+        Some(vec![CallArgument {
+            value: Some(Value::String(value.to_string())),
+            object_id: None,
+        }]),
+    )
+    .await?;
+    match mode.as_ref().and_then(|v| v.as_str()) {
+        Some("set") => return Ok(()),
+        Some(m) if m.starts_with("malformed:") => {
+            return Err(format!(
+                "Malformed value for <input type=\"{}\">: \"{}\"",
+                &m["malformed:".len()..],
+                value
+            ));
+        }
+        _ => {}
+    }
 
-    // Select all + delete to clear
-    client
-        .send_command_typed::<_, Value>(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: r#"function() {
-                    this.select && this.select();
-                    this.value = '';
-                    this.dispatchEvent(new Event('input', { bubbles: true }));
-                }"#
-                .to_string(),
-                object_id: Some(object_id),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&effective_session_id),
-        )
-        .await?;
-
-    // Insert text (keyboard input dispatched at page level, use parent session_id)
-    client
-        .send_command_typed::<_, Value>(
-            "Input.insertText",
-            &InsertTextParams {
-                text: value.to_string(),
-            },
-            Some(session_id),
-        )
-        .await?;
-
-    Ok(())
+    // Keyboard input is dispatched at page level, so use the parent session_id.
+    if value.is_empty() {
+        press_key(client, session_id, "Delete").await
+    } else {
+        client
+            .send_command_typed::<_, Value>(
+                "Input.insertText",
+                &InsertTextParams {
+                    text: value.to_string(),
+                },
+                Some(session_id),
+            )
+            .await?;
+        Ok(())
+    }
 }
 
+/// Types `text` into the element. Without `clear`, an element that is not
+/// already focused gets its caret at the end so the text is appended; an
+/// already focused element keeps its caret where the agent left it.
 #[allow(clippy::too_many_arguments)]
 pub async fn type_text(
     client: &CdpClient,
@@ -212,40 +277,47 @@ pub async fn type_text(
     )
     .await?;
 
-    // Focus
-    client
-        .send_command_typed::<_, Value>(
-            "Runtime.callFunctionOn",
-            &CallFunctionOnParams {
-                function_declaration: "function() { this.focus(); }".to_string(),
-                object_id: Some(object_id.clone()),
-                arguments: None,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(&effective_session_id),
+    if clear {
+        call_on_element(
+            client,
+            &effective_session_id,
+            &object_id,
+            format!("function() {{ ({SELECT_CONTENTS_JS})(this); }}"),
+            None,
         )
         .await?;
-
-    if clear {
-        client
-            .send_command_typed::<_, Value>(
-                "Runtime.callFunctionOn",
-                &CallFunctionOnParams {
-                    function_declaration: r#"function() {
-                        this.select && this.select();
-                        this.value = '';
-                        this.dispatchEvent(new Event('input', { bubbles: true }));
-                    }"#
-                    .to_string(),
-                    object_id: Some(object_id),
-                    arguments: None,
-                    return_by_value: Some(true),
-                    await_promise: Some(false),
-                },
-                Some(&effective_session_id),
-            )
-            .await?;
+        press_key(client, session_id, "Delete").await?;
+    } else {
+        // email and number inputs reject setSelectionRange; selecting and
+        // collapsing the document selection still moves their caret.
+        call_on_element(
+            client,
+            &effective_session_id,
+            &object_id,
+            r#"function() {
+                if (this.ownerDocument.activeElement === this) return;
+                this.focus();
+                if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement) {
+                    try {
+                        const end = this.value.length;
+                        this.setSelectionRange(end, end);
+                    } catch {
+                        this.select();
+                        this.ownerDocument.getSelection().collapseToEnd();
+                    }
+                } else if (this.isContentEditable) {
+                    const range = this.ownerDocument.createRange();
+                    range.selectNodeContents(this);
+                    range.collapse(false);
+                    const selection = this.ownerDocument.getSelection();
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                }
+            }"#
+            .to_string(),
+            None,
+        )
+        .await?;
     }
 
     type_text_into_active_context(client, session_id, text, delay_ms).await
