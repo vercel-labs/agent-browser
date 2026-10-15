@@ -4259,6 +4259,52 @@ mod tests {
 
     use super::*;
 
+    /// CLI commands without their own MCP tool: aliases share the canonical
+    /// command's tool, and `mcp` is the server itself.
+    const MCP_OMITTED_COMMANDS: &[&str] = &[
+        "goto",
+        "navigate",
+        "key",
+        "quit",
+        "exit",
+        "scrollinto",
+        "web-vitals",
+        "plugins",
+        "mcp",
+    ];
+
+    fn top_level_command_for_tool(tool_name: &str) -> Option<&str> {
+        let suffix = tool_name.strip_prefix("agent_browser_")?;
+        match suffix {
+            "scroll_into_view" => Some("scrollintoview"),
+            "remove_init_script" => Some("removeinitscript"),
+            _ => suffix.split('_').next(),
+        }
+    }
+
+    #[test]
+    fn cli_commands_have_mcp_tools() {
+        let tools = tools();
+        let exposed: std::collections::HashSet<_> = tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .filter_map(top_level_command_for_tool)
+            .collect();
+        for command in MCP_OMITTED_COMMANDS {
+            assert!(
+                crate::commands::TOP_LEVEL_COMMANDS.contains(command),
+                "{command}"
+            );
+        }
+        for command in crate::commands::TOP_LEVEL_COMMANDS {
+            assert_eq!(
+                exposed.contains(command),
+                !MCP_OMITTED_COMMANDS.contains(command),
+                "'{command}' should have an MCP tool unless it is in MCP_OMITTED_COMMANDS"
+            );
+        }
+    }
+
     #[test]
     fn tools_list_contains_typed_tools() {
         let tools = tools();
