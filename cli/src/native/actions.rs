@@ -9783,12 +9783,12 @@ async fn handle_waitforloadstate(cmd: &Value, state: &DaemonState) -> Result<Val
     let timeout_ms = state.timeout_ms(cmd);
 
     let wait_until = WaitUntil::from_str(load_state);
-    let _ = tokio::time::timeout(
+    tokio::time::timeout(
         tokio::time::Duration::from_millis(timeout_ms),
         mgr.wait_for_lifecycle_external(wait_until, &session_id),
     )
     .await
-    .map_err(|_| format!("Timeout waiting for load state: {}", load_state))?;
+    .map_err(|_| format!("Timeout waiting for load state: {}", load_state))??;
 
     Ok(json!({ "state": load_state }))
 }
