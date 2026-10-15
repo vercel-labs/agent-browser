@@ -4093,6 +4093,11 @@ fn response_text(value: &Value) -> Option<String> {
         }
 
         if let Some(data) = obj.get("data") {
+            if data.get("requestId").is_some() {
+                if let Some(text) = crate::output::format_request_detail_text(data) {
+                    return Some(text);
+                }
+            }
             // Accessibility reports carry a URL alongside their findings. Use
             // the same report formatter as the CLI before the generic string
             // field fallback turns the MCP text content into only that URL.
@@ -4647,6 +4652,34 @@ mod tests {
         assert!(text.contains("[critical] image-alt"));
         assert!(text.contains("  - #hero"));
         assert_ne!(text, "https://example.com");
+    }
+
+    #[test]
+    fn response_text_formats_network_request_detail_before_url_metadata() {
+        let text = response_text(&json!({
+            "success": true,
+            "data": {
+                "requestId": "123.4",
+                "method": "POST",
+                "url": "https://example.com/api",
+                "status": 201,
+                "headers": { "content-type": "application/json" },
+                "postData": "{\"name\":\"test\"}",
+                "responseHeaders": { "x-request-id": "abc" },
+                "mimeType": "application/json",
+                "responseBody": "{\"ok\":true}"
+            }
+        }))
+        .unwrap();
+
+        assert!(text.contains("POST https://example.com/api"));
+        assert!(text.contains("Status: 201"));
+        assert!(text.contains("content-type: application/json"));
+        assert!(text.contains("{\"name\":\"test\"}"));
+        assert!(text.contains("x-request-id: abc"));
+        assert!(text.contains("Content-Type: application/json"));
+        assert!(text.contains("{\"ok\":true}"));
+        assert_ne!(text, "https://example.com/api");
     }
 
     #[test]
