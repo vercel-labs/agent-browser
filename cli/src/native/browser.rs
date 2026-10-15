@@ -778,6 +778,7 @@ impl BrowserManager {
                     "Target.createTarget",
                     &CreateTargetParams {
                         url: "about:blank".to_string(),
+                        ..Default::default()
                     },
                     None,
                 )
@@ -1506,6 +1507,7 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: "about:blank".to_string(),
+                    ..Default::default()
                 },
                 None,
             )
@@ -1671,6 +1673,7 @@ impl BrowserManager {
                 "Target.createTarget",
                 &CreateTargetParams {
                     url: target_url.to_string(),
+                    ..Default::default()
                 },
                 None,
             )
@@ -3480,6 +3483,64 @@ mod tests {
             observed
         });
         (url, server)
+    }
+
+    /// Every tab the daemon creates besides the state-save scratch page keeps the
+    /// bare `{"url": ...}` request: `background` and `hidden` are not sent.
+    #[tokio::test]
+    async fn test_ordinary_tab_creation_sends_only_a_url() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut created = Vec::new();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let result = match command["method"].as_str().unwrap() {
+                    "Target.getTargets" => json!({"targetInfos": []}),
+                    "Target.createTarget" => {
+                        created.push(command["params"].clone());
+                        json!({"targetId": format!("page-{}", created.len())})
+                    }
+                    "Target.attachToTarget" => {
+                        json!({"sessionId": format!("session-{}", created.len())})
+                    }
+                    "Runtime.evaluate" => json!({"result": {"type": "number", "value": 1}}),
+                    _ => json!({}),
+                };
+                ws.send(Message::Text(
+                    json!({"id": command["id"], "result": result}).to_string(),
+                ))
+                .await
+                .unwrap();
+            }
+            created
+        });
+
+        // Connecting to a browser with no page creates one.
+        let mut manager = BrowserManager::connect_cdp_inner(&url, false, None)
+            .await
+            .unwrap();
+        manager
+            .tab_new(Some("https://example.test/"), None)
+            .await
+            .unwrap();
+        manager.pages.clear();
+        manager.ensure_page().await.unwrap();
+        manager.close().await.unwrap();
+
+        assert_eq!(
+            server.await.unwrap(),
+            vec![
+                json!({"url": "about:blank"}),
+                json!({"url": "https://example.test/"}),
+                json!({"url": "about:blank"}),
+            ]
+        );
     }
 
     async fn assert_failed_external_initialization(
