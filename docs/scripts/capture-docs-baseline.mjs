@@ -14,10 +14,49 @@ const output = new URL("../tests/fixtures/docs-baseline.json", import.meta.url);
 const git = (...args) =>
   execFileSync("git", args, { cwd: root, maxBuffer: 16 * 1024 * 1024 });
 const hash = (value) => createHash("sha256").update(value).digest("hex");
+// Intentional contract changes after the migration, applied to pinned Git inputs.
+// PR #1863 preserves commas inside Chrome launch-argument values.
+const launchArgsUpdates = {
+  "docs/src/app/cdp-mode/page.mdx": [
+    [
+      "Browser launch args (comma-separated)",
+      "Browser launch args (comma or newline separated; commas inside <code>--flag=value</code> stay intact)"
+    ]
+  ],
+  "docs/src/app/commands/page.mdx": [
+    [
+      "Browser launch args (comma separated)",
+      "Browser launch args (comma or newline separated; commas inside --flag=value stay intact)"
+    ]
+  ],
+  "docs/src/app/configuration/page.mdx": [
+    [
+      "<tr><td><code>args</code></td><td><code>--args</code></td><td>string</td></tr>",
+      "<tr><td><code>args</code></td><td><code>--args</code></td><td>string; commas inside <code>--flag=value</code> stay intact</td></tr>"
+    ],
+    [
+      "Comma or newline separated browser launch arguments.",
+      "Comma or newline separated browser launch arguments. Commas inside <code>--flag=value</code> stay intact."
+    ]
+  ],
+  "docs/public/schema.json": [
+    [
+      "Additional comma-separated launch arguments for the browser.",
+      "Additional comma or newline separated launch arguments for the browser. Commas inside --flag=value stay intact."
+    ]
+  ]
+};
+function applyLaunchArgsUpdate(path, raw) {
+  for (const [before, after] of launchArgsUpdates[path] ?? []) {
+    assert.equal(raw.split(before).length - 1, 1, `${path}: launch args update must match once`);
+    raw = raw.replace(before, after);
+  }
+  return raw;
+}
 const sources = {};
 function original(path) {
   if (!sources[path]) {
-    const raw = git("show", `${commit}:${path}`).toString("utf8");
+    const raw = applyLaunchArgsUpdate(path, git("show", `${commit}:${path}`).toString("utf8"));
     sources[path] = { sha256: hash(raw), raw };
   }
   return sources[path].raw;
@@ -298,7 +337,10 @@ const resources = git(
   .trim()
   .split("\n")
   .map((source) => {
-    const bytes = git("show", `${commit}:${source}`);
+    const originalBytes = git("show", `${commit}:${source}`);
+    const bytes = launchArgsUpdates[source]
+      ? Buffer.from(applyLaunchArgsUpdate(source, originalBytes.toString("utf8")))
+      : originalBytes;
     return {
       source,
       path:
@@ -313,7 +355,7 @@ const serialized = `${JSON.stringify(
   {
     commit,
     policy:
-      "Only git objects at the pinned commit are inputs. Modern Markdown removes AST-level MDX imports, DiffDemo and presentation className attributes; fenced code is preserved. Legacy Markdown executes the original converter verbatim, including its removal of export/import lines inside fences. Heading IDs execute the original slugify/extractText without deduplication. Root metadata comes from the root layout; child metadata comes from each original layout and pageMetadata/PAGE_TITLES.",
+      "Inputs are git objects at the pinned commit plus the explicit PR #1863 launch-argument documentation updates in the capture script. Modern Markdown removes AST-level MDX imports, DiffDemo and presentation className attributes; fenced code is preserved. Legacy Markdown executes the original converter verbatim, including its removal of export/import lines inside fences. Heading IDs execute the original slugify/extractText without deduplication. Root metadata comes from the root layout; child metadata comes from each original layout and pageMetadata/PAGE_TITLES.",
     sources,
     pages,
     legacySearch,

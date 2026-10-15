@@ -94,7 +94,7 @@
     },
     "args": {
       "type": "string",
-      "description": "Additional comma-separated launch arguments for the browser."
+      "description": "Additional comma or newline separated launch arguments for the browser. Commas inside --flag=value stay intact."
     },
     "userAgent": {
       "type": "string",
