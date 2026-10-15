@@ -1858,6 +1858,8 @@ agent-browser check - Check a checkbox
 Usage: agent-browser check <selector>
 
 Checks a checkbox element. If already checked, no action is taken.
+Fails if the element is not a checkbox, radio, or ARIA checkbox, if it is
+disabled, or if it did not end up checked.
 
 Global Options:
   --json               Output as JSON
@@ -1875,6 +1877,8 @@ agent-browser uncheck - Uncheck a checkbox
 Usage: agent-browser uncheck <selector>
 
 Unchecks a checkbox element. If already unchecked, no action is taken.
+Fails if the element is not a checkbox or ARIA checkbox, if it is disabled,
+or if it did not end up unchecked. A checked radio cannot be unchecked.
 
 Global Options:
   --json               Output as JSON
