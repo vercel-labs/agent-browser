@@ -3591,7 +3591,7 @@ Usage:
 
 Sends natural language instructions to an AI model that translates them
 into agent-browser commands and executes them against the active session.
-Requires AI_GATEWAY_API_KEY to be set.
+Requires AI_GATEWAY_API_KEY or ATLASCLOUD_API_KEY to be set.
 
 In interactive mode, type "quit", "exit", or "q" to leave the REPL.
 
