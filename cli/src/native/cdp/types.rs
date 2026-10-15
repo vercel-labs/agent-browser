@@ -406,8 +406,9 @@ pub struct BoxModel {
     pub padding: Vec<f64>,
     pub border: Vec<f64>,
     pub margin: Vec<f64>,
-    pub width: i64,
-    pub height: i64,
+    // Chrome sends integers; some CDP-compatible backends send fractional dimensions.
+    pub width: f64,
+    pub height: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -583,4 +584,47 @@ pub struct BrowserVersionInfo {
 #[allow(clippy::upper_case_acronyms)]
 pub mod generated {
     include!(concat!(env!("OUT_DIR"), "/cdp_generated.rs"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DomGetBoxModelResult;
+    use serde_json::json;
+
+    #[test]
+    fn box_model_accepts_fractional_dimensions() {
+        let response = json!({
+            "model": {
+                "content": [10.25, 20.5, 101.5, 20.5, 101.5, 40.75, 10.25, 40.75],
+                "padding": [],
+                "border": [],
+                "margin": [],
+                "width": 91.25,
+                "height": 20.25
+            }
+        });
+
+        let result: DomGetBoxModelResult = serde_json::from_value(response).unwrap();
+        assert_eq!(result.model.content[0], 10.25);
+        assert_eq!(result.model.width, 91.25);
+        assert_eq!(result.model.height, 20.25);
+    }
+
+    #[test]
+    fn box_model_still_accepts_integer_dimensions() {
+        let response = json!({
+            "model": {
+                "content": [10, 20, 110, 20, 110, 60, 10, 60],
+                "padding": [],
+                "border": [],
+                "margin": [],
+                "width": 100,
+                "height": 40
+            }
+        });
+
+        let result: DomGetBoxModelResult = serde_json::from_value(response).unwrap();
+        assert_eq!(result.model.width, 100.0);
+        assert_eq!(result.model.height, 40.0);
+    }
 }
