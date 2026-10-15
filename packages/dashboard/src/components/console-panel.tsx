@@ -137,7 +137,12 @@ export function ConsolePanel() {
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      if (e.key === "Enter" && !e.shiftKey) {
+      if (
+        e.key === "Enter" &&
+        !e.shiftKey &&
+        !e.nativeEvent.isComposing &&
+        e.keyCode !== 229
+      ) {
         e.preventDefault();
         handleEval();
       }
