@@ -232,10 +232,11 @@ async fn run_socket_server(
             idle_activity.clone(),
         )));
 
-    // Notifier used by handle_connection to signal the daemon loop to exit
-    // after a "close" command, instead of calling process::exit() which skips
-    // destructors and can leave Chrome processes orphaned (issue #1113).
-    let close_notify = Arc::new(Notify::new());
+    // Lets handle_connection end the daemon loop after a "close" command,
+    // instead of calling process::exit() which skips destructors and can
+    // leave Chrome processes orphaned (issue #1113).
+    let close = Arc::new(CloseHandshake::default());
+    let mut closed_by_command = false;
 
     let mut drain_interval = tokio::time::interval(Duration::from_millis(100));
     drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -251,9 +252,9 @@ async fn run_socket_server(
                     Ok((stream, _)) => {
                         let state = state.clone();
                         let idle_activity = idle_activity.clone();
-                        let cn = close_notify.clone();
+                        let close = close.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, idle_activity, cn).await;
+                            handle_connection(stream, state, idle_activity, close).await;
                         });
                     }
                     Err(e) => {
@@ -312,10 +313,11 @@ async fn run_socket_server(
                     .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
                 continue;
             }
-            _ = close_notify.notified() => {
+            _ = close.requested.notified() => {
                 // "close" command was handled; browser already closed by
                 // handle_close(). Break to run cleanup and exit gracefully
                 // so destructors fire.
+                closed_by_command = true;
                 break;
             }
             _ = shutdown_signal() => {
@@ -330,6 +332,10 @@ async fn run_socket_server(
                 break;
             }
         }
+    }
+
+    if closed_by_command {
+        close.finish(listener).await;
     }
 
     Ok(())
@@ -374,7 +380,8 @@ async fn run_socket_server(
             idle_activity.clone(),
         )));
 
-    let close_notify = Arc::new(Notify::new());
+    let close = Arc::new(CloseHandshake::default());
+    let mut closed_by_command = false;
 
     let idle_sleep = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
     let mut idle_sleep_pin = idle_sleep.map(Box::pin);
@@ -393,9 +400,9 @@ async fn run_socket_server(
                     Ok((stream, _)) => {
                         let state = state.clone();
                         let idle_activity = idle_activity.clone();
-                        let cn = close_notify.clone();
+                        let close = close.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, idle_activity, cn).await;
+                            handle_connection(stream, state, idle_activity, close).await;
                         });
                     }
                     Err(e) => {
@@ -451,7 +458,8 @@ async fn run_socket_server(
                     .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
                 continue;
             }
-            _ = close_notify.notified() => {
+            _ = close.requested.notified() => {
+                closed_by_command = true;
                 break;
             }
             _ = shutdown_signal() => {
@@ -466,6 +474,10 @@ async fn run_socket_server(
                 break;
             }
         }
+    }
+
+    if closed_by_command {
+        close.finish(listener).await;
     }
 
     Ok(())
@@ -508,11 +520,30 @@ fn spawn_background_tick_if_idle(
     true
 }
 
+/// Orders a `close` between the connection that handled it and the accept
+/// loop: the loop stops listening first and only then is the reply sent, so a
+/// command issued right after `close` returns is refused and starts a fresh
+/// daemon instead of reaching this exiting one (issue #2134).
+#[derive(Default)]
+struct CloseHandshake {
+    requested: Notify,
+    listener_closed: Notify,
+    replied: Notify,
+}
+
+impl CloseHandshake {
+    async fn finish<L>(&self, listener: L) {
+        drop(listener);
+        self.listener_closed.notify_one();
+        let _ = tokio::time::timeout(Duration::from_secs(1), self.replied.notified()).await;
+    }
+}
+
 async fn handle_connection<S>(
     stream: S,
     state: std::sync::Arc<tokio::sync::Mutex<DaemonState>>,
     idle_activity: Arc<IdleActivity>,
-    close_notify: Arc<Notify>,
+    close: Arc<CloseHandshake>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -566,19 +597,22 @@ async fn handle_connection<S>(
                     response
                 };
 
-                let mut resp = serde_json::to_string(&response).unwrap_or_default();
-                resp.push('\n');
-                if writer.write_all(resp.as_bytes()).await.is_err() {
-                    break;
+                let closing = close_completed_response(&action, &response);
+                if closing {
+                    close.requested.notify_one();
+                    close.listener_closed.notified().await;
                 }
 
-                if close_completed_response(&action, &response) {
-                    // Signal the daemon loop to exit gracefully instead of
-                    // calling process::exit(), which skips destructors and
-                    // can leave Chrome processes orphaned (issue #1113).
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    close_notify.notify_one();
+                let mut resp = serde_json::to_string(&response).unwrap_or_default();
+                resp.push('\n');
+                let written = writer.write_all(resp.as_bytes()).await.is_ok();
+                if closing {
+                    let _ = writer.flush().await;
+                    close.replied.notify_one();
                     return;
+                }
+                if !written {
+                    break;
                 }
             }
             Err(_) => break,

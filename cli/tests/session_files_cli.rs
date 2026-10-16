@@ -133,3 +133,19 @@ fn test_daemon_shutdown_keeps_files_of_replacement_daemon() {
         "replacement socket path should remain"
     );
 }
+
+#[test]
+fn test_daemon_refuses_connections_once_close_replied() {
+    let mut d = Daemon::start();
+    // Guard against a false pass: the socket must accept connections before close.
+    UnixStream::connect(d.path("sock")).expect("socket should accept before close");
+
+    d.request_shutdown();
+    // No sleep: the listener must already be gone once the close reply was read.
+    let result = UnixStream::connect(d.path("sock"));
+    assert!(
+        result.is_err(),
+        "socket still accepted a connection after the close reply"
+    );
+    d.wait_for_exit();
+}
