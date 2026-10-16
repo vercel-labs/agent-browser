@@ -1199,6 +1199,7 @@ impl DaemonState {
             self.recording_state.contact_sheet_path.clone(),
             self.recording_state.contact_sheet_threshold,
             shared_contact_sheet_count.clone(),
+            self.recording_state.condense,
             cancel_rx,
         );
         self.recording_state.capture_task = Some(handle);
@@ -8010,6 +8011,10 @@ fn recording_options_from_command(cmd: &Value) -> Result<recording::RecordingOpt
             .unwrap_or(false)
             || cmd.get("contactSheetThreshold").is_some(),
         contact_sheet_threshold,
+        condense: cmd
+            .get("condense")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -8154,6 +8159,7 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         "cursor": state.recording_state.cursor,
         "contactSheet": state.recording_state.contact_sheet,
         "contactSheetPath": state.recording_state.contact_sheet_path,
+        "condense": state.recording_state.condense,
     }))
 }
 

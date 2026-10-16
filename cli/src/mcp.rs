@@ -1398,6 +1398,7 @@ fn parity_tools() -> Vec<Value> {
                 "cursor": { "type": "boolean", "description": "Render a pointer and click ripple with the page so drags stay synchronized. The inert overlay is hidden from accessibility snapshots, included in screenshots while recording, and removed on stop." },
                 "contactSheet": { "type": "boolean", "description": "Export first, changed, and final frames as a timestamped PNG beside the video." },
                 "contactSheetThreshold": { "type": "number", "minimum": 0, "maximum": 1, "description": "Changed-pixel ratio required to select a contact-sheet frame (default 0.05). Implies contactSheet." },
+                "condense": { "type": "boolean", "description": "Cut every stretch where the picture does not change, such as waiting on the network or a loader, to a 0.75 s hold. Motion keeps its real speed." },
             }),
             &["path"],
         ),
@@ -1427,6 +1428,7 @@ fn parity_tools() -> Vec<Value> {
                 "cursor": { "type": "boolean", "description": "Render a pointer and click ripple with the page so drags stay synchronized. The inert overlay is hidden from accessibility snapshots, included in screenshots while recording, and removed on stop." },
                 "contactSheet": { "type": "boolean", "description": "Export first, changed, and final frames as a timestamped PNG beside the video." },
                 "contactSheetThreshold": { "type": "number", "minimum": 0, "maximum": 1, "description": "Changed-pixel ratio required to select a contact-sheet frame (default 0.05). Implies contactSheet." },
+                "condense": { "type": "boolean", "description": "Cut every stretch where the picture does not change, such as waiting on the network or a loader, to a 0.75 s hold. Motion keeps its real speed." },
             }),
             &["path"],
         ),
@@ -3191,6 +3193,9 @@ fn record_command_args(arguments: &Value, action: &str) -> Result<Vec<String>, P
     if let Some(threshold) = optional_number_string(arguments, "contactSheetThreshold")? {
         args.push("--contact-sheet-threshold".to_string());
         args.push(threshold);
+    }
+    if optional_bool(arguments, "condense")?.unwrap_or(false) {
+        args.push("--condense".to_string());
     }
     Ok(args)
 }
@@ -4970,7 +4975,17 @@ mod tests {
             let threshold = &tool["inputSchema"]["properties"]["contactSheetThreshold"];
             assert_eq!(threshold["minimum"], json!(0));
             assert_eq!(threshold["maximum"], json!(1));
+            assert_eq!(
+                tool["inputSchema"]["properties"]["condense"]["type"],
+                "boolean"
+            );
         }
+
+        assert_eq!(
+            record_command_args(&json!({ "path": "demo.webm", "condense": true }), "start")
+                .unwrap(),
+            vec!["record", "start", "demo.webm", "--condense"]
+        );
 
         assert_eq!(
             record_command_args(&json!({ "path": "demo.webm", "fps": 60 }), "start").unwrap(),

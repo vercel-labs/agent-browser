@@ -134,6 +134,7 @@ agent-browser record start ./soak.webm --fps 10    # Lower rate for long session
 agent-browser tab new https://example.com          # Open a separate tab first if you want the recording there
 agent-browser record start ./demo.webm --cursor    # Add an animated mouse pointer
 agent-browser record start ./demo.webm --contact-sheet # Save a timestamped PNG summary
+agent-browser record start ./demo.webm --condense  # Cut still stretches, like loading waits, to a brief hold
 ```
 
 Needs `ffmpeg` on PATH; use a path with an extension. `--fps` accepts 1 to 60 and defaults to 30. `--contact-sheet-threshold <0-1>` adjusts keyframe sensitivity and implies `--contact-sheet`.

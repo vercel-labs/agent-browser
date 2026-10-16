@@ -2921,9 +2921,9 @@ The output file can be viewed in:
             r##"
 agent-browser record - Record browser session to video
 
-Usage: agent-browser record start <path.webm|path.mp4> [url] [--fps <n>] [--cursor] [--contact-sheet]
+Usage: agent-browser record start <path.webm|path.mp4> [url] [--fps <n>] [--cursor] [--contact-sheet] [--condense]
        agent-browser record stop
-       agent-browser record restart <path.webm|path.mp4> [url] [--fps <n>] [--cursor] [--contact-sheet]
+       agent-browser record restart <path.webm|path.mp4> [url] [--fps <n>] [--cursor] [--contact-sheet] [--condense]
 
 Record the browser to a video file. Supported formats are .webm (VP8 via
 libvpx) and .mp4 (H.264 via libx264); any other extension is handed to
@@ -2945,6 +2945,10 @@ With --cursor, an inert overlay renders the pointer and page together so
 drags stay synchronized. It is hidden from accessibility snapshots and
 removed on stop. Screenshots taken while recording include the overlay.
 
+With --condense, every stretch where the picture does not change, such as
+waiting on the network or a loader, is cut to a 0.75 s hold, while motion
+keeps its real speed. Contact sheet timestamps stay on the capture clock.
+
 Operations:
   start <path> [url]     Start recording the active page (navigates first if url given)
   stop                   Stop recording and save video
@@ -2955,6 +2959,7 @@ Options:
   --cursor                        Show an animated pointer
   --contact-sheet                 Save distinct visual changes as a timestamped PNG
   --contact-sheet-threshold <n>   Changed-pixel ratio, 0-1 (default: 0.05)
+  --condense                      Cut still stretches to a brief hold
 
 Global Options:
   --json               Output as JSON
@@ -2983,6 +2988,9 @@ Examples:
 
   # Export a visual summary beside the video
   agent-browser record start ./demo.webm --cursor --contact-sheet
+
+  # Cut waits on the network or loaders out of the video
+  agent-browser record start ./demo.webm --cursor --condense
 
   # Restart recording with a new file (stops previous, starts new)
   agent-browser record restart ./take2.webm
