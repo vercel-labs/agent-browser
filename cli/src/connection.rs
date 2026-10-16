@@ -594,9 +594,12 @@ fn daemon_config_fingerprint(opts: &DaemonOptions) -> String {
     opts.debug.hash(&mut hasher);
     opts.action_policy.hash(&mut hasher);
     opts.confirm_actions.hash(&mut hasher);
-    opts.idle_timeout.hash(&mut hasher);
     opts.default_timeout.hash(&mut hasher);
     opts.no_auto_dialog.hash(&mut hasher);
+    // idle_timeout is deliberately excluded: it bounds the daemon's lifetime, it does not
+    // describe the browser or its pages. Including it made a command that merely carried (or
+    // omitted) the flag look like a different daemon, so the session and every open page were
+    // discarded just because the caller did not repeat the same value.
     format!("{:016x}", hasher.finish())
 }
 
@@ -1580,11 +1583,13 @@ mod tests {
 
         assert_ne!(
             daemon_config_fingerprint(&base),
-            daemon_config_fingerprint(&idle_changed)
-        );
-        assert_ne!(
-            daemon_config_fingerprint(&base),
             daemon_config_fingerprint(&dialog_changed)
+        );
+        assert_eq!(
+            daemon_config_fingerprint(&base),
+            daemon_config_fingerprint(&idle_changed),
+            "the idle timeout is a daemon lifetime, not daemon identity: a differing or omitted \
+             value must not discard the session's pages"
         );
         assert_eq!(
             daemon_config_fingerprint(&base),
@@ -1601,8 +1606,11 @@ mod tests {
         guard.remove("AGENT_BROWSER_NAMESPACE");
 
         let session = "race-config";
+        // The loser must differ from the winner on a field that is part of the fingerprint:
+        // the idle timeout is deliberately not one of them, so varying it here would make the two
+        // configs match and the test would prove nothing.
         let winner_opts = test_daemon_options(Some("1000"), false, None);
-        let loser_opts = test_daemon_options(Some("2000"), false, None);
+        let loser_opts = test_daemon_options(Some("1000"), true, None);
 
         fs::create_dir_all(get_socket_dir()).unwrap();
         fs::write(get_pid_path(session), "12345").unwrap();
