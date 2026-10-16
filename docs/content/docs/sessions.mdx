@@ -52,6 +52,8 @@ agent-browser --session agent2 --cdp 9222 --pin-tab open https://site-b.com
 
 With `--pin-tab`, a session whose bound tab was closed gets a `tab_gone` error instead of silently acting on another session's tab; run `tab new <url>` or pick a tab from `tab list` to recover. JSON output includes <code>"code": "tab_gone"</code>, <code>data.targetId</code>, and optional sanitized <code>data.lastUrl</code>. Batch output uses <code>result</code> for the same recovery object. The flag is sticky per session; pass `--no-pin-tab` to turn it off again. See [CDP Mode](/cdp-mode) for details.
 
+Another session cannot take a pinned tab with `tab <ref>` while the pinning session is running (`tab_locked`), and an explicit `close` releases the pin.
+
 ## Chrome profile reuse
 
 The simplest way to reuse your existing login state: pass a Chrome profile name to `--profile`. agent-browser copies the profile to a temp directory (read-only snapshot) and launches Chrome with your existing cookies and sessions.

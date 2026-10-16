@@ -5740,25 +5740,39 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     }
 
     state.ref_map.invalidate_all_documents();
-    match save_result {
-        Ok(Some(path)) => Ok(json!({
+    // An explicit close releases this session's pin before replying, so other
+    // sessions need not wait for the daemon process to exit.
+    let pin_release_error = match tab_binding::release_pin(&state.session_id) {
+        Ok(Some(binding)) => {
+            state.last_persisted_binding = Some(binding);
+            None
+        }
+        Ok(None) => None,
+        Err(e) => Some(e),
+    };
+    let mut reply = match save_result {
+        Ok(Some(path)) => json!({
             "closed": true,
             "restoreStatus": state.restore_status,
             "saveStatus": state.restore_save_status,
             "statePath": path
-        })),
-        Ok(None) => Ok(json!({
+        }),
+        Ok(None) => json!({
             "closed": true,
             "restoreStatus": state.restore_status,
             "saveStatus": state.restore_save_status
-        })),
-        Err(err) => Ok(json!({
+        }),
+        Err(err) => json!({
             "closed": true,
             "restoreStatus": state.restore_status,
             "saveStatus": state.restore_save_status,
             "saveError": err
-        })),
+        }),
+    };
+    if let Some(err) = pin_release_error {
+        reply["pinReleaseError"] = json!(err);
     }
+    Ok(reply)
 }
 
 // ---------------------------------------------------------------------------
@@ -7633,6 +7647,18 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
         mgr.resolve_tab_ref(&tab_ref)?
     };
+    if let Some(target_id) = state
+        .browser
+        .as_ref()
+        .and_then(|mgr| mgr.target_id_for_tab(tab_id))
+    {
+        if let Some(owner) = super::tab_binding::pinned_owner(target_id, &state.session_id) {
+            return Err(format!(
+                "tab_locked: tab {} is pinned by session '{}' (--pin-tab); close that session or use another tab",
+                target_id, owner
+            ));
+        }
+    }
     let dialog_session = state
         .pending_dialog
         .as_ref()

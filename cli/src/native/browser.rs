@@ -2264,6 +2264,14 @@ impl BrowserManager {
         self.pages.get(self.active_page_index).map(|p| p.tab_id)
     }
 
+    /// CDP target id for a tab's stable `tab_id`.
+    pub fn target_id_for_tab(&self, tab_id: u32) -> Option<&str> {
+        self.pages
+            .iter()
+            .find(|p| p.tab_id == tab_id)
+            .map(|p| p.target_id.as_str())
+    }
+
     /// Returns true if a tab with the given stable `tab_id` is still open.
     pub fn has_tab_id(&self, tab_id: u32) -> bool {
         self.pages.iter().any(|p| p.tab_id == tab_id)
