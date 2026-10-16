@@ -5,9 +5,10 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
 
-use crate::connection::get_socket_dir;
 #[cfg(windows)]
 use crate::connection::resolve_port;
+#[cfg(unix)]
+use crate::session_files::SessionFile;
 
 use super::chat::{chat_status_json, handle_chat_request, handle_models_request};
 use super::dashboard::spawn_session;
@@ -410,7 +411,7 @@ pub(super) async fn relay_command_to_daemon(
 
     #[cfg(unix)]
     let stream = {
-        let socket_path = get_socket_dir().join(format!("{}.sock", session_name));
+        let socket_path = SessionFile::Socket.path(session_name);
         tokio::net::UnixStream::connect(&socket_path)
             .await
             .map_err(|e| format!("Failed to connect to daemon: {}", e))?

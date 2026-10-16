@@ -1,3 +1,4 @@
+use crate::session_files::{remove_daemon_files, SessionFile};
 use crate::validation::sanitize_session_component;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -142,43 +143,24 @@ pub fn get_socket_dir() -> PathBuf {
 
 #[cfg(unix)]
 fn get_socket_path(session: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.sock", session))
+    SessionFile::Socket.path(session)
 }
 
 fn get_pid_path(session: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.pid", session))
+    SessionFile::Pid.path(session)
 }
 
 fn get_version_path(session: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.version", session))
+    SessionFile::Version.path(session)
 }
 
 fn get_config_path(session: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.config", session))
+    SessionFile::Config.path(session)
 }
 
-/// Clean up stale socket and PID files for a session
+/// Clean up the stale daemon files of a session
 pub fn cleanup_stale_files(session: &str) {
-    let pid_path = get_pid_path(session);
-    let _ = fs::remove_file(&pid_path);
-    let version_path = get_version_path(session);
-    let _ = fs::remove_file(&version_path);
-    let config_path = get_config_path(session);
-    let _ = fs::remove_file(&config_path);
-    let stream_path = get_socket_dir().join(format!("{}.stream", session));
-    let _ = fs::remove_file(&stream_path);
-
-    #[cfg(unix)]
-    {
-        let socket_path = get_socket_path(session);
-        let _ = fs::remove_file(&socket_path);
-    }
-
-    #[cfg(windows)]
-    {
-        let port_path = get_port_path(session);
-        let _ = fs::remove_file(&port_path);
-    }
+    remove_daemon_files(&get_socket_dir(), session);
 }
 
 /// Returns whether a process with the given PID is currently alive.
@@ -253,7 +235,7 @@ pub struct DaemonInventory {
 
 /// Read the session's `.version` sidecar if present and non-empty.
 pub fn read_session_version(session: &str) -> Option<String> {
-    let path = get_socket_dir().join(format!("{}.version", session));
+    let path = SessionFile::Version.path(session);
     fs::read_to_string(&path)
         .ok()
         .map(|s| s.trim().to_string())
@@ -347,7 +329,7 @@ pub fn walk_daemons() -> DaemonInventory {
                 if session_name.is_empty() {
                     continue;
                 }
-                let pid_path = socket_dir.join(format!("{}.pid", session_name));
+                let pid_path = SessionFile::Pid.path_in(&socket_dir, session_name);
                 if !pid_path.exists() {
                     cleanup_stale_files(session_name);
                     inventory.cleaned.push(CleanedSession {
@@ -364,7 +346,7 @@ pub fn walk_daemons() -> DaemonInventory {
 
 #[cfg(windows)]
 fn get_port_path(session: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.port", session))
+    SessionFile::Port.path(session)
 }
 
 #[cfg(windows)]
@@ -983,10 +965,7 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     }
 
     #[cfg(unix)]
-    let endpoint_info = format!(
-        "socket: {}",
-        get_socket_dir().join(format!("{}.sock", session)).display()
-    );
+    let endpoint_info = format!("socket: {}", SessionFile::Socket.path(session).display());
     #[cfg(windows)]
     let endpoint_info = format!("port: 127.0.0.1:{}", resolve_port(session));
 

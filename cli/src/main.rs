@@ -11,6 +11,7 @@ mod native;
 mod output;
 mod plugins;
 mod read;
+mod session_files;
 mod skills;
 #[cfg(test)]
 mod test_utils;
