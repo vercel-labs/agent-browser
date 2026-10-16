@@ -84,6 +84,8 @@ Lightpanda is a purpose-built headless engine. Some Chrome-specific features are
 
 agent-browser returns a clear error if you combine `--engine lightpanda` with unsupported flags.
 
+External stylesheets are fetched at page load (`--load-resources stylesheet`), so elements hidden by a linked stylesheet (for example `display: none`) are excluded from snapshots, matching Chrome's visibility behavior. This requires Lightpanda 1.0.1 or newer; the nightly builds linked above include it.
+
 ## When to Use Lightpanda
 
 Lightpanda is a good fit for:
