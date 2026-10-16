@@ -2681,6 +2681,14 @@ Operations:
   close [t<N>|label|target]  Close a tab (current if no ref given)
   <t<N>|label|target>        Switch to a tab by id, label, or CDP target id
 
+List Options (also accepted by `tab` without `list`):
+  --filter <text>     Case-insensitive literal substring of the title or URL
+  --limit <n>         Return at most N matches; N must be a positive integer
+
+Filtering happens before limiting and preserves tab order, ids, active flags,
+and selection. An empty filter matches all tabs. Without either option, all
+tabs are returned as before. Use --filter=--text for values starting with --.
+
 Global Options:
   --json               Output as JSON (includes each tab's targetId)
   --session <name>     Use specific session
@@ -2688,6 +2696,8 @@ Global Options:
 Examples:
   agent-browser tab
   agent-browser tab list
+  agent-browser tab list --filter docs --limit 5
+  agent-browser tab --filter example.com
   agent-browser tab new
   agent-browser tab new https://example.com
   agent-browser tab new --label docs https://docs.example.com
@@ -3879,7 +3889,7 @@ Storage:
   storage <local|session>    Manage web storage
 
 Tabs:
-  tab [new|list|close|<n>]   Manage tabs
+  tab [new|list|close|<ref>] Manage tabs (list: --filter <text>, --limit <n>)
 
 Diff:
   diff snapshot              Compare current vs last snapshot

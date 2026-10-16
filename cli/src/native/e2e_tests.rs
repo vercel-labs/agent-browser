@@ -2638,6 +2638,68 @@ async fn e2e_tabs() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_tab_list_filter_preserves_selection() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "launch", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    for (index, title) in ["Home", "API Docs", "API Changelog"].iter().enumerate() {
+        let action = if index == 0 { "navigate" } else { "tab_new" };
+        let resp = execute_command(
+            &json!({ "id": "setup", "action": action, "url": format!("data:text/html,<title>{title}</title><p>{title}</p>") }),
+            &mut state,
+        ).await;
+        assert_success(&resp);
+    }
+    let resp = execute_command(&json!({ "id": "before", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    let original = get_data(&resp)["tabs"].as_array().unwrap().clone();
+    assert_eq!(original.len(), 3);
+    assert_eq!(original[2]["active"], true);
+
+    for (options, expected) in [
+        (
+            json!({ "filter": "api", "limit": 1 }),
+            vec![original[1].clone()],
+        ),
+        (json!({ "limit": 1 }), vec![original[0].clone()]),
+        (json!({ "filter": "does-not-match" }), vec![]),
+        (json!({ "filter": "", "limit": 10 }), original.clone()),
+    ] {
+        let mut command = options;
+        command["id"] = json!("filtered");
+        command["action"] = json!("tab_list");
+        let resp = execute_command(&command, &mut state).await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["tabs"], json!(expected));
+    }
+    let resp = execute_command(
+        &json!({ "id": "invalid", "action": "tab_list", "limit": 0 }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false);
+    let resp = execute_command(&json!({ "id": "after", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["tabs"], json!(original));
+    assert_evaluate(
+        &mut state,
+        "title",
+        "document.title",
+        json!("API Changelog"),
+    )
+    .await;
+
+    let resp = execute_command(&json!({ "id": "close", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_tab_ids_not_reused() {
     let mut state = DaemonState::new();
 

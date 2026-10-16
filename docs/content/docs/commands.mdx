@@ -250,6 +250,13 @@ agent-browser frame @e3                        # Switch to iframe by element ref
 agent-browser frame main                       # Back to main frame
 ```
 
+```bash
+agent-browser tab list --filter docs --limit 5 # First 5 tabs matching title or URL
+agent-browser tab --filter example.com        # Shorthand for tab list --filter
+```
+
+`agent-browser tab list [--filter <text>] [--limit <n>]` (alias: `agent-browser tab [--filter <text>] [--limit <n>]`) filters by case-insensitive literal substring in the title or URL, not labels or regex; an empty filter matches all tabs. Filtering precedes the positive-integer limit, preserves order, stable ids and active flags, and never changes tab selection. With neither option, the full output and JSON schema are unchanged. Missing option values and zero, negative, fractional, invalid or overflowing limits are errors. MCP `agent_browser_tab_list` accepts the same optional `filter` string and positive-integer `limit`.
+
 ### Stable tab ids and labels
 
 Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused within a session, so `t2` keeps pointing at the same tab even as other tabs are opened or closed. The `t` prefix mirrors the `@e1` element-ref convention and is not interchangeable with positional integers — `agent-browser tab 2` errors with a teaching message; use `t2`.

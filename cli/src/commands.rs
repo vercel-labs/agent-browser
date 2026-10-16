@@ -1596,7 +1596,14 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     }
                     Ok(cmd)
                 }
-                Some("list") => Ok(json!({ "id": id, "action": "tab_list" })),
+                Some("list") => parse_tab_list(&rest[1..], &id),
+                Some(option)
+                    if matches!(option, "--filter" | "--limit")
+                        || option.starts_with("--filter=")
+                        || option.starts_with("--limit=") =>
+                {
+                    parse_tab_list(&rest, &id)
+                }
                 Some("close") => {
                     let mut cmd = json!({ "id": id, "action": "tab_close" });
                     if let Some(tab_ref) = rest.get(1) {
@@ -2270,6 +2277,54 @@ fn parse_webmcp(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             valid_options: &["list", "invoke", "result", "cancel"],
         }),
     }
+}
+
+/// Parse opt-in tab discovery options without changing tab-switch syntax.
+fn parse_tab_list(rest: &[&str], id: &str) -> Result<Value, ParseError> {
+    const USAGE: &str = "tab list [--filter <text>] [--limit <n>]";
+    let mut cmd = json!({ "id": id, "action": "tab_list" });
+    let mut i = 0;
+    while i < rest.len() {
+        let (option, inline_value) = rest[i]
+            .split_once('=')
+            .map_or((rest[i], None), |(option, value)| (option, Some(value)));
+        if !matches!(option, "--filter" | "--limit") {
+            return Err(ParseError::UnknownSubcommand {
+                subcommand: rest[i].to_string(),
+                valid_options: &["--filter", "--limit"],
+            });
+        }
+        let value = match inline_value {
+            Some(value) => value,
+            None => {
+                i += 1;
+                rest.get(i)
+                    .copied()
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or_else(|| ParseError::MissingArguments {
+                        context: format!("tab list {option}"),
+                        usage: USAGE,
+                    })?
+            }
+        };
+        match option {
+            "--filter" => cmd["filter"] = json!(value),
+            "--limit" => {
+                let limit = value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|limit| *limit > 0)
+                    .ok_or_else(|| ParseError::InvalidValue {
+                        message: "tab list --limit must be a positive integer".to_string(),
+                        usage: USAGE,
+                    })?;
+                cmd["limit"] = json!(limit);
+            }
+            _ => unreachable!(),
+        }
+        i += 1;
+    }
+    Ok(cmd)
 }
 
 fn parse_read(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseError> {
@@ -4560,6 +4615,86 @@ mod tests {
     fn test_tab_list() {
         let cmd = parse_command(&args("tab list"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "tab_list");
+    }
+
+    #[test]
+    fn test_tab_list_options() {
+        for input in [
+            vec!["tab", "list", "--filter", "API Docs", "--limit", "2"],
+            vec!["tab", "--limit", "2", "--filter", "API Docs"],
+        ] {
+            let input: Vec<String> = input.into_iter().map(String::from).collect();
+            let flags = crate::flags::parse_flags(&input);
+            let cmd = parse_command(&crate::flags::clean_args(&input), &flags).unwrap();
+            assert_eq!(cmd["action"], "tab_list");
+            assert_eq!(cmd["filter"], "API Docs");
+            assert_eq!(cmd["limit"], 2);
+            assert!(cmd.get("tabId").is_none());
+        }
+    }
+
+    #[test]
+    fn test_tab_list_inline_values_survive_global_flag_parsing() {
+        let baseline = crate::flags::parse_flags(&[]);
+        for filter in ["--json", "--session", "--limit", "", "title=docs"] {
+            let input = vec![
+                "tab".to_string(),
+                format!("--filter={filter}"),
+                "--limit=2".to_string(),
+            ];
+            let flags = crate::flags::parse_flags(&input);
+            let cmd = parse_command(&crate::flags::clean_args(&input), &flags).unwrap();
+            assert_eq!(cmd["action"], "tab_list");
+            assert_eq!(cmd["filter"], filter);
+            assert_eq!(cmd["limit"], 2);
+            assert_eq!(flags.json, baseline.json);
+            assert_eq!(flags.session, baseline.session);
+        }
+    }
+
+    #[test]
+    fn test_tab_list_empty_filter_and_large_limit() {
+        let cmd = parse_command(
+            &vec![
+                "tab",
+                "list",
+                "--filter",
+                "",
+                "--limit",
+                "18446744073709551615",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>(),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["filter"], "");
+        assert_eq!(cmd["limit"], u64::MAX);
+    }
+
+    #[test]
+    fn test_tab_list_rejects_invalid_options() {
+        for input in [
+            "tab list --filter",
+            "tab --filter",
+            "tab list --limit",
+            "tab --limit",
+            "tab list --filter --limit 2",
+            "tab list --limit=",
+            "tab list --limit 0",
+            "tab list --limit -1",
+            "tab list --limit 1.5",
+            "tab list --limit nope",
+            "tab list --limit 18446744073709551616",
+            "tab list --unknown",
+            "tab list extra",
+        ] {
+            assert!(
+                parse_command(&args(input), &default_flags()).is_err(),
+                "Expected an error for {input}"
+            );
+        }
     }
 
     #[test]

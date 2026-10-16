@@ -3075,7 +3075,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "recording_stop" => handle_recording_stop(state).await,
         "recording_restart" => handle_recording_restart(cmd, state).await,
         "pdf" => handle_pdf(cmd, state).await,
-        "tab_list" => handle_tab_list(state).await,
+        "tab_list" => handle_tab_list(cmd, state).await,
         "tab_new" => handle_tab_new(cmd, state).await,
         "tab_switch" => handle_tab_switch(cmd, state).await,
         "tab_close" => handle_tab_close(cmd, state).await,
@@ -7566,9 +7566,47 @@ async fn handle_keyboard(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
 // Phase 5 handlers
 // ---------------------------------------------------------------------------
 
-async fn handle_tab_list(state: &DaemonState) -> Result<Value, String> {
+/// Narrow only the returned rows; tab identity, selection, and broadcasts stay unchanged.
+fn filter_tab_list(cmd: &Value, mut tabs: Vec<Value>) -> Result<Vec<Value>, String> {
+    let filter = cmd
+        .get("filter")
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_lowercase)
+                .ok_or("tab list filter must be a string")
+        })
+        .transpose()?;
+    let limit = cmd
+        .get("limit")
+        .map(|value| {
+            value
+                .as_u64()
+                .filter(|limit| *limit > 0)
+                .ok_or("tab list limit must be a positive integer")
+        })
+        .transpose()?;
+
+    if let Some(filter) = filter {
+        tabs.retain(|tab| {
+            ["title", "url"].iter().any(|field| {
+                tab[*field]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_lowercase()
+                    .contains(&filter)
+            })
+        });
+    }
+    if let Some(limit) = limit {
+        tabs.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    }
+    Ok(tabs)
+}
+
+async fn handle_tab_list(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let tabs = mgr.tab_list();
+    let tabs = filter_tab_list(cmd, mgr.tab_list())?;
     Ok(json!({ "tabs": tabs }))
 }
 
@@ -13744,6 +13782,61 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tab_list_filter_preserves_rows_and_limits_after_matching() {
+        let tabs = vec![
+            json!({ "tabId": "t1", "targetId": "first", "label": "docs", "title": "Welcome", "url": "https://home.example/", "active": false, "type": "page" }),
+            json!({ "tabId": "t3", "targetId": "second", "label": null, "title": "API Docs", "url": "https://docs.example/reference", "active": false, "type": "page" }),
+            json!({ "tabId": "t8", "targetId": "third", "label": null, "title": "API Éditeur", "url": "https://example.com/RELEASES[1]", "active": true, "type": "page" }),
+        ];
+        for (options, indices) in [
+            (json!({}), vec![0, 1, 2]),
+            (json!({ "filter": "api" }), vec![1, 2]),
+            (json!({ "filter": "API", "limit": 1 }), vec![1]),
+            (json!({ "filter": "docs" }), vec![1]),
+            (json!({ "filter": "EXAMPLE.COM" }), vec![2]),
+            (json!({ "filter": "éDITEUR" }), vec![2]),
+            (json!({ "filter": "[1]" }), vec![2]),
+            (json!({ "filter": "^API" }), vec![]),
+            (json!({ "filter": "missing", "limit": 2 }), vec![]),
+            (json!({ "filter": "", "limit": 2 }), vec![0, 1]),
+            (json!({ "limit": 1 }), vec![0]),
+            (json!({ "limit": u64::MAX }), vec![0, 1, 2]),
+        ] {
+            let expected: Vec<Value> = indices
+                .into_iter()
+                .map(|index| tabs[index].clone())
+                .collect();
+            assert_eq!(
+                super::filter_tab_list(&options, tabs.clone()).unwrap(),
+                expected,
+                "{options}"
+            );
+        }
+        assert!(super::filter_tab_list(&json!({ "filter": "api" }), vec![])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn tab_list_filter_rejects_invalid_protocol_options() {
+        for options in [
+            json!({ "filter": 1 }),
+            json!({ "filter": null }),
+            json!({ "limit": 0 }),
+            json!({ "limit": -1 }),
+            json!({ "limit": 1.5 }),
+            json!({ "limit": "2" }),
+            json!({ "limit": null }),
+            json!({ "limit": 18446744073709551616.0 }),
+        ] {
+            assert!(
+                super::filter_tab_list(&options, vec![]).is_err(),
+                "{options}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_auth_login_releases_remote_objects_after_failures() {
         use futures_util::{SinkExt, StreamExt};

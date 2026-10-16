@@ -330,10 +330,13 @@ Headless Chromium screenshots hide native scrollbars for consistent image output
 
 ```bash
 agent-browser tab                      # list open tabs (with stable tabId)
+agent-browser tab list --filter docs --limit 5 # narrow the list before choosing a tab
 agent-browser tab new https://docs...  # open a new tab (and switch to it)
 agent-browser tab t2                   # switch to tab t2
 agent-browser tab close t2             # close tab t2
 ```
+
+Use `tab list --filter <text> --limit <n>` (or `tab --filter <text> --limit <n>`) to narrow discovery without switching tabs. See [Tabs and Windows](references/commands.md#tabs-and-windows) for matching, limits, validation and MCP arguments.
 
 Stable `tabId`s mean `t2` points at the same tab across commands even when other tabs open or close. After switching, refs from a prior snapshot on a different tab no longer apply — re-snapshot. `tab list --json` also reports each tab's CDP `targetId`, accepted anywhere a tab ref is accepted; target ids stay stable across daemon restarts, unlike `t<N>` ids.
 

@@ -229,6 +229,8 @@ agent-browser network har stop [output.har]    # Stop and save HAR
 
 ```bash
 agent-browser tab                              # List tabs with tabId and label
+agent-browser tab list --filter docs --limit 5 # First 5 tabs matching title or URL
+agent-browser tab --filter example.com        # Shorthand for tab list --filter
 agent-browser tab new [url]                    # New tab
 agent-browser tab new --label docs [url]       # New tab with a memorable label
 agent-browser tab t2                           # Switch to tab by id
@@ -238,6 +240,10 @@ agent-browser tab close t2                     # Close tab by id
 agent-browser tab close docs                   # Close tab by label
 agent-browser window new                       # New window
 ```
+
+`agent-browser tab list [--filter <text>] [--limit <n>]` and its alias `agent-browser tab [--filter <text>] [--limit <n>]` accept either option independently. `--filter` matches a case-insensitive literal substring in each tab's title or URL only, not labels or regex; an empty string matches all tabs. Filtering happens before limiting. Results preserve the existing order, stable ids and active flags without changing tab selection. With neither option, the existing full output and JSON schema are unchanged.
+
+`--limit` requires a positive integer; zero, negative, fractional, invalid and overflowing values are rejected. Missing CLI values for either option are errors. Use `--filter=--text` when the literal filter starts with `--`, so it is not parsed as an option. MCP `agent_browser_tab_list` accepts optional `filter` (string) and `limit` (positive integer) with the same semantics.
 
 Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused within a session, so the same id keeps referring to the same tab across commands. Positional integers are **not** accepted — `tab 2` errors with a teaching message; use `t2`.
 
