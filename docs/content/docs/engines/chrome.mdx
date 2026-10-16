@@ -106,3 +106,9 @@ agent-browser --args "--no-sandbox" open example.com
 ```
 
 agent-browser automatically adds `--no-sandbox` when it detects a container environment (Docker, Podman, running as root).
+
+Separate args with newlines, or with commas before another flag. Commas inside a value stay with that flag, so list-valued Chrome flags work:
+
+```bash
+agent-browser --args "--disable-features=Translate,HttpsUpgrades,--no-sandbox" open example.com
+```

@@ -9,6 +9,36 @@ const CONFIG_DIR: &str = ".agent-browser";
 const CONFIG_FILENAME: &str = "config.json";
 const PROJECT_CONFIG_FILENAME: &str = "agent-browser.json";
 
+/// Split `--args` into launch args. Newlines always separate args; commas separate
+/// only before another flag, so values like `--disable-features=A,B` stay whole.
+pub fn split_launch_args(input: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let ends_arg = match ch {
+            '\n' | '\r' => true,
+            ',' => chars.clone().find(|c| *c != ' ' && *c != '\t') == Some('-'),
+            _ => false,
+        };
+        if ends_arg {
+            push_launch_arg(&mut args, &mut current);
+        } else {
+            current.push(ch);
+        }
+    }
+    push_launch_arg(&mut args, &mut current);
+    args
+}
+
+fn push_launch_arg(args: &mut Vec<String>, current: &mut String) {
+    let arg = current.trim_matches(|c: char| c == ',' || c.is_whitespace());
+    if !arg.is_empty() {
+        args.push(arg.to_string());
+    }
+    current.clear();
+}
+
 /// Parse idle timeout from user-friendly format.
 /// Supports: "10s" (seconds), "3m" (minutes), "1h" (hours), or raw milliseconds.
 fn parse_idle_timeout(s: &str) -> Result<String, String> {
@@ -1278,6 +1308,51 @@ mod tests {
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn test_split_launch_args_splits_flags_on_commas() {
+        assert_eq!(
+            split_launch_args("--no-sandbox,--disable-gpu"),
+            vec!["--no-sandbox", "--disable-gpu"]
+        );
+    }
+
+    #[test]
+    fn test_split_launch_args_keeps_commas_inside_values() {
+        assert_eq!(
+            split_launch_args("--disable-features=HttpsUpgrades,HttpsFirstModeV2,Translate"),
+            vec!["--disable-features=HttpsUpgrades,HttpsFirstModeV2,Translate"]
+        );
+        assert_eq!(
+            split_launch_args("--window-size=1280,720,--no-sandbox"),
+            vec!["--window-size=1280,720", "--no-sandbox"]
+        );
+    }
+
+    #[test]
+    fn test_split_launch_args_mixed_values_and_flags() {
+        assert_eq!(
+            split_launch_args("--disable-features=A,B,C, --no-sandbox"),
+            vec!["--disable-features=A,B,C", "--no-sandbox"]
+        );
+    }
+
+    #[test]
+    fn test_split_launch_args_newlines_always_split() {
+        assert_eq!(
+            split_launch_args("--disable-features=A,B\r\n--enable-features=C,D\nplain"),
+            vec!["--disable-features=A,B", "--enable-features=C,D", "plain"]
+        );
+    }
+
+    #[test]
+    fn test_split_launch_args_ignores_empty_and_trailing_separators() {
+        assert_eq!(
+            split_launch_args("  --no-sandbox  ,   --disable-gpu,  \n\n"),
+            vec!["--no-sandbox", "--disable-gpu"]
+        );
+        assert!(split_launch_args(" , \n").is_empty());
     }
 
     #[test]
