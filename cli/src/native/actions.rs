@@ -6823,7 +6823,7 @@ async fn handle_back(state: &mut DaemonState) -> Result<Value, String> {
     }
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
-    mgr.evaluate("history.back()", None).await?;
+    history_step(mgr, &session_id, "history.back()", -1).await?;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     let url = mgr.get_url().await.unwrap_or_default();
     state.ref_map.invalidate_page(&session_id);
@@ -6842,11 +6842,78 @@ async fn handle_forward(state: &mut DaemonState) -> Result<Value, String> {
     }
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
-    mgr.evaluate("history.forward()", None).await?;
+    history_step(mgr, &session_id, "history.forward()", 1).await?;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     let url = mgr.get_url().await.unwrap_or_default();
     state.ref_map.invalidate_page(&session_id);
     Ok(json!({ "url": url }))
+}
+
+/// CDP reply Chrome sends when the navigation a page-script evaluate started
+/// tore down that script's execution context before the reply was produced.
+/// The navigation itself succeeded.
+const CONTEXT_TEARDOWN_ERROR: &str = "Inspected target navigated or closed";
+
+/// Step the session one history entry back (`delta` -1) or forward (`delta` +1).
+///
+/// The navigation runs through `Page.getNavigationHistory` +
+/// `Page.navigateToHistoryEntry`, which execute browser-side: driving
+/// `history.back()`/`history.forward()` from page script instead races the
+/// execution-context teardown the navigation starts, so the `Runtime.evaluate`
+/// reply can come back as [`CONTEXT_TEARDOWN_ERROR`] and fail the command even
+/// though the navigation succeeded (#2121). Engines that do not implement the
+/// history commands fall back to the page-script evaluation, tolerating that
+/// one reply from this call only.
+async fn history_step(
+    mgr: &BrowserManager,
+    session_id: &str,
+    script: &str,
+    delta: i64,
+) -> Result<(), String> {
+    if navigate_history(&mgr.client, session_id, delta)
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+    match mgr.evaluate(script, None).await {
+        Ok(_) => Ok(()),
+        Err(err) if err.contains(CONTEXT_TEARDOWN_ERROR) => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+/// Navigate through CDP history instead of page script. Returns `Ok(())`
+/// without sending anything when already at the target end of history, where
+/// the old page-script evaluation was a no-op.
+async fn navigate_history(client: &CdpClient, session_id: &str, delta: i64) -> Result<(), String> {
+    let history = client
+        .send_command("Page.getNavigationHistory", None, Some(session_id))
+        .await?;
+    let current = history
+        .get("currentIndex")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "Page.getNavigationHistory: missing currentIndex".to_string())?;
+    let entries = history
+        .get("entries")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Page.getNavigationHistory: missing entries".to_string())?;
+    let target_index = match usize::try_from(current + delta) {
+        Ok(i) if i < entries.len() => i,
+        _ => return Ok(()),
+    };
+    let entry_id = entries[target_index]
+        .get("id")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "Page.getNavigationHistory: entry without id".to_string())?;
+    client
+        .send_command(
+            "Page.navigateToHistoryEntry",
+            Some(json!({ "entryId": entry_id })),
+            Some(session_id),
+        )
+        .await
+        .map(|_| ())
 }
 
 async fn handle_reload(state: &mut DaemonState) -> Result<Value, String> {
@@ -18373,6 +18440,206 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         for dialog_type in &["confirm", "prompt"] {
             let auto_handled = auto_dialog && matches!(*dialog_type, "beforeunload" | "alert");
             assert!(!auto_handled, "{dialog_type} should NOT be auto-handled");
+        }
+    }
+
+    fn history_reply(request: &Value) -> Value {
+        json!({ "id": request["id"], "result": {} })
+    }
+
+    fn evaluate_url_response(value: &str) -> Value {
+        // `send_command` unwraps the outer CDP `result`, so `Runtime.evaluate`
+        // replies deserialize `EvaluateResult` from what is left here.
+        json!({ "result": { "type": "string", "value": value } })
+    }
+
+    async fn history_test_daemon(url: &str) -> DaemonState {
+        let mut state = DaemonState::new();
+        state.browser = Some(BrowserManager::connect_cdp_direct(url).await.unwrap());
+        state
+    }
+
+    #[tokio::test]
+    async fn back_and_forward_navigate_via_cdp_history_not_page_script() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut current_index = 1u64;
+            let mut navigated_to = Vec::new();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let mut response = history_reply(&request);
+                match request["method"].as_str().unwrap() {
+                    "Page.enable"
+                    | "Runtime.enable"
+                    | "Runtime.runIfWaitingForDebugger"
+                    | "Network.enable"
+                    | "WebMCP.enable" => {}
+                    "Page.getNavigationHistory" => {
+                        response["result"] = json!({
+                            "currentIndex": current_index,
+                            "entries": [
+                                { "id": 7, "url": "http://localhost:8931/" },
+                                { "id": 11, "url": "http://localhost:8931/two.html" },
+                            ],
+                        });
+                    }
+                    "Page.navigateToHistoryEntry" => {
+                        let entry_id = request["params"]["entryId"].as_u64().unwrap();
+                        navigated_to.push(entry_id);
+                        current_index = if entry_id == 7 { 0 } else { 1 };
+                    }
+                    // #2121: a history navigation started from page script
+                    // tears down that script's execution context, so
+                    // back/forward must drive navigation through CDP only.
+                    "Runtime.evaluate" => {
+                        assert_eq!(
+                            request["params"]["expression"].as_str(),
+                            Some("location.href"),
+                            "back/forward must not evaluate page script"
+                        );
+                        response["result"] = evaluate_url_response("http://localhost:8931/");
+                    }
+                    other => panic!("unexpected command: {other}"),
+                }
+                ws.send(Message::Text(response.to_string())).await.unwrap();
+            }
+            navigated_to
+        });
+
+        let mut state = history_test_daemon(&url).await;
+        let back = handle_back(&mut state).await.unwrap();
+        assert_eq!(back["url"], "http://localhost:8931/");
+        let forward = handle_forward(&mut state).await.unwrap();
+        assert_eq!(forward["url"], "http://localhost:8931/");
+        state.browser.take().unwrap().client.close().await;
+
+        let navigated_to = server.await.unwrap();
+        assert_eq!(navigated_to, vec![7, 11]);
+    }
+
+    #[tokio::test]
+    async fn back_at_start_of_history_is_a_noop_without_any_navigation() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let mut response = history_reply(&request);
+                match request["method"].as_str().unwrap() {
+                    "Page.enable"
+                    | "Runtime.enable"
+                    | "Runtime.runIfWaitingForDebugger"
+                    | "Network.enable"
+                    | "WebMCP.enable" => {}
+                    "Page.getNavigationHistory" => {
+                        response["result"] = json!({
+                            "currentIndex": 0,
+                            "entries": [{ "id": 7, "url": "http://localhost:8931/" }],
+                        });
+                    }
+                    "Page.navigateToHistoryEntry" => {
+                        panic!("nothing to go back to; the old page-script evaluation was a no-op")
+                    }
+                    "Runtime.evaluate" => {
+                        assert_eq!(
+                            request["params"]["expression"].as_str(),
+                            Some("location.href"),
+                            "back must not evaluate page script"
+                        );
+                        response["result"] = evaluate_url_response("http://localhost:8931/");
+                    }
+                    other => panic!("unexpected command: {other}"),
+                }
+                ws.send(Message::Text(response.to_string())).await.unwrap();
+            }
+        });
+
+        let mut state = history_test_daemon(&url).await;
+        let back = handle_back(&mut state).await.unwrap();
+        assert_eq!(back["url"], "http://localhost:8931/");
+        state.browser.take().unwrap().client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn back_fallback_evaluate_tolerates_only_the_context_teardown_error() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        // An engine without Page.getNavigationHistory falls back to evaluating
+        // history.back() in the page. The navigation that script starts can
+        // tear the context down before the reply (#2121): that one reply must
+        // read as success. Any other evaluate error must still fail the
+        // command so the fallback does not widen the swallowed error surface.
+        for (evaluate_error, expected_ok) in [
+            ("Inspected target navigated or closed", true),
+            ("Session not found", false),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+            let evaluate_error = evaluate_error.to_string();
+            let evaluate_error_display = evaluate_error.clone();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let mut evaluates = 0;
+                while let Some(Ok(Message::Text(text))) = ws.next().await {
+                    let request: Value = serde_json::from_str(&text).unwrap();
+                    let mut response = history_reply(&request);
+                    match request["method"].as_str().unwrap() {
+                        "Page.enable"
+                        | "Runtime.enable"
+                        | "Runtime.runIfWaitingForDebugger"
+                        | "Network.enable"
+                        | "WebMCP.enable" => {}
+                        "Page.getNavigationHistory" => {
+                            response["error"] = json!({
+                                "code": -32601,
+                                "message": "'Page.getNavigationHistory' wasn't found"
+                            });
+                        }
+                        "Runtime.evaluate" => {
+                            evaluates += 1;
+                            if evaluates == 1 {
+                                response["error"] = json!({
+                                    "code": -32000,
+                                    "message": evaluate_error,
+                                });
+                            } else {
+                                assert_eq!(
+                                    request["params"]["expression"].as_str(),
+                                    Some("location.href")
+                                );
+                                response["result"] =
+                                    evaluate_url_response("http://localhost:8931/");
+                            }
+                        }
+                        other => panic!("unexpected command: {other}"),
+                    }
+                    ws.send(Message::Text(response.to_string())).await.unwrap();
+                }
+            });
+
+            let mut state = history_test_daemon(&url).await;
+            let result = handle_back(&mut state).await;
+            assert_eq!(
+                result.is_ok(),
+                expected_ok,
+                "evaluate error {evaluate_error_display:?} -> {result:?}"
+            );
+            state.browser.take().unwrap().client.close().await;
+            server.await.unwrap();
         }
     }
 }
