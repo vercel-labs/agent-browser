@@ -14,11 +14,10 @@ agent-browser open example.com
 # 2. Snapshot to get element refs
 agent-browser snapshot -i
 # Output:
-# @e1 [heading] "Example Domain"
-# @e2 [link] "More information..."
+# - link "Learn more" [ref=e1]
 
 # 3. Interact using refs
-agent-browser click @e2
+agent-browser click @e1
 
 # 4. Re-snapshot after page changes
 agent-browser snapshot -i

@@ -1,5 +1,11 @@
 {
   "pages": {
+    "/": [
+      {
+        "from": "# - heading \"Example Domain\" [ref=e1]\n# - link \"More information...\" [ref=e2]\n\n# Interact using refs\nagent-browser click @e2",
+        "to": "# - link \"Learn more\" [ref=e1]\n\n# Interact using refs\nagent-browser click @e1"
+      }
+    ],
     "/commands": [
       {
         "from": "# Trust a CA for locally launched Chromium on Linux",
@@ -36,6 +42,12 @@
       {
         "from": "It is not supported on macOS or Windows.",
         "to": "Browser trust is not supported on macOS or Windows, where Chromium already uses the operating system trust store."
+      }
+    ],
+    "/quick-start": [
+      {
+        "from": "# @e1 [heading] \"Example Domain\"\n# @e2 [link] \"More information...\"\n\n# 3. Interact using refs\nagent-browser click @e2",
+        "to": "# - link \"Learn more\" [ref=e1]\n\n# 3. Interact using refs\nagent-browser click @e1"
       }
     ]
   },
