@@ -664,12 +664,12 @@ impl BrowserManager {
                 .await;
         }
 
-        if let Some(ref path) = download_path {
+        if download_path.is_some() {
             let _ = manager
                 .client
                 .send_command(
                     "Browser.setDownloadBehavior",
-                    Some(json!({ "behavior": "allow", "downloadPath": path })),
+                    Some(launch_download_behavior(download_path.as_deref())),
                     None,
                 )
                 .await;
@@ -2277,6 +2277,27 @@ impl BrowserManager {
         &self.visited_origins
     }
 
+    /// Restores the download behavior configured at launch after `download`
+    /// redirected the browser's downloads into its own directory with GUID
+    /// file names. Without this, later plain clicks keep saving GUID-named
+    /// files into the last `download` directory instead of `--download-path`.
+    ///
+    /// Browsers attached over CDP are left alone: their own download settings
+    /// cannot be read back, and resetting them would discard them.
+    pub async fn restore_download_behavior(&self) -> Result<(), String> {
+        if self.is_cdp_connection() {
+            return Ok(());
+        }
+        self.client
+            .send_command(
+                "Browser.setDownloadBehavior",
+                Some(launch_download_behavior(self.download_path.as_deref())),
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn set_download_behavior(&self, download_path: &str) -> Result<(), String> {
         let session_id = self.active_session_id()?;
         self.client
@@ -2291,6 +2312,15 @@ impl BrowserManager {
             )
             .await?;
         Ok(())
+    }
+}
+
+/// `Browser.setDownloadBehavior` parameters for the download location chosen
+/// at launch: `--download-path` when set, otherwise Chrome's own default.
+fn launch_download_behavior(download_path: Option<&str>) -> Value {
+    match download_path {
+        Some(path) => json!({ "behavior": "allow", "downloadPath": path }),
+        None => json!({ "behavior": "default" }),
     }
 }
 
@@ -3335,6 +3365,29 @@ mod tests {
             bound_target_gone: None,
             headless: true,
         }
+    }
+
+    #[test]
+    fn test_launch_download_behavior_matches_launch_options() {
+        assert_eq!(
+            launch_download_behavior(Some("/tmp/downloads")),
+            json!({ "behavior": "allow", "downloadPath": "/tmp/downloads" })
+        );
+        assert_eq!(
+            launch_download_behavior(None),
+            json!({ "behavior": "default" })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_restore_download_behavior_leaves_attached_browser_alone() {
+        // The dummy server never answers, so sending any command would hang.
+        let mut manager = test_manager(Vec::new()).await;
+        tokio::time::timeout(Duration::from_secs(1), manager.restore_download_behavior())
+            .await
+            .expect("restoring must not send a command to an attached browser")
+            .unwrap();
+        manager.close().await.unwrap();
     }
 
     #[tokio::test]
