@@ -8,12 +8,20 @@
       {
         "from": "# Clear CA trust retained by the running session",
         "to": "# Clear CA trust retained by the running session\n--use-system-ca          # Use the OS trust store for CLI requests (read, install, upgrade, doctor)"
+      },
+      {
+        "from": "--auto-connect           # Auto-discover and connect to running Chrome",
+        "to": "--auto-connect           # Auto-discover and connect to running Chrome\n# autoConnectTimeout / AGENT_BROWSER_AUTO_CONNECT_TIMEOUT adjusts auto-connect discovery and approval wait for a connection attempt (default 20000ms when omitted, including implicit recovery); changing or omitting it reuses an existing daemon and browser connection"
       }
     ],
     "/configuration": [
       {
         "from": "This initial implementation does not support",
         "to": "Browser trust does not support"
+      },
+      {
+        "from": "\"hideScrollbars\": false,\n  \"ignoreHttpsErrors\": true\n}",
+        "to": "\"hideScrollbars\": false,\n  \"ignoreHttpsErrors\": true,\n  \"autoConnectTimeout\": 25000\n}"
       }
     ],
     "/proxy": [
@@ -40,6 +48,6 @@
     ]
   },
   "resources": {
-    "/schema.json": { "size": 9427, "sha256": "eecb6f5aa3f6c7f0a4f0fb1176923c5b7d005065fea101ff90394c2845b97468" }
+    "/schema.json": { "size": 9860, "sha256": "aa1b3bd3704601efef4ccb8b69a8d980009812385d508cb874bf59c740e6a19e" }
   }
 }

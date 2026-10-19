@@ -3608,6 +3608,7 @@ mod tests {
             device: None,
             auto_connect: false,
             pin_tab: false,
+            auto_connect_timeout: None,
             session_name: None,
             restore: None,
             restore_save: None,

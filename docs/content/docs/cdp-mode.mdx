@@ -57,6 +57,8 @@ Auto-connect discovers Chrome by:
 
 Chrome 144+ shows a remote-debugging permission prompt on the first connection. Auto-connect waits up to 20 seconds for approval. If the prompt is still open after that, the command fails with a message asking you to approve it and retry, without opening a second prompt.
 
+Set `autoConnectTimeout` in config or `AGENT_BROWSER_AUTO_CONNECT_TIMEOUT` in the environment to change that wait, for example to 30000ms for a longer approval window. The timeout covers discovery and approval together. When omitted, it stays at 20000ms, including for implicit recovery after a lost connection. It applies only to an attempt that needs to connect, so changing or omitting it between commands reuses the current daemon and browser connection.
+
 This is useful when:
 
 - Chrome 144+ has remote debugging enabled via `chrome://inspect/#remote-debugging` (which uses a dynamic port)
@@ -137,6 +139,7 @@ This enables control of:
     <tr><td><code>--auto-connect</code></td><td>Auto-discover and connect to running Chrome</td></tr>
     <tr><td><code>--pin-tab</code></td><td>Pin the session to its bound tab (strict tab binding)</td></tr>
     <tr><td><code>--no-pin-tab</code></td><td>Disable a sticky pin previously enabled with <code>--pin-tab</code></td></tr>
+    <tr><td><code>autoConnectTimeout</code></td><td>Config/env only auto-connect discovery and approval timeout in ms; omitted values use 20000ms, including implicit recovery, and changing or omitting it reuses an existing daemon and browser connection</td></tr>
     <tr><td><code>--color-scheme &lt;scheme&gt;</code></td><td>Persistent color scheme (<code>dark</code>, <code>light</code>, <code>no-preference</code>)</td></tr>
     <tr><td><code>--debug</code></td><td>Debug output</td></tr>
   </tbody>
