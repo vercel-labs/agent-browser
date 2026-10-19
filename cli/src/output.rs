@@ -2233,6 +2233,9 @@ Usage: agent-browser snapshot [options]
 Returns an accessibility tree representation of the page with element
 references (like @e1, @e2) that can be used in subsequent commands.
 Refs can be reused across snapshots. Take a fresh snapshot after navigation.
+Iframe lines use the iframe's name as a display fallback when the accessibility
+tree has no name. Ref identity keeps the real accessibility name, and iframe
+URLs are not displayed.
 
 Options:
   -i, --interactive    Only include interactive elements

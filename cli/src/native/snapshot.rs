@@ -191,6 +191,9 @@ pub struct SnapshotOptions {
 struct TreeNode {
     role: String,
     name: String,
+    /// Presentation-only fallback. Refs and role/name locators continue to
+    /// use the real accessibility name.
+    display_name: Option<String>,
     level: Option<i64>,
     checked: Option<String>,
     expanded: Option<bool>,
@@ -214,6 +217,7 @@ impl TreeNode {
         Self {
             role: String::new(),
             name: String::new(),
+            display_name: None,
             level: None,
             checked: None,
             expanded: None,
@@ -634,6 +638,29 @@ pub async fn take_snapshot(
         }
     }
 
+    // Resolve iframe metadata once so the DOM name can be used for
+    // presentation while the same frame metadata drives recursion below.
+    let mut iframe_metadata: Vec<(usize, IframeMetadata)> = Vec::new();
+    let iframe_nodes: Vec<(usize, i64, bool)> = tree_nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(node_idx, node)| {
+            (node.role == "Iframe" && node.has_ref).then_some((
+                node_idx,
+                node.backend_node_id?,
+                node.name.is_empty(),
+            ))
+        })
+        .collect();
+    for (node_idx, bid, name_is_empty) in iframe_nodes {
+        if let Ok(metadata) = resolve_iframe_frame(client, effective_session_id, bid).await {
+            if name_is_empty {
+                tree_nodes[node_idx].display_name = metadata.name.clone();
+            }
+            iframe_metadata.push((node_idx, metadata));
+        }
+    }
+
     let mut output = String::new();
     for &root_idx in &effective_roots {
         render_tree(&tree_nodes, root_idx, 0, &mut output, options);
@@ -645,33 +672,25 @@ pub async fn take_snapshot(
     // unbounded depth; nested iframes within iframes are not expanded.
     if frame_id.is_none() {
         let mut iframe_snapshots: Vec<(String, String)> = Vec::new(); // (ref_id, child_snapshot)
-        for node in tree_nodes.iter() {
-            if node.role != "Iframe" || !node.has_ref {
-                continue;
-            }
-            let Some(bid) = node.backend_node_id else {
-                continue;
-            };
-            let ref_id = node.ref_id.as_deref().unwrap_or("");
-            if let Ok(child_fid) = resolve_iframe_frame_id(client, session_id, bid).await {
-                // Snapshot the child frame; errors are silently ignored
-                // (e.g. cross-origin iframes)
-                if let Ok(child_text) = Box::pin(take_snapshot(
-                    client,
-                    session_id,
-                    options,
-                    ref_map,
-                    Some(&child_fid),
-                    iframe_sessions,
-                ))
-                .await
+        for (node_idx, metadata) in iframe_metadata {
+            let ref_id = tree_nodes[node_idx].ref_id.as_deref().unwrap_or("");
+            // Snapshot the child frame; errors are silently ignored (e.g.
+            // cross-origin iframes).
+            if let Ok(child_text) = Box::pin(take_snapshot(
+                client,
+                session_id,
+                options,
+                ref_map,
+                Some(&metadata.frame_id),
+                iframe_sessions,
+            ))
+            .await
+            {
+                if !child_text.is_empty()
+                    && child_text != "(empty page)"
+                    && child_text != "(no interactive elements)"
                 {
-                    if !child_text.is_empty()
-                        && child_text != "(empty page)"
-                        && child_text != "(no interactive elements)"
-                    {
-                        iframe_snapshots.push((ref_id.to_string(), child_text));
-                    }
+                    iframe_snapshots.push((ref_id.to_string(), child_text));
                 }
             }
         }
@@ -724,7 +743,11 @@ pub async fn take_snapshot(
     Ok(trimmed)
 }
 
-/// Resolve the child frame ID for an iframe element given its backendNodeId.
+struct IframeMetadata {
+    frame_id: String,
+    name: Option<String>,
+}
+
 fn frame_loader<'a>(tree: &'a Value, frame_id: Option<&str>) -> Option<&'a str> {
     let frame = &tree["frame"];
     if frame_id.is_none() || frame["id"].as_str() == frame_id {
@@ -736,11 +759,13 @@ fn frame_loader<'a>(tree: &'a Value, frame_id: Option<&str>) -> Option<&'a str> 
         .find_map(|child| frame_loader(child, frame_id))
 }
 
-async fn resolve_iframe_frame_id(
+/// Resolve the child frame and its non-sensitive presentation metadata for an
+/// iframe element given its backendNodeId. The URL is intentionally ignored.
+async fn resolve_iframe_frame(
     client: &CdpClient,
     session_id: &str,
     backend_node_id: i64,
-) -> Result<String, String> {
+) -> Result<IframeMetadata, String> {
     // depth: 1 ensures contentDocument is included in the response
     let describe: Value = client
         .send_command(
@@ -750,23 +775,41 @@ async fn resolve_iframe_frame_id(
         )
         .await?;
 
-    // Try contentDocument.frameId first (standard for iframes)
-    if let Some(frame_id) = describe
+    let node = describe
         .get("node")
-        .and_then(|n| n.get("contentDocument"))
+        .ok_or_else(|| "Could not resolve iframe node".to_string())?;
+
+    // Try contentDocument.frameId first (standard for iframes)
+    let frame_id = if let Some(frame_id) = node
+        .get("contentDocument")
         .and_then(|cd| cd.get("frameId"))
         .and_then(|v| v.as_str())
     {
-        return Ok(frame_id.to_string());
-    }
+        frame_id
+    } else {
+        // Fallback: the node itself may have a frameId
+        node.get("frameId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "Could not resolve iframe frame ID".to_string())?
+    };
 
-    // Fallback: the node itself may have a frameId
-    describe
-        .get("node")
-        .and_then(|n| n.get("frameId"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "Could not resolve iframe frame ID".to_string())
+    Ok(IframeMetadata {
+        frame_id: frame_id.to_string(),
+        name: dom_attribute(node, "name").map(str::to_string),
+    })
+}
+
+fn dom_attribute<'a>(node: &'a Value, attribute_name: &str) -> Option<&'a str> {
+    node.get("attributes")
+        .and_then(Value::as_array)
+        .and_then(|attrs| {
+            attrs.as_chunks::<2>().0.iter().find_map(|pair| {
+                pair[0]
+                    .as_str()
+                    .filter(|name| name.eq_ignore_ascii_case(attribute_name))
+                    .and_then(|_| pair[1].as_str())
+            })
+        })
 }
 
 async fn find_cursor_interactive_elements(
@@ -1107,6 +1150,7 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
         tree_nodes.push(TreeNode {
             role,
             name,
+            display_name: None,
             level,
             checked,
             expanded,
@@ -1268,9 +1312,12 @@ fn render_tree(
     let prefix = "  ".repeat(indent);
     let mut line = format!("{}- {}", prefix, role);
 
-    // Use ARIA name if available, only fall back to cursor-interactive textContent in interactive mode since their visible text in child nodes is filtered out
+    // Use the real AX name first. Iframe DOM names are presentation-only
+    // fallbacks and must not become the ref-map's accessible name.
     let unescaped_display_name = if !node.name.is_empty() {
         &node.name
+    } else if node.role == "Iframe" {
+        node.display_name.as_deref().unwrap_or("")
     } else if options.interactive {
         if let Some(ref ci) = node.cursor_info {
             &ci.text
@@ -1516,6 +1563,38 @@ mod tests {
             "Capital Federal"
         );
         assert_eq!(normalize_snapshot_name("zero\u{200B}width"), "zerowidth");
+    }
+
+    #[test]
+    fn test_dom_attribute_reads_name_only_when_present() {
+        let node = serde_json::json!({
+            "attributes": ["NAME", "results", "title", "Accessible Result"]
+        });
+
+        assert_eq!(dom_attribute(&node, "name"), Some("results"));
+        assert_eq!(dom_attribute(&node, "src"), None);
+    }
+
+    #[test]
+    fn test_iframe_display_name_is_presentation_only() {
+        let mut fallback = make_node("Iframe", "", Some(1));
+        fallback.display_name = Some("results".to_string());
+        fallback.has_ref = true;
+        fallback.ref_id = Some("e1".to_string());
+
+        let mut accessible = make_node("Iframe", "Accessible frame", Some(2));
+        accessible.display_name = Some("dom-name".to_string());
+        accessible.has_ref = true;
+        accessible.ref_id = Some("e2".to_string());
+
+        let nodes = vec![fallback, accessible];
+        let mut output = String::new();
+        render_tree(&nodes, 0, 0, &mut output, &SnapshotOptions::default());
+        render_tree(&nodes, 1, 0, &mut output, &SnapshotOptions::default());
+
+        assert!(output.contains("- Iframe \"results\" [ref=e1]"));
+        assert!(output.contains("- Iframe \"Accessible frame\" [ref=e2]"));
+        assert!(!output.contains("dom-name"));
     }
 
     #[test]

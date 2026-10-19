@@ -836,7 +836,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_SNAPSHOT,
             "Snapshot page",
-            "Return an accessibility-tree snapshot with reusable element refs.",
+            "Return an accessibility-tree snapshot with reusable element refs. Iframe names are used only as a display fallback when the accessibility tree has no name; refs keep the real accessibility name and iframe URLs are not displayed.",
             json!({
                 "interactive": { "type": "boolean", "default": true, "description": "Only include interactive elements." },
                 "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements." },
