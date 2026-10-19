@@ -22,7 +22,6 @@ export const navigation: NavSection[] = [
     title: "Reference",
     items: [
       { name: "Commands", href: "/commands" },
-      { name: "WebMCP", href: "/webmcp" },
       { name: "Configuration", href: "/configuration" },
       { name: "Plugins", href: "/plugins" },
       { name: "Selectors", href: "/selectors" },
@@ -37,6 +36,7 @@ export const navigation: NavSection[] = [
       { name: "Diffing", href: "/diffing" },
       { name: "Network", href: "/network" },
       { name: "CDP Mode", href: "/cdp-mode" },
+      { name: "WebMCP", href: "/webmcp" },
       { name: "Streaming", href: "/streaming" },
       { name: "Video Recording", href: "/recording" },
       { name: "WebGPU", href: "/webgpu" },
@@ -72,6 +72,7 @@ export const navigation: NavSection[] = [
     items: [
       { name: "Chrome", href: "/engines/chrome" },
       { name: "Lightpanda", href: "/engines/lightpanda" },
+      { name: "Obscura", href: "/engines/obscura" },
     ],
   },
   {
@@ -81,5 +82,5 @@ export const navigation: NavSection[] = [
 ];
 
 export const allDocsPages: NavItem[] = navigation.flatMap(
-  (section) => section.items
+  (section) => section.items,
 );

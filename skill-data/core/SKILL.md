@@ -486,19 +486,23 @@ EOF
 --session <name>        # isolated browser session
 --json                  # JSON output (for machine parsing)
 --headed                # show the window (default is headless)
+--engine <name>         # chrome (default), lightpanda, obscura (experimental)
 --webgpu                # enable WebGPU (software Vulkan on Linux, no GPU needed)
 --auto-connect          # connect to an already-running Chrome
 --cdp <port|url>        # connect to a CDP port or WebSocket URL; root query slash is optional
 --profile <name|path>   # use a Chrome profile (login state survives)
 --headers <json>        # HTTP headers scoped to the URL's origin
 --proxy <url>           # proxy server
---ca-cert <path>        # trust a CA in local Chromium on Linux (install --with-deps provides certutil)
+--ca-cert <path>        # trust a CA for CLI requests, and in local Chromium on Linux (install --with-deps provides certutil)
 --no-ca-cert            # clear CA trust retained by the running session
+--use-system-ca         # OS trust store for CLI requests (read, install, upgrade, doctor)
 --state <path>          # load saved auth state from JSON
 --restore [name]        # auto-save/restore session state, defaults to --session
 --restore-save <policy> # auto, always, or never
 --namespace <name>      # isolate daemon sockets and restore-state directories
 ```
+
+Engine setup and limits: [Lightpanda](https://agent-browser.dev/engines/lightpanda), [Obscura (experimental)](https://agent-browser.dev/engines/obscura).
 
 ## When to load another skill
 

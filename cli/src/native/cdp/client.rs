@@ -39,6 +39,12 @@ type PrivateSessions = Arc<std::sync::Mutex<HashMap<String, mpsc::Sender<CdpEven
 /// cannot keep up should lose frames, not stall the reader.
 const PRIVATE_SESSION_BUFFER: usize = 16;
 
+/// Lossless taps for events that must each get a reply (paused requests,
+/// auth challenges, targets waiting for the debugger). Unlike the bounded
+/// broadcast, a tap never drops an event when its reader falls behind.
+type MethodTaps =
+    Arc<std::sync::Mutex<Vec<(&'static [&'static str], mpsc::UnboundedSender<CdpEvent>)>>>;
+
 /// Interval between WebSocket ping frames sent to keep the connection alive
 /// through intermediate proxies (reverse proxies, load balancers, service meshes).
 const WS_KEEPALIVE_INTERVAL_SECS: u64 = 30;
@@ -163,6 +169,7 @@ pub struct CdpClient {
     reader_handle: Mutex<Option<JoinHandle<()>>>,
     keepalive_handle: Mutex<Option<JoinHandle<()>>>,
     private_sessions: PrivateSessions,
+    method_taps: MethodTaps,
 }
 
 /// Removes a pending entry if `send_command` is cancelled mid-await (e.g. an
@@ -256,12 +263,14 @@ impl CdpClient {
         let closed = Arc::new(AtomicBool::new(false));
 
         let private_sessions: PrivateSessions = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let method_taps: MethodTaps = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let pending_clone = pending.clone();
         let event_tx_clone = event_tx.clone();
         let raw_tx_clone = raw_tx.clone();
         let closed_reader = closed.clone();
         let private_clone = private_sessions.clone();
+        let taps_clone = method_taps.clone();
 
         // Notify used to stop the keepalive task when the reader loop exits.
         let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
@@ -371,6 +380,12 @@ impl CdpClient {
                         }
                     });
                     if !routed {
+                        let mut taps = taps_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        taps.retain(|(methods, tx)| {
+                            !methods.contains(&event.method.as_str())
+                                || tx.send(event.clone()).is_ok()
+                        });
+                        drop(taps);
                         let _ = event_tx_clone.send(event);
                     }
                 }
@@ -423,6 +438,7 @@ impl CdpClient {
             reader_handle: Mutex::new(Some(reader_handle)),
             keepalive_handle: Mutex::new(Some(keepalive_handle)),
             private_sessions,
+            method_taps,
         })
     }
 
@@ -529,6 +545,21 @@ impl CdpClient {
 
     pub fn subscribe(&self) -> broadcast::Receiver<CdpEvent> {
         self.event_tx.subscribe()
+    }
+
+    /// Deliver every event whose method is in `methods` to the returned
+    /// receiver without loss. The events still reach the broadcast. Dropping
+    /// the receiver ends the tap on the next matching event.
+    pub fn subscribe_methods(
+        &self,
+        methods: &'static [&'static str],
+    ) -> mpsc::UnboundedReceiver<CdpEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.method_taps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((methods, tx));
+        rx
     }
 
     /// Deliver every event carrying `session_id` to the returned receiver
@@ -1187,6 +1218,53 @@ mod tests {
         );
 
         client.unsubscribe_session("S-REC");
+        drop(client);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn method_tap_keeps_every_event_when_the_broadcast_lags() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ready_rx.await.unwrap();
+            for i in 0..7000 {
+                let method = if i % 7 == 0 {
+                    "Fetch.requestPaused"
+                } else {
+                    "Network.dataReceived"
+                };
+                let msg = serde_json::json!({ "method": method, "params": { "n": i } });
+                ws.send(Message::Text(msg.to_string())).await.unwrap();
+            }
+            let _ = ws.next().await;
+        });
+
+        let client = CdpClient::connect(&format!("ws://127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        let mut broadcast_rx = client.subscribe();
+        let mut tap = client.subscribe_methods(&["Fetch.requestPaused"]);
+        ready_tx.send(()).unwrap();
+
+        let wait = std::time::Duration::from_secs(5);
+        for expected in (0..7000).step_by(7) {
+            let event = tokio::time::timeout(wait, tap.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(event.method, "Fetch.requestPaused");
+            assert_eq!(event.params["n"], expected);
+        }
+        assert!(matches!(
+            broadcast_rx.recv().await,
+            Err(broadcast::error::RecvError::Lagged(_))
+        ));
+
         drop(client);
         server.abort();
     }

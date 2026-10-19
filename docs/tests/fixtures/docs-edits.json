@@ -1,0 +1,45 @@
+{
+  "pages": {
+    "/commands": [
+      {
+        "from": "# Trust a CA for locally launched Chromium on Linux",
+        "to": "# Trust a CA for CLI requests, and for local Chromium on Linux"
+      },
+      {
+        "from": "# Clear CA trust retained by the running session",
+        "to": "# Clear CA trust retained by the running session\n--use-system-ca          # Use the OS trust store for CLI requests (read, install, upgrade, doctor)"
+      }
+    ],
+    "/configuration": [
+      {
+        "from": "This initial implementation does not support",
+        "to": "Browser trust does not support"
+      }
+    ],
+    "/proxy": [
+      {
+        "from": "--ca-cert /etc/ssl/certs/proxy-ca.pem open https://example.com",
+        "to": "--ca-cert /etc/ssl/certs/proxy-ca.pem open https://example.com\nagent-browser --use-system-ca read https://example.com"
+      },
+      {
+        "from": "Trust a CA certificate or PEM bundle in a locally launched Chromium browser on Linux",
+        "to": "Trust a CA certificate or PEM bundle for the CLI's own HTTPS requests, and in a locally launched Chromium browser on Linux"
+      },
+      {
+        "from": "Path to a CA certificate or PEM bundle for locally launched Chromium on Linux",
+        "to": "Path to a CA certificate or PEM bundle for CLI requests and locally launched Chromium on Linux"
+      },
+      {
+        "from": "The option cannot be combined with",
+        "to": "For browser commands, the option cannot be combined with"
+      },
+      {
+        "from": "It is not supported on macOS or Windows.",
+        "to": "Browser trust is not supported on macOS or Windows, where Chromium already uses the operating system trust store."
+      }
+    ]
+  },
+  "resources": {
+    "/schema.json": { "size": 9427, "sha256": "eecb6f5aa3f6c7f0a4f0fb1176923c5b7d005065fea101ff90394c2845b97468" }
+  }
+}

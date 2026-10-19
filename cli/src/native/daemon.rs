@@ -256,6 +256,7 @@ async fn run_socket_server(
 
     let idle_sleep = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
     let mut idle_sleep_pin = idle_sleep.map(Box::pin);
+    let mut idle_lock: Option<IdleLock> = None;
 
     loop {
         tokio::select! {
@@ -276,33 +277,21 @@ async fn run_socket_server(
                 }
             }
             _ = drain_interval.tick() => {
-                let mut s = state.lock().await;
-                let process_exited = s
-                    .browser
-                    .as_mut()
-                    .map(|mgr| mgr.has_process_exited())
-                    .unwrap_or(false);
-                if process_exited {
-                    let _ = close_current_browser(&mut s).await;
-                } else if s.browser.is_some() {
-                    if let Err(error) = s.drain_cdp_events_background().await {
-                        let _ = writeln!(
-                            std::io::stderr(),
-                            "Failed to apply browser network controls: {}",
-                            error
-                        );
-                    } else {
-                        maybe_autosave_restore_state(&mut s, autosave_interval_ms).await;
-                    }
-                }
+                spawn_background_tick_if_idle(state.clone(), autosave_interval_ms);
             }
             _ = async {
                 match idle_sleep_pin {
                     Some(ref mut s) => s.as_mut().await,
                     None => std::future::pending::<()>().await,
                 }
-            }, if idle_timeout_ms.is_some() => {
-                let mut s = state.lock().await;
+            }, if idle_timeout_ms.is_some() && idle_lock.is_none() => {
+                // Wait for the state lock in its own branch so a command
+                // holding it does not stop the loop accepting connections.
+                idle_lock = Some(Box::pin(state.clone().lock_owned()));
+            }
+            s = async { idle_lock.as_mut().expect("idle lock armed").await }, if idle_lock.is_some() => {
+                idle_lock = None;
+                let mut s = s;
                 // The timer may have expired while a command held the state
                 // lock. Command completion refreshes the shared activity
                 // clock before releasing that lock, so re-check it here.
@@ -345,7 +334,12 @@ async fn run_socket_server(
                 break;
             }
             _ = shutdown_signal() => {
-                let mut s = state.lock().await;
+                // An armed idle lock already holds a place in the lock queue;
+                // await it rather than queueing behind it.
+                let mut s = match idle_lock.take() {
+                    Some(idle_lock) => idle_lock.await,
+                    None => state.clone().lock_owned().await,
+                };
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_all_browser_backends(&mut s).await;
                 break;
@@ -404,6 +398,7 @@ async fn run_socket_server(
 
     let idle_sleep = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
     let mut idle_sleep_pin = idle_sleep.map(Box::pin);
+    let mut idle_lock: Option<IdleLock> = None;
 
     // Mirror the unix loop's background tick: reap a browser the user closed
     // by hand, and drain CDP events (dialog state in particular) before
@@ -430,26 +425,21 @@ async fn run_socket_server(
                 }
             }
             _ = drain_interval.tick() => {
-                let mut s = state.lock().await;
-                let process_exited = s
-                    .browser
-                    .as_mut()
-                    .map(|mgr| mgr.has_process_exited())
-                    .unwrap_or(false);
-                if process_exited {
-                    let _ = close_current_browser(&mut s).await;
-                } else if s.browser.is_some() {
-                    s.drain_cdp_events_background().await;
-                    maybe_autosave_restore_state(&mut s, autosave_interval_ms).await;
-                }
+                spawn_background_tick_if_idle(state.clone(), autosave_interval_ms);
             }
             _ = async {
                 match idle_sleep_pin {
                     Some(ref mut s) => s.as_mut().await,
                     None => std::future::pending::<()>().await,
                 }
-            }, if idle_timeout_ms.is_some() => {
-                let mut s = state.lock().await;
+            }, if idle_timeout_ms.is_some() && idle_lock.is_none() => {
+                // Wait for the state lock in its own branch so a command
+                // holding it does not stop the loop accepting connections.
+                idle_lock = Some(Box::pin(state.clone().lock_owned()));
+            }
+            s = async { idle_lock.as_mut().expect("idle lock armed").await }, if idle_lock.is_some() => {
+                idle_lock = None;
+                let mut s = s;
                 if let Some(remaining) =
                     remaining_idle_timeout(&idle_activity, idle_timeout_ms.unwrap_or_default())
                 {
@@ -488,7 +478,12 @@ async fn run_socket_server(
                 break;
             }
             _ = shutdown_signal() => {
-                let mut s = state.lock().await;
+                // An armed idle lock already holds a place in the lock queue;
+                // await it rather than queueing behind it.
+                let mut s = match idle_lock.take() {
+                    Some(idle_lock) => idle_lock.await,
+                    None => state.clone().lock_owned().await,
+                };
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_all_browser_backends(&mut s).await;
                 let _ = fs::remove_file(&port_path);
@@ -498,6 +493,43 @@ async fn run_socket_server(
     }
 
     Ok(())
+}
+
+type IdleLock = std::pin::Pin<
+    Box<dyn std::future::Future<Output = tokio::sync::OwnedMutexGuard<DaemonState>> + Send>,
+>;
+
+/// Run the periodic browser maintenance tick in the background, skipping it
+/// when a command holds the state lock. A skipped tick loses nothing: CDP
+/// events stay buffered and autosave is rechecked on the next tick.
+fn spawn_background_tick_if_idle(
+    state: Arc<tokio::sync::Mutex<DaemonState>>,
+    autosave_interval_ms: u64,
+) -> bool {
+    let Ok(mut state) = state.try_lock_owned() else {
+        return false;
+    };
+    tokio::spawn(async move {
+        let process_exited = state
+            .browser
+            .as_mut()
+            .map(|mgr| mgr.has_process_exited())
+            .unwrap_or(false);
+        if process_exited {
+            let _ = close_current_browser(&mut state).await;
+        } else if state.browser.is_some() {
+            if let Err(error) = state.drain_cdp_events_background().await {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "Failed to apply browser network controls: {}",
+                    error
+                );
+            } else {
+                maybe_autosave_restore_state(&mut state, autosave_interval_ms).await;
+            }
+        }
+    });
+    true
 }
 
 async fn handle_connection<S>(
@@ -814,6 +846,24 @@ mod tests {
             &direct
         ));
         assert!(close_completed_response("confirm", &confirmed));
+    }
+
+    #[tokio::test]
+    async fn test_background_tick_skips_busy_state() {
+        let state = Arc::new(tokio::sync::Mutex::new(DaemonState::new()));
+        let held = state.lock().await;
+
+        for _ in 0..100 {
+            assert!(!spawn_background_tick_if_idle(state.clone(), 30_000));
+        }
+        // Skipped ticks must not leave tasks queued on the lock.
+        assert_eq!(Arc::strong_count(&state), 1);
+
+        drop(held);
+        assert!(spawn_background_tick_if_idle(state.clone(), 30_000));
+        let _ = tokio::time::timeout(Duration::from_secs(1), state.lock())
+            .await
+            .expect("background tick should release the state lock");
     }
 
     /// Guard against re-introducing `waitpid(-1)` in daemon code.

@@ -63,6 +63,10 @@ const AUTH_LOGIN_SELECTOR_POLL_INTERVAL_MS: u64 = 100;
 /// fallback selectors are allowed.
 const AUTH_LOGIN_PREFERRED_SELECTOR_WINDOW_MS: u64 = 5_000;
 
+/// Local snapshot ref used to keep the auth element selected during detection
+/// bound to the exact DOM node used by the subsequent interaction.
+const AUTH_LOGIN_ELEMENT_REF: &str = "e1";
+
 const AUTH_LOGIN_NO_NAVIGATE_PAGE_ERROR: &str = "auth login --no-navigate requires an existing active HTTP(S) browser page; open the login page first";
 
 pub struct PendingConfirmation {
@@ -185,6 +189,7 @@ pub struct FetchPausedRequest {
     pub request_id: String,
     pub url: String,
     pub resource_type: String,
+    pub frame_id: String,
     pub session_id: String,
     /// Original request headers from the Fetch.requestPaused event, needed
     /// because Fetch.continueRequest replaces (not merges) headers.
@@ -601,6 +606,9 @@ pub struct DaemonState {
     /// Key is the origin (scheme + host + port), value is the headers map.
     /// Wrapped in Arc<RwLock<>> so the background Fetch handler can read it.
     pub origin_headers: Arc<RwLock<HashMap<String, HashMap<String, String>>>>,
+    /// Last document URL the domain filter blocked, keyed by frame ID, so
+    /// navigation can report a redirect that landed on the blocked page.
+    pub blocked_documents: Arc<std::sync::Mutex<HashMap<String, String>>>,
     /// Proxy authentication credentials (username, password) for handling
     /// Fetch.authRequired events from authenticated proxies.
     pub proxy_credentials: Arc<RwLock<Option<(String, String)>>>,
@@ -738,6 +746,7 @@ impl DaemonState {
             iframe_sessions: HashMap::new(),
             active_iframe_sessions: HashSet::new(),
             origin_headers: Arc::new(RwLock::new(HashMap::new())),
+            blocked_documents: Arc::new(std::sync::Mutex::new(HashMap::new())),
             proxy_credentials: Arc::new(RwLock::new(None)),
             fetch_handler_task: None,
             dialog_handler_task: None,
@@ -840,17 +849,22 @@ impl DaemonState {
         };
 
         let client = browser.client.clone();
-        let mut rx = browser.client.subscribe();
+        let mut rx = browser.client.subscribe_methods(&[
+            "Fetch.authRequired",
+            "Target.attachedToTarget",
+            "Fetch.requestPaused",
+        ]);
         let domain_filter = self.domain_filter.clone();
         let routes = self.routes.clone();
         let origin_headers = self.origin_headers.clone();
+        let blocked_documents = self.blocked_documents.clone();
         let proxy_credentials = self.proxy_credentials.clone();
         let capture_session = self.recording_state.capture_session.clone();
 
         self.fetch_handler_task = Some(tokio::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(event) if event.method == "Fetch.authRequired" => {
+                    Some(event) if event.method == "Fetch.authRequired" => {
                         let request_id = event
                             .params
                             .get("requestId")
@@ -889,7 +903,7 @@ impl DaemonState {
                                 .await;
                         }
                     }
-                    Ok(event) if event.method == "Target.attachedToTarget" => {
+                    Some(event) if event.method == "Target.attachedToTarget" => {
                         let Some(sid) = event
                             .params
                             .get("sessionId")
@@ -966,7 +980,7 @@ impl DaemonState {
                             );
                         }
                     }
-                    Ok(event) if event.method == "Fetch.requestPaused" => {
+                    Some(event) if event.method == "Fetch.requestPaused" => {
                         let request_id = event
                             .params
                             .get("requestId")
@@ -992,12 +1006,19 @@ impl DaemonState {
                             .and_then(|r| r.get("headers"))
                             .and_then(|h| h.as_object())
                             .cloned();
+                        let frame_id = event
+                            .params
+                            .get("frameId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let sid = event.session_id.clone().unwrap_or_default();
 
                         let paused = FetchPausedRequest {
                             request_id,
                             url: request_url,
                             resource_type,
+                            frame_id,
                             session_id: sid,
                             request_headers,
                         };
@@ -1006,11 +1027,18 @@ impl DaemonState {
                         let rt = routes.read().await;
                         let oh = origin_headers.read().await;
 
-                        resolve_fetch_paused(&client, df.as_ref(), &rt, &oh, &paused).await;
+                        resolve_fetch_paused(
+                            &client,
+                            df.as_ref(),
+                            &rt,
+                            &oh,
+                            &blocked_documents,
+                            &paused,
+                        )
+                        .await;
                     }
-                    Ok(_) => continue,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(_) => break,
+                    Some(_) => continue,
+                    None => break,
                 }
             }
         }));
@@ -5041,6 +5069,11 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         no_xvfb: no_xvfb_from_launch_cmd(cmd),
         restrict_webrtc,
     };
+    if engine.as_deref() == Some("obscura") {
+        if let Some(bypass) = cmd.get("proxyBypass") {
+            launch_options.proxy_bypass = bypass.as_str().map(String::from);
+        }
+    }
     apply_effective_ca_cert(&mut launch_options, &effective_ca_cert);
 
     let external_launch =
@@ -5540,9 +5573,34 @@ async fn navigate_active_page(
     }
     state.active_iframe_sessions.clear();
     state.active_frame_id = None;
+    state
+        .blocked_documents
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let result = mgr.navigate(url, wait_until).await?;
     state.refresh_active_iframe_sessions().await;
+
+    // The domain filter answers a blocked document with a 403 page, so a
+    // redirect to a disallowed host still completes as a navigation.
+    // The main frame shares its ID with the target.
+    let blocked = result
+        .get("targetId")
+        .and_then(|v| v.as_str())
+        .and_then(|target_id| {
+            state
+                .blocked_documents
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(target_id)
+        });
+    if let Some(blocked_url) = blocked {
+        return Err(format!(
+            "Navigation to {} was blocked by the domain filter",
+            blocked_url
+        ));
+    }
     Ok(result)
 }
 
@@ -11769,6 +11827,7 @@ async fn resolve_fetch_paused(
     domain_filter: Option<&DomainFilter>,
     routes: &[RouteEntry],
     origin_headers: &HashMap<String, HashMap<String, String>>,
+    blocked_documents: &std::sync::Mutex<HashMap<String, String>>,
     paused: &FetchPausedRequest,
 ) {
     let session_id = &paused.session_id;
@@ -11805,6 +11864,10 @@ async fn resolve_fetch_paused(
             if let Some(hostname) = parsed.host_str() {
                 if !filter.is_allowed(hostname) {
                     if paused.resource_type.eq_ignore_ascii_case("document") {
+                        blocked_documents
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(paused.frame_id.clone(), paused.url.clone());
                         let error_body = format!(
                             "<html><body><h1>Blocked</h1><p>Navigation to {} is not allowed by domain filter.</p></body></html>",
                             hostname
@@ -12254,7 +12317,112 @@ async fn handle_http_credentials(cmd: &Value, state: &mut DaemonState) -> Result
 // Auth handlers
 // ---------------------------------------------------------------------------
 
-/// Wait for any selector in `selectors` to appear and return the first match.
+struct AuthLoginElement {
+    ref_map: RefMap,
+}
+
+impl AuthLoginElement {
+    async fn fill(
+        &self,
+        client: &super::cdp::client::CdpClient,
+        session_id: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        let (object_id, effective_session_id) = super::element::resolve_element_object_id(
+            client,
+            session_id,
+            &self.ref_map,
+            AUTH_LOGIN_ELEMENT_REF,
+            &HashMap::new(),
+        )
+        .await?;
+        let result = client
+            .send_command_typed::<_, super::cdp::types::EvaluateResult>(
+                "Runtime.callFunctionOn",
+                &super::cdp::types::CallFunctionOnParams {
+                    function_declaration: r#"function(value) {
+                        const editable = () => this.isConnected &&
+                            !this.matches(':disabled') && !this.readOnly;
+                        const focused = () => editable() &&
+                            this.ownerDocument.activeElement === this;
+                        if (!editable()) return false;
+                        this.focus();
+                        if (!focused()) return false;
+                        if (typeof this.select === 'function') {
+                            this.select();
+                        } else if (this.isContentEditable ||
+                            this.contentEditable === 'true' ||
+                            this.contentEditable === 'plaintext-only') {
+                            const range = this.ownerDocument.createRange();
+                            range.selectNodeContents(this);
+                            const selection = this.ownerDocument.getSelection();
+                            selection.removeAllRanges();
+                            selection.addRange(range);
+                        } else {
+                            return false;
+                        }
+                        if (!focused()) return false;
+                        if (typeof this.ownerDocument.execCommand === 'function') {
+                            const inserted = this.ownerDocument.execCommand(
+                                value === '' ? 'delete' : 'insertText', false, value
+                            );
+                            return inserted && this.isConnected;
+                        }
+                        if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement) {
+                            const prototype = this instanceof HTMLInputElement
+                                ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+                            Object.getOwnPropertyDescriptor(prototype, 'value').set.call(this, value);
+                        } else {
+                            this.textContent = value;
+                        }
+                        this.dispatchEvent(new Event('input', { bubbles: true }));
+                        return this.isConnected;
+                    }"#
+                    .to_string(),
+                    object_id: Some(object_id.clone()),
+                    arguments: Some(vec![super::cdp::types::CallArgument {
+                        value: Some(json!(value)),
+                        object_id: None,
+                    }]),
+                    return_by_value: Some(true),
+                    await_promise: Some(false),
+                },
+                Some(&effective_session_id),
+            )
+            .await;
+        let mut object_ids = std::collections::HashSet::from([object_id]);
+        if let Ok(result) = &result {
+            object_ids.extend(result.result.object_id.clone());
+            object_ids.extend(
+                result
+                    .exception_details
+                    .as_ref()
+                    .and_then(|details| details.exception.as_ref())
+                    .and_then(|exception| exception.object_id.clone()),
+            );
+        }
+        for object_id in object_ids {
+            let _ = client
+                .send_command(
+                    "Runtime.releaseObject",
+                    Some(json!({ "objectId": object_id })),
+                    Some(&effective_session_id),
+                )
+                .await;
+        }
+        let result = result?;
+        if result.exception_details.is_some() || result.result.value != Some(json!(true)) {
+            return Err(
+                "Could not fill the selected login field; it may have changed or lost focus"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Wait for any selector in `selectors` to match a usable element and retain
+/// that element's stable backend node identity for the subsequent interaction.
 ///
 /// This is used by `auth_login` auto-detection so SPA login forms can render
 /// after initial navigation without requiring global network-idle.
@@ -12263,33 +12431,29 @@ async fn wait_for_any_selector(
     session_id: &str,
     selectors: &[&str],
     timeout_ms: u64,
-) -> Result<String, String> {
+) -> Result<AuthLoginElement, String> {
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
 
     loop {
         for selector in selectors {
             let expression = format!(
                 r#"(() => {{
-                    const el = document.querySelector({sel});
-                    if (!el) return false;
+                    return Array.from(document.querySelectorAll({sel})).find((el) => {{
+                        const r = el.getBoundingClientRect();
+                        const s = window.getComputedStyle(el);
+                        const opacity = parseFloat(s.opacity || '1');
+                        const isVisible =
+                            r.width > 0 &&
+                            r.height > 0 &&
+                            s.visibility !== 'hidden' &&
+                            s.display !== 'none' &&
+                            (!Number.isFinite(opacity) || opacity > 0);
 
-                    const r = el.getBoundingClientRect();
-                    const s = window.getComputedStyle(el);
-                    const opacity = parseFloat(s.opacity || '1');
-                    const isVisible =
-                        r.width > 0 &&
-                        r.height > 0 &&
-                        s.visibility !== 'hidden' &&
-                        s.display !== 'none' &&
-                        (!Number.isFinite(opacity) || opacity > 0);
-
-                    if (!isVisible) return false;
-                    if (el.matches(':disabled')) return false;
-
-                    if (el instanceof HTMLInputElement && el.type === 'hidden') return false;
-                    if ((el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && el.readOnly) return false;
-
-                    return true;
+                        if (!isVisible || el.matches(':disabled')) return false;
+                        if (el instanceof HTMLInputElement && el.type === 'hidden') return false;
+                        if ((el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && el.readOnly) return false;
+                        return true;
+                    }}) || null;
                 }})()"#,
                 sel = serde_json::to_string(selector).unwrap_or_default()
             );
@@ -12299,22 +12463,65 @@ async fn wait_for_any_selector(
                     "Runtime.evaluate",
                     &super::cdp::types::EvaluateParams {
                         expression,
-                        return_by_value: Some(true),
+                        return_by_value: Some(false),
                         await_promise: Some(true),
                     },
                     Some(session_id),
                 )
                 .await?;
 
-            if result
-                .result
-                .value
-                .as_ref()
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
+            if result.exception_details.is_some()
+                || result.result.subtype.as_deref() != Some("node")
             {
-                return Ok((*selector).to_string());
+                let mut object_ids = std::collections::HashSet::new();
+                object_ids.extend(result.result.object_id);
+                object_ids.extend(
+                    result
+                        .exception_details
+                        .and_then(|details| details.exception)
+                        .and_then(|exception| exception.object_id),
+                );
+                for object_id in object_ids {
+                    let _ = client
+                        .send_command(
+                            "Runtime.releaseObject",
+                            Some(json!({ "objectId": object_id })),
+                            Some(session_id),
+                        )
+                        .await;
+                }
+                continue;
             }
+
+            let Some(object_id) = result.result.object_id else {
+                continue;
+            };
+            let describe = client
+                .send_command(
+                    "DOM.describeNode",
+                    Some(json!({ "objectId": object_id })),
+                    Some(session_id),
+                )
+                .await;
+            let _ = client
+                .send_command(
+                    "Runtime.releaseObject",
+                    Some(json!({ "objectId": object_id })),
+                    Some(session_id),
+                )
+                .await;
+            let Ok(describe) = describe else {
+                continue;
+            };
+            let Some(backend_node_id) = describe
+                .pointer("/node/backendNodeId")
+                .and_then(Value::as_i64)
+            else {
+                continue;
+            };
+            let mut ref_map = RefMap::new();
+            ref_map.add_exact_backend_node(AUTH_LOGIN_ELEMENT_REF.to_string(), backend_node_id);
+            return Ok(AuthLoginElement { ref_map });
         }
 
         if tokio::time::Instant::now() >= deadline {
@@ -12621,11 +12828,10 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .or(stored_submit_selector);
 
     // Find and fill username
-    let user_sel = if let Some(s) = username_sel {
-        wait_for_selector(&mgr.client, &session_id, &s, "visible", auth_timeout_ms)
+    let user_element = if let Some(s) = username_sel {
+        wait_for_any_selector(&mgr.client, &session_id, &[s.as_str()], auth_timeout_ms)
             .await
-            .map_err(|_| format!("Timed out waiting for username selector '{}'", s))?;
-        s
+            .map_err(|_| format!("Timed out waiting for username selector '{}'", s))?
     } else {
         let preferred_window_ms = auth_timeout_ms.min(AUTH_LOGIN_PREFERRED_SELECTOR_WINDOW_MS);
         let fallback_window_ms = auth_timeout_ms.saturating_sub(preferred_window_ms);
@@ -12670,23 +12876,16 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     if let (Some(bound_page), Some(expected_origin)) = (&bound_page, &expected_origin) {
         validate_auth_login_active_page(mgr, bound_page, expected_origin).await?;
     }
-    interaction::fill(
-        &mgr.client,
-        &session_id,
-        &state.ref_map,
-        &user_sel,
-        &username,
-        &state.iframe_sessions,
-    )
-    .await?;
+    user_element
+        .fill(&mgr.client, &session_id, &username)
+        .await?;
 
     // Find and fill password
     let pass_sel = password_sel.unwrap_or_else(|| "input[type=password]".to_string());
-    wait_for_selector(
+    let pass_element = wait_for_any_selector(
         &mgr.client,
         &session_id,
-        &pass_sel,
-        "visible",
+        &[pass_sel.as_str()],
         auth_timeout_ms,
     )
     .await
@@ -12694,22 +12893,15 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     if let (Some(bound_page), Some(expected_origin)) = (&bound_page, &expected_origin) {
         validate_auth_login_active_page(mgr, bound_page, expected_origin).await?;
     }
-    interaction::fill(
-        &mgr.client,
-        &session_id,
-        &state.ref_map,
-        &pass_sel,
-        &password,
-        &state.iframe_sessions,
-    )
-    .await?;
+    pass_element
+        .fill(&mgr.client, &session_id, &password)
+        .await?;
 
     // Find and click submit
-    let sub_sel = if let Some(s) = submit_sel {
-        wait_for_selector(&mgr.client, &session_id, &s, "visible", auth_timeout_ms)
+    let submit_element = if let Some(s) = submit_sel {
+        wait_for_any_selector(&mgr.client, &session_id, &[s.as_str()], auth_timeout_ms)
             .await
-            .map_err(|_| format!("Timed out waiting for submit selector '{}'", s))?;
-        s
+            .map_err(|_| format!("Timed out waiting for submit selector '{}'", s))?
     } else {
         wait_for_any_selector(
             &mgr.client,
@@ -12731,8 +12923,8 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
     let result = interaction::click(
         &mgr.client,
         &session_id,
-        &state.ref_map,
-        &sub_sel,
+        &submit_element.ref_map,
+        AUTH_LOGIN_ELEMENT_REF,
         "left",
         1,
         &state.iframe_sessions,
@@ -13584,6 +13776,89 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn test_auth_login_releases_remote_objects_after_failures() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        for failure in ["selection", "describe", "fill-exception", "fill-protocol"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let mut releases = Vec::new();
+                let mut attempts = 0;
+                while let Some(Ok(Message::Text(text))) = ws.next().await {
+                    let request: Value = serde_json::from_str(&text).unwrap();
+                    let mut response = json!({ "id": request["id"] });
+                    response["result"] = match request["method"].as_str().unwrap() {
+                        "Runtime.evaluate" => {
+                            attempts += 1;
+                            if failure == "selection" && attempts == 1 {
+                                json!({
+                                    "result": { "type": "object", "objectId": "rejected-result" },
+                                    "exceptionDetails": { "text": "Invalid selector",
+                                        "exception": { "type": "object", "objectId": "exception" } }
+                                })
+                            } else {
+                                json!({ "result": { "type": "object", "subtype": "node",
+                                    "objectId": format!("node-{attempts}") } })
+                            }
+                        }
+                        "DOM.describeNode" if failure == "describe" && attempts == 1 => {
+                            response["error"] =
+                                json!({ "code": -32000, "message": "Node unavailable" });
+                            Value::Null
+                        }
+                        "DOM.describeNode" => json!({ "node": { "backendNodeId": 42 } }),
+                        "DOM.resolveNode" => {
+                            json!({ "object": { "type": "object", "objectId": "login-node" } })
+                        }
+                        "Runtime.callFunctionOn" if failure == "fill-exception" => json!({
+                            "result": { "type": "object", "objectId": "rejected-result" },
+                            "exceptionDetails": { "text": "Page exception",
+                                "exception": { "type": "object", "objectId": "exception" } }
+                        }),
+                        "Runtime.callFunctionOn" if failure == "fill-protocol" => {
+                            response["error"] = json!({ "code": -32000, "message": "CDP failure" });
+                            Value::Null
+                        }
+                        "Runtime.callFunctionOn" => {
+                            json!({ "result": { "type": "boolean", "value": true } })
+                        }
+                        "Runtime.releaseObject" => {
+                            releases
+                                .push(request["params"]["objectId"].as_str().unwrap().to_string());
+                            json!({})
+                        }
+                        other => panic!("Unexpected command: {other}"),
+                    };
+                    ws.send(Message::Text(response.to_string())).await.unwrap();
+                }
+                (attempts, releases)
+            });
+            let client = CdpClient::connect(&url).await.unwrap();
+            let element = super::wait_for_any_selector(&client, "session", &["input"], 1_000)
+                .await
+                .unwrap();
+            let filled = element.fill(&client, "session", "test-value").await;
+            client.close().await;
+            let (attempts, mut releases) = server.await.unwrap();
+            assert_eq!(filled.is_ok(), !failure.starts_with("fill"), "{failure}");
+            assert_eq!(attempts, if failure.starts_with("fill") { 1 } else { 2 });
+            let mut expected = match failure {
+                "selection" => vec!["exception", "rejected-result", "node-2", "login-node"],
+                "describe" => vec!["node-1", "node-2", "login-node"],
+                "fill-exception" => vec!["node-1", "rejected-result", "exception", "login-node"],
+                _ => vec!["node-1", "login-node"],
+            };
+            releases.sort();
+            expected.sort();
+            assert_eq!(releases, expected, "{failure}");
+        }
+    }
+
     #[tokio::test]
     async fn human_command_does_not_change_session_default() {
         let mut state = super::DaemonState::new();

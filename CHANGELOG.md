@@ -1,8 +1,77 @@
 # agent-browser
 
-## 0.38.1
+## 0.39.1
 
 <!-- release:start -->
+### Bug Fixes
+
+- Fixed **duplicate command execution after a lost daemon response** so mutating and launch commands are no longer retried after any request bytes have been sent. CLI JSON and MCP responses report `outcome_unknown` so callers can inspect the result before retrying; read-only commands and failures before sending retain their retries (#2085)
+
+### Contributors
+
+- @Railly
+- @rotemb-wond
+<!-- release:end -->
+
+## 0.39.0
+
+### New Features
+
+- Added an experimental **Obscura engine** (`--engine obscura`), launched and cleaned up locally like Chrome with bounded startup and CLI/MCP support. Obscura still has accessibility and rendering gaps, so review the engine page before choosing it (#1876)
+- Added **private CA trust for CLI HTTPS requests** so `read`, `install`, `upgrade` and `doctor` work behind TLS inspection. `--ca-cert` now applies to them on every platform, the new `--use-system-ca` uses the operating system trust store, and `SSL_CERT_FILE` is a fallback. Certificate verification always stays on (#2006)
+
+### Bug Fixes
+
+- Fixed **selector-scoped snapshots** (`snapshot -s`) so elements under ignored wrappers are no longer printed twice and shadow root content of a selected custom element is no longer dropped (#2043)
+- Fixed **`--auto-connect`** to wait up to 30s while Chrome 144+ shows the remote-debugging prompt, so it no longer opens repeated prompts or fails with "No running Chrome instance found" (#2026)
+- Fixed **daemon responsiveness during long commands** so it keeps accepting connections, including `close`, while a command holds the state lock, and a SIGTERM sent in that window is no longer lost (#2059)
+
+### Documentation
+
+- Migrated the **docs site** to Geistdocs (#1887)
+
+### Contributors
+
+- @NamanSatish
+- @Railly
+- @SGavrl
+- @SUSINDRAREDDY
+- @godtail
+- @jadenfix
+- @niieani
+
+## 0.38.2
+
+### Bug Fixes
+
+- Fixed **auth vault login** to pick usable controls when hidden duplicates exist, and to bind credential entry to the selected field so replaced fields or redirected focus are rejected before submitting (#2014)
+- Fixed **chat mode** to allow `webmcp`, `skills`, and other top-level browser commands, so the model uses page WebMCP tools instead of falling back to `eval` (#2015)
+- Fixed **Kernel profiles** so `KERNEL_PROFILE_NAME` sessions send the profile as an object instead of failing with a 400, and added `KERNEL_PROFILE_SAVE_CHANGES` to opt into saving changes back (#2004)
+- Fixed **Chrome freezing after launch** by draining its stderr for the browser's lifetime, so a full log pipe no longer blocks the browser (#2003)
+- Fixed **Browser Use** by switching to Cloud V4, which creates, attaches to, and stops the same browser with bounded timeouts (#1879)
+- Fixed **Vercel Sandbox shared memory detection** by measuring `/dev/shm` capacity and adding `--disable-dev-shm-usage` below 256 MiB, so Chrome no longer terminates renderers on the undersized mount (#1890)
+
+### Improvements
+
+- Upgraded the **eve integration** from eve 0.47.3 to 0.57.0, so apps on eve 0.50 and later build again (#1945)
+
+### Documentation
+
+- Updated the **contact sheet example** with the loading-flash demo output (#1871)
+
+### Contributors
+
+- @Railly
+- @benjamincanac
+- @boatri
+- @luxleader
+- @petehunt
+- @robertjamesprior
+- @simonellefsen
+- @zyz619963502zyz
+
+## 0.38.1
+
 ### Bug Fixes
 
 - Fixed **recording cursor and mouse movement timing** so cursor rendering stays synchronized with page content during drags and timed mouse moves (#1869)
@@ -15,7 +84,6 @@
 
 - @ctate
 - @Railly
-<!-- release:end -->
 
 ## 0.38.0
 

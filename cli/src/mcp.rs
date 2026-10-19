@@ -1504,7 +1504,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_AUTH_LOGIN,
             "Auth login",
-            "Log in with a saved auth profile.",
+            "Log in with a saved auth profile. Control selection checks layout size, computed visibility and opacity, and disabled/readonly state. Replaced or focus-redirected credential fields fail without submitting.",
             json!({
                 "name": { "type": "string" },
                 "noNavigate": {
@@ -2020,7 +2020,14 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         "caCert".to_string(),
         json!({
             "type": "string",
-            "description": "Path to a CA certificate or PEM bundle trusted by a locally launched Chromium browser on Linux."
+            "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux."
+        }),
+    );
+    props.insert(
+        "useSystemCa".to_string(),
+        json!({
+            "type": "boolean",
+            "description": "Use the operating system trust store instead of the built-in roots for the CLI's own HTTPS requests. Does not affect the browser."
         }),
     );
     props.insert(
@@ -2042,7 +2049,7 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         json!({
             "type": "array",
             "items": { "type": "string" },
-            "description": "Advanced: extra CLI arguments for this command, preserving full CLI parity."
+            "description": "Advanced: extra CLI arguments, including --engine chrome|lightpanda|obscura and --executable-path, preserving full CLI parity. Obscura is experimental and rejects --proxy-bypass (including resolved config/environment settings). Explicit Obscura launches send this invocation's resolved bypass setting even to an existing daemon."
         }),
     );
     props.insert(
@@ -3878,6 +3885,10 @@ fn append_common_global_args(
     } else if clear_ca_cert {
         args.push("--no-ca-cert".to_string());
     }
+    if let Some(use_system_ca) = optional_bool(arguments, "useSystemCa")? {
+        args.push("--use-system-ca".to_string());
+        args.push(use_system_ca.to_string());
+    }
 
     Ok(())
 }
@@ -4717,6 +4728,40 @@ mod tests {
     }
 
     #[test]
+    fn obscura_extra_args_use_the_canonical_cli_parser() {
+        let arguments = json!({"extraArgs": [
+            "--engine", "obscura", "--executable-path", "/tmp/obscura",
+            "--proxy-bypass", "localhost"
+        ]});
+        let mut args = vec!["open".to_string(), "https://example.com".to_string()];
+        args.extend(
+            optional_string_array(&arguments, "extraArgs")
+                .unwrap()
+                .unwrap(),
+        );
+        let flags = crate::flags::parse_flags(&args);
+        assert_eq!(flags.engine.as_deref(), Some("obscura"));
+        assert_eq!(flags.executable_path.as_deref(), Some("/tmp/obscura"));
+        assert_eq!(flags.proxy_bypass.as_deref(), Some("localhost"));
+        let mut launch = json!({"action": "launch"});
+        crate::attach_obscura_proxy_bypass(&mut launch, &flags);
+        assert_eq!(launch["proxyBypass"], "localhost");
+        assert!(launch.get("proxy").is_none());
+
+        let mut flags = flags;
+        flags.proxy_bypass = None;
+        crate::attach_obscura_proxy_bypass(&mut launch, &flags);
+        assert_eq!(launch.get("proxyBypass"), Some(&Value::Null));
+        for engine in [None, Some("chrome"), Some("lightpanda")] {
+            flags.engine = engine.map(String::from);
+            flags.proxy_bypass = Some("localhost".into());
+            let mut launch = json!({"action": "launch"});
+            crate::attach_obscura_proxy_bypass(&mut launch, &flags);
+            assert_eq!(launch, json!({"action": "launch"}));
+        }
+    }
+
+    #[test]
     fn common_global_args_use_equals_form_for_string_restore_key() {
         let mut args = Vec::new();
 
@@ -4779,6 +4824,15 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["--ca-cert", "/tmp/proxy-ca.pem"]);
+    }
+
+    #[test]
+    fn common_global_args_include_use_system_ca() {
+        let mut args = Vec::new();
+
+        append_common_global_args(&mut args, &json!({ "useSystemCa": true }), None).unwrap();
+
+        assert_eq!(args, vec!["--use-system-ca", "true"]);
     }
 
     #[test]
@@ -5213,6 +5267,27 @@ mod tests {
         assert!(!text.contains("\"webmcp\""));
         assert_eq!(result["structuredContent"]["response"], response);
         assert_eq!(result["isError"], true);
+    }
+
+    #[test]
+    fn tool_result_preserves_outcome_unknown_code() {
+        let run = CliRun {
+            exit_code: Some(1),
+            stdout: json!({
+                "success": false,
+                "error": "Failed to read: Connection reset by peer (os error 54) (the command reached the daemon but no response came back; it may or may not have run, so it was not retried)",
+                "code": "outcome_unknown"
+            })
+            .to_string(),
+            stderr: String::new(),
+        };
+
+        let result = tool_result_from_run(run);
+        assert_eq!(result["isError"], true);
+        assert_eq!(
+            result["structuredContent"]["response"]["code"],
+            "outcome_unknown"
+        );
     }
 
     #[test]

@@ -63,7 +63,7 @@ const PROVIDER_LOGOS: Record<string, string> = {
   kernel: "/providers/kernel.svg",
 };
 
-const SUPPORTED_ENGINES = ["chrome", "lightpanda"] as const;
+const SUPPORTED_ENGINES = ["chrome", "lightpanda", "obscura"] as const;
 
 const BROWSER_OPTIONS: { id: string; label: string; engine?: string; provider?: string }[] = [
   { id: "chrome", label: "Chrome", engine: "chrome" },
