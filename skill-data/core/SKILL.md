@@ -493,8 +493,9 @@ EOF
 --profile <name|path>   # use a Chrome profile (login state survives)
 --headers <json>        # HTTP headers scoped to the URL's origin
 --proxy <url>           # proxy server
---ca-cert <path>        # trust a CA in local Chromium on Linux (install --with-deps provides certutil)
+--ca-cert <path>        # trust a CA for CLI requests, and in local Chromium on Linux (install --with-deps provides certutil)
 --no-ca-cert            # clear CA trust retained by the running session
+--use-system-ca         # OS trust store for CLI requests (read, install, upgrade, doctor)
 --state <path>          # load saved auth state from JSON
 --restore [name]        # auto-save/restore session state, defaults to --session
 --restore-save <policy> # auto, always, or never

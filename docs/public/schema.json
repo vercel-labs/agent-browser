@@ -126,7 +126,11 @@
     },
     "caCert": {
       "type": "string",
-      "description": "Path to a CA certificate or PEM bundle trusted by locally launched Chromium on Linux. Trust remains active for later commands in the same running session."
+      "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by locally launched Chromium on Linux. Trust remains active for later commands in the same running session."
+    },
+    "useSystemCa": {
+      "type": "boolean",
+      "description": "Use the operating system trust store instead of the built-in roots for the CLI's own HTTPS requests. Does not affect the browser. Can also be set with AGENT_BROWSER_USE_SYSTEM_CA."
     },
     "clearCaCert": {
       "type": "boolean",

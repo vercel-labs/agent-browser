@@ -189,6 +189,7 @@ pub struct FetchPausedRequest {
     pub request_id: String,
     pub url: String,
     pub resource_type: String,
+    pub frame_id: String,
     pub session_id: String,
     /// Original request headers from the Fetch.requestPaused event, needed
     /// because Fetch.continueRequest replaces (not merges) headers.
@@ -605,6 +606,9 @@ pub struct DaemonState {
     /// Key is the origin (scheme + host + port), value is the headers map.
     /// Wrapped in Arc<RwLock<>> so the background Fetch handler can read it.
     pub origin_headers: Arc<RwLock<HashMap<String, HashMap<String, String>>>>,
+    /// Last document URL the domain filter blocked, keyed by frame ID, so
+    /// navigation can report a redirect that landed on the blocked page.
+    pub blocked_documents: Arc<std::sync::Mutex<HashMap<String, String>>>,
     /// Proxy authentication credentials (username, password) for handling
     /// Fetch.authRequired events from authenticated proxies.
     pub proxy_credentials: Arc<RwLock<Option<(String, String)>>>,
@@ -742,6 +746,7 @@ impl DaemonState {
             iframe_sessions: HashMap::new(),
             active_iframe_sessions: HashSet::new(),
             origin_headers: Arc::new(RwLock::new(HashMap::new())),
+            blocked_documents: Arc::new(std::sync::Mutex::new(HashMap::new())),
             proxy_credentials: Arc::new(RwLock::new(None)),
             fetch_handler_task: None,
             dialog_handler_task: None,
@@ -844,17 +849,22 @@ impl DaemonState {
         };
 
         let client = browser.client.clone();
-        let mut rx = browser.client.subscribe();
+        let mut rx = browser.client.subscribe_methods(&[
+            "Fetch.authRequired",
+            "Target.attachedToTarget",
+            "Fetch.requestPaused",
+        ]);
         let domain_filter = self.domain_filter.clone();
         let routes = self.routes.clone();
         let origin_headers = self.origin_headers.clone();
+        let blocked_documents = self.blocked_documents.clone();
         let proxy_credentials = self.proxy_credentials.clone();
         let capture_session = self.recording_state.capture_session.clone();
 
         self.fetch_handler_task = Some(tokio::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(event) if event.method == "Fetch.authRequired" => {
+                    Some(event) if event.method == "Fetch.authRequired" => {
                         let request_id = event
                             .params
                             .get("requestId")
@@ -893,7 +903,7 @@ impl DaemonState {
                                 .await;
                         }
                     }
-                    Ok(event) if event.method == "Target.attachedToTarget" => {
+                    Some(event) if event.method == "Target.attachedToTarget" => {
                         let Some(sid) = event
                             .params
                             .get("sessionId")
@@ -970,7 +980,7 @@ impl DaemonState {
                             );
                         }
                     }
-                    Ok(event) if event.method == "Fetch.requestPaused" => {
+                    Some(event) if event.method == "Fetch.requestPaused" => {
                         let request_id = event
                             .params
                             .get("requestId")
@@ -996,12 +1006,19 @@ impl DaemonState {
                             .and_then(|r| r.get("headers"))
                             .and_then(|h| h.as_object())
                             .cloned();
+                        let frame_id = event
+                            .params
+                            .get("frameId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let sid = event.session_id.clone().unwrap_or_default();
 
                         let paused = FetchPausedRequest {
                             request_id,
                             url: request_url,
                             resource_type,
+                            frame_id,
                             session_id: sid,
                             request_headers,
                         };
@@ -1010,11 +1027,18 @@ impl DaemonState {
                         let rt = routes.read().await;
                         let oh = origin_headers.read().await;
 
-                        resolve_fetch_paused(&client, df.as_ref(), &rt, &oh, &paused).await;
+                        resolve_fetch_paused(
+                            &client,
+                            df.as_ref(),
+                            &rt,
+                            &oh,
+                            &blocked_documents,
+                            &paused,
+                        )
+                        .await;
                     }
-                    Ok(_) => continue,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(_) => break,
+                    Some(_) => continue,
+                    None => break,
                 }
             }
         }));
@@ -5517,9 +5541,34 @@ async fn navigate_active_page(
     }
     state.active_iframe_sessions.clear();
     state.active_frame_id = None;
+    state
+        .blocked_documents
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
     let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
     let result = mgr.navigate(url, wait_until).await?;
     state.refresh_active_iframe_sessions().await;
+
+    // The domain filter answers a blocked document with a 403 page, so a
+    // redirect to a disallowed host still completes as a navigation.
+    // The main frame shares its ID with the target.
+    let blocked = result
+        .get("targetId")
+        .and_then(|v| v.as_str())
+        .and_then(|target_id| {
+            state
+                .blocked_documents
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(target_id)
+        });
+    if let Some(blocked_url) = blocked {
+        return Err(format!(
+            "Navigation to {} was blocked by the domain filter",
+            blocked_url
+        ));
+    }
     Ok(result)
 }
 
@@ -11746,6 +11795,7 @@ async fn resolve_fetch_paused(
     domain_filter: Option<&DomainFilter>,
     routes: &[RouteEntry],
     origin_headers: &HashMap<String, HashMap<String, String>>,
+    blocked_documents: &std::sync::Mutex<HashMap<String, String>>,
     paused: &FetchPausedRequest,
 ) {
     let session_id = &paused.session_id;
@@ -11782,6 +11832,10 @@ async fn resolve_fetch_paused(
             if let Some(hostname) = parsed.host_str() {
                 if !filter.is_allowed(hostname) {
                     if paused.resource_type.eq_ignore_ascii_case("document") {
+                        blocked_documents
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(paused.frame_id.clone(), paused.url.clone());
                         let error_body = format!(
                             "<html><body><h1>Blocked</h1><p>Navigation to {} is not allowed by domain filter.</p></body></html>",
                             hostname

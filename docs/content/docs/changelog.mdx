@@ -3,6 +3,37 @@ title: "Changelog"
 navTitle: "Changelog"
 ---
 
+## v0.39.1
+
+<p className="text-[#888] text-sm">October 13, 2026</p>
+
+### Bug Fixes
+
+- Fixed **duplicate command execution after a lost daemon response** so mutating and launch commands are no longer retried after any request bytes have been sent. CLI JSON and MCP responses report `outcome_unknown` so callers can inspect the result before retrying; read-only commands and failures before sending retain their retries (#2085)
+
+---
+
+## v0.39.0
+
+<p className="text-[#888] text-sm">October 7, 2026</p>
+
+### New Features
+
+- Added an experimental **Obscura engine** (`--engine obscura`), launched and cleaned up locally like Chrome with bounded startup and CLI/MCP support. Obscura still has accessibility and rendering gaps, so review the engine page before choosing it (#1876)
+- Added **private CA trust for CLI HTTPS requests** so `read`, `install`, `upgrade` and `doctor` work behind TLS inspection. `--ca-cert` now applies to them on every platform, the new `--use-system-ca` uses the operating system trust store, and `SSL_CERT_FILE` is a fallback. Certificate verification always stays on (#2006)
+
+### Bug Fixes
+
+- Fixed **selector-scoped snapshots** (`snapshot -s`) so elements under ignored wrappers are no longer printed twice and shadow root content of a selected custom element is no longer dropped (#2043)
+- Fixed **`--auto-connect`** to wait up to 30s while Chrome 144+ shows the remote-debugging prompt, so it no longer opens repeated prompts or fails with "No running Chrome instance found" (#2026)
+- Fixed **daemon responsiveness during long commands** so it keeps accepting connections, including `close`, while a command holds the state lock, and a SIGTERM sent in that window is no longer lost (#2059)
+
+### Documentation
+
+- Migrated the **docs site** to Geistdocs (#1887)
+
+---
+
 ## v0.38.2
 
 <p className="text-[#888] text-sm">October 1, 2026</p>
