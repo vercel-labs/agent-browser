@@ -582,6 +582,12 @@ async fn handle_connection<S>(
                     .to_string();
 
                 let response = {
+                    #[cfg(feature = "event-prototype")]
+                    if action == "events_subscribe" {
+                        super::events::serve(&cmd, state.clone(), &mut buf_reader, &mut writer)
+                            .await;
+                        return;
+                    }
                     let mut s = state.lock().await;
                     let response = execute_command(&cmd, &mut s).await;
                     // Refresh while the state lock is still held. An idle

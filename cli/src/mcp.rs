@@ -701,6 +701,7 @@ fn initialize_result(params: Option<&Value>, config: &McpConfig) -> Value {
     })
 }
 
+/// Prototype socket subscriptions are omitted because these tools return one CLI result.
 fn tools_for_config(config: &McpConfig) -> Vec<Value> {
     tools()
         .into_iter()

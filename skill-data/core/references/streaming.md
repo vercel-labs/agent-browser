@@ -4,6 +4,10 @@ Stream a session's viewport over WebSocket and drive it with remote input. This 
 
 **Related**: [commands.md](commands.md) for full command reference, [SKILL.md](../SKILL.md) for quick start.
 
+## Source-only event prototype
+
+The `event-prototype` Cargo feature enables an experimental daemon socket subscription for visibility transitions in one Chrome document. In a source checkout, build with `cargo build --features event-prototype --manifest-path cli/Cargo.toml`, then run `python3 .compound-engineering/docs/prototypes/events/demo.py`. The client receives readiness, waits three seconds, clicks, and receives a pushed modal event without another browser query. Add `--verify` for the browser checks. This has no normal CLI command, MCP tool, replay, or automatic navigation recovery; see `.compound-engineering/docs/prototypes/events/README.md` for the protocol and limits.
+
 ## Contents
 
 - [Enabling the stream](#enabling-the-stream)

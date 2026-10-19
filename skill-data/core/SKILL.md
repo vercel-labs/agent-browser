@@ -72,6 +72,8 @@ The browser stays running across commands so these feel like a single session. B
 
 ## MCP integration
 
+Source builds with the `event-prototype` Cargo feature can demonstrate pushed Chrome visibility events through a local socket client. This experimental stream has no normal CLI command or MCP tool. See [Streaming](references/streaming.md) for its scope and source-checkout demo.
+
 For tools that support Model Context Protocol servers, start the stdio server:
 
 ```bash

@@ -5,6 +5,12 @@ navTitle: "Streaming"
 
 Stream the browser viewport via WebSocket for live preview or "pair browsing" where a human can watch and interact alongside an AI agent.
 
+## Source-only event prototype
+
+Source builds with `cargo build --features event-prototype --manifest-path cli/Cargo.toml` include an experimental local socket stream for Chrome visibility transitions. From the source checkout, run `python3 .compound-engineering/docs/prototypes/events/demo.py` to subscribe, click after three seconds, receive the modal event, and stop without another browser query. Add `--verify` for the focused browser checks or `--headed` to see Chrome.
+
+This prototype captures one top-level document, ends on navigation, and has no replay or MCP adapter. The Python client uses Unix sockets and supports macOS and Linux. The normal CLI parser and MCP catalogue do not expose a subscription command; the existing MCP tool path returns one result. Read `.compound-engineering/docs/prototypes/events/README.md` in the checkout for the protocol and remaining limits. Normal builds do not enable this prototype.
+
 ## Streaming
 
 Every session automatically starts a WebSocket stream server on an OS-assigned port. The server streams viewport frames and accepts input events (mouse, keyboard, touch).

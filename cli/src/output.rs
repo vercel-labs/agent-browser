@@ -3796,6 +3796,8 @@ Examples:
 }
 
 pub fn print_help() {
+    #[cfg(feature = "event-prototype")]
+    println!("Event prototype enabled: run python3 .compound-engineering/docs/prototypes/events/demo.py from the source checkout. Socket subscriptions are not CLI commands or MCP tools.\n");
     println!(
         r#"
 agent-browser - fast browser automation CLI for AI agents
