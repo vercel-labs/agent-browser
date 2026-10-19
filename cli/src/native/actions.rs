@@ -8161,11 +8161,20 @@ async fn handle_pdf(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
-    let params = json!({
+    // Page.printToPDF options from the `pdf` command's flags. Paper size is in inches;
+    // left unset, Chrome uses Letter (8.5 x 11). With preferCSSPageSize, a CSS @page
+    // size on the page wins over the paper size.
+    let mut params = json!({
         "printBackground": cmd.get("printBackground").and_then(|v| v.as_bool()).unwrap_or(true),
         "landscape": cmd.get("landscape").and_then(|v| v.as_bool()).unwrap_or(false),
         "preferCSSPageSize": cmd.get("preferCSSPageSize").and_then(|v| v.as_bool()).unwrap_or(false),
     });
+    if let Some(w) = cmd.get("paperWidth").and_then(|v| v.as_f64()) {
+        params["paperWidth"] = json!(w);
+    }
+    if let Some(h) = cmd.get("paperHeight").and_then(|v| v.as_f64()) {
+        params["paperHeight"] = json!(h);
+    }
 
     let result = mgr
         .client

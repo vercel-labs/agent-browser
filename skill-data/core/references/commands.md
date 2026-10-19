@@ -114,7 +114,12 @@ agent-browser screenshot --full   # Full page
 agent-browser screenshot --if-changed # Recommended: skip unchanged images to save tokens
 agent-browser screenshot --threshold 0.01 # Ignore changes affecting at most 1% of pixels
 agent-browser pdf output.pdf      # Save as PDF
+agent-browser pdf slides.pdf --css-page-size # Use the page's CSS @page size
+agent-browser pdf a4.pdf --width 8.27 --height 11.69 # Paper size in inches
+agent-browser pdf wide.pdf --landscape --no-background
 ```
+
+`pdf` prints Letter, portrait, with backgrounds, unless told otherwise. Use `--css-page-size` for pages that set their own size with CSS `@page`, such as HTML slides: each slide then prints as one page at its own size. `--width` and `--height` take inches.
 
 `--threshold <0-1>` implies `--if-changed`. Conditional history is isolated by tab and capture scope. JSON responses include `changed`, `revision`, `pixelChangeRatio`, and `threshold`; `path` is present only when the change exceeds the threshold. The first capture for a scope is always changed.
 

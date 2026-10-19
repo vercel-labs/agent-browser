@@ -2209,9 +2209,17 @@ Examples:
             r##"
 agent-browser pdf - Save page as PDF
 
-Usage: agent-browser pdf <path>
+Usage: agent-browser pdf <path> [options]
 
-Saves the current page as a PDF file.
+Saves the current page as a PDF file. Pages are Letter size, portrait, with
+backgrounds printed, unless an option says otherwise.
+
+Options:
+  --css-page-size      Use the page's CSS @page size (slides, A4 layouts)
+  --landscape          Landscape orientation
+  --no-background      Omit background graphics
+  --width <inches>     Paper width in inches (default: 8.5)
+  --height <inches>    Paper height in inches (default: 11)
 
 Global Options:
   --json               Output as JSON
@@ -2220,6 +2228,9 @@ Global Options:
 Examples:
   agent-browser pdf ./page.pdf
   agent-browser pdf ~/Documents/report.pdf
+  agent-browser pdf ./slides.pdf --css-page-size
+  agent-browser pdf ./a4.pdf --width 8.27 --height 11.69
+  agent-browser pdf ./wide.pdf --landscape --no-background
 "##
         }
 
@@ -3839,7 +3850,7 @@ Core Commands:
   scrollintoview <sel>       Scroll element into view
   wait <sel|ms>              Wait for element or time
   screenshot [path]          Take screenshot
-  pdf <path>                 Save as PDF
+  pdf <path> [options]       Save as PDF (--css-page-size, --landscape, ...)
   snapshot                   Accessibility tree with refs (for AI)
   eval <js>                  Run JavaScript
   connect <port|url>         Connect to browser via CDP

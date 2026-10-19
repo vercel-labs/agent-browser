@@ -41,7 +41,24 @@ agent-browser screenshot --if-changed
 agent-browser screenshot --threshold 0.01
 agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80 ./page.jpg
 agent-browser pdf ./page.pdf
+agent-browser pdf ./slides.pdf --css-page-size
+agent-browser pdf ./a4.pdf --width 8.27 --height 11.69
 ```
+
+`pdf` prints Letter, portrait, with backgrounds, unless an option says otherwise:
+
+<table>
+  <thead>
+    <tr><th>Option</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>--css-page-size</code></td><td>Use the page's CSS <code>@page</code> size, so that HTML slides or an A4 layout print one page per sheet at their own size</td></tr>
+    <tr><td><code>--landscape</code></td><td>Landscape orientation</td></tr>
+    <tr><td><code>--no-background</code></td><td>Omit background colors and images</td></tr>
+    <tr><td><code>--width &lt;inches&gt;</code></td><td>Paper width in inches (default 8.5)</td></tr>
+    <tr><td><code>--height &lt;inches&gt;</code></td><td>Paper height in inches (default 11)</td></tr>
+  </tbody>
+</table>
 
 Prefer `--if-changed` for repeated captures: skipping unchanged images is the most token-efficient option. History is per tab and capture scope. The first capture returns a path; later unchanged captures omit it. JSON includes `changed`, `revision`, and `pixelChangeRatio`. `--threshold <0-1>` implies `--if-changed` and treats changes at or below that ratio as unchanged.
 
