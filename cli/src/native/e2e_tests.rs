@@ -69,6 +69,7 @@ fn assert_error_code(resp: &Value, code: &str) {
 fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
+        "events_probe" => include_str!("test_fixtures/events_probe.html"),
         "html5_drag_probe" => include_str!("test_fixtures/html5_drag_probe.html"),
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
         "snapshot_diff_probe" => include_str!("test_fixtures/snapshot_diff_probe.html"),
@@ -1621,6 +1622,98 @@ async fn e2e_stream_command_requires_same_origin_before_daemon_relay() {
 // ---------------------------------------------------------------------------
 // Snapshot with refs and ref-based click
 // ---------------------------------------------------------------------------
+
+#[cfg(feature = "event-prototype")]
+#[tokio::test]
+#[ignore]
+async fn e2e_events_subscription_survives_across_commands() {
+    let state = tokio::sync::Mutex::new(DaemonState::new());
+    let run = |command: Value| {
+        let state = &state;
+        async move { execute_command(&command, &mut *state.lock().await).await }
+    };
+    let wait = |id: String, timeout_ms: u64| {
+        let state = &state;
+        async move {
+            super::events::wait(
+                &json!({
+                    "id": "w", "action": "events_wait",
+                    "subscriptionId": id, "timeout_ms": timeout_ms
+                }),
+                state,
+            )
+            .await
+        }
+    };
+
+    assert_success(&run(json!({ "id": "1", "action": "launch", "headless": true })).await);
+    assert_success(
+        &run(json!({ "id": "2", "action": "navigate", "url": native_test_fixture_url("events_probe") }))
+            .await,
+    );
+
+    let resp = run(json!({ "id": "3", "action": "events_start", "selector": "#done" })).await;
+    assert_success(&resp);
+    let started = get_data(&resp).clone();
+    let id = started["id"].as_str().unwrap().to_string();
+    assert!(
+        id.starts_with("ev_") && id.len() == 11,
+        "unexpected id {id}"
+    );
+    assert_eq!(started["state"], "armed");
+    assert_eq!(started["initial"], "hidden");
+    assert!(started["tabId"].as_str().is_some_and(|tab| !tab.is_empty()));
+
+    let resp = wait(id.clone(), 100).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["status"], "waiting");
+    assert_eq!(get_data(&resp)["events"], json!([]));
+
+    let resp = run(json!({ "id": "4", "action": "events_list" })).await;
+    assert_success(&resp);
+    let listed = &get_data(&resp)["subscriptions"];
+    assert_eq!(listed[0]["id"], id);
+    assert_eq!(listed[0]["status"], "armed");
+    assert_eq!(listed[0]["selector"], "#done");
+
+    assert_success(&run(json!({ "id": "5", "action": "click", "selector": "#go" })).await);
+
+    let resp = wait(id.clone(), 10_000).await;
+    assert_success(&resp);
+    let data = get_data(&resp);
+    assert_eq!(data["status"], "matched", "{data}");
+    assert_eq!(data["events"][0]["name"], "element.visible");
+    assert_eq!(data["events"][0]["subscriptionId"], id);
+    assert_eq!(data["events"][0]["data"]["observation"]["label"], "All set");
+    assert_eq!(data["events"][1]["name"], "subscription.ended");
+
+    let again = wait(id.clone(), 10).await;
+    assert_eq!(get_data(&again)["events"], data["events"]);
+
+    let resp = run(json!({ "id": "6", "action": "events_list" })).await;
+    let listed = &get_data(&resp)["subscriptions"];
+    assert_eq!(listed[0]["status"], "matched");
+    assert_eq!(listed[0]["eventCount"], 2);
+    assert!(listed[0]["firedAt"].is_string());
+
+    let stopped = run(json!({ "id": "7", "action": "events_stop", "subscriptionId": id })).await;
+    assert_success(&stopped);
+    assert_eq!(get_data(&stopped)["status"], "cancelled");
+    let stopped = run(json!({ "id": "8", "action": "events_stop", "subscriptionId": id })).await;
+    assert_success(&stopped);
+
+    let resp = run(json!({
+        "id": "9", "action": "evaluate",
+        "script": format!("typeof globalThis['__ab_event_{id}_stop']")
+    }))
+    .await;
+    assert_eq!(get_data(&resp)["result"], "undefined");
+
+    let missing = wait("ev_missing0".to_string(), 10).await;
+    assert_eq!(missing["success"], false);
+
+    assert_success(&run(json!({ "id": "99", "action": "close" })).await);
+}
 
 #[tokio::test]
 #[ignore]

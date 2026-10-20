@@ -701,7 +701,8 @@ fn initialize_result(params: Option<&Value>, config: &McpConfig) -> Value {
     })
 }
 
-/// Prototype socket subscriptions are omitted because these tools return one CLI result.
+/// Prototype socket subscriptions and the source-only `events` commands have no tools here.
+/// These tools return one CLI result and the prototype is not part of the released surface.
 fn tools_for_config(config: &McpConfig) -> Vec<Value> {
     tools()
         .into_iter()

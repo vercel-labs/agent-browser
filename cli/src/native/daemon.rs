@@ -588,13 +588,28 @@ async fn handle_connection<S>(
                             .await;
                         return;
                     }
-                    let mut s = state.lock().await;
-                    let response = execute_command(&cmd, &mut s).await;
-                    // Refresh while the state lock is still held. An idle
-                    // timer waiting on this command will observe the updated
-                    // clock as soon as it acquires the lock.
-                    idle_activity.mark();
-                    response
+                    #[cfg(feature = "event-prototype")]
+                    let waited = if action == "events_wait" {
+                        let response = super::events::wait(&cmd, &state).await;
+                        idle_activity.mark();
+                        Some(response)
+                    } else {
+                        None
+                    };
+                    #[cfg(not(feature = "event-prototype"))]
+                    let waited: Option<Value> = None;
+                    match waited {
+                        Some(response) => response,
+                        None => {
+                            let mut s = state.lock().await;
+                            let response = execute_command(&cmd, &mut s).await;
+                            // Refresh while the state lock is still held. An idle
+                            // timer waiting on this command will observe the updated
+                            // clock as soon as it acquires the lock.
+                            idle_activity.mark();
+                            response
+                        }
+                    }
                 };
 
                 let mut resp = serde_json::to_string(&response).unwrap_or_default();

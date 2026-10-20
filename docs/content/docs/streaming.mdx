@@ -7,9 +7,19 @@ Stream the browser viewport via WebSocket for live preview or "pair browsing" wh
 
 ## Source-only event prototype
 
-Source builds with `cargo build --features event-prototype --manifest-path cli/Cargo.toml` include an experimental local socket stream for Chrome visibility transitions. From the source checkout, run `python3 .compound-engineering/docs/prototypes/events/demo.py` to subscribe, click after three seconds, receive the modal event, and stop without another browser query. Add `--verify` for the focused browser checks or `--headed` to see Chrome.
+Source builds with `cargo build --features event-prototype --manifest-path cli/Cargo.toml` include experimental Chrome visibility events. The daemon holds a watch on a CSS selector, so a later command can collect the result:
 
-This prototype captures one top-level document, ends on navigation, and has no replay or MCP adapter. The Python client uses Unix sockets and supports macOS and Linux. The normal CLI parser and MCP catalogue do not expose a subscription command; the existing MCP tool path returns one result. Read `.compound-engineering/docs/prototypes/events/README.md` in the checkout for the protocol and remaining limits. Normal builds do not enable this prototype.
+```bash
+agent-browser events start --selector '[role="dialog"]'
+agent-browser click @e3
+agent-browser events wait ev_1a2b3c4d
+```
+
+`events start` accepts `--repeat` and `--timeout <ms>` and prints an id. `events wait <id>` returns `matched`, `timeout`, `ended`, `cancelled`, or `waiting` with the recorded events, `events list` shows watches, and `events stop <id>` cancels one. Connected dashboard clients also receive an `event` message for every transition.
+
+A raw local socket stream is available too. From the source checkout, run `python3 .compound-engineering/docs/prototypes/events/demo.py` to subscribe, click after three seconds, receive the modal event, and stop without another browser query. Add `--verify` for the focused browser checks or `--headed` to see Chrome.
+
+This prototype captures one top-level document, ends on navigation, and has no replay or MCP adapter. Event data is page content and untrusted. The Python client uses Unix sockets and supports macOS and Linux. The MCP catalogue does not expose these commands; the existing MCP tool path returns one result. Read `.compound-engineering/docs/prototypes/events/README.md` in the checkout for the protocol and remaining limits. Normal builds do not enable this prototype.
 
 ## Streaming
 

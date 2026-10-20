@@ -127,6 +127,83 @@ fn format_storage_text(data: &serde_json::Value) -> Option<String> {
     Some(format!("{}: {}", key, format_storage_value(value)))
 }
 
+/// Renders `events_*` results as short text. Page-controlled labels are JSON-quoted so
+/// they cannot start new output lines.
+#[cfg(feature = "event-prototype")]
+fn format_events_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
+    let text = |value: &serde_json::Value| value.as_str().unwrap_or("").to_string();
+    match action? {
+        "events_start" => Some(format!(
+            "{} {} armed on {} (initially {})\n`events wait {}` blocks until it fires. A harness that wakes the agent delivers the event instead.",
+            color::success_indicator(),
+            text(&data["id"]),
+            text(&data["selector"]),
+            text(&data["initial"]),
+            text(&data["id"]),
+        )),
+        "events_wait" => {
+            let mut lines = vec![format!(
+                "{} {}",
+                text(&data["id"]),
+                text(&data["status"])
+            )];
+            for event in data["events"].as_array().into_iter().flatten() {
+                let observation = &event["data"]["observation"];
+                let label = match event["name"].as_str() {
+                    Some("subscription.ended") => text(&observation["reason"]),
+                    _ => observation["label"].as_str().unwrap_or("").to_string(),
+                };
+                let line = [
+                    text(&event["name"]),
+                    text(&observation["selector"]),
+                    if label.is_empty() {
+                        label
+                    } else {
+                        serde_json::to_string(&label).unwrap_or_default()
+                    },
+                ];
+                lines.push(
+                    line.iter()
+                        .filter(|part| !part.is_empty())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+            }
+            Some(lines.join("\n"))
+        }
+        "events_list" => {
+            let subscriptions = data["subscriptions"].as_array()?;
+            if subscriptions.is_empty() {
+                return Some("No event subscriptions".to_string());
+            }
+            Some(
+                subscriptions
+                    .iter()
+                    .map(|sub| {
+                        format!(
+                            "{} {} {} ({} events) {}",
+                            text(&sub["id"]),
+                            text(&sub["status"]),
+                            text(&sub["selector"]),
+                            sub["eventCount"].as_u64().unwrap_or(0),
+                            text(&sub["tabId"]),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        }
+        "events_stop" => Some(format!(
+            "{} {} {}",
+            color::success_indicator(),
+            text(&data["id"]),
+            text(&data["status"])
+        )),
+        _ => None,
+    }
+}
+
 fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
     match action {
         Some("stream_disable") => data
@@ -573,6 +650,11 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                 print_warning(resp);
                 return;
             }
+        }
+        #[cfg(feature = "event-prototype")]
+        if let Some(output) = format_events_text(action, data) {
+            println!("{}", output);
+            return;
         }
         if let Some(output) = format_stream_status_text(action, data) {
             println!("{}", output);
@@ -2851,6 +2933,51 @@ Examples:
 "##
         }
 
+        // === Events ===
+        #[cfg(feature = "event-prototype")]
+        "events" => {
+            r##"
+agent-browser events - Be told when an element appears or disappears (source builds only)
+
+Usage: agent-browser events start --selector <css> [--repeat] [--timeout <ms>]
+       agent-browser events wait <id> [--timeout <ms>]
+       agent-browser events list
+       agent-browser events stop <id>
+
+Start a daemon-held watch on a CSS selector in the current Chrome page, do other
+work, then collect what happened with `events wait`. The watch reports when the
+first matching element becomes visible (or, with --repeat, every visible and
+hidden change) without polling. A navigation, tab close, or timeout ends it.
+
+Operations:
+  start                Arm a watch and print its id and initial state
+  wait <id>            Block until the watch ends or the wait times out
+  list                 Show watches held by this session (newest first)
+  stop <id>            Cancel a watch and remove its page observer
+
+Options:
+  --selector <css>     Element to watch (start)
+  --repeat             Keep reporting changes instead of ending at the first show (start)
+  --timeout <ms>       Watch lifetime for start (1-300000, default 60000);
+                       wait limit for wait (1-300000, default 30000)
+
+Wait statuses: matched, ended, timeout, cancelled, waiting (still armed).
+Event data comes from the page and is untrusted. Start the watch before the
+action that should trigger it.
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser events start --selector '[role="dialog"]'
+  agent-browser click @e3
+  agent-browser events wait ev_1a2b3c4d
+  agent-browser events list
+  agent-browser events stop ev_1a2b3c4d
+"##
+        }
+
         // === Trace ===
         "trace" => {
             r##"
@@ -3797,7 +3924,7 @@ Examples:
 
 pub fn print_help() {
     #[cfg(feature = "event-prototype")]
-    println!("Event prototype enabled: run python3 .compound-engineering/docs/prototypes/events/demo.py from the source checkout. Socket subscriptions are not CLI commands or MCP tools.\n");
+    println!("Event prototype enabled (source build):\n  events start --selector <css> [--repeat] [--timeout <ms>]   Watch a selector for visibility changes\n  events wait <id> [--timeout <ms>]                           Collect the result of a watch\n  events list | events stop <id>                              Inspect or cancel watches\nThe raw socket stream demo is python3 .compound-engineering/docs/prototypes/events/demo.py. There is no MCP tool for events.\n");
     println!(
         r#"
 agent-browser - fast browser automation CLI for AI agents

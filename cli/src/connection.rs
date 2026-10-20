@@ -1159,6 +1159,13 @@ pub(crate) fn read_timeout_for(cmd: &Value) -> Duration {
     if cmd.get("action").and_then(Value::as_str) == Some("mousemove") {
         op_ms = op_ms.max(cmd.get("duration").and_then(Value::as_u64).unwrap_or(0));
     }
+    if cmd.get("action").and_then(Value::as_str) == Some("events_wait") {
+        op_ms = op_ms.max(
+            cmd.get("timeout_ms")
+                .and_then(Value::as_u64)
+                .unwrap_or(30_000),
+        );
+    }
     Duration::from_millis(op_ms.saturating_add(10_000).max(30_000))
 }
 

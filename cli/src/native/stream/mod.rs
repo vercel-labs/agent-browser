@@ -560,6 +560,21 @@ impl StreamServer {
         let _ = self.frame_tx.send(msg.to_string());
     }
 
+    /// Broadcast an event subscription transition to connected dashboard clients.
+    /// `event` carries `subscriptionId`, `selector`, `name`, `eventId`, and `data`.
+    pub fn broadcast_event(&self, event: &Value) {
+        let mut msg = json!({
+            "type": "event",
+            "timestamp": timestamp_ms(),
+        });
+        if let (Some(target), Some(fields)) = (msg.as_object_mut(), event.as_object()) {
+            for (key, value) in fields {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+        let _ = self.frame_tx.send(msg.to_string());
+    }
+
     /// Broadcast a page error (uncaught exception) from the browser.
     pub fn broadcast_page_error(&self, text: &str, line: Option<i64>, column: Option<i64>) {
         let msg = json!({

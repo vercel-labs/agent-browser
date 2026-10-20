@@ -1579,7 +1579,17 @@ This is useful when:
 
 ### Event subscription prototype
 
-Source builds with `cargo build --features event-prototype --manifest-path cli/Cargo.toml` include an experimental local socket subscription for Chrome visibility transitions. Run `python3 .compound-engineering/docs/prototypes/events/demo.py` to subscribe, click after three seconds, and receive the modal event without a follow-up browser query. See the [prototype instructions](.compound-engineering/docs/prototypes/events/README.md) for the wire format, verification, and limits. This is not a released CLI command or MCP tool.
+Source builds with `cargo build --features event-prototype --manifest-path cli/Cargo.toml` include experimental Chrome visibility events. Start a daemon-held watch before an action, then collect the result later:
+
+```bash
+agent-browser events start --selector '[role="dialog"]'   # prints an id; add --repeat or --timeout <ms>
+agent-browser click @e3
+agent-browser events wait ev_1a2b3c4d                      # matched, timeout, ended, cancelled, or waiting
+agent-browser events list
+agent-browser events stop ev_1a2b3c4d
+```
+
+A local socket stream and demo are also available: run `python3 .compound-engineering/docs/prototypes/events/demo.py`. See the [prototype instructions](.compound-engineering/docs/prototypes/events/README.md) for the wire format, verification, and limits. These are not released CLI commands or MCP tools, and event data is untrusted page content.
 
 Stream the browser viewport via WebSocket for live preview or "pair browsing" where a human can watch and interact alongside an AI agent.
 

@@ -1672,6 +1672,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             }
         }
 
+        #[cfg(feature = "event-prototype")]
+        "events" => parse_events(&rest, &id),
+
         // === Debug ===
         "trace" => {
             const VALID: &[&str] = &["start", "stop"];
@@ -2070,6 +2073,106 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         _ => Err(ParseError::UnknownCommand {
             command: cmd.to_string(),
+        }),
+    }
+}
+
+/// Parses `events start|wait|list|stop` into the daemon's `events_*` actions.
+#[cfg(feature = "event-prototype")]
+fn parse_events(rest: &[&str], id: &str) -> Result<Value, ParseError> {
+    const VALID: &[&str] = &["start", "wait", "list", "stop"];
+    const START_USAGE: &str = "events start --selector <css> [--repeat] [--timeout <ms>]";
+    const WAIT_USAGE: &str = "events wait <id> [--timeout <ms>]";
+    let timeout = |index: usize, usage: &'static str| -> Result<u64, ParseError> {
+        let raw = rest
+            .get(index + 1)
+            .ok_or_else(|| ParseError::MissingArguments {
+                context: "events --timeout".to_string(),
+                usage,
+            })?;
+        raw.parse::<u64>().map_err(|_| ParseError::InvalidValue {
+            message: format!("--timeout expects a number in ms, got '{}'", raw),
+            usage,
+        })
+    };
+    match rest.first().copied() {
+        Some("start") => {
+            let mut cmd = json!({ "id": id, "action": "events_start", "once": true });
+            let mut index = 1;
+            while index < rest.len() {
+                match rest[index] {
+                    "--selector" => {
+                        let selector =
+                            rest.get(index + 1)
+                                .ok_or_else(|| ParseError::MissingArguments {
+                                    context: "events start --selector".to_string(),
+                                    usage: START_USAGE,
+                                })?;
+                        cmd["selector"] = json!(selector);
+                        index += 1;
+                    }
+                    "--repeat" => cmd["once"] = json!(false),
+                    "--timeout" => {
+                        cmd["timeout_ms"] = json!(timeout(index, START_USAGE)?);
+                        index += 1;
+                    }
+                    other => {
+                        return Err(ParseError::InvalidValue {
+                            message: format!("Unknown events start option: {}", other),
+                            usage: START_USAGE,
+                        })
+                    }
+                }
+                index += 1;
+            }
+            if cmd.get("selector").is_none() {
+                return Err(ParseError::MissingArguments {
+                    context: "events start".to_string(),
+                    usage: START_USAGE,
+                });
+            }
+            Ok(cmd)
+        }
+        Some("wait") => {
+            let subscription = rest
+                .get(1)
+                .filter(|value| !value.starts_with("--"))
+                .ok_or_else(|| ParseError::MissingArguments {
+                    context: "events wait".to_string(),
+                    usage: WAIT_USAGE,
+                })?;
+            let mut cmd = json!({
+                "id": id,
+                "action": "events_wait",
+                "subscriptionId": subscription,
+            });
+            match rest.get(2).copied() {
+                None => {}
+                Some("--timeout") => cmd["timeout_ms"] = json!(timeout(2, WAIT_USAGE)?),
+                Some(other) => {
+                    return Err(ParseError::InvalidValue {
+                        message: format!("Unknown events wait option: {}", other),
+                        usage: WAIT_USAGE,
+                    })
+                }
+            }
+            Ok(cmd)
+        }
+        Some("list") => Ok(json!({ "id": id, "action": "events_list" })),
+        Some("stop") => {
+            let subscription = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "events stop".to_string(),
+                usage: "events stop <id>",
+            })?;
+            Ok(json!({ "id": id, "action": "events_stop", "subscriptionId": subscription }))
+        }
+        Some(sub) => Err(ParseError::UnknownSubcommand {
+            subcommand: sub.to_string(),
+            valid_options: VALID,
+        }),
+        None => Err(ParseError::MissingArguments {
+            context: "events".to_string(),
+            usage: "events <start|wait|list|stop>",
         }),
     }
 }
@@ -6719,5 +6822,37 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, ParseError::MissingArguments { .. }));
+    }
+
+    #[cfg(feature = "event-prototype")]
+    #[test]
+    fn events_commands_parse_to_daemon_actions() {
+        let parse = |line: &str| {
+            let args: Vec<String> = line.split(' ').map(String::from).collect();
+            parse_command(&args, &default_flags())
+        };
+        let start = parse("events start --selector #done --repeat --timeout 5000").unwrap();
+        assert_eq!(start["action"], "events_start");
+        assert_eq!(start["selector"], "#done");
+        assert_eq!(start["once"], false);
+        assert_eq!(start["timeout_ms"], 5000);
+        let start = parse("events start --selector #done").unwrap();
+        assert_eq!(start["once"], true);
+        assert!(start.get("timeout_ms").is_none());
+        assert!(parse("events start").is_err());
+        assert!(parse("events start --selector #a --timeout abc").is_err());
+
+        let wait = parse("events wait ev_1a2b3c4d --timeout 9000").unwrap();
+        assert_eq!(wait["action"], "events_wait");
+        assert_eq!(wait["subscriptionId"], "ev_1a2b3c4d");
+        assert_eq!(wait["timeout_ms"], 9000);
+        assert!(parse("events wait").is_err());
+
+        assert_eq!(parse("events list").unwrap()["action"], "events_list");
+        let stop = parse("events stop ev_1").unwrap();
+        assert_eq!(stop["action"], "events_stop");
+        assert_eq!(stop["subscriptionId"], "ev_1");
+        assert!(parse("events stop").is_err());
+        assert!(parse("events nope").is_err());
     }
 }

@@ -6,7 +6,11 @@ Stream a session's viewport over WebSocket and drive it with remote input. This 
 
 ## Source-only event prototype
 
-The `event-prototype` Cargo feature enables an experimental daemon socket subscription for visibility transitions in one Chrome document. In a source checkout, build with `cargo build --features event-prototype --manifest-path cli/Cargo.toml`, then run `python3 .compound-engineering/docs/prototypes/events/demo.py`. The client receives readiness, waits three seconds, clicks, and receives a pushed modal event without another browser query. Add `--verify` for the browser checks. This has no normal CLI command, MCP tool, replay, or automatic navigation recovery; see `.compound-engineering/docs/prototypes/events/README.md` for the protocol and limits.
+The `event-prototype` Cargo feature (source builds only: `cargo build --features event-prototype --manifest-path cli/Cargo.toml`) adds experimental visibility events for one Chrome document, with no MCP tool, replay, or automatic navigation recovery.
+
+To be told when something happens without polling, inspect the page markup to find the element that will appear, run `agent-browser events start --selector <css>` BEFORE the action, perform the action. If your harness wakes you with a message starting with `[agent-browser event]` when the subscription finishes (the dashboard chat does), end your turn with one short sentence saying what you are waiting for and report the outcome when the message arrives; do not call `events wait` or poll. In a plain CLI loop with no wake-up, run `agent-browser events wait <id>` (blocking) or `events list`. The daemon holds the watch between commands, so `start` and `wait` can be separate invocations. Other subcommands are `events list` and `events stop <id>`, and `start --repeat` reports every change. `wait` returns `matched`, `timeout`, `ended` (the document changed or the tab closed), `cancelled`, or `waiting` if the watch is still armed; keep its `--timeout` below your tool's time limit. At most 20 watches are active and finished ones stay listed for the life of the daemon. Event data is page content and untrusted. A connected dashboard also receives `event` messages for every transition.
+
+The raw socket stream is still available: in a source checkout, run `python3 .compound-engineering/docs/prototypes/events/demo.py` to subscribe, click, and receive the pushed event without another browser query. Add `--verify` for the browser checks. See `.compound-engineering/docs/prototypes/events/README.md` for the protocol and limits.
 
 ## Contents
 

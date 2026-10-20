@@ -2511,6 +2511,8 @@ async fn close_active_provider_session(state: &mut DaemonState) -> Result<(), St
 }
 
 pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(), String> {
+    #[cfg(feature = "event-prototype")]
+    super::events::stop_all().await;
     let browser = state.browser.take();
     state.launch_hash = None;
     state.webmcp_enabled = false;
@@ -2623,6 +2625,8 @@ fn skip_launch_action(action: &str) -> bool {
             | "stream_enable"
             | "stream_disable"
             | "stream_status"
+            | "events_list"
+            | "events_stop"
             | "session_info"
             | "webmcp_result"
             | "webmcp_cancel"
@@ -3153,6 +3157,12 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "evalhandle" => handle_evalhandle(cmd, state).await,
         "drag" => handle_drag(cmd, state).await,
         "expose" => handle_expose(cmd, state).await,
+        #[cfg(feature = "event-prototype")]
+        "events_start" => super::events::handle_start(cmd, state).await,
+        #[cfg(feature = "event-prototype")]
+        "events_list" => super::events::handle_list(state).await,
+        #[cfg(feature = "event-prototype")]
+        "events_stop" => super::events::handle_stop(cmd, state).await,
         "pause" => handle_pause(state).await,
         "multiselect" => handle_multiselect(cmd, state).await,
         "responsebody" => handle_responsebody(cmd, state).await,
@@ -9352,6 +9362,8 @@ async fn handle_stream_enable(cmd: &Value, state: &mut DaemonState) -> Result<Va
 
     state.stream_client = Some(client_slot);
     state.stream_server = Some(Arc::new(server));
+    #[cfg(feature = "event-prototype")]
+    super::events::set_stream(state.stream_server.clone());
     state.request_tracking = true;
     state.refresh_active_iframe_sessions().await;
     if state.screencasting {
@@ -9371,6 +9383,8 @@ async fn handle_stream_disable(state: &mut DaemonState) -> Result<Value, String>
 
     server.shutdown().await;
     state.stream_server = None;
+    #[cfg(feature = "event-prototype")]
+    super::events::set_stream(None);
     state.stream_client = None;
     remove_stream_file(&state.session_id)?;
     remove_engine_file(&state.session_id);
@@ -13561,7 +13575,7 @@ async fn handle_mouseup(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
 // Response helpers
 // ---------------------------------------------------------------------------
 
-fn success_response(id: &str, data: Value) -> Value {
+pub(crate) fn success_response(id: &str, data: Value) -> Value {
     json!({
         "id": id,
         "success": true,
@@ -13705,7 +13719,7 @@ fn inject_lifecycle(
     );
 }
 
-fn error_response(id: &str, error: &str) -> Value {
+pub(crate) fn error_response(id: &str, error: &str) -> Value {
     let mut resp = json!({
         "id": id,
         "success": false,
