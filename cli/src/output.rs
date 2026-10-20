@@ -1590,7 +1590,7 @@ pub fn print_command_help(command: &str) -> bool {
             r##"
 agent-browser open - Launch the browser, optionally navigate
 
-Usage: agent-browser open [url]
+Usage: agent-browser open [url] [--wait-until <load|domcontentloaded|networkidle>]
 
 Without a URL, launches the browser but stays on about:blank. This lets
 you stage state (network routes, cookies, init scripts) before the first
@@ -1605,6 +1605,11 @@ tools and unchanged catalogs add no context or discovery polling.
 
 The `goto` and `navigate` aliases still require a URL.
 
+Options:
+  --wait-until <state>  When the navigation counts as done: load (default,
+                        every subresource loaded), domcontentloaded (the
+                        document parsed) or networkidle
+
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
@@ -1618,6 +1623,7 @@ Examples:
   agent-browser open example.com
   agent-browser open https://github.com
   agent-browser open localhost:3000
+  agent-browser open example.com --wait-until domcontentloaded
   agent-browser open api.example.com --headers '{"Authorization": "Bearer token"}'
     # ^ Headers only sent to api.example.com, not other domains
 

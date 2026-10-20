@@ -11,6 +11,9 @@ agent-browser open            # Launch browser (no navigation); stays on about:b
 agent-browser open <url>      # Launch + navigate (aliases: goto, navigate)
                               # Supports: https://, http://, file://, about:, data://
                               # Auto-prepends https:// if no protocol given
+                              # --wait-until <load|domcontentloaded|networkidle>: when the
+                              # navigation counts as done (default load, every subresource;
+                              # domcontentloaded returns once the document is parsed)
 agent-browser read [url]      # Fetch agent-readable text, or read rendered active-tab DOM
                               # Explicit URLs send Accept: text/markdown, then try .md if needed
                               # Walks ancestor paths for llms.txt before HTML fallback

@@ -776,6 +776,7 @@ fn tools() -> Vec<Value> {
                 "headed": { "type": "boolean", "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults." },
                 "webgpu": { "type": "boolean", "description": "Enable WebGPU (SwiftShader software Vulkan on Linux; no GPU required). Explicit true/false overrides AGENT_BROWSER_WEBGPU and config; omit to use those defaults." }
                 ,"webmcp": { "type": "boolean", "description": "Enable experimental WebMCP support. Defaults to true for locally launched Chrome; set false to pass --no-webmcp." }
+                ,"waitUntil": { "type": "string", "enum": ["load", "domcontentloaded", "networkidle"], "description": "When the navigation counts as done (--wait-until). Defaults to load; domcontentloaded returns once the document is parsed, without waiting for images, ads and other subresources." }
             }),
             &[],
         ),
@@ -2540,6 +2541,10 @@ fn open_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
             args.push(url);
         }
     }
+    if let Some(wait_until) = optional_string(arguments, "waitUntil")? {
+        args.push("--wait-until".to_string());
+        args.push(wait_until);
+    }
     Ok(args)
 }
 
@@ -4297,6 +4302,29 @@ mod tests {
         assert!(props.get("headed").is_some());
         assert!(props.get("webgpu").is_some());
         assert!(props.get("webmcp").is_some());
+        assert_eq!(
+            props["waitUntil"]["enum"],
+            json!(["load", "domcontentloaded", "networkidle"])
+        );
+    }
+
+    #[test]
+    fn open_args_forward_wait_until_to_the_cli_parser() {
+        let args =
+            open_args(&json!({ "url": "https://example.com", "waitUntil": "domcontentloaded" }))
+                .unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "open",
+                "https://example.com",
+                "--wait-until",
+                "domcontentloaded"
+            ]
+        );
+        let flags = crate::flags::parse_flags(&args);
+        let cmd = crate::commands::parse_command(&args, &flags).unwrap();
+        assert_eq!(cmd["waitUntil"], "domcontentloaded");
     }
 
     #[test]

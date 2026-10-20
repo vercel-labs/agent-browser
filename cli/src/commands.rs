@@ -386,7 +386,16 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             // scripts before the first real navigation (see `batch`).
             // `goto` and `navigate` still require a URL since those verbs
             // imply the navigation itself.
-            let first_url = rest.iter().find(|a| !a.starts_with("--"));
+            let wait_until = parse_navigation_wait_until(&rest, cmd)?;
+            let wait_value_at = rest
+                .iter()
+                .position(|a| *a == "--wait-until")
+                .map(|at| at + 1);
+            let first_url = rest
+                .iter()
+                .enumerate()
+                .find(|(i, a)| !a.starts_with("--") && Some(*i) != wait_value_at)
+                .map(|(_, a)| a);
             let url = match first_url {
                 Some(u) => *u,
                 None if cmd == "open" => {
@@ -401,7 +410,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             };
             let url = normalize_navigation_url(url);
             let mut nav_cmd = json!({ "id": id, "action": "navigate", "url": url });
-            if flags.provider.is_some() {
+            if let Some(wait_until) = wait_until {
+                nav_cmd["waitUntil"] = json!(wait_until);
+            } else if flags.provider.is_some() {
                 nav_cmd["waitUntil"] = json!("none");
             }
             if let Some(ref headers_json) = flags.headers {
@@ -2268,6 +2279,35 @@ fn parse_webmcp(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         _ => Err(ParseError::UnknownSubcommand {
             subcommand: subcommand.to_string(),
             valid_options: &["list", "invoke", "result", "cancel"],
+        }),
+    }
+}
+
+/// The lifecycle points `open`, `goto` and `navigate` can wait for.
+const NAVIGATION_WAIT_UNTIL: &[&str] = &["load", "domcontentloaded", "networkidle"];
+
+/// `--wait-until <load|domcontentloaded|networkidle>` on `open`, `goto` and `navigate`: when the
+/// navigation counts as done. None when the flag is absent, so the daemon keeps its default (`load`).
+fn parse_navigation_wait_until<'a>(
+    rest: &[&'a str],
+    cmd: &str,
+) -> Result<Option<&'a str>, ParseError> {
+    let Some(at) = rest.iter().position(|a| *a == "--wait-until") else {
+        return Ok(None);
+    };
+    match rest.get(at + 1) {
+        Some(value) if NAVIGATION_WAIT_UNTIL.contains(value) => Ok(Some(value)),
+        Some(value) => Err(ParseError::InvalidValue {
+            message: format!(
+                "Invalid --wait-until value: {} (expected one of: {})",
+                value,
+                NAVIGATION_WAIT_UNTIL.join(", ")
+            ),
+            usage: "open <url> --wait-until <load|domcontentloaded|networkidle>",
+        }),
+        None => Err(ParseError::MissingArguments {
+            context: format!("{} --wait-until", cmd),
+            usage: "open <url> --wait-until <load|domcontentloaded|networkidle>",
         }),
     }
 }
@@ -4195,6 +4235,62 @@ mod tests {
         let cmd = parse_command(&args("open https://example.com"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "navigate");
         assert_eq!(cmd["url"], "https://example.com");
+    }
+
+    #[test]
+    fn test_navigate_wait_until() {
+        let cmd = parse_command(
+            &args("open https://example.com --wait-until domcontentloaded"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "navigate");
+        assert_eq!(cmd["url"], "https://example.com");
+        assert_eq!(cmd["waitUntil"], "domcontentloaded");
+
+        // The flag may come before the URL, on every alias.
+        let cmd = parse_command(
+            &args("goto --wait-until networkidle example.com"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["url"], "https://example.com");
+        assert_eq!(cmd["waitUntil"], "networkidle");
+
+        // Without it the daemon keeps its default (load).
+        let cmd = parse_command(&args("navigate https://example.com"), &default_flags()).unwrap();
+        assert!(cmd.get("waitUntil").is_none());
+    }
+
+    #[test]
+    fn test_navigate_wait_until_overrides_provider_default() {
+        let mut flags = default_flags();
+        flags.provider = Some("browserbase".to_string());
+        let cmd = parse_command(&args("open https://example.com"), &flags).unwrap();
+        assert_eq!(cmd["waitUntil"], "none");
+        let cmd =
+            parse_command(&args("open https://example.com --wait-until load"), &flags).unwrap();
+        assert_eq!(cmd["waitUntil"], "load");
+    }
+
+    #[test]
+    fn test_navigate_wait_until_invalid() {
+        let result = parse_command(
+            &args("open https://example.com --wait-until interactive"),
+            &default_flags(),
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::InvalidValue { .. }
+        ));
+        let result = parse_command(
+            &args("open https://example.com --wait-until"),
+            &default_flags(),
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            ParseError::MissingArguments { .. }
+        ));
     }
 
     #[test]

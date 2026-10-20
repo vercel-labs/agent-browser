@@ -2,6 +2,10 @@
   "pages": {
     "/commands": [
       {
+        "from": "agent-browser open <url>              # Launch + navigate (aliases: goto, navigate)",
+        "to": "agent-browser open <url>              # Launch + navigate (aliases: goto, navigate)\nagent-browser open <url> --wait-until domcontentloaded  # Return once the document is parsed (load, the default, waits for every subresource; or networkidle)"
+      },
+      {
         "from": "# Trust a CA for locally launched Chromium on Linux",
         "to": "# Trust a CA for CLI requests, and for local Chromium on Linux"
       },
