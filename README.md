@@ -1246,6 +1246,8 @@ export AGENT_BROWSER_DEFAULT_TIMEOUT=45000
 
 > **Note:** Setting this above 30000 (30s) may cause EAGAIN errors on slow operations because the CLI's read timeout will expire before the daemon responds. Read-only commands (`snapshot`, `url`, `get text`, ...) are retried automatically. A command that changes the page or launches the browser is not re-sent once the daemon received it, since it may already have run; it fails with code `outcome_unknown` instead.
 
+> **Note:** If a command times out because the page stopped responding (for example a script stuck in `while(true){}`), the command fails with code `page_wedged`. When agent-browser launched the browser and the next command also times out, it replaces the stuck tab with a blank one, so later commands work again after you navigate. A page that recovers in between keeps its tab. With `--cdp` or `--auto-connect`, the tab belongs to your browser and is left as is. The tab is also left as is when an action policy denies `tab_new` or `tab_close` or requires confirmation for them.
+
 | Variable                        | Description                              |
 | ------------------------------- | ---------------------------------------- |
 | `AGENT_BROWSER_DEFAULT_TIMEOUT` | Default operation timeout in ms (default: 25000) |

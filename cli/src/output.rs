@@ -544,6 +544,9 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         return;
     }
 
+    // Printed before the per-action formatting, most of which returns early.
+    print_warning(resp);
+
     if let Some(data) = &resp.data {
         print_lifecycle_note(data);
 
@@ -570,7 +573,6 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                 } else {
                     println!("{} No dialog is currently open", color::success_indicator());
                 }
-                print_warning(resp);
                 return;
             }
         }
@@ -1530,8 +1532,6 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         // Default success
         println!("{} Done", color::success_indicator());
     }
-
-    print_warning(resp);
 }
 
 fn print_lifecycle_note(data: &serde_json::Value) {

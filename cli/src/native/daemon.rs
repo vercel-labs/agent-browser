@@ -596,6 +596,11 @@ async fn handle_connection<S>(
                 if writer.write_all(resp.as_bytes()).await.is_err() {
                     break;
                 }
+                if response.get("code").and_then(Value::as_str) == Some("page_wedged") {
+                    if let Some(id) = response.get("id").and_then(Value::as_str) {
+                        state.lock().await.wedge_report_delivered(id);
+                    }
+                }
 
                 if close_completed_response(&action, &response) {
                     if let Some(ref path) = stream_file_cleanup {
