@@ -5791,7 +5791,10 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 
     let previous_refs = state.ref_map.ref_ids();
     state.ref_map.begin_snapshot();
-    let tree = snapshot::take_snapshot(
+    let snapshot::SnapshotResult {
+        tree,
+        refs: rendered_refs,
+    } = snapshot::take_snapshot(
         &mgr.client,
         &session_id,
         &options,
@@ -5803,10 +5806,12 @@ async fn handle_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 
     let url = mgr.get_url().await.unwrap_or_default();
 
+    // Only expose refs printed in the tree; retain the internal map for ref resolution.
     let refs: serde_json::Map<String, Value> = state
         .ref_map
         .entries_sorted()
         .into_iter()
+        .filter(|(ref_id, _)| rendered_refs.contains(ref_id))
         .map(|(ref_id, entry)| {
             let mut obj = serde_json::Map::new();
             obj.insert("role".into(), Value::String(entry.role));
@@ -7325,7 +7330,8 @@ async fn handle_diff_snapshot(cmd: &Value, state: &mut DaemonState) -> Result<Va
         state.active_frame_id.as_deref(),
         &state.iframe_sessions,
     )
-    .await?;
+    .await?
+    .tree;
 
     let baseline = cmd.get("baseline").and_then(|v| v.as_str());
 
@@ -7395,7 +7401,8 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         None,
         &state.iframe_sessions,
     )
-    .await?;
+    .await?
+    .tree;
 
     // Navigate to URL2 and snapshot
     snap1_ref_map.invalidate_page(&first_session_id);
@@ -7410,7 +7417,8 @@ async fn handle_diff_url(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         None,
         &state.iframe_sessions,
     )
-    .await?;
+    .await?
+    .tree;
 
     let result = diff::diff_text(
         &diff::snapshot_comparison_text(&snap1),

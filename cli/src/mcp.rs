@@ -836,7 +836,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_SNAPSHOT,
             "Snapshot page",
-            "Return an accessibility-tree snapshot with reusable element refs.",
+            "Return an accessibility-tree snapshot with reusable element refs. The refs map contains only refs shown in the tree.",
             json!({
                 "interactive": { "type": "boolean", "default": true, "description": "Only include interactive elements." },
                 "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements." },
@@ -4222,12 +4222,19 @@ mod tests {
         for arguments in [
             json!({}),
             json!({"interactive": false, "selector": "#content"}),
+            json!({"selector": "header", "depth": 1, "compact": true}),
+            json!({"depth": 0}),
         ] {
             let args = snapshot_command_args(&arguments).unwrap();
             let flags = crate::flags::parse_flags(&args);
             let command = crate::commands::parse_command(&args, &flags).unwrap();
             assert_eq!(command["action"], "snapshot");
             assert_eq!(command.get("selector"), arguments.get("selector"));
+            assert_eq!(command.get("maxDepth"), arguments.get("depth"));
+            assert_eq!(
+                command["compact"].as_bool().unwrap_or(false),
+                arguments["compact"].as_bool().unwrap_or(false)
+            );
             assert_eq!(
                 command["interactive"].as_bool().unwrap_or(false),
                 arguments["interactive"].as_bool().unwrap_or(true)
