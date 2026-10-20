@@ -14,6 +14,10 @@
       {
         "from": "This initial implementation does not support",
         "to": "Browser trust does not support"
+      },
+      {
+        "from": "<tr><td><code>AGENT_BROWSER_ARGS</code></td><td>Comma or newline separated browser launch arguments.</td><td>(none)</td></tr>",
+        "to": "<tr><td><code>AGENT_BROWSER_ARGS</code></td><td>Comma or newline separated browser launch arguments. Repeated <code>--disable-features</code> entries merge with the built-in <code>Translate</code> opt-out. On Linux, a custom <code>--use-angle</code> that conflicts with <code>--webgpu</code> causes a launch error.</td><td>(none)</td></tr>"
       }
     ],
     "/proxy": [
@@ -40,6 +44,9 @@
     ]
   },
   "resources": {
-    "/schema.json": { "size": 9427, "sha256": "eecb6f5aa3f6c7f0a4f0fb1176923c5b7d005065fea101ff90394c2845b97468" }
+    "/schema.json": {
+      "size": 9427,
+      "sha256": "eecb6f5aa3f6c7f0a4f0fb1176923c5b7d005065fea101ff90394c2845b97468"
+    }
   }
 }
