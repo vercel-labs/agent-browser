@@ -8,7 +8,7 @@ Each page records its complete source hash, original H1 insertion position, meta
 
 The generator executes the original slugger and recursive React-child text extractor without substituting GitHub slugging or deduplicating IDs. The independent oracle compiles and renders the captured original MDX with the original heading components, checking every captured heading and content sample. Synthetic cases exercise nested inline children, numeric text, punctuation and duplicate IDs. Fenced code is not parsed as headings.
 
-Never regenerate fixtures from migrated output to accept a failing assertion. To verify reproducibility from the pinned commit:
+Never regenerate fixtures from migrated output to accept a failing assertion. The capture script applies explicit PR #1863 launch-argument wording updates to the three affected pinned MDX sources and public schema; all other pinned inputs stay unchanged. These updates record the intentional comma-preserving argument contract, not a new migration baseline. To verify reproducibility from the pinned commit:
 
 ```sh
 node scripts/capture-docs-baseline.mjs --check

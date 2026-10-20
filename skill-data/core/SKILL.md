@@ -486,6 +486,7 @@ EOF
 --session <name>        # isolated browser session
 --json                  # JSON output (for machine parsing)
 --headed                # show the window (default is headless)
+--args <args>           # Chrome launch args (comma/newline separated; commas inside --flag=value stay intact)
 --engine <name>         # chrome (default), lightpanda, obscura (experimental)
 --webgpu                # enable WebGPU (software Vulkan on Linux, no GPU needed)
 --auto-connect          # connect to an already-running Chrome
