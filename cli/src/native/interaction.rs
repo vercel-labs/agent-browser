@@ -5,7 +5,7 @@ use serde_json::Value;
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
 use super::element::{
-    resolve_element_center, resolve_element_object_id, session_viewport_offset, RefMap,
+    resolve_element_object_id, resolve_stable_element_center, session_viewport_offset, RefMap,
 };
 
 /// Outcome of a click. `dialog_opened` is true if a JavaScript dialog opened
@@ -41,7 +41,7 @@ pub async fn click(
     click_count: i32,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<ClickResult, String> {
-    let (x, y, effective_session_id) = resolve_element_center(
+    let (x, y, effective_session_id) = resolve_stable_element_center(
         client,
         session_id,
         ref_map,
@@ -96,7 +96,7 @@ pub async fn hover(
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<(f64, f64), String> {
-    let (x, y, effective_session_id) = resolve_element_center(
+    let (x, y, effective_session_id) = resolve_stable_element_center(
         client,
         session_id,
         ref_map,
@@ -941,7 +941,7 @@ pub async fn tap_touch(
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<(), String> {
-    let (x, y, effective_session_id) = resolve_element_center(
+    let (x, y, effective_session_id) = resolve_stable_element_center(
         client,
         session_id,
         ref_map,
