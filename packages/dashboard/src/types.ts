@@ -85,6 +85,68 @@ export interface TabsMessage {
   timestamp: number;
 }
 
+export type EventName =
+  | "subscription.ready"
+  | "element.visible"
+  | "element.hidden"
+  | "subscription.ended";
+
+export type EndReason =
+  | "matched"
+  | "timeout"
+  | "cancelled"
+  | "document_changed"
+  | "tab_closed"
+  | "event_gap";
+
+export interface EventObservation {
+  selector: string;
+  state: "hidden" | "visible";
+  label: string | null;
+  observedAt: string;
+  /** Only present on `subscription.ended`. */
+  reason?: EndReason;
+}
+
+export interface EventMessage {
+  type: "event";
+  timestamp: number;
+  subscriptionId: string;
+  selector: string;
+  name: EventName;
+  /** Empty for `subscription.ready`. */
+  eventId: string;
+  data: {
+    tabId: string;
+    observation: EventObservation;
+  };
+}
+
+export interface EventActivity {
+  type: "event";
+  id: string;
+  timestamp: number;
+  subscriptionId: string;
+  selector: string;
+  name: EventName;
+  label: string | null;
+  reason?: EndReason;
+}
+
+export interface Subscription {
+  id: string;
+  selector: string;
+  tabId: string;
+  status: "watching" | "fired" | "ended";
+  initialState: "hidden" | "visible";
+  firedAt?: number;
+  label?: string;
+  reason?: EndReason;
+  startedAt: number;
+  lastEventAt: number;
+  events: number;
+}
+
 export type StreamMessage =
   | FrameMessage
   | StatusMessage
@@ -94,9 +156,14 @@ export type StreamMessage =
   | PageErrorMessage
   | ErrorMessage
   | UrlMessage
-  | TabsMessage;
+  | TabsMessage
+  | EventMessage;
 
-export type ActivityEvent = CommandMessage | ResultMessage | ConsoleMessage;
+export type ActivityEvent =
+  | CommandMessage
+  | ResultMessage
+  | ConsoleMessage
+  | EventActivity;
 export type ConsoleEntry = ConsoleMessage | PageErrorMessage;
 
 export interface ExtensionInfo {

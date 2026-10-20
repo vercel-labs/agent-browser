@@ -11,7 +11,9 @@ import { ModelSelector } from "@/components/model-selector";
 import { shikiTheme } from "@/lib/shiki-theme";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
-import { ArrowUp, Square, Trash2, ChevronRight, ImagePlus, X, Loader, Copy, Check, Download } from "lucide-react";
+import { useEventWake } from "@/hooks/use-event-wake";
+import { parseEventMessage } from "@/lib/event-wake";
+import { ArrowUp, Square, Trash2, ChevronRight, ImagePlus, X, Loader, Copy, Check, Download, Radio } from "lucide-react";
 
 type ExtraProps = { node?: unknown };
 type MdImgProps = React.ImgHTMLAttributes<HTMLImageElement> & ExtraProps;
@@ -197,6 +199,23 @@ function ToolCallBlock({ part, onImageLoad }: { part: ToolInvocationPart; onImag
   );
 }
 
+function EventCard({ selector, outcome }: { selector: string; outcome: string }) {
+  return (
+    <div className="rounded-md border border-success/40 bg-success/5 px-2.5 py-2 text-[11px]">
+      <div className="flex items-center gap-2">
+        <Radio className="size-3 shrink-0 text-success" />
+        <span className="font-medium text-success">Event received</span>
+        {selector && (
+          <span className="min-w-0 truncate rounded bg-muted px-1.5 py-0.5 font-mono text-foreground">
+            {selector}
+          </span>
+        )}
+      </div>
+      {outcome && <p className="mt-1 pl-5 text-muted-foreground">{outcome}</p>}
+    </div>
+  );
+}
+
 const DEFAULT_CONTEXT_WINDOW = 128000;
 
 function estimateTokens(text: string): number {
@@ -346,6 +365,8 @@ export function ChatPanel() {
     transport,
     onError: () => setErrorDismissed(false),
   });
+
+  useEventWake({ messages, status, sendMessage });
 
   const visibleError = error && !errorDismissed ? error : undefined;
   const isLoading = status === "streaming" || status === "submitted";
@@ -606,12 +627,21 @@ export function ChatPanel() {
                           ))}
                       </div>
                     )}
-                    <div className="text-xs text-muted-foreground whitespace-pre-wrap leading-relaxed">
-                      {message.parts
+                    {(() => {
+                      const userText = message.parts
                         .filter((p): p is Extract<typeof p, { type: "text" }> => p.type === "text")
                         .map((p) => p.text)
-                        .join("")}
-                    </div>
+                        .join("");
+                      const eventInfo = parseEventMessage(userText);
+                      if (eventInfo) {
+                        return <EventCard selector={eventInfo.selector} outcome={eventInfo.outcome} />;
+                      }
+                      return (
+                        <div className="text-xs text-muted-foreground whitespace-pre-wrap leading-relaxed">
+                          {userText}
+                        </div>
+                      );
+                    })()}
                   </div>
                 ) : (
                   <div className="space-y-1.5">

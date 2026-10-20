@@ -7,9 +7,11 @@ import type {
   ActivityEvent,
   ConsoleEntry,
   StreamMessage,
+  Subscription,
   TabInfo,
 } from "@/types";
 import { getSessionStreamUrl } from "@/lib/dashboard-routes";
+import { reduceSubscriptions, toActivityEvent } from "@/lib/event-subscriptions";
 import { tabCacheAtom, engineCacheAtom } from "@/store/tabs";
 
 const MAX_EVENTS = 500;
@@ -27,6 +29,7 @@ export const viewportHeightAtom = atom(720);
 export const currentFrameAtom = atom<string | null>(null);
 export const streamEventsAtom = atom<ActivityEvent[]>([]);
 export const consoleLogsAtom = atom<ConsoleEntry[]>([]);
+export const eventSubscriptionsAtom = atom<Subscription[]>([]);
 export const streamTabsAtom = atom<TabInfo[]>([]);
 export const streamEngineAtom = atom("");
 export const wsRefAtom = atom<WebSocket | null>(null);
@@ -45,6 +48,11 @@ export const hasConsoleErrorsAtom = atom((get) =>
       e.type === "page_error" ||
       (e.type === "console" && e.level === "error"),
   ),
+);
+
+export const watchingCountAtom = atom(
+  (get) =>
+    get(eventSubscriptionsAtom).filter((s) => s.status === "watching").length,
 );
 
 // ---------------------------------------------------------------------------
@@ -83,6 +91,7 @@ export function useStreamSync(port: number) {
   const setFrame = useSetAtom(currentFrameAtom);
   const setEvents = useSetAtom(streamEventsAtom);
   const setConsoleLogs = useSetAtom(consoleLogsAtom);
+  const setSubscriptions = useSetAtom(eventSubscriptionsAtom);
   const setTabs = useSetAtom(streamTabsAtom);
   const setEngine = useSetAtom(streamEngineAtom);
   const setWsRef = useSetAtom(wsRefAtom);
@@ -94,6 +103,7 @@ export function useStreamSync(port: number) {
   const retryCountRef = useRef(0);
   const eventsRef = useRef<ActivityEvent[]>([]);
   const consoleRef = useRef<ConsoleEntry[]>([]);
+  const subscriptionsRef = useRef<Subscription[]>([]);
   const portRef = useRef(port);
 
   // Reset all stream state when port changes
@@ -102,6 +112,7 @@ export function useStreamSync(port: number) {
       portRef.current = port;
       eventsRef.current = [];
       consoleRef.current = [];
+      subscriptionsRef.current = [];
       setConnected(false);
       setBrowserConnected(false);
       setScreencasting(false);
@@ -111,10 +122,11 @@ export function useStreamSync(port: number) {
       setFrame(null);
       setEvents([]);
       setConsoleLogs([]);
+      setSubscriptions([]);
       setTabs([]);
       setEngine("");
     }
-  }, [port, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine]);
+  }, [port, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setSubscriptions, setTabs, setEngine]);
 
   const connect = useCallback(() => {
     if (port <= 0) return;
@@ -186,6 +198,18 @@ export function useStreamSync(port: number) {
           break;
         }
 
+        case "event": {
+          const subs = reduceSubscriptions(subscriptionsRef.current, msg);
+          subscriptionsRef.current = subs;
+          setSubscriptions(subs);
+          const updated = [...eventsRef.current, toActivityEvent(msg)].slice(
+            -MAX_EVENTS,
+          );
+          eventsRef.current = updated;
+          setEvents(updated);
+          break;
+        }
+
         case "result": {
           const cmdIdx = eventsRef.current.findIndex(
             (e) => e.type === "command" && e.id === msg.id,
@@ -218,7 +242,7 @@ export function useStreamSync(port: number) {
           break;
       }
     };
-  }, [port, setWsRef, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setTabs, setEngine, setTabCache, setEngineCache]);
+  }, [port, setWsRef, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setSubscriptions, setTabs, setEngine, setTabCache, setEngineCache]);
 
   useEffect(() => {
     connect();
