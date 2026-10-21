@@ -2937,7 +2937,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         } else if let Some(ref mut mgr) = state.browser {
             mgr.has_process_exited() || !mgr.is_connection_alive().await
         } else {
-            true
+            // Safari and iOS sessions live outside `state.browser`.
+            state.webdriver_backend.is_none()
         }
     } else {
         false
@@ -15606,6 +15607,34 @@ mod tests {
         assert!(content.contains("# Account"));
         assert!(content.contains("Signed in."));
         assert_eq!(server.await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_webdriver_session_does_not_auto_launch_chrome() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_CDP"]);
+        // Makes any auto-launch attempt fail fast instead of starting a local Chrome.
+        guard.set("AGENT_BROWSER_CDP", "invalid-cdp-target");
+        let (port, server) = start_webdriver_response_server(vec![(
+            "/session/test-session/url",
+            json!({ "value": "https://example.com/" }),
+        )])
+        .await;
+        let mut state = DaemonState::new();
+        state.backend_type = BackendType::WebDriver;
+        state.webdriver_backend = Some(WebDriverBackend::new(
+            crate::native::webdriver::client::WebDriverClient::new_with_session(
+                port,
+                "test-session".to_string(),
+            ),
+        ));
+        let cmd = json!({ "action": "url", "id": "webdriver-url" });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(resp["success"], true, "{resp}");
+        assert_eq!(resp["data"]["url"], "https://example.com/");
+        assert!(state.browser.is_none());
+        assert_eq!(server.await.unwrap(), 1);
     }
 
     #[tokio::test]
