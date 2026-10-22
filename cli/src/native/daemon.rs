@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -9,11 +10,12 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::signal;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 
 use super::actions::{
-    auto_save_restore_state, close_all_browser_backends, close_current_browser, execute_command,
-    maybe_autosave_restore_state, DaemonState,
+    auto_save_restore_state, check_command_policy, close_all_browser_backends,
+    close_current_browser, error_response, execute_command, maybe_autosave_restore_state,
+    success_response, DaemonState,
 };
 use super::cdp::client::CdpClient;
 use super::state;
@@ -162,6 +164,44 @@ pub async fn run_daemon(session: &str) {
         let _ = writeln!(std::io::stderr(), "Daemon error: {}", e);
         process::exit(1);
     }
+}
+
+pub(crate) async fn execute_events_read(cmd: &Value, state: &Mutex<DaemonState>) -> Value {
+    let id = cmd.get("id").and_then(Value::as_str).unwrap_or("");
+    let (bus, idle_activity) = {
+        let mut state = state.lock().await;
+        let mut policy_actions = vec!["events_read".to_owned()];
+        let mut approved = HashSet::new();
+        if let Some(subscription_id) = cmd
+            .get("subscriptionId")
+            .or_else(|| cmd.get("subscription_id"))
+            .and_then(Value::as_str)
+        {
+            if let Ok((actions, confirmed)) =
+                state.events.policy_for_subscription(subscription_id).await
+            {
+                policy_actions.extend(actions);
+                approved.extend(confirmed);
+            }
+        }
+        if cmd.get("ack").and_then(Value::as_bool).unwrap_or(false) {
+            policy_actions.push("events_ack".to_owned());
+        }
+        let previous = std::mem::replace(&mut state.confirmed_policy_actions, approved);
+        let denied = check_command_policy(cmd, &mut state, &policy_actions).await;
+        state.confirmed_policy_actions = previous;
+        if let Some(response) = denied {
+            state.idle_activity.mark();
+            return response;
+        }
+        (state.events.clone(), state.idle_activity.clone())
+    };
+    let response = match super::events::ops::read(cmd, &bus).await {
+        Ok(data) => success_response(id, data),
+        Err(error) => error_response(id, &error),
+    };
+    idle_activity.mark();
+    response
 }
 
 /// Idle timeout applied when AGENT_BROWSER_IDLE_TIMEOUT_MS is unset, so an
@@ -581,12 +621,11 @@ async fn handle_connection<S>(
                     .unwrap_or_default()
                     .to_string();
 
-                let response = {
-                    let mut s = state.lock().await;
-                    let response = execute_command(&cmd, &mut s).await;
-                    // Refresh while the state lock is still held. An idle
-                    // timer waiting on this command will observe the updated
-                    // clock as soon as it acquires the lock.
+                let response = if action == "events_read" {
+                    execute_events_read(&cmd, &state).await
+                } else {
+                    let mut state = state.lock().await;
+                    let response = execute_command(&cmd, &mut state).await;
                     idle_activity.mark();
                     response
                 };
@@ -737,6 +776,25 @@ mod tests {
             assert_eq!(t.ms, DEFAULT_IDLE_TIMEOUT_MS);
             assert!(t.is_default);
         }
+    }
+
+    #[tokio::test]
+    async fn test_events_read_ack_requires_ack_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        fs::write(&path, r#"{"deny":["events_ack"]}"#).unwrap();
+        let mut daemon = DaemonState::new();
+        daemon.policy =
+            Some(crate::native::policy::ActionPolicy::load(path.to_str().unwrap()).unwrap());
+        let state = Mutex::new(daemon);
+        let cmd = serde_json::json!({
+            "action": "events_read", "id": "read-ack", "subscriptionId": "sub-1", "ack": true
+        });
+
+        let response = execute_events_read(&cmd, &state).await;
+
+        assert_eq!(response["success"], false);
+        assert!(response["error"].as_str().unwrap().contains("events_ack"));
     }
 
     #[test]

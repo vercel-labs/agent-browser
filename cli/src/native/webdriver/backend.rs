@@ -131,6 +131,7 @@ pub const WEBDRIVER_UNSUPPORTED_ACTIONS: &[&str] = &[
     "network",
     "har_start",
     "har_stop",
+    "events_start",
 ];
 
 #[cfg(test)]
@@ -142,6 +143,7 @@ mod tests {
         assert!(WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&"a11y"));
         assert!(WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&"screencast_start"));
         assert!(WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&"trace_start"));
+        assert!(WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&"events_start"));
         assert!(!WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&"navigate"));
     }
 }

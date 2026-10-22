@@ -69,6 +69,8 @@ fn assert_error_code(resp: &Value, code: &str) {
 fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
+        "event_navigation_probe" => include_str!("test_fixtures/event_navigation_probe.html"),
+        "events_probe" => include_str!("test_fixtures/events_probe.html"),
         "html5_drag_probe" => include_str!("test_fixtures/html5_drag_probe.html"),
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
         "snapshot_diff_probe" => include_str!("test_fixtures/snapshot_diff_probe.html"),
@@ -79,6 +81,221 @@ fn native_test_fixture_html(name: &str) -> &'static str {
         "webmcp_context_probe" => include_str!("test_fixtures/webmcp_context_probe.html"),
         _ => panic!("Unknown native test fixture: {}", name),
     }
+}
+
+macro_rules! event {
+    ($session:ident, $($command:tt)*) => {
+        $session.command(json!($($command)*)).await
+    };
+}
+
+struct EventSession {
+    _environment: EnvGuard<'static>,
+    state: tokio::sync::Mutex<DaemonState>,
+    url: String,
+    downloads: tempfile::TempDir,
+    leak_requests: Arc<AtomicUsize>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl EventSession {
+    async fn start(domains: Option<&str>) -> Self {
+        let names = [
+            "AGENT_BROWSER_ACTION_POLICY",
+            "AGENT_BROWSER_POLICY",
+            "AGENT_BROWSER_CONFIRM_ACTIONS",
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_NO_AUTO_DIALOG",
+        ];
+        let environment = EnvGuard::new(&names);
+        for name in names {
+            environment.remove(name);
+        }
+        environment.set("AGENT_BROWSER_NO_AUTO_DIALOG", "1");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let leak_requests = Arc::new(AtomicUsize::new(0));
+        let logged = leak_requests.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let logged = logged.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 8192];
+                    let length = stream.read(&mut buffer).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buffer[..length]);
+                    let request = request.lines().next().unwrap_or("");
+                    let response = if request.contains(" /redirect ") {
+                        format!("HTTP/1.1 302 Found\r\nLocation: http://{address}/leak\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    } else {
+                        let (headers, body) = if request.contains(" /download ") {
+                            ("application/octet-stream\r\nContent-Disposition: attachment; filename=event-tap.txt", "event tap download")
+                        } else if request.contains(" /leak ") {
+                            logged.fetch_add(1, Ordering::SeqCst);
+                            ("text/html", "<!doctype html><div id=leaked>secret</div>")
+                        } else {
+                            (
+                                "text/html",
+                                include_str!("test_fixtures/event_tap_probe.html"),
+                            )
+                        };
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: {headers}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    };
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        let session = Self {
+            _environment: environment,
+            state: tokio::sync::Mutex::new(DaemonState::new()),
+            url: format!("http://{address}/events"),
+            downloads: tempfile::tempdir().unwrap(),
+            leak_requests,
+            server,
+        };
+        event!(session, {"action": "launch", "headless": true, "allowedDomains": domains, "downloadPath": session.downloads.path().to_string_lossy()});
+        event!(session, {"action": "navigate", "url": if domains == Some("localhost") { session.url.replace("127.0.0.1", "localhost") } else { session.url.clone() }});
+        session
+    }
+
+    async fn response(&self, mut command: Value) -> Value {
+        command["id"] = json!("event-test");
+        if command["action"] == "events_read" {
+            super::daemon::execute_events_read(&command, &self.state).await
+        } else {
+            Box::pin(execute_command(&command, &mut *self.state.lock().await)).await
+        }
+    }
+
+    async fn command(&self, command: Value) -> Value {
+        let response = self.response(command).await;
+        assert_success(&response);
+        get_data(&response).clone()
+    }
+
+    async fn tap(&self, method: &str, matchers: &[&str]) -> Value {
+        event!(self, {"action": "events_start", "method": method, "once": true, "match": matchers})
+    }
+
+    async fn read(&self, subscription: &Value, cursor: &Value) -> Value {
+        event!(self, {"action":"events_read", "subscriptionId":subscription["id"], "since":cursor, "waitMs":5_000, "limit":20})
+    }
+
+    async fn tap_event(&self, subscription: &Value, method: &str) -> Value {
+        let read = self.read(subscription, &subscription["cursor"]).await;
+        assert_bus_event(&read, method).clone()
+    }
+
+    async fn finish(self) {
+        event!(self, {"action": "close"});
+        self.server.abort();
+    }
+}
+
+async fn tap_fixture(method: &str, matchers: &[&str], selector: &str) {
+    let session = EventSession::start(None).await;
+    let subscription = session.tap(method, matchers).await;
+    event!(session, {"action": "evaluate", "script": format!("setTimeout(() => document.querySelector('{selector}').click(), 0)")});
+    session.tap_event(&subscription, method).await;
+    session.finish().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_cdp_event_tap_dialog() {
+    tap_fixture("Page.javascriptDialogOpening", &["/type=alert"], "#alert").await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_cdp_event_tap_navigation() {
+    tap_fixture("Page.navigatedWithinDocument", &[], "#navigate").await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_cdp_event_tap_console_from_background_tab() {
+    let session = EventSession::start(None).await;
+    let tabs = event!(session, {"action": "tab_list"});
+    let background_tab = &tabs["tabs"][0]["tabId"];
+    event!(session, {"action": "evaluate", "script": "window.eventTapChannel = new BroadcastChannel('event-tap'); eventTapChannel.onmessage = () => console.log('fixture background console')"});
+    event!(session, {"action": "tab_new", "url": session.url});
+    let subscription = session.tap("Runtime.consoleAPICalled", &[]).await;
+    event!(session, {"action": "evaluate", "script": "new BroadcastChannel('event-tap').postMessage(true)"});
+    let event = session
+        .tap_event(&subscription, "Runtime.consoleAPICalled")
+        .await;
+    assert_eq!(&event["meta"]["tab"]["id"], background_tab);
+    assert_eq!(event["data"]["text"], "fixture background console");
+    session.finish().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_cdp_event_tap_page_error() {
+    tap_fixture("Runtime.exceptionThrown", &[], "#error").await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_cdp_event_tap_download() {
+    let session = EventSession::start(None).await;
+    let subscription = session.tap("Browser.downloadWillBegin", &[]).await;
+    let path = session.downloads.path().join("event-tap.txt");
+    event!(session, {"action": "download", "selector": "#download", "path": path.to_string_lossy()});
+    session
+        .tap_event(&subscription, "Browser.downloadWillBegin")
+        .await;
+    assert!(path.exists(), "download was not written to the policy path");
+    session.finish().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_cdp_event_tap_target_created() {
+    let session = EventSession::start(None).await;
+    let subscription = session.tap("Target.targetCreated", &[]).await;
+    event!(session, {"action": "tab_new", "url": "about:blank"});
+    session
+        .tap_event(&subscription, "Target.targetCreated")
+        .await;
+    session.finish().await;
+}
+
+fn bus_events(read: &Value) -> impl Iterator<Item = &Value> {
+    read["events"].as_array().unwrap().iter()
+}
+
+fn assert_bus_event<'response>(read: &'response Value, name: &str) -> &'response Value {
+    bus_events(read)
+        .find(|event| event["meta"]["name"] == name)
+        .expect("missing bus event")
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_event_bus_shares_observer_and_rearms_after_navigation() {
+    let session = EventSession::start(None).await;
+    event!(session, {"action": "navigate", "url": native_test_fixture_url("events_probe")});
+    let first = event!(session, {"action":"events_start", "selector":"#done", "once":true});
+    let second = event!(session, {"action":"events_start", "selector":"#done", "once":false});
+    event!(session, {"action": "evaluate", "script": "document.querySelector('#go').click()"});
+    let first_read = session.read(&first, &first["cursor"]).await;
+    let second_read = session.read(&second, &second["cursor"]).await;
+    assert_bus_event(&first_read, "element.visible");
+    assert_bus_event(&second_read, "element.visible");
+    assert_eq!(first_read["status"], "ended");
+    for script in ["document.querySelector('#done').remove()", "const ready = document.createElement('div'); ready.id = 'done'; ready.textContent = 'Again'; document.body.append(ready)"] {
+        event!(session, {"action": "evaluate", "script": script});
+    }
+    let after_refcount = session.read(&second, &second_read["cursor"]).await;
+    assert_bus_event(&after_refcount, "element.visible");
+    event!(session, {"action": "evaluate", "script": "history.pushState({}, '', '#route')"});
+    let rearmed = session.read(&second, &after_refcount["cursor"]).await;
+    assert_bus_event(&rearmed, "subscription.rearmed");
+    event!(session, {"action": "navigate", "url": native_test_fixture_url("event_navigation_probe")});
+    let navigated = session.read(&second, &rearmed["cursor"]).await;
+    assert_bus_event(&navigated, "subscription.rearmed");
+    session.finish().await;
 }
 
 #[tokio::test]
@@ -1621,6 +1838,63 @@ async fn e2e_stream_command_requires_same_origin_before_daemon_relay() {
 // ---------------------------------------------------------------------------
 // Snapshot with refs and ref-based click
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_events_operations_use_cursor_reads() {
+    let session = EventSession::start(None).await;
+    event!(session, {"action": "navigate", "url": native_test_fixture_url("event_navigation_probe")});
+    let ready =
+        event!(session, {"action": "events_start", "selector": "#done", "owner": "worker-a"});
+    assert_eq!(ready["alreadySatisfied"], true);
+    for action in ["events_stop", "events_ack"] {
+        let response = session.response(json!({"action": action, "subscriptionId": ready["id"], "cursor": ready["cursor"], "owner": "worker-b"})).await;
+        assert_eq!(response["success"], false);
+    }
+    let listed = event!(session, {"action": "events_list", "owner": "worker-b"});
+    assert_eq!(listed["subscriptions"], json!([]));
+    event!(session, {"action": "navigate", "url": native_test_fixture_url("event_navigation_probe")});
+    let read = session.read(&ready, &ready["cursor"]).await;
+    assert!(bus_events(&read).any(|event| {
+        event["meta"]["name"] == "element.visible" && event["data"]["afterNavigation"] == true
+    }));
+    let policy_path = session.downloads.path().join("policy.json");
+    std::fs::write(&policy_path, r#"{"deny":["events_read"]}"#).unwrap();
+    session.state.lock().await.policy =
+        Some(super::policy::ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
+    let denied = session.response(json!({"action": "events_read", "subscriptionId": ready["id"], "since": read["cursor"]})).await;
+    assert_eq!(denied["success"], false);
+    assert!(denied["error"].as_str().unwrap().contains("events_read"));
+    session.finish().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_events_do_not_store_data_for_blocked_origin() {
+    let session = EventSession::start(Some("127.0.0.1")).await;
+    let subscription = event!(session, {"action": "events_start", "selector": "#blocked"});
+    let blocked = session
+        .response(json!({"action": "navigate", "url": "https://blocked.example"}))
+        .await;
+    assert_eq!(blocked["success"], false);
+    let read = event!(session, {"action": "events_read", "subscriptionId": subscription["id"], "since": subscription["cursor"]});
+    assert_eq!(read["events"], json!([]));
+    session.finish().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_events_lose_content_after_a_redirect_to_a_blocked_origin() {
+    let session = EventSession::start(Some("localhost")).await;
+    let subscription = event!(session, {"action": "events_start", "selector": "#leaked"});
+    event!(session, {"action": "evaluate", "script": "location.href = '/redirect'"});
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let read = event!(session, {"action": "events_read", "subscriptionId": subscription["id"], "since": subscription["cursor"], "waitMs": 1_000});
+    assert!(bus_events(&read).all(|event| event["meta"]["name"] != "element.visible"));
+    assert!(bus_events(&read).all(|event| !event.to_string().contains("secret")));
+    assert_eq!(session.leak_requests.load(Ordering::SeqCst), 0);
+    session.finish().await;
+}
 
 #[tokio::test]
 #[ignore]

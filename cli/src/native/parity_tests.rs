@@ -449,6 +449,80 @@ async fn test_error_response_format() {
     assert!(result.get("error").is_some());
 }
 
+#[tokio::test]
+async fn event_policy_matrix_without_a_browser() {
+    use crate::native::policy::ActionPolicy;
+    use crate::test_utils::EnvGuard;
+
+    let environment = EnvGuard::new(&["AGENT_BROWSER_CONFIRM_ACTIONS"]);
+    environment.remove("AGENT_BROWSER_CONFIRM_ACTIONS");
+    let directory = tempfile::tempdir().unwrap();
+    let policy_path = directory.path().join("policy.json");
+    std::fs::write(&policy_path, "{}").unwrap();
+    let mut state = DaemonState::new();
+    state.policy = Some(ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
+
+    for (action, method) in [
+        ("events_start", ""),
+        ("events_read", ""),
+        ("events_ack", ""),
+        ("events_list", ""),
+        ("events_stop", ""),
+        ("dialog", "Page.javascriptDialogOpening"),
+        ("url", "Page.frameNavigated"),
+        ("url", "Page.navigatedWithinDocument"),
+        ("console", "Runtime.consoleAPICalled"),
+        ("errors", "Runtime.exceptionThrown"),
+        ("tab_list", "Target.targetCreated"),
+        ("download", "Browser.downloadWillBegin"),
+    ] {
+        for rule in ["deny", "confirm"]
+            .into_iter()
+            .filter(|rule| method.is_empty() || *rule == "deny")
+        {
+            std::fs::write(&policy_path, json!({rule: [action]}).to_string()).unwrap();
+            let command = if method.is_empty() {
+                json!({"id": action, "action": action, "selector": "#notice", "subscriptionId": "missing", "since": "missing:0", "cursor": "missing:0"})
+            } else {
+                json!({"id": action, "action": "events_start", "method": method})
+            };
+            let response = execute_command(&command, &mut state).await;
+            let expected = match (rule, action) {
+                ("confirm", "events_start") => {
+                    json!({"id": action, "success": true, "data": {"confirmation_required": true, "confirmation_id": action, "action": action}})
+                }
+                ("confirm", _) => {
+                    json!({"id": action, "success": false, "error": format!("Action '{action}' requires confirmation, which is only supported at events_start")})
+                }
+                _ => {
+                    json!({"id": action, "success": false, "error": format!("Action '{action}' denied by policy: Action '{action}' is denied by policy")})
+                }
+            };
+            assert_eq!(response, expected, "{method}");
+        }
+    }
+    assert!(state.browser.is_none());
+    std::fs::remove_file(&policy_path).unwrap();
+    let event_response = execute_command(&json!({"action": "events_read"}), &mut state).await;
+    assert_eq!(event_response["success"], false);
+    let error = event_response["error"].as_str().unwrap();
+    assert!(error.contains("failed to load"));
+    let denied = execute_command(&json!({"action": "download"}), &mut state).await;
+    let error = denied["error"].as_str().unwrap();
+    assert!(error.contains("denied by policy"));
+
+    let command_response = execute_command(
+        &json!({ "id": "state-list", "action": "state_list" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(command_response["success"], false);
+    assert!(command_response["error"]
+        .as_str()
+        .unwrap()
+        .contains("failed to load"));
+}
+
 // ---------------------------------------------------------------------------
 // 3. Credential/state actions work without a browser
 // ---------------------------------------------------------------------------

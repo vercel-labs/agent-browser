@@ -590,6 +590,11 @@ impl CdpClient {
         self.raw_tx.subscribe()
     }
 
+    /// Notify when the transport closes or the reader loop exits.
+    pub fn subscribe_closed(&self) -> watch::Receiver<bool> {
+        self.cancel_tx.subscribe()
+    }
+
     /// Create a lightweight handle for the inspect WebSocket proxy.
     /// Contains only what's needed to forward messages bidirectionally.
     pub fn inspect_handle(&self) -> InspectProxyHandle {
