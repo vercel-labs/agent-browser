@@ -31,6 +31,7 @@ pub struct EventBuffer {
     consumed: u64,
     event_count: usize,
     event_bytes: usize,
+    dropped: u64,
     ready_cursor: Option<String>,
     ended_cursor: Option<String>,
 }
@@ -44,6 +45,7 @@ impl EventBuffer {
             consumed: 0,
             event_count: 0,
             event_bytes: 0,
+            dropped: 0,
             ready_cursor: None,
             ended_cursor: None,
         }
@@ -142,6 +144,11 @@ impl EventBuffer {
         self.consumed = self.consumed.max(seq.min(self.head()));
     }
 
+    pub fn ack_cursor(&mut self, cursor: &str) -> Result<(), CursorError> {
+        self.ack(self.parse_cursor(cursor)?);
+        Ok(())
+    }
+
     pub fn start_cursor(&self) -> String {
         self.cursor(0)
     }
@@ -160,6 +167,14 @@ impl EventBuffer {
 
     pub fn event_count(&self) -> usize {
         self.event_count
+    }
+
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    pub fn head_cursor(&self) -> String {
+        self.cursor(self.head())
     }
 
     fn cursor(&self, seq: u64) -> String {
@@ -190,6 +205,7 @@ impl EventBuffer {
                 .expect("entry index came from the buffer");
             self.event_count -= 1;
             self.event_bytes -= removed.bytes;
+            self.dropped += removed.end_seq - removed.start_seq + 1;
             self.insert_gap(index, removed);
         }
     }
@@ -340,6 +356,7 @@ mod tests {
         assert_eq!(events[0].meta.name, "subscription.gap");
         assert_eq!(events[0].data, json!({"missed": 2}));
         assert_eq!(events[1].data, json!({"index": 2}));
+        assert_eq!(buffer.dropped(), 2);
         assert_eq!(
             buffer.read(Some(&events[0].meta.cursor), 10).unwrap()[0].data,
             json!({"index": 2})
@@ -474,15 +491,19 @@ mod tests {
     #[test]
     fn ack_never_moves_the_consumed_watermark_backwards_or_past_head() {
         let mut buffer = EventBuffer::new();
-        append(&mut buffer, "first", json!({}));
-        append(&mut buffer, "second", json!({}));
-        buffer.ack(2);
-        buffer.ack(1);
-        buffer.ack(2);
+        let first = append(&mut buffer, "first", json!({}));
+        let second = append(&mut buffer, "second", json!({}));
+        buffer.ack_cursor(&second).unwrap();
+        buffer.ack_cursor(&first).unwrap();
+        buffer.ack_cursor(&second).unwrap();
 
         assert_eq!(buffer.consumed(), 2);
         buffer.ack(u64::MAX);
         assert_eq!(buffer.consumed(), buffer.head());
+        assert_eq!(
+            buffer.ack_cursor("foreign:1"),
+            Err(CursorError::CursorInvalid)
+        );
     }
 
     #[test]

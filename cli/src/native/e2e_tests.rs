@@ -69,6 +69,7 @@ fn assert_error_code(resp: &Value, code: &str) {
 fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
+        "event_navigation_probe" => include_str!("test_fixtures/event_navigation_probe.html"),
         "events_probe" => include_str!("test_fixtures/events_probe.html"),
         "html5_drag_probe" => include_str!("test_fixtures/html5_drag_probe.html"),
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
@@ -80,6 +81,213 @@ fn native_test_fixture_html(name: &str) -> &'static str {
         "webmcp_context_probe" => include_str!("test_fixtures/webmcp_context_probe.html"),
         _ => panic!("Unknown native test fixture: {}", name),
     }
+}
+
+#[cfg(feature = "event-prototype")]
+#[tokio::test]
+#[ignore]
+async fn e2e_event_bus_shares_observer_and_rearms_after_navigation() {
+    let mut state = DaemonState::new();
+    let response = execute_command(
+        &json!({"id": "launch", "action": "launch", "headless": true}),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+    let response = execute_command(
+        &json!({"id": "open", "action": "navigate", "url": native_test_fixture_url("events_probe")}),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+
+    let (client, session_id, tab, current_url) = {
+        let browser = state.browser.as_ref().unwrap();
+        let target_id = browser.active_target_id().unwrap().to_owned();
+        let page = browser
+            .pages_list()
+            .into_iter()
+            .find(|page| page.target_id == target_id)
+            .unwrap();
+        (
+            browser.client.clone(),
+            page.session_id,
+            browser.event_tab_for_target(&target_id).unwrap(),
+            page.url,
+        )
+    };
+    let first = state
+        .events
+        .start_dom(super::events::bus::DomStart {
+            engine: "chrome",
+            client: client.clone(),
+            session_id: &session_id,
+            tab: tab.clone(),
+            current_url: &current_url,
+            selector: "#done",
+            state: "visible",
+            once: true,
+            ttl: std::time::Duration::from_secs(60),
+            owner: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+    let second = state
+        .events
+        .start_dom(super::events::bus::DomStart {
+            engine: "chrome",
+            client,
+            session_id: &session_id,
+            tab,
+            current_url: &current_url,
+            selector: "#done",
+            state: "visible",
+            once: false,
+            ttl: std::time::Duration::from_secs(60),
+            owner: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+    let first_id = first["id"].as_str().unwrap().to_owned();
+    let second_id = second["id"].as_str().unwrap().to_owned();
+    let first_head = first["head"].as_str().unwrap().to_owned();
+    let second_head = second["head"].as_str().unwrap().to_owned();
+
+    let response = execute_command(
+        &json!({"id": "show", "action": "evaluate", "script": "document.querySelector('#go').click()"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+    let first_read = state
+        .events
+        .read(
+            &first_id,
+            Some(&first_head),
+            std::time::Duration::from_secs(5),
+            10,
+        )
+        .await
+        .unwrap();
+    let second_read = state
+        .events
+        .read(
+            &second_id,
+            Some(&second_head),
+            std::time::Duration::from_secs(5),
+            10,
+        )
+        .await
+        .unwrap();
+    assert!(first_read
+        .events
+        .iter()
+        .any(|event| event.meta.name == "element.visible"));
+    assert!(second_read
+        .events
+        .iter()
+        .any(|event| event.meta.name == "element.visible"));
+    assert_eq!(first_read.status, "ended");
+
+    for script in [
+        "document.querySelector('#done').remove()",
+        "const ready = document.createElement('div'); ready.id = 'done'; ready.textContent = 'Again'; document.body.append(ready)",
+    ] {
+        let response = execute_command(
+            &json!({"id": "transition", "action": "evaluate", "script": script}),
+            &mut state,
+        )
+        .await;
+        assert_success(&response);
+    }
+    let after_refcount = state
+        .events
+        .read(
+            &second_id,
+            Some(&second_read.cursor),
+            std::time::Duration::from_secs(5),
+            10,
+        )
+        .await
+        .unwrap();
+    assert!(after_refcount
+        .events
+        .iter()
+        .any(|event| event.meta.name == "element.visible"));
+
+    let response = execute_command(
+        &json!({"id": "push", "action": "evaluate", "script": "history.pushState({}, '', '#route')"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+    let rearmed = state
+        .events
+        .read(
+            &second_id,
+            Some(&after_refcount.cursor),
+            std::time::Duration::from_secs(5),
+            10,
+        )
+        .await
+        .unwrap();
+    assert!(rearmed
+        .events
+        .iter()
+        .any(|event| event.meta.name == "subscription.rearmed"));
+
+    let response = execute_command(
+        &json!({"id": "navigate", "action": "navigate", "url": native_test_fixture_url("event_navigation_probe")}),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+    let navigated = state
+        .events
+        .read(
+            &second_id,
+            Some(&rearmed.cursor),
+            std::time::Duration::from_secs(5),
+            10,
+        )
+        .await
+        .unwrap();
+    assert!(navigated
+        .events
+        .iter()
+        .any(|event| event.meta.name == "subscription.rearmed"));
+    assert!(navigated.events.iter().any(|event| {
+        event.meta.name == "element.visible" && event.data["afterNavigation"] == true
+    }));
+
+    let response = execute_command(
+        &json!({"id": "other-tab", "action": "tab_new", "url": "about:blank"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+    let response = execute_command(
+        &json!({"id": "close-tab", "action": "tab_close", "tabId": "t1"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+    let closed = state
+        .events
+        .read(
+            &second_id,
+            Some(&navigated.cursor),
+            std::time::Duration::from_secs(5),
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(closed.status, "ended");
+    assert_eq!(closed.events.last().unwrap().data["reason"], "tab_closed");
+    let response = execute_command(&json!({"id": "close", "action": "close"}), &mut state).await;
+    assert_success(&response);
 }
 
 #[tokio::test]

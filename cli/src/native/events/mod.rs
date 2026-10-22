@@ -15,6 +15,8 @@ use tokio::task::JoinHandle;
 #[allow(dead_code)]
 pub mod buffer;
 #[allow(dead_code)]
+pub mod bus;
+#[allow(dead_code)]
 pub mod envelope;
 #[allow(dead_code)]
 pub mod filter;

@@ -1,11 +1,11 @@
 use serde_json::{json, Value};
 
-use super::super::source::EventSource;
+use super::super::source::{EventSource, SourceSignal};
 use crate::native::cdp::client::{CdpClient, RawCdpMessage};
 
 const MAX_LABEL_CHARS: usize = 160;
 const MAX_PAYLOAD_BYTES: usize = 16 * 1024;
-const WORLD_NAME: &str = "__agent_browser_events";
+pub(in crate::native::events) const WORLD_NAME: &str = "__agent_browser_events";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::native::events) enum DomState {
@@ -130,6 +130,21 @@ fn parse_observation(payload: &str, expected_nonce: &str) -> Result<Observation,
 }
 
 impl DomObserver {
+    #[cfg(test)]
+    pub(in crate::native::events) fn test_observer() -> Self {
+        Self {
+            target_id: "target-1".into(),
+            selector: ".ready".into(),
+            session_id: "session-1".into(),
+            world_name: WORLD_NAME.into(),
+            binding_name: "__ab_event_test".into(),
+            nonce: "nonce-1".into(),
+            script_id: "script-1".into(),
+            observe_key: "__ab_event_test_observe".into(),
+            stop_key: "__ab_event_test_stop".into(),
+        }
+    }
+
     pub(in crate::native::events) async fn install(
         client: &CdpClient,
         session_id: &str,
@@ -287,13 +302,82 @@ impl DomObserver {
     }
 }
 
+#[async_trait::async_trait]
 impl EventSource for DomObserver {
     fn supported_engines(&self) -> &'static [&'static str] {
         &["chrome"]
     }
 
     fn policy_actions(&self) -> &'static [&'static str] {
-        &["events_start", "events_wait"]
+        &[
+            "events_start",
+            "events_read",
+            "events_ack",
+            "events_list",
+            "events_stop",
+            "events_wait",
+            "events_watch",
+        ]
+    }
+
+    fn target_id(&self) -> &str {
+        &self.target_id
+    }
+
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    fn sharing_key(&self) -> Option<String> {
+        Some(format!(
+            "{}:{}:{}",
+            self.target_id, WORLD_NAME, self.selector
+        ))
+    }
+
+    fn classify(&self, raw: &RawCdpMessage) -> Option<SourceSignal> {
+        match DomObserver::classify(self, raw)? {
+            DomSignal::Observation(observation) => {
+                let (key, state) = match observation.state {
+                    DomState::Visible => ("visible", "visible"),
+                    DomState::Hidden => ("hidden", "hidden"),
+                };
+                Some(SourceSignal::Match {
+                    key: key.to_owned(),
+                    name: format!("element.{state}"),
+                    data: json!({
+                        "state": state,
+                        "label": observation.label,
+                        "truncated": observation.truncated
+                    }),
+                    initial: observation.initial,
+                })
+            }
+            DomSignal::SameDocumentNavigation => Some(SourceSignal::Rearmed),
+            DomSignal::RejectedPayload => Some(SourceSignal::Rejected),
+        }
+    }
+
+    async fn observe(&self, client: &CdpClient) -> Result<Option<SourceSignal>, String> {
+        let observation = DomObserver::observe(self, client).await?;
+        let (key, state) = match observation.state {
+            DomState::Visible => ("visible", "visible"),
+            DomState::Hidden => ("hidden", "hidden"),
+        };
+        Ok(Some(SourceSignal::Match {
+            key: key.to_owned(),
+            name: format!("element.{state}"),
+            data: json!({
+                "state": state,
+                "label": observation.label,
+                "truncated": observation.truncated
+            }),
+            initial: observation.initial,
+        }))
+    }
+
+    async fn stop(&self, client: &CdpClient) {
+        DomObserver::remove(self, client).await;
     }
 }
 

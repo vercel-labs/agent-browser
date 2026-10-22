@@ -2273,6 +2273,21 @@ impl BrowserManager {
         self.pages.clone()
     }
 
+    #[cfg(feature = "event-prototype")]
+    pub fn event_tab_for_target(
+        &self,
+        target_id: &str,
+    ) -> Option<super::events::envelope::EventTab> {
+        self.pages
+            .iter()
+            .find(|page| page.target_id == target_id)
+            .map(|page| super::events::envelope::EventTab {
+                id: format_tab_id(page.tab_id),
+                label: page.label.clone().unwrap_or_default(),
+                target_id: page.target_id.clone(),
+            })
+    }
+
     pub fn visited_origins(&self) -> &HashSet<String> {
         &self.visited_origins
     }

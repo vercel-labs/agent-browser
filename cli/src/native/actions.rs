@@ -571,6 +571,8 @@ pub struct DaemonState {
     /// used to enforce the minimum interval between periodic saves.
     pub last_autosave_attempt: Option<std::time::Instant>,
     pub session_id: String,
+    #[cfg(feature = "event-prototype")]
+    pub events: Arc<super::events::bus::Bus>,
     pub tracing_state: TracingState,
     pub recording_state: RecordingState,
     event_rx: Option<broadcast::Receiver<CdpEvent>>,
@@ -692,6 +694,12 @@ impl DaemonState {
             .ok()
             .flatten()
             .is_some_and(|b| b.pinned);
+        let domain_filter = Arc::new(RwLock::new(
+            env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| DomainFilter::new(&s)),
+        ));
         Self {
             browser: None,
             appium: None,
@@ -701,12 +709,7 @@ impl DaemonState {
             ref_map: RefMap::new(),
             snapshot_revisions: HashMap::new(),
             screenshot_observations: HashMap::new(),
-            domain_filter: Arc::new(RwLock::new(
-                env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
-                    .ok()
-                    .filter(|s| !s.trim().is_empty())
-                    .map(|s| DomainFilter::new(&s)),
-            )),
+            domain_filter: domain_filter.clone(),
             event_tracker: EventTracker::new(),
             session_name: env::var("AGENT_BROWSER_SESSION_NAME").ok(),
             restore_save: env::var("AGENT_BROWSER_RESTORE_SAVE")
@@ -724,7 +727,12 @@ impl DaemonState {
             restore_saved_path: None,
             last_command_finished: None,
             last_autosave_attempt: None,
-            session_id,
+            session_id: session_id.clone(),
+            #[cfg(feature = "event-prototype")]
+            events: Arc::new(super::events::bus::Bus::new(
+                session_id.clone(),
+                domain_filter,
+            )),
             tracing_state: TracingState::new(),
             recording_state: RecordingState::new(),
             event_rx: None,
@@ -2513,6 +2521,8 @@ async fn close_active_provider_session(state: &mut DaemonState) -> Result<(), St
 pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(), String> {
     #[cfg(feature = "event-prototype")]
     super::events::stop_all().await;
+    #[cfg(feature = "event-prototype")]
+    state.events.end_all("browser_closed").await;
     let browser = state.browser.take();
     state.launch_hash = None;
     state.webmcp_enabled = false;
