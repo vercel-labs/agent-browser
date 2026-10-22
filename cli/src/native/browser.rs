@@ -170,12 +170,9 @@ fn validate_obscura_options(options: &LaunchOptions) -> Result<(), String> {
     Ok(())
 }
 
-/// Returns true for Chrome internal targets that should not be selected
-/// during auto-connect (e.g. chrome://, chrome-extension://, devtools://).
+/// Returns true for Chrome UI targets that are not user-facing tabs.
 fn is_internal_chrome_target(url: &str) -> bool {
-    url.starts_with("chrome://")
-        || url.starts_with("chrome-extension://")
-        || url.starts_with("devtools://")
+    url.starts_with("chrome://") || url.starts_with("devtools://")
 }
 
 pub(crate) fn should_track_target(target: &TargetInfo) -> bool {
@@ -1014,37 +1011,38 @@ impl BrowserManager {
         }
     }
 
-    /// Index of the lowest-numbered page whose renderer answers a liveness
-    /// probe, or `None` if every tab is discarded. The conventional active tab
-    /// (index 0) is almost always live, so it is probed first to keep the
-    /// common connect instant; only when it is discarded do we probe the rest
-    /// concurrently to pick a live tab to enable domains on, instead of hanging
-    /// on the dead first one (#1036). Probing is browser-safe: a `Runtime.evaluate`
-    /// to a discarded session simply never answers (cleaned up when the probe
-    /// times out) and does not reload or focus the tab.
+    /// Index of a live user page, preferring it over extension pages, or `None`
+    /// if every tab is discarded. The conventional active tab is almost always
+    /// live, so probe it first when it is a user page; otherwise probe the
+    /// remaining pages concurrently (#1036). Probing is browser-safe: a
+    /// `Runtime.evaluate` to a discarded session simply never answers (cleaned
+    /// up when the probe times out) and does not reload or focus the tab.
     async fn find_live_page_index(&self, session_ids: &[String]) -> Option<usize> {
-        if let Some(first) = session_ids.first() {
+        let mut page_indices: Vec<usize> = (0..session_ids.len()).collect();
+        page_indices.sort_by_key(|index| {
+            self.pages
+                .get(*index)
+                .is_some_and(|page| page.url.starts_with("chrome-extension://"))
+        });
+
+        if let Some(first) = page_indices.first() {
             if self
-                .renderer_responds(first, RENDERER_PROBE_TIMEOUT_MS)
+                .renderer_responds(&session_ids[*first], RENDERER_PROBE_TIMEOUT_MS)
                 .await
             {
-                return Some(0);
+                return Some(*first);
             }
         }
-        let probes = session_ids
-            .iter()
-            .enumerate()
-            .skip(1)
-            .map(|(index, session_id)| async move {
-                self.renderer_responds(session_id, RENDERER_PROBE_TIMEOUT_MS)
-                    .await
-                    .then_some(index)
-            });
+        let probes = page_indices.iter().skip(1).map(|index| async move {
+            self.renderer_responds(&session_ids[*index], RENDERER_PROBE_TIMEOUT_MS)
+                .await
+                .then_some(*index)
+        });
         futures_util::future::join_all(probes)
             .await
             .into_iter()
             .flatten()
-            .min()
+            .next()
     }
 
     async fn resume_if_waiting(&self, session_id: &str) -> Result<(), String> {
@@ -2635,6 +2633,7 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{SinkExt, StreamExt};
     use tokio::time::sleep;
 
     #[tokio::test]
@@ -2830,6 +2829,29 @@ mod tests {
         };
 
         assert!(!should_track_target(&target));
+    }
+
+    #[test]
+    fn test_should_track_extension_popup_but_not_worker() {
+        let popup = TargetInfo {
+            target_id: "extension-popup".to_string(),
+            target_type: "page".to_string(),
+            title: "Wallet approval".to_string(),
+            url: "chrome-extension://abc123/popup.html#/approve/connect".to_string(),
+            attached: None,
+            browser_context_id: None,
+        };
+        assert!(should_track_target(&popup));
+
+        let worker = TargetInfo {
+            target_id: "extension-worker".to_string(),
+            target_type: "service_worker".to_string(),
+            title: String::new(),
+            url: "chrome-extension://abc123/background.js".to_string(),
+            attached: None,
+            browser_context_id: None,
+        };
+        assert!(!should_track_target(&worker));
     }
 
     #[test]
@@ -3145,7 +3167,7 @@ mod tests {
         assert!(is_internal_chrome_target(
             "chrome://omnibox-popup.top-chrome/"
         ));
-        assert!(is_internal_chrome_target(
+        assert!(!is_internal_chrome_target(
             "chrome-extension://abc123/popup.html"
         ));
         assert!(is_internal_chrome_target(
@@ -3335,6 +3357,68 @@ mod tests {
             bound_target_gone: None,
             headless: true,
         }
+    }
+
+    #[tokio::test]
+    async fn test_live_web_page_is_selected_before_extension_popup() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) =
+                ws.next().await
+            {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let Some(session_id) = command.get("sessionId").and_then(Value::as_str) else {
+                    continue;
+                };
+                if session_id != "session-1" && session_id != "session-3" {
+                    continue;
+                }
+                let response = json!({ "id": command["id"], "result": {} });
+                ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                    response.to_string(),
+                ))
+                .await
+                .unwrap();
+            }
+        });
+
+        let ws_url = format!("ws://{}", addr);
+        let client = Arc::new(CdpClient::connect(&ws_url).await.unwrap());
+        let manager = BrowserManager {
+            client,
+            browser_process: None,
+            ws_url,
+            pages: vec![
+                page(
+                    1,
+                    "extension-popup",
+                    "chrome-extension://abc123/popup.html#/approve/connect",
+                ),
+                page(2, "discarded-web", "https://app.example/discarded"),
+                page(3, "live-web", "https://app.example/"),
+            ],
+            active_page_index: 0,
+            default_timeout_ms: 25_000,
+            download_path: None,
+            ignore_https_errors: false,
+            visited_origins: HashSet::new(),
+            next_tab_id: 100,
+            direct_page: false,
+            pin_tab: false,
+            bound_target_id: None,
+            bound_target_gone: None,
+            headless: true,
+        };
+
+        let session_ids = manager
+            .pages
+            .iter()
+            .map(|page| page.session_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(manager.find_live_page_index(&session_ids).await, Some(2));
     }
 
     #[tokio::test]
