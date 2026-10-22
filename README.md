@@ -748,6 +748,8 @@ agent-browser session id --scope worktree --prefix next-dev-loop
 agent-browser session info --json
 ```
 
+Concurrent CLI or MCP calls with the same session and daemon settings serialize daemon startup and reuse the resulting daemon. The startup lock is released before commands run; it does not order dependent browser actions. Use separate sessions for independent workflows.
+
 Each session has its own:
 
 - Browser instance
