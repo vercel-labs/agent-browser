@@ -817,6 +817,10 @@ fn resolve_frame_session<'a>(
         .unwrap_or(session_id)
 }
 
+/// Re-query the accessibility tree to find a node matching role+name+nth,
+/// returning its fresh backendDOMNodeId. This uses the same data source
+/// (Accessibility.getFullAXTree) that built the ref map during snapshot,
+/// so role/name matching is guaranteed to be consistent.
 async fn find_node_id_by_role_name(
     client: &CdpClient,
     session_id: &str,
@@ -836,18 +840,32 @@ async fn find_node_id_by_role_name(
         )
         .await?;
 
-    let node = ax_tree
-        .nodes
-        .iter()
-        .filter(|node| {
-            !node.ignored.unwrap_or(false)
-                && extract_ax_string(&node.role) == role
-                && extract_ax_string(&node.name) == name
-        })
-        .nth(nth.unwrap_or(0))
-        .ok_or_else(|| format!("Could not locate element with role={role} name={name}"))?;
-    node.backend_d_o_m_node_id
-        .ok_or_else(|| format!("AX node has no backendDOMNodeId for role={role} name={name}"))
+    let nth_index = nth.unwrap_or(0);
+    let mut match_count: usize = 0;
+
+    for node in &ax_tree.nodes {
+        if node.ignored.unwrap_or(false) {
+            continue;
+        }
+        let node_role = extract_ax_string(&node.role);
+        let node_name = extract_ax_string(&node.name);
+        if node_role == role && node_name == name {
+            if match_count == nth_index {
+                return node.backend_d_o_m_node_id.ok_or_else(|| {
+                    format!(
+                        "AX node has no backendDOMNodeId for role={} name={}",
+                        role, name
+                    )
+                });
+            }
+            match_count += 1;
+        }
+    }
+
+    Err(format!(
+        "Could not locate element with role={} name={}",
+        role, name
+    ))
 }
 
 pub(super) fn extract_ax_string(value: &Option<AXValue>) -> String {
