@@ -695,7 +695,64 @@ pub fn recording_stop(state: &mut RecordingState) -> Result<Value, String> {
     Ok(result)
 }
 
-fn build_ffmpeg_command(output_path: &str, fps: u32, cursor: bool) -> tokio::process::Command {
+/// The option that turns on variable frame rate output. `-fps_mode` only
+/// exists from ffmpeg 5.1; older releases (such as 4.4 on Ubuntu 22.04) reject
+/// it while parsing arguments, so they get the older `-vsync` spelling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameRateModeFlag {
+    FpsMode,
+    Vsync,
+}
+
+impl FrameRateModeFlag {
+    fn as_arg(self) -> &'static str {
+        match self {
+            Self::FpsMode => "-fps_mode",
+            Self::Vsync => "-vsync",
+        }
+    }
+
+    /// Choose from `ffmpeg -version` output. Anything that does not start with
+    /// a release number (git snapshots such as `N-123-gabc`, custom builds)
+    /// keeps `-fps_mode`, which every current ffmpeg accepts.
+    fn from_version_output(stdout: &str) -> Self {
+        let release = stdout
+            .lines()
+            .next()
+            .and_then(|line| line.trim().strip_prefix("ffmpeg version "))
+            .map(|rest| rest.trim_start_matches('n'));
+        let mut parts = release.into_iter().flat_map(|r| r.split(['.', '-', ' ']));
+        let mut number = || parts.next().and_then(|p| p.parse::<u32>().ok());
+        match (number(), number()) {
+            (Some(major), minor) if (major, minor.unwrap_or(0)) < (5, 1) => Self::Vsync,
+            _ => Self::FpsMode,
+        }
+    }
+}
+
+/// Ask the installed ffmpeg for its version to pick the frame rate mode flag.
+/// A failed probe keeps `-fps_mode`; the encoder launch reports real errors.
+async fn probe_frame_rate_mode_flag() -> FrameRateModeFlag {
+    let output = tokio::process::Command::new("ffmpeg")
+        .arg("-version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .await;
+    match output {
+        Ok(output) if output.status.success() => {
+            FrameRateModeFlag::from_version_output(&String::from_utf8_lossy(&output.stdout))
+        }
+        _ => FrameRateModeFlag::FpsMode,
+    }
+}
+
+fn build_ffmpeg_command(
+    output_path: &str,
+    fps: u32,
+    cursor: bool,
+    frame_rate_mode: FrameRateModeFlag,
+) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("ffmpeg");
     let high_fps = fps > HIGH_FPS_THRESHOLD;
 
@@ -721,7 +778,7 @@ fn build_ffmpeg_command(output_path: &str, fps: u32, cursor: bool) -> tokio::pro
             "pipe:0",
         ])
         .args(["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
-        .args(["-fps_mode", "vfr"]);
+        .args([frame_rate_mode.as_arg(), "vfr"]);
 
     if output_extension(output_path).as_deref() == Some("webm") {
         cmd.args(["-c:v", "libvpx", "-crf", "18"])
@@ -1813,7 +1870,8 @@ async fn encode_stream(
     shared_cursor: SharedRecordingCursor,
     mut frames: mpsc::Receiver<CapturedVideoFrame>,
 ) -> Result<u64, String> {
-    let mut command = build_ffmpeg_command(&output_path, fps, cursor);
+    let frame_rate_mode = probe_frame_rate_mode_flag().await;
+    let mut command = build_ffmpeg_command(&output_path, fps, cursor, frame_rate_mode);
     let mut ffmpeg = spawn_ffmpeg_command(&mut command)?;
     let mut stdin = ffmpeg
         .stdin
@@ -2444,7 +2502,7 @@ mod tests {
                 }
             }
         }
-        let cmd = build_ffmpeg_command("/tmp/out.webm", 30, true);
+        let cmd = build_ffmpeg_command("/tmp/out.webm", 30, true, FrameRateModeFlag::FpsMode);
         assert!(cmd.as_std().get_args().any(|arg| arg == "ppm"));
     }
 
@@ -2884,7 +2942,12 @@ mod tests {
 
     #[test]
     fn test_build_ffmpeg_command_matches_extension_case_insensitively() {
-        let cmd = build_ffmpeg_command("/tmp/OUT.WEBM", DEFAULT_FPS, false);
+        let cmd = build_ffmpeg_command(
+            "/tmp/OUT.WEBM",
+            DEFAULT_FPS,
+            false,
+            FrameRateModeFlag::FpsMode,
+        );
         let args: Vec<&std::ffi::OsStr> = cmd.as_std().get_args().collect();
         let args_str: Vec<&str> = args.iter().filter_map(|a| a.to_str()).collect();
         assert!(args_str.contains(&"libvpx"));
@@ -2893,7 +2956,12 @@ mod tests {
 
     #[test]
     fn test_build_ffmpeg_command_hides_banner() {
-        let cmd = build_ffmpeg_command("/tmp/out.webm", DEFAULT_FPS, false);
+        let cmd = build_ffmpeg_command(
+            "/tmp/out.webm",
+            DEFAULT_FPS,
+            false,
+            FrameRateModeFlag::FpsMode,
+        );
         let args: Vec<&std::ffi::OsStr> = cmd.as_std().get_args().collect();
         assert!(args.contains(&std::ffi::OsStr::new("-hide_banner")));
     }
@@ -3037,7 +3105,12 @@ mod tests {
 
     #[test]
     fn test_build_ffmpeg_command_webm() {
-        let cmd = build_ffmpeg_command("/tmp/out.webm", DEFAULT_FPS, false);
+        let cmd = build_ffmpeg_command(
+            "/tmp/out.webm",
+            DEFAULT_FPS,
+            false,
+            FrameRateModeFlag::FpsMode,
+        );
         let args: Vec<&std::ffi::OsStr> = cmd.as_std().get_args().collect();
         let args_str: Vec<&str> = args.iter().filter_map(|a| a.to_str()).collect();
         assert!(args_str.contains(&"libvpx"));
@@ -3051,8 +3124,66 @@ mod tests {
     }
 
     #[test]
+    fn test_frame_rate_mode_flag_follows_ffmpeg_release() {
+        let flag = |first_line: &str| {
+            FrameRateModeFlag::from_version_output(&format!(
+                "{first_line} Copyright (c) 2000-2026 the FFmpeg developers\nbuilt with gcc\n"
+            ))
+        };
+        assert_eq!(
+            flag("ffmpeg version 4.4.2-0ubuntu0.22.04.1"),
+            FrameRateModeFlag::Vsync
+        );
+        assert_eq!(
+            flag("ffmpeg version 4.4.1-static https://johnvansickle.com/ffmpeg/ "),
+            FrameRateModeFlag::Vsync
+        );
+        assert_eq!(flag("ffmpeg version n5.0.3"), FrameRateModeFlag::Vsync);
+        assert_eq!(flag("ffmpeg version 5.1"), FrameRateModeFlag::FpsMode);
+        assert_eq!(
+            flag("ffmpeg version 7.1.5-0+deb13u1"),
+            FrameRateModeFlag::FpsMode
+        );
+        assert_eq!(
+            flag("ffmpeg version n7.1.1-4ubuntu1"),
+            FrameRateModeFlag::FpsMode
+        );
+        assert_eq!(flag("ffmpeg version 8.1"), FrameRateModeFlag::FpsMode);
+        assert_eq!(
+            flag("ffmpeg version N-117382-g1a2b3c4d5e"),
+            FrameRateModeFlag::FpsMode
+        );
+        assert_eq!(
+            FrameRateModeFlag::from_version_output(""),
+            FrameRateModeFlag::FpsMode
+        );
+    }
+
+    #[test]
+    fn test_build_ffmpeg_command_uses_vsync_for_pre_5_1_ffmpeg() {
+        let args = |flag| {
+            build_ffmpeg_command("/tmp/out.webm", DEFAULT_FPS, false, flag)
+                .as_std()
+                .get_args()
+                .filter_map(|a| a.to_str().map(String::from))
+                .collect::<Vec<_>>()
+        };
+        let legacy = args(FrameRateModeFlag::Vsync);
+        assert!(legacy.windows(2).any(|pair| pair == ["-vsync", "vfr"]));
+        assert!(!legacy.iter().any(|a| a == "-fps_mode"));
+        let current = args(FrameRateModeFlag::FpsMode);
+        assert!(current.windows(2).any(|pair| pair == ["-fps_mode", "vfr"]));
+        assert!(!current.iter().any(|a| a == "-vsync"));
+    }
+
+    #[test]
     fn test_build_ffmpeg_command_mp4() {
-        let cmd = build_ffmpeg_command("/tmp/out.mp4", DEFAULT_FPS, false);
+        let cmd = build_ffmpeg_command(
+            "/tmp/out.mp4",
+            DEFAULT_FPS,
+            false,
+            FrameRateModeFlag::FpsMode,
+        );
         let args: Vec<&std::ffi::OsStr> = cmd.as_std().get_args().collect();
         let args_str: Vec<&str> = args.iter().filter_map(|a| a.to_str()).collect();
         assert!(args_str.contains(&"libx264"));
@@ -3061,7 +3192,7 @@ mod tests {
 
     #[test]
     fn test_build_ffmpeg_command_passes_framerate() {
-        let cmd = build_ffmpeg_command("/tmp/out.webm", 60, false);
+        let cmd = build_ffmpeg_command("/tmp/out.webm", 60, false, FrameRateModeFlag::FpsMode);
         let args: Vec<String> = cmd
             .as_std()
             .get_args()
@@ -3081,7 +3212,12 @@ mod tests {
 
     #[test]
     fn test_build_ffmpeg_command_single_thread_at_default_fps() {
-        let cmd = build_ffmpeg_command("/tmp/out.mp4", DEFAULT_FPS, false);
+        let cmd = build_ffmpeg_command(
+            "/tmp/out.mp4",
+            DEFAULT_FPS,
+            false,
+            FrameRateModeFlag::FpsMode,
+        );
         let args: Vec<String> = cmd
             .as_std()
             .get_args()
