@@ -191,7 +191,7 @@ pub(crate) async fn read(cmd: &Value, bus: &Arc<Bus>) -> Result<Value, String> {
             request.since.as_deref(),
             Duration::from_millis(request.wait_ms),
             request.limit,
-            request.ack || request.wait_ms > 0,
+            request.ack,
         )
         .await?;
     serde_json::to_value(result).map_err(|error| error.to_string())
