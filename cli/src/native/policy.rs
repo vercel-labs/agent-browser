@@ -205,6 +205,21 @@ mod tests {
     }
 
     #[test]
+    fn failed_reload_keeps_the_previous_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("policy.json");
+        fs::write(&path, r#"{"deny":["delete"]}"#).unwrap();
+        let mut policy = ActionPolicy::load(path.to_str().unwrap()).unwrap();
+        fs::remove_file(&path).unwrap();
+
+        let error = policy.reload().unwrap_err();
+
+        assert!(error.contains("Failed to read policy file"));
+        assert!(matches!(policy.check("delete"), PolicyResult::Deny(_)));
+        assert_eq!(policy.check("click"), PolicyResult::Allow);
+    }
+
+    #[test]
     fn test_confirm_actions_from_env() {
         let _guard = EnvGuard::new(&["AGENT_BROWSER_CONFIRM_ACTIONS"]);
         _guard.set("AGENT_BROWSER_CONFIRM_ACTIONS", "navigate,click,fill");

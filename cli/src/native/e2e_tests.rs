@@ -2467,6 +2467,136 @@ async fn e2e_events_do_not_store_data_for_blocked_origin() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_events_lose_content_after_a_redirect_to_a_blocked_origin() {
+    let environment = crate::test_utils::EnvGuard::new(&[
+        "AGENT_BROWSER_ACTION_POLICY",
+        "AGENT_BROWSER_POLICY",
+        "AGENT_BROWSER_CONFIRM_ACTIONS",
+        "AGENT_BROWSER_ALLOWED_DOMAINS",
+    ]);
+    environment.remove("AGENT_BROWSER_ACTION_POLICY");
+    environment.remove("AGENT_BROWSER_POLICY");
+    environment.remove("AGENT_BROWSER_CONFIRM_ACTIONS");
+    environment.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+    let requests_for_server = requests.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..20 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let requests = requests_for_server.clone();
+            tokio::spawn(async move {
+                let mut request = vec![0u8; 8192];
+                let length = stream.read(&mut request).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..length]);
+                let request_line = request.lines().next().unwrap_or("").to_string();
+                if let Ok(mut logged) = requests.lock() {
+                    logged.push(request_line.clone());
+                }
+                let response = if request_line.contains(" /redirect ") {
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/leak\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                } else if request_line.contains(" /leak ") {
+                    let body = "<!doctype html><div id=\"leaked\">secret</div>";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body,
+                    )
+                } else {
+                    let body = "<!doctype html><title>Start</title>";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body,
+                    )
+                };
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    let mut daemon = DaemonState::new();
+    *daemon.domain_filter.write().await = Some(super::network::DomainFilter::new("localhost"));
+
+    let response = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut daemon,
+    )
+    .await;
+    assert_success(&response);
+    let response = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": format!("http://localhost:{port}/start"),
+        }),
+        &mut daemon,
+    )
+    .await;
+    assert_success(&response);
+    let response = execute_command(
+        &json!({ "id": "3", "action": "events_start", "selector": "#leaked" }),
+        &mut daemon,
+    )
+    .await;
+    assert_success(&response);
+    let subscription = get_data(&response).clone();
+
+    let response = execute_command(
+        &json!({
+            "id": "4",
+            "action": "evaluate",
+            "script": "location.href = '/redirect'"
+        }),
+        &mut daemon,
+    )
+    .await;
+    assert_success(&response);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let state = tokio::sync::Mutex::new(daemon);
+    let read = super::daemon::execute_events_read(
+        &json!({
+            "id": "5",
+            "action": "events_read",
+            "subscriptionId": subscription["id"],
+            "since": subscription["cursor"],
+            "waitMs": 1_000,
+        }),
+        &state,
+    )
+    .await;
+    assert_success(&read);
+    let events = get_data(&read)["events"].as_array().unwrap();
+    assert!(events
+        .iter()
+        .all(|event| event["meta"]["name"] != "element.visible"));
+    assert!(events
+        .iter()
+        .all(|event| !event.to_string().contains("secret")));
+    assert!(!requests
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|line| line.contains(" /leak ")));
+
+    let response = execute_command(
+        &json!({ "id": "6", "action": "close" }),
+        &mut *state.lock().await,
+    )
+    .await;
+    assert_success(&response);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_snapshot_and_click_ref() {
     let (base_url, _server) = start_link_fixture_server().await;
     let mut state = DaemonState::new();

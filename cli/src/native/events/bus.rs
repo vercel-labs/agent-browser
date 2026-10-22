@@ -1656,6 +1656,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mid_watch_redirect_to_a_blocked_origin_stops_event_content() {
+        let bus = Arc::new(Bus::new(
+            "session-1".into(),
+            Arc::new(RwLock::new(Some(DomainFilter::new("allowed.test")))),
+            Arc::new(RwLock::new(None)),
+        ));
+        let id = add(&bus, source(), false).await;
+
+        bus.update_url("session-1", "https://blocked.test/").await;
+        bus.process_raw(raw("change", "visible", "nonce-1")).await;
+
+        let listed = bus.list(None, false).await;
+        let result = bus.read(&id, None, Duration::ZERO, 10).await.unwrap();
+        assert_eq!(listed[0]["filtered"], 1);
+        assert!(result
+            .events
+            .iter()
+            .all(|event| event.meta.name != "element.visible"));
+    }
+
+    struct DataSource {
+        session_id: String,
+        target_id: String,
+        actions: [&'static str; 1],
+    }
+
+    impl DataSource {
+        fn console() -> Self {
+            Self {
+                session_id: "session-1".into(),
+                target_id: "target-1".into(),
+                actions: ["console"],
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EventSource for DataSource {
+        fn supported_engines(&self) -> &'static [&'static str] {
+            &["chrome"]
+        }
+
+        fn policy_actions(&self) -> &[&'static str] {
+            &self.actions
+        }
+
+        fn target_id(&self) -> &str {
+            &self.target_id
+        }
+
+        fn session_id(&self) -> &str {
+            &self.session_id
+        }
+
+        fn sharing_key(&self) -> Option<String> {
+            Some("session-1:console".into())
+        }
+
+        fn classify(&self, raw: &RawCdpMessage) -> Option<SourceSignal> {
+            let event: Value = serde_json::from_str(&raw.text).ok()?;
+            if event.get("method").and_then(Value::as_str) != Some("Runtime.consoleAPICalled") {
+                return None;
+            }
+            Some(SourceSignal::Match {
+                key: "Runtime.consoleAPICalled".into(),
+                name: "Runtime.consoleAPICalled".into(),
+                data: event.get("params").cloned()?,
+                initial: false,
+                location: None,
+            })
+        }
+
+        async fn observe(&self, _client: &CdpClient) -> Result<Option<SourceSignal>, String> {
+            Ok(None)
+        }
+
+        async fn stop(&self, _client: &CdpClient) {}
+    }
+
+    fn console_event() -> RawCdpMessage {
+        RawCdpMessage {
+            text: json!({
+                "sessionId": "session-1",
+                "method": "Runtime.consoleAPICalled",
+                "params": {"type": "log", "args": [{"type": "string", "value": "page text"}]}
+            })
+            .to_string(),
+            session_id: Some("session-1".into()),
+        }
+    }
+
+    fn policy_bus(policy: ActionPolicy) -> Arc<Bus> {
+        Arc::new(Bus::new(
+            "session-1".into(),
+            Arc::new(RwLock::new(None)),
+            Arc::new(RwLock::new(Some(policy))),
+        ))
+    }
+
+    async fn data_subscription(bus: &Bus) -> String {
+        bus.test_add_subscription(
+            Arc::new(DataSource::console()),
+            SourceSignal::Rearmed,
+            "Runtime.consoleAPICalled",
+            false,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn failed_policy_reload_mid_subscription_ends_it_with_policy_denied() {
+        let directory = tempfile::tempdir().unwrap();
+        let policy_path = directory.path().join("policy.json");
+        std::fs::write(&policy_path, r#"{"deny":[]}"#).unwrap();
+        let bus = policy_bus(ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
+        let id = data_subscription(&bus).await;
+        std::fs::remove_file(&policy_path).unwrap();
+
+        bus.process_raw(console_event()).await;
+
+        let result = bus.read(&id, None, Duration::ZERO, 10).await.unwrap();
+        assert_eq!(result.status, "ended");
+        assert_eq!(
+            result.events.last().unwrap().data,
+            json!({"reason": "policy_denied"})
+        );
+        assert!(result
+            .events
+            .iter()
+            .all(|event| event.meta.name != "Runtime.consoleAPICalled"));
+    }
+
+    #[tokio::test]
+    async fn denying_a_data_action_mid_subscription_ends_it_with_policy_denied() {
+        let directory = tempfile::tempdir().unwrap();
+        let policy_path = directory.path().join("policy.json");
+        std::fs::write(&policy_path, r#"{"deny":["console"]}"#).unwrap();
+        let bus = policy_bus(ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
+        let id = data_subscription(&bus).await;
+
+        bus.process_raw(console_event()).await;
+
+        let result = bus.read(&id, None, Duration::ZERO, 10).await.unwrap();
+        assert_eq!(result.status, "ended");
+        assert_eq!(
+            result.events.last().unwrap().data,
+            json!({"reason": "policy_denied"})
+        );
+    }
+
+    #[tokio::test]
     async fn active_subscription_limit_is_twenty() {
         let bus = bus();
         let source = source();

@@ -518,12 +518,17 @@ async fn events_start_checks_the_source_policy_without_a_browser() {
     daemon.policy = Some(ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
     for (action, method) in [
         ("dialog", "Page.javascriptDialogOpening"),
+        ("url", "Page.frameNavigated"),
+        ("url", "Page.navigatedWithinDocument"),
+        ("console", "Runtime.consoleAPICalled"),
+        ("errors", "Runtime.exceptionThrown"),
+        ("tab_list", "Target.targetCreated"),
         ("download", "Browser.downloadWillBegin"),
     ] {
         std::fs::write(&policy_path, format!(r#"{{"deny":["{action}"]}}"#)).unwrap();
         let response = execute_command(
             &json!({
-                "id": format!("policy-start-{action}"),
+                "id": format!("policy-start-{action}-{method}"),
                 "action": "events_start",
                 "method": method
             }),
@@ -535,6 +540,127 @@ async fn events_start_checks_the_source_policy_without_a_browser() {
         assert!(response["error"].as_str().unwrap().contains(action));
     }
     assert!(daemon.browser.is_none());
+}
+
+fn event_operation_command(action: &str) -> Value {
+    match action {
+        "events_start" => json!({
+            "id": action,
+            "action": action,
+            "selector": "#notice"
+        }),
+        "events_read" => json!({
+            "id": action,
+            "action": action,
+            "subscriptionId": "missing",
+            "since": "missing:0"
+        }),
+        "events_ack" => json!({
+            "id": action,
+            "action": action,
+            "subscriptionId": "missing",
+            "cursor": "missing:0"
+        }),
+        _ => json!({
+            "id": action,
+            "action": action,
+            "subscriptionId": "missing"
+        }),
+    }
+}
+
+async fn event_operation_response(state: &tokio::sync::Mutex<DaemonState>, action: &str) -> Value {
+    let command = event_operation_command(action);
+    if action == "events_read" {
+        super::daemon::execute_events_read(&command, state).await
+    } else {
+        execute_command(&command, &mut *state.lock().await).await
+    }
+}
+
+#[tokio::test]
+async fn every_event_operation_denies_its_own_policy_action() {
+    use crate::native::policy::ActionPolicy;
+    use crate::test_utils::EnvGuard;
+
+    let _environment = EnvGuard::new(&[
+        "AGENT_BROWSER_ACTION_POLICY",
+        "AGENT_BROWSER_POLICY",
+        "AGENT_BROWSER_CONFIRM_ACTIONS",
+    ]);
+    _environment.remove("AGENT_BROWSER_ACTION_POLICY");
+    _environment.remove("AGENT_BROWSER_POLICY");
+    _environment.remove("AGENT_BROWSER_CONFIRM_ACTIONS");
+    let directory = tempfile::tempdir().unwrap();
+    let policy_path = directory.path().join("policy.json");
+    std::fs::write(&policy_path, r#"{"deny":["events_start"]}"#).unwrap();
+    let mut daemon = DaemonState::new();
+    daemon.policy = Some(ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
+    let state = tokio::sync::Mutex::new(daemon);
+
+    for action in [
+        "events_start",
+        "events_read",
+        "events_ack",
+        "events_list",
+        "events_stop",
+    ] {
+        std::fs::write(&policy_path, format!(r#"{{"deny":["{action}"]}}"#)).unwrap();
+        let response = event_operation_response(&state, action).await;
+
+        assert_eq!(response["success"], false, "{action} was not denied");
+        assert!(
+            response["error"].as_str().unwrap().contains(action),
+            "{action} denial did not name the action: {response}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn only_events_start_can_be_confirmed() {
+    use crate::native::policy::ActionPolicy;
+    use crate::test_utils::EnvGuard;
+
+    let _environment = EnvGuard::new(&[
+        "AGENT_BROWSER_ACTION_POLICY",
+        "AGENT_BROWSER_POLICY",
+        "AGENT_BROWSER_CONFIRM_ACTIONS",
+    ]);
+    _environment.remove("AGENT_BROWSER_ACTION_POLICY");
+    _environment.remove("AGENT_BROWSER_POLICY");
+    _environment.remove("AGENT_BROWSER_CONFIRM_ACTIONS");
+    let directory = tempfile::tempdir().unwrap();
+    let policy_path = directory.path().join("policy.json");
+    std::fs::write(&policy_path, r#"{"confirm":["events_start"]}"#).unwrap();
+    let mut daemon = DaemonState::new();
+    daemon.policy = Some(ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
+    let state = tokio::sync::Mutex::new(daemon);
+
+    for action in [
+        "events_start",
+        "events_read",
+        "events_ack",
+        "events_list",
+        "events_stop",
+    ] {
+        std::fs::write(&policy_path, format!(r#"{{"confirm":["{action}"]}}"#)).unwrap();
+        let response = event_operation_response(&state, action).await;
+
+        if action == "events_start" {
+            assert_eq!(response["success"], true);
+            assert_eq!(response["data"]["confirmation_required"], true);
+            assert_eq!(response["data"]["action"], action);
+        } else {
+            assert_eq!(response["success"], false, "{action} was not refused");
+            assert!(
+                response["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("only supported at events_start"),
+                "{action} did not explain the confirmation rule: {response}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
