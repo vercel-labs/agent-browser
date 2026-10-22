@@ -7,10 +7,10 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 
-use super::buffer::{CursorError, EventBuffer};
+use super::buffer::EventBuffer;
 use super::envelope::{EventEnvelope, EventTab};
 use super::source::{EventSource, SourceSignal};
-use super::sources::dom::{normalize_selector, DomObserver, DomState, WORLD_NAME};
+use super::sources::dom::{normalize_selector, DomObserver, WORLD_NAME};
 use crate::native::cdp::client::{CdpClient, RawCdpMessage};
 use crate::native::network::DomainFilter;
 use crate::native::policy::ActionPolicy;
@@ -20,6 +20,8 @@ const MAX_ACTIVE: usize = 20;
 const MAX_LISTED: usize = 50;
 const RETENTION: Duration = Duration::from_secs(600);
 const MAX_TTL: Duration = Duration::from_secs(1_800);
+const LOST: &str =
+    "Event subscription was lost; the daemon may have restarted or the subscription expired";
 
 pub struct Bus {
     session_id: String,
@@ -32,10 +34,10 @@ pub struct Bus {
     receiver: Mutex<Option<ReceiverTask>>,
 }
 
+#[derive(Default)]
 struct BusState {
-    subscriptions: HashMap<String, Subscription>,
+    subs: HashMap<String, Subscription>,
     sources: HashMap<String, SharedSource>,
-    shared_keys: HashMap<String, String>,
 }
 
 struct Subscription {
@@ -57,14 +59,14 @@ struct Subscription {
     buffer: EventBuffer,
     filtered: u64,
     rejected: u64,
-    already_satisfied: bool,
+    satisfied: bool,
 }
 
 struct SharedSource {
     source: Arc<dyn EventSource>,
-    subscriptions: HashSet<String>,
-    current: Option<SourceSignal>,
-    navigation_pending: bool,
+    subs: HashSet<String>,
+    current: String,
+    pending: bool,
     url: String,
     tab: EventTab,
 }
@@ -101,10 +103,8 @@ pub struct DomStart<'request> {
 }
 
 pub(super) struct SourceStart<'request> {
-    pub engine: &'request str,
-    pub client: Arc<CdpClient>,
     pub source: Arc<dyn EventSource>,
-    pub initial: SourceSignal,
+    pub initial: String,
     pub tab: EventTab,
     pub current_url: &'request str,
     pub filter_key: String,
@@ -113,21 +113,6 @@ pub(super) struct SourceStart<'request> {
     pub ttl: Duration,
     pub owner: Option<String>,
     pub idempotency_key: Option<String>,
-}
-
-struct SubscriptionStart<'request> {
-    session_id: &'request str,
-    source_key: String,
-    policy_actions: Vec<String>,
-    filter_key: String,
-    rule: Value,
-    tab: EventTab,
-    owner: Option<String>,
-    idempotency_key: Option<String>,
-    once: bool,
-    expires_at: chrono::DateTime<chrono::Utc>,
-    current: &'request SourceSignal,
-    already_satisfied: bool,
 }
 
 impl Bus {
@@ -141,251 +126,107 @@ impl Bus {
             domain_filter,
             policy,
             stream_server: RwLock::new(None),
-            state: Mutex::new(BusState {
-                subscriptions: HashMap::new(),
-                sources: HashMap::new(),
-                shared_keys: HashMap::new(),
-            }),
+            state: Mutex::new(BusState::default()),
             notify: Notify::new(),
             operation: Mutex::new(()),
             receiver: Mutex::new(None),
         }
     }
 
-    pub async fn start_dom(self: &Arc<Self>, request: DomStart<'_>) -> Result<Value, String> {
-        let DomStart {
-            engine,
-            client,
-            session_id,
-            tab,
-            current_url,
-            selector,
-            state,
-            once,
-            ttl,
-            owner,
-            idempotency_key,
-        } = request;
-        if engine != "chrome" {
+    pub async fn start_dom(self: &Arc<Self>, req: DomStart<'_>) -> Result<Value, String> {
+        if req.engine != "chrome" {
             return Err("Browser events are supported only with the Chrome engine".into());
         }
-        let selector = normalize_selector(selector)?;
-        let target_id = tab.target_id.as_str();
-        if ttl < Duration::from_secs(1) || ttl > MAX_TTL {
-            return Err("Event subscription TTL must be between 1 second and 30 minutes".into());
+        let selector = normalize_selector(req.selector)?;
+        validate_ttl(req.ttl)?;
+        if !matches!(req.state, "visible" | "hidden") {
+            return Err("Event state must be visible or hidden".into());
         }
-        let filter_key = match state {
-            "visible" => "visible",
-            "hidden" => "hidden",
-            _ => return Err("Event state must be visible or hidden".into()),
-        }
-        .to_owned();
-        self.attach(client.clone()).await?;
+        self.attach(req.client.clone()).await?;
         let _operation = self.operation.lock().await;
         self.expire().await;
-
         {
-            let mut state_guard = self.state.lock().await;
-            prune(&mut state_guard);
-            if let Some(existing) =
-                idempotent_subscription(&state_guard, owner.as_deref(), idempotency_key.as_deref())
+            let mut state = self.state.lock().await;
+            prune(&mut state);
+            if let Some(sub) =
+                idempotent(&state, req.owner.as_deref(), req.idempotency_key.as_deref())
             {
-                return Ok(start_response(existing));
+                return Ok(start_response(sub));
             }
-            check_active_capacity(&state_guard)?;
+            check_capacity(&state)?;
         }
-
-        let sharing_key = format!("{}:{}:{}", target_id, WORLD_NAME, selector);
-        let existing_source = {
-            let state_guard = self.state.lock().await;
-            state_guard
-                .shared_keys
-                .get(&sharing_key)
-                .and_then(|source_key| state_guard.sources.get(source_key))
-                .map(|source| {
-                    (
-                        source.source.clone(),
-                        source.current.clone(),
-                        source.url.clone(),
-                    )
-                })
-        };
-        let (source, current, source_key, url) = match existing_source {
-            Some((source, current, url)) => {
-                let source_key = sharing_key.clone();
-                (source, current, source_key, url)
-            }
+        let key = format!("{}:{}:{}", req.tab.target_id, WORLD_NAME, selector);
+        let existing = self.state.lock().await.sources.get(&key).map(|shared| {
+            (
+                shared.source.clone(),
+                shared.current.clone(),
+                shared.url.clone(),
+            )
+        });
+        let (source, initial, url): (Arc<dyn EventSource>, _, _) = match existing {
+            Some(existing) => existing,
             None => {
-                let (observer, initial) =
-                    DomObserver::install(&client, session_id, target_id, &selector).await?;
-                let source: Arc<dyn EventSource> = Arc::new(observer);
-                let current = observation_signal(initial);
+                let (observer, initial) = DomObserver::install(
+                    &req.client,
+                    req.session_id,
+                    &req.tab.target_id,
+                    &selector,
+                )
+                .await?;
                 (
-                    source,
-                    Some(current),
-                    sharing_key.clone(),
-                    current_url.to_owned(),
+                    Arc::new(observer),
+                    signal_key(&initial).to_owned(),
+                    req.current_url.to_owned(),
                 )
             }
         };
-        if source.session_id() != session_id {
+        if source.session_id() != req.session_id {
             return Err("Event observer session changed while subscribing".into());
         }
-        let state_name = filter_key.clone();
-        let current = current.ok_or_else(|| "Event observer has no current state".to_string())?;
-        let already_satisfied =
-            matches!(&current, SourceSignal::Match { key, .. } if key == &filter_key);
-        let expires_at = chrono::Utc::now()
-            + chrono::Duration::from_std(ttl).map_err(|error| error.to_string())?;
-        let policy_actions = source
-            .policy_actions()
-            .iter()
-            .map(|action| (*action).to_owned())
-            .collect();
-        let response = {
-            let mut state_guard = self.state.lock().await;
-            if !state_guard.sources.contains_key(&source_key) {
-                state_guard
-                    .shared_keys
-                    .insert(sharing_key, source_key.clone());
-                state_guard.sources.insert(
-                    source_key.clone(),
-                    SharedSource {
-                        source: source.clone(),
-                        subscriptions: HashSet::new(),
-                        current: Some(current.clone()),
-                        navigation_pending: false,
-                        url,
-                        tab: tab.clone(),
-                    },
-                );
-            }
-            add_subscription(
-                &mut state_guard,
-                SubscriptionStart {
-                    session_id: &self.session_id,
-                    source_key,
-                    policy_actions,
-                    filter_key,
-                    rule: json!({"selector": selector, "state": state_name}),
-                    tab,
-                    owner,
-                    idempotency_key,
-                    once,
-                    expires_at,
-                    current: &current,
-                    already_satisfied,
-                },
-            )
+        let expires = chrono::Utc::now() + chrono::Duration::from_std(req.ttl).unwrap();
+        let start = SourceStart {
+            source,
+            initial,
+            tab: req.tab,
+            current_url: &url,
+            filter_key: req.state.to_owned(),
+            rule: json!({"selector": selector, "state": req.state}),
+            once: req.once,
+            ttl: req.ttl,
+            owner: req.owner,
+            idempotency_key: req.idempotency_key,
         };
-        self.nudge_all_heads().await;
-        self.notify.notify_waiters();
+        let response = register(
+            &mut *self.state.lock().await,
+            &self.session_id,
+            key,
+            start,
+            expires,
+        );
+        self.publish().await;
         Ok(response)
     }
 
-    pub(super) async fn subscribe_source(
+    pub(super) async fn subscribe_cdp(
         self: &Arc<Self>,
-        request: SourceStart<'_>,
+        client: Arc<CdpClient>,
+        req: SourceStart<'_>,
     ) -> Result<Value, String> {
-        self.attach(request.client.clone()).await?;
+        self.attach(client).await?;
         let _operation = self.operation.lock().await;
         self.expire().await;
-        if !request.source.supported_engines().contains(&request.engine) {
-            return Err("Event source does not support the selected browser engine".into());
-        }
-        if request.ttl < Duration::from_secs(1) || request.ttl > MAX_TTL {
-            return Err("Event subscription TTL must be between 1 second and 30 minutes".into());
-        }
         let mut state = self.state.lock().await;
-        let policy_actions = request
-            .source
-            .policy_actions()
-            .iter()
-            .map(|action| (*action).to_owned())
-            .collect();
         prune(&mut state);
-        if let Some(existing) = idempotent_subscription(
-            &state,
-            request.owner.as_deref(),
-            request.idempotency_key.as_deref(),
-        ) {
-            let response = start_response(existing);
-            let stop_source = state
-                .sources
-                .get(&existing.source_key)
-                .is_none_or(|source| !Arc::ptr_eq(&source.source, &request.source));
-            drop(state);
-            if stop_source {
-                request.source.stop(&request.client).await;
-            }
-            return Ok(response);
+        if let Some(sub) = idempotent(&state, req.owner.as_deref(), req.idempotency_key.as_deref())
+        {
+            return Ok(start_response(sub));
         }
-        check_active_capacity(&state)?;
-        let sharing_key = request.source.sharing_key();
-        let source_key = sharing_key
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
-        let existing = sharing_key
-            .as_ref()
-            .and_then(|key| state.shared_keys.get(key))
-            .and_then(|key| state.sources.get(key))
-            .map(|source| (source.source.clone(), source.current.clone()));
-        let (source, current, stop_duplicate) = match existing {
-            Some((source, Some(current))) => {
-                let stop_duplicate = !Arc::ptr_eq(&source, &request.source);
-                (source, current, stop_duplicate)
-            }
-            Some((_, None)) => return Err("Event source has no current state".into()),
-            None => (request.source.clone(), request.initial.clone(), false),
-        };
-        if !state.sources.contains_key(&source_key) {
-            if let Some(sharing_key) = sharing_key {
-                state.shared_keys.insert(sharing_key, source_key.clone());
-            }
-            state.sources.insert(
-                source_key.clone(),
-                SharedSource {
-                    source,
-                    subscriptions: HashSet::new(),
-                    current: Some(current.clone()),
-                    navigation_pending: false,
-                    url: request.current_url.to_owned(),
-                    tab: request.tab.clone(),
-                },
-            );
-        } else if let Some(shared) = state.sources.get_mut(&source_key) {
-            shared.url = request.current_url.to_owned();
-            shared.tab = request.tab.clone();
-        }
-        let already_satisfied = matches!(
-            &current,
-            SourceSignal::Match { key, .. } if key == &request.filter_key
-        );
-        let expires_at = chrono::Utc::now()
-            + chrono::Duration::from_std(request.ttl).map_err(|error| error.to_string())?;
-        let response = add_subscription(
-            &mut state,
-            SubscriptionStart {
-                session_id: &self.session_id,
-                source_key,
-                policy_actions,
-                filter_key: request.filter_key,
-                rule: request.rule,
-                tab: request.tab,
-                owner: request.owner,
-                idempotency_key: request.idempotency_key,
-                once: request.once,
-                expires_at,
-                current: &current,
-                already_satisfied,
-            },
-        );
+        check_capacity(&state)?;
+        let key = uuid::Uuid::new_v4().simple().to_string();
+        let expires = chrono::Utc::now() + chrono::Duration::from_std(req.ttl).unwrap();
+        let response = register(&mut state, &self.session_id, key, req, expires);
         drop(state);
-        if stop_duplicate {
-            request.source.stop(&request.client).await;
-        }
-        self.nudge_all_heads().await;
-        self.notify.notify_waiters();
+        self.publish().await;
         Ok(response)
     }
 
@@ -398,29 +239,41 @@ impl Bus {
         self.expire().await;
         let state = self.state.lock().await;
         state
-            .subscriptions
+            .subs
             .get(id)
-            .map(|subscription| subscription.policy_actions.clone())
-            .ok_or_else(|| {
-                "Event subscription was lost; the daemon may have restarted or the subscription expired".into()
-            })
+            .map(|sub| sub.policy_actions.clone())
+            .ok_or_else(|| LOST.into())
     }
 
     async fn nudge_all_heads(&self) {
-        let Some(server) = self.stream_server.read().await.clone() else {
-            return;
-        };
-        let heads = self
-            .state
-            .lock()
-            .await
-            .subscriptions
-            .values()
-            .map(|subscription| (subscription.id.clone(), subscription.buffer.head()))
-            .collect::<Vec<_>>();
-        for (id, head) in heads {
-            server.nudge_event(&id, head);
+        let server = self.stream_server.read().await.clone();
+        if let Some(server) = server {
+            let heads: Vec<_> = {
+                let state = self.state.lock().await;
+                state
+                    .subs
+                    .values()
+                    .map(|sub| (sub.id.clone(), sub.buffer.head()))
+                    .collect()
+            };
+            for (id, head) in heads {
+                server.nudge_event(&id, head);
+            }
         }
+    }
+
+    async fn publish(&self) {
+        self.nudge_all_heads().await;
+        self.notify.notify_waiters();
+    }
+
+    async fn cleanup(&self, sources: Vec<Arc<dyn EventSource>>, client: Option<Arc<CdpClient>>) {
+        if let Some(client) = client {
+            for source in sources {
+                source.stop(&client).await;
+            }
+        }
+        self.publish().await;
     }
 
     async fn attach(self: &Arc<Self>, client: Arc<CdpClient>) -> Result<(), String> {
@@ -429,15 +282,15 @@ impl Bus {
             let mut receiver = self.receiver.lock().await;
             if receiver
                 .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(&current.client, &client))
+                .is_some_and(|old| Arc::ptr_eq(&old.client, &client))
             {
                 return Ok(());
             }
             receiver.take()
         };
-        if let Some(previous) = previous {
-            previous.task.abort();
-            self.end_all_with_client("browser_closed", Some(previous.client))
+        if let Some(old) = previous {
+            old.task.abort();
+            self.end_all_with_client("browser_closed", Some(old.client))
                 .await;
         }
         let mut receiver = client.subscribe_raw();
@@ -448,9 +301,7 @@ impl Bus {
                 tokio::select! {
                     received = receiver.recv() => match received {
                         Ok(raw) => bus.receive_raw(&receiver_client, raw).await,
-                        Err(broadcast::error::RecvError::Lagged(missed)) => {
-                            bus.handle_gap(&receiver_client, missed).await;
-                        }
+                        Err(broadcast::error::RecvError::Lagged(missed)) => bus.handle_gap(&receiver_client, missed).await,
                         Err(broadcast::error::RecvError::Closed) => {
                             bus.end_all_with_client("browser_closed", Some(receiver_client.clone())).await;
                             return;
@@ -465,216 +316,177 @@ impl Bus {
     }
 
     async fn receive_raw(&self, client: &Arc<CdpClient>, raw: RawCdpMessage) {
-        let event: Value = match serde_json::from_str(&raw.text) {
-            Ok(event) => event,
-            Err(_) => return,
+        let Ok(event) = serde_json::from_str::<Value>(&raw.text) else {
+            return;
         };
-        let method = event.get("method").and_then(Value::as_str).unwrap_or("");
-        let session_id = raw
+        let method = event["method"].as_str().unwrap_or("");
+        let session = raw
             .session_id
             .as_deref()
-            .or_else(|| event.get("sessionId").and_then(Value::as_str));
+            .or_else(|| event["sessionId"].as_str());
         match method {
             "Target.targetDestroyed" | "Target.targetCrashed" => {
                 self.process_raw(raw.clone()).await;
-                if let Some(target_id) = event.pointer("/params/targetId").and_then(Value::as_str) {
-                    self.end_target(
-                        target_id,
-                        if method.ends_with("Crashed") {
-                            "tab_crashed"
-                        } else {
-                            "tab_closed"
-                        },
-                        client,
-                    )
-                    .await;
+                if let Some(target) = event.pointer("/params/targetId").and_then(Value::as_str) {
+                    let reason = if method.ends_with("Crashed") {
+                        "tab_crashed"
+                    } else {
+                        "tab_closed"
+                    };
+                    self.end_matching(reason, client, |source| source.target_id() == target)
+                        .await;
                 }
                 return;
             }
             "Inspector.targetCrashed" => {
-                if let Some(session_id) = session_id {
-                    self.end_session(session_id, "tab_crashed", client).await;
+                if let Some(session) = session {
+                    self.end_matching("tab_crashed", client, |source| {
+                        source.session_id() == session
+                    })
+                    .await;
                 }
                 return;
             }
             "Page.frameNavigated" if event.pointer("/params/frame/parentId").is_none() => {
-                if let (Some(session_id), Some(url)) = (
-                    session_id,
+                if let (Some(session), Some(url)) = (
+                    session,
                     event.pointer("/params/frame/url").and_then(Value::as_str),
                 ) {
-                    self.update_url(session_id, url).await;
-                    self.rearm_session(session_id).await;
+                    let mut state = self.state.lock().await;
+                    for shared in state.sources.values_mut() {
+                        if shared.source.session_id() == session {
+                            shared.url = url.to_owned();
+                        }
+                        shared.source.update_url(session, url);
+                    }
+                    for shared in state
+                        .sources
+                        .values_mut()
+                        .filter(|shared| shared.source.session_id() == session)
+                    {
+                        shared.pending = true;
+                    }
                 }
             }
             _ => {}
         }
         self.process_raw(raw.clone()).await;
-        if method == "Page.navigatedWithinDocument" {
-            if let Some(session_id) = session_id {
-                self.observe_pending(session_id, client, "afterNavigation")
-                    .await;
-            }
-        }
-        if method == "Runtime.bindingCalled" {
-            if let Some(session_id) = session_id {
-                self.observe_pending(session_id, client, "afterNavigation")
-                    .await;
-            }
-        }
-        if method == "Page.frameNavigated" {
-            if let Some(session_id) = session_id {
-                self.observe_pending(session_id, client, "afterNavigation")
-                    .await;
+        if matches!(
+            method,
+            "Page.navigatedWithinDocument" | "Runtime.bindingCalled" | "Page.frameNavigated"
+        ) {
+            if let Some(session) = session {
+                self.observe_pending(session, client).await;
             }
         }
     }
 
     pub async fn process_raw(&self, raw: RawCdpMessage) {
-        let mut classified = Vec::new();
-        {
+        let signals: Vec<_> = {
             let state = self.state.lock().await;
-            for (source_key, source) in &state.sources {
-                if let Some(signal) = source.source.classify(&raw) {
-                    classified.push((source_key.clone(), signal));
+            state
+                .sources
+                .iter()
+                .filter_map(|(key, shared)| {
+                    shared
+                        .source
+                        .classify(&raw)
+                        .map(|signal| (key.clone(), signal))
+                })
+                .collect()
+        };
+        for (key, signal) in signals {
+            match signal {
+                SourceSignal::Rearmed => {
+                    if let Some(shared) = self.state.lock().await.sources.get_mut(&key) {
+                        shared.pending = true;
+                    }
+                }
+                SourceSignal::Rejected => {
+                    let mut state = self.state.lock().await;
+                    let ids = state
+                        .sources
+                        .get(&key)
+                        .map(|shared| shared.subs.clone())
+                        .unwrap_or_default();
+                    for id in ids {
+                        if let Some(sub) =
+                            state.subs.get_mut(&id).filter(|sub| sub.status == "active")
+                        {
+                            sub.rejected += 1;
+                        }
+                    }
+                }
+                signal => self.emit_signal(&key, signal, None).await,
+            }
+        }
+    }
+
+    async fn observe_pending(&self, session: &str, client: &Arc<CdpClient>) {
+        let sources: Vec<_> = {
+            let state = self.state.lock().await;
+            state
+                .sources
+                .iter()
+                .filter(|(_, shared)| shared.source.session_id() == session && shared.pending)
+                .map(|(key, shared)| (key.clone(), shared.source.clone()))
+                .collect()
+        };
+        for (key, source) in sources {
+            if let Ok(Some(signal)) = source.observe(client).await {
+                self.emit_signal(&key, signal, Some("afterNavigation"))
+                    .await;
+            }
+            let mut state = self.state.lock().await;
+            let Some(shared) = state.sources.get_mut(&key).filter(|shared| shared.pending) else {
+                continue;
+            };
+            shared.pending = false;
+            let ids = shared.subs.clone();
+            let tab = shared.tab.clone();
+            for id in ids {
+                if let Some(sub) = state.subs.get_mut(&id) {
+                    sub.buffer.append(envelope(
+                        "subscription.rearmed",
+                        &self.session_id,
+                        &tab,
+                        json!({}),
+                    ));
                 }
             }
-        }
-        for (source_key, signal) in classified {
-            match signal {
-                SourceSignal::Rearmed => self.mark_rearmed(&source_key).await,
-                SourceSignal::Rejected => self.count_rejected(&source_key).await,
-                signal => self.emit_signal(&source_key, signal, None).await,
-            }
-        }
-    }
-
-    async fn update_url(&self, session_id: &str, url: &str) {
-        let mut state = self.state.lock().await;
-        for source in state.sources.values_mut() {
-            if source.source.session_id() == session_id {
-                source.url = url.to_owned();
-            }
-            source.source.update_url(session_id, url);
-        }
-    }
-
-    async fn mark_rearmed(&self, source_key: &str) {
-        if let Some(source) = self.state.lock().await.sources.get_mut(source_key) {
-            source.navigation_pending = true;
-        }
-    }
-
-    async fn record_rearmed(&self, source_key: &str) {
-        let mut state = self.state.lock().await;
-        let Some(source) = state.sources.get_mut(source_key) else {
-            return;
-        };
-        source.navigation_pending = false;
-        let ids: Vec<String> = source.subscriptions.iter().cloned().collect();
-        let tab = source.tab.clone();
-        for id in ids {
-            if let Some(subscription) = state.subscriptions.get_mut(&id) {
-                subscription.buffer.append(EventEnvelope::new(
-                    "subscription.rearmed",
-                    &self.session_id,
-                    &tab.id,
-                    &tab.label,
-                    &tab.target_id,
-                    json!({}),
-                ));
-            }
-        }
-        drop(state);
-        self.nudge_all_heads().await;
-        self.notify.notify_waiters();
-    }
-
-    async fn rearm_session(&self, session_id: &str) {
-        let source_keys: Vec<String> = {
-            let state = self.state.lock().await;
-            state
-                .sources
-                .iter()
-                .filter(|(_, source)| source.source.session_id() == session_id)
-                .map(|(key, _)| key.clone())
-                .collect()
-        };
-        for source_key in source_keys {
-            self.mark_rearmed(&source_key).await;
-        }
-    }
-
-    async fn observe_pending(&self, session_id: &str, client: &Arc<CdpClient>, flag: &str) {
-        let sources: Vec<(String, Arc<dyn EventSource>)> = {
-            let state = self.state.lock().await;
-            state
-                .sources
-                .iter()
-                .filter(|(_, source)| {
-                    source.source.session_id() == session_id && source.navigation_pending
-                })
-                .map(|(key, source)| (key.clone(), source.source.clone()))
-                .collect()
-        };
-        for (source_key, source) in sources {
-            let observed = source.observe(client).await;
-            if let Ok(Some(signal)) = observed {
-                self.emit_signal(&source_key, signal, Some(flag)).await;
-            }
-            let pending = self
-                .state
-                .lock()
-                .await
-                .sources
-                .get(&source_key)
-                .is_some_and(|source| source.navigation_pending);
-            if pending {
-                self.record_rearmed(&source_key).await;
-            }
+            drop(state);
+            self.publish().await;
         }
     }
 
     async fn handle_gap(&self, client: &Arc<CdpClient>, missed: u64) {
-        let sources = self.append_gap(missed).await;
-        for (source_key, source) in sources {
-            if let Ok(Some(signal)) = source.observe(client).await {
-                self.emit_signal(&source_key, signal, Some("afterGap"))
-                    .await;
-            }
-        }
-    }
-
-    async fn append_gap(&self, missed: u64) -> Vec<(String, Arc<dyn EventSource>)> {
-        let sources = {
+        let sources: Vec<_> = {
             let mut state = self.state.lock().await;
-            for subscription in state
-                .subscriptions
-                .values_mut()
-                .filter(|subscription| subscription.status == "active")
-            {
-                subscription.buffer.append(EventEnvelope::new(
+            for sub in state.subs.values_mut().filter(|sub| sub.status == "active") {
+                sub.buffer.append(envelope(
                     "subscription.gap",
                     &self.session_id,
-                    &subscription.tab.id,
-                    &subscription.tab.label,
-                    &subscription.tab.target_id,
+                    &sub.tab,
                     json!({"missed": missed}),
                 ));
             }
             state
                 .sources
                 .iter()
-                .map(|(key, source)| (key.clone(), source.source.clone()))
+                .map(|(key, shared)| (key.clone(), shared.source.clone()))
                 .collect()
         };
-        self.nudge_all_heads().await;
-        self.notify.notify_waiters();
-        sources
+        self.publish().await;
+        for (key, source) in sources {
+            if let Ok(Some(signal)) = source.observe(client).await {
+                self.emit_signal(&key, signal, Some("afterGap")).await;
+            }
+        }
     }
 
-    async fn emit_signal(&self, source_key: &str, signal: SourceSignal, forced_flag: Option<&str>) {
+    async fn emit_signal(&self, key: &str, signal: SourceSignal, forced: Option<&str>) {
         let SourceSignal::Match {
-            key,
+            key: filter_key,
             name,
             mut data,
             initial,
@@ -683,217 +495,123 @@ impl Bus {
         else {
             return;
         };
-        let policy_actions = {
+        let actions: Vec<_> = {
             let state = self.state.lock().await;
             state
                 .sources
-                .get(source_key)
-                .map(|source| {
-                    source
-                        .source
-                        .policy_actions()
-                        .iter()
-                        .map(|action| (*action).to_owned())
-                        .collect::<Vec<_>>()
-                })
+                .get(key)
+                .map(|shared| shared.source.policy_actions())
                 .unwrap_or_default()
         };
-        if crate::native::actions::check_event_source_policy(&self.policy, &policy_actions)
+        if crate::native::actions::check_event_source_policy(&self.policy, &actions)
             .await
             .is_err()
         {
-            self.end_source(source_key, "policy_denied").await;
+            let ids = {
+                let state = self.state.lock().await;
+                state
+                    .sources
+                    .get(key)
+                    .map(|shared| shared.subs.clone())
+                    .unwrap_or_default()
+            };
+            let stopped = finish_many(&mut *self.state.lock().await, ids, "policy_denied");
+            self.cleanup(stopped, self.current_client().await).await;
             return;
         }
-        let (ids, source_url, source_tab, navigation_pending, rearmed) = {
+        let (ids, url, tab, pending, rearmed) = {
             let mut state = self.state.lock().await;
-            let Some(source) = state.sources.get_mut(source_key) else {
+            let Some(shared) = state.sources.get_mut(key) else {
                 return;
             };
-            source.current = Some(SourceSignal::Match {
-                key: key.clone(),
-                name: name.clone(),
-                data: data.clone(),
-                initial,
-                location: location.clone(),
-            });
-            let pending = source.navigation_pending;
-            let rearmed = pending && (forced_flag == Some("afterNavigation") || initial);
+            shared.current = filter_key.clone();
+            let pending = shared.pending;
+            let rearmed = pending && (forced == Some("afterNavigation") || initial);
             if rearmed {
-                source.navigation_pending = false;
+                shared.pending = false;
             }
             (
-                source.subscriptions.iter().cloned().collect::<Vec<_>>(),
-                source.url.clone(),
-                source.tab.clone(),
+                shared.subs.clone(),
+                shared.url.clone(),
+                shared.tab.clone(),
                 pending,
                 rearmed,
             )
         };
         let (url, tab) = location
-            .map(|location| {
-                (
-                    location.url,
-                    location.tab.unwrap_or_else(|| source_tab.clone()),
-                )
-            })
-            .unwrap_or((source_url, source_tab));
-        let flag =
-            forced_flag.or_else(|| (initial && navigation_pending).then_some("afterNavigation"));
+            .map(|loc| (loc.url, loc.tab.unwrap_or_else(|| tab.clone())))
+            .unwrap_or((url, tab));
+        let flag = forced.or_else(|| (initial && pending).then_some("afterNavigation"));
         if initial && flag.is_none() {
             return;
         }
-        if let Some(flag) = flag {
-            if let Some(object) = data.as_object_mut() {
-                object.insert(flag.to_owned(), Value::Bool(true));
-            }
+        if let (Some(flag), Some(data)) = (flag, data.as_object_mut()) {
+            data.insert(flag.to_owned(), Value::Bool(true));
         }
-        let allowed = self.url_allowed(&url).await;
+        let allowed = self
+            .domain_filter
+            .read()
+            .await
+            .as_ref()
+            .is_none_or(|filter| url == "about:blank" || filter.check_url(&url).is_ok());
         let mut state = self.state.lock().await;
-        let mut to_finish = Vec::new();
+        let mut done = Vec::new();
         for id in ids {
-            let Some(subscription) = state.subscriptions.get_mut(&id) else {
+            let Some(sub) = state.subs.get_mut(&id).filter(|sub| sub.status == "active") else {
                 continue;
             };
-            if subscription.status != "active" {
-                continue;
-            }
             if rearmed {
-                subscription.buffer.append(EventEnvelope::new(
+                sub.buffer.append(envelope(
                     "subscription.rearmed",
                     &self.session_id,
-                    &tab.id,
-                    &tab.label,
-                    &tab.target_id,
+                    &tab,
                     json!({}),
                 ));
             }
-            if subscription.filter_key != key {
+            if sub.filter_key != filter_key {
                 continue;
             }
             if !allowed {
-                subscription.filtered += 1;
+                sub.filtered += 1;
                 continue;
             }
-            subscription.buffer.append(EventEnvelope::new(
-                &name,
-                &self.session_id,
-                &tab.id,
-                &tab.label,
-                &tab.target_id,
-                data.clone(),
-            ));
-            if subscription.once {
-                to_finish.push(id);
+            sub.buffer
+                .append(envelope(&name, &self.session_id, &tab, data.clone()));
+            if sub.once {
+                done.push(id);
             }
         }
-        let mut stopped = Vec::new();
-        for id in to_finish {
-            if let Some(source) = finish_subscription(&mut state, &id, "matched") {
-                stopped.push(source);
-            }
-        }
+        let stopped = finish_many(&mut state, done, "matched");
         drop(state);
-        if let Some(client) = self.current_client().await {
-            for source in stopped {
-                source.stop(&client).await;
-            }
-        }
-        self.nudge_all_heads().await;
-        self.notify.notify_waiters();
+        self.cleanup(stopped, self.current_client().await).await;
     }
 
-    async fn end_source(&self, source_key: &str, reason: &str) {
-        let mut stopped = Vec::new();
-        {
-            let mut state = self.state.lock().await;
-            let ids = state
-                .sources
-                .get(source_key)
-                .map(|source| source.subscriptions.iter().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            for id in ids {
-                if let Some(source) = finish_subscription(&mut state, &id, reason) {
-                    stopped.push(source);
-                }
-            }
-        }
-        if let Some(client) = self.current_client().await {
-            for source in stopped {
-                source.stop(&client).await;
-            }
-        }
-        self.nudge_all_heads().await;
-        self.notify.notify_waiters();
-    }
-
-    async fn url_allowed(&self, url: &str) -> bool {
-        let filter = self.domain_filter.read().await;
-        match filter.as_ref() {
-            None => true,
-            Some(_) if url == "about:blank" => true,
-            Some(filter) => filter.check_url(url).is_ok(),
-        }
-    }
-
-    async fn count_rejected(&self, source_key: &str) {
-        let mut state = self.state.lock().await;
-        let ids = state
-            .sources
-            .get(source_key)
-            .map(|source| source.subscriptions.iter().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        for id in ids {
-            if let Some(subscription) = state.subscriptions.get_mut(&id) {
-                if subscription.status == "active" {
-                    subscription.rejected += 1;
-                }
-            }
-        }
-    }
-
-    async fn end_target(&self, target_id: &str, reason: &str, client: &Arc<CdpClient>) {
-        self.end_matching(reason, client, |source| source.target_id() == target_id)
-            .await;
-    }
-
-    async fn end_session(&self, session_id: &str, reason: &str, client: &Arc<CdpClient>) {
-        self.end_matching(reason, client, |source| source.session_id() == session_id)
-            .await;
-    }
-
-    async fn end_matching<F>(&self, reason: &str, client: &Arc<CdpClient>, matches: F)
-    where
-        F: Fn(&dyn EventSource) -> bool,
-    {
-        let source_keys: Vec<String> = {
+    async fn end_matching(
+        &self,
+        reason: &str,
+        client: &Arc<CdpClient>,
+        matches: impl Fn(&dyn EventSource) -> bool,
+    ) {
+        let keys: Vec<_> = {
             let state = self.state.lock().await;
             state
                 .sources
                 .iter()
-                .filter(|(_, source)| matches(source.source.as_ref()))
+                .filter(|(_, shared)| matches(shared.source.as_ref()))
                 .map(|(key, _)| key.clone())
                 .collect()
         };
         let mut stopped = Vec::new();
-        for source_key in source_keys {
+        for key in keys {
             let mut state = self.state.lock().await;
             let ids = state
                 .sources
-                .get(&source_key)
-                .map(|source| source.subscriptions.iter().cloned().collect::<Vec<_>>())
+                .get(&key)
+                .map(|shared| shared.subs.clone())
                 .unwrap_or_default();
-            for id in ids {
-                if let Some(source) = finish_subscription(&mut state, &id, reason) {
-                    stopped.push(source);
-                }
-            }
+            stopped.extend(finish_many(&mut state, ids, reason));
         }
-        for source in stopped {
-            source.stop(client).await;
-        }
-        self.nudge_all_heads().await;
-        self.notify.notify_waiters();
+        self.cleanup(stopped, Some(client.clone())).await;
     }
 
     pub async fn end_all(&self, reason: &str) {
@@ -911,65 +629,40 @@ impl Bus {
             let sources = state
                 .sources
                 .values()
-                .map(|source| source.source.clone())
-                .collect::<Vec<_>>();
-            let ids: Vec<String> = state
-                .subscriptions
-                .values()
-                .filter(|subscription| subscription.status == "active")
-                .map(|subscription| subscription.id.clone())
+                .map(|shared| shared.source.clone())
                 .collect();
-            for id in ids {
-                finish_subscription(&mut state, &id, reason);
-            }
+            let ids: Vec<_> = state
+                .subs
+                .values()
+                .filter(|sub| sub.status == "active")
+                .map(|sub| sub.id.clone())
+                .collect();
+            finish_many(&mut state, ids, reason);
             state.sources.clear();
-            state.shared_keys.clear();
             sources
         };
-        if let Some(client) = client {
-            for source in sources {
-                source.stop(&client).await;
-            }
-        }
-        self.nudge_all_heads().await;
-        self.notify.notify_waiters();
+        self.cleanup(sources, client).await;
     }
 
     async fn expire(&self) {
         let client = self.current_client().await;
         let now = chrono::Utc::now();
         let mut state = self.state.lock().await;
-        let expired: Vec<String> = state
-            .subscriptions
+        let ids: Vec<_> = state
+            .subs
             .values()
-            .filter(|subscription| {
-                subscription.status == "active" && subscription.expires_at <= now
-            })
-            .map(|subscription| subscription.id.clone())
+            .filter(|sub| sub.status == "active" && sub.expires_at <= now)
+            .map(|sub| sub.id.clone())
             .collect();
-        let mut stopped = Vec::new();
-        for id in expired {
-            if let Some(source) = finish_subscription(&mut state, &id, "expired") {
-                stopped.push(source);
-            }
-        }
+        let stopped = finish_many(&mut state, ids, "expired");
         prune(&mut state);
         drop(state);
-        if let Some(client) = client {
-            for source in stopped {
-                source.stop(&client).await;
-            }
-        }
-        self.nudge_all_heads().await;
-        self.notify.notify_waiters();
+        self.cleanup(stopped, client).await;
     }
 
     async fn current_client(&self) -> Option<Arc<CdpClient>> {
-        self.receiver
-            .lock()
-            .await
-            .as_ref()
-            .map(|receiver| receiver.client.clone())
+        let receiver = self.receiver.lock().await;
+        receiver.as_ref().map(|receiver| receiver.client.clone())
     }
 
     pub async fn read(
@@ -985,44 +678,34 @@ impl Bus {
             let notified = self.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let result = {
-                let mut state = self.state.lock().await;
-                prune(&mut state);
-                let subscription = state
-                    .subscriptions
-                    .get(id)
-                    .ok_or_else(|| {
-                        "Event subscription was lost; the daemon may have restarted or the subscription expired".to_string()
-                    })?;
-                let events = subscription
-                    .buffer
-                    .read(since, limit)
-                    .map_err(cursor_error)?;
-                let cursor = events
-                    .last()
-                    .map(|event| event.meta.cursor.clone())
-                    .or_else(|| since.map(str::to_owned))
-                    .unwrap_or_else(|| subscription.buffer.start_cursor());
-                ReadResult {
-                    id: id.to_owned(),
-                    status: subscription.status,
-                    events,
-                    cursor,
-                    head: subscription.buffer.head(),
-                    consumed: subscription.buffer.consumed(),
-                    waiting: false,
-                }
+            let mut state = self.state.lock().await;
+            prune(&mut state);
+            let sub = state.subs.get(id).ok_or_else(|| LOST.to_owned())?;
+            let events = sub
+                .buffer
+                .read(since, limit)
+                .map_err(|_| "Invalid event cursor".to_owned())?;
+            let cursor = events
+                .last()
+                .map(|event| event.meta.cursor.clone())
+                .or_else(|| since.map(str::to_owned))
+                .unwrap_or_else(|| sub.buffer.start_cursor());
+            let mut result = ReadResult {
+                id: id.to_owned(),
+                status: sub.status,
+                events,
+                cursor,
+                head: sub.buffer.head(),
+                consumed: sub.buffer.consumed(),
+                waiting: false,
             };
+            drop(state);
             if !result.events.is_empty() || wait.is_zero() {
                 return Ok(result);
             }
-            if tokio::time::Instant::now() >= deadline {
-                let mut result = result;
-                result.waiting = true;
-                return Ok(result);
-            }
-            if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                let mut result = result;
+            if tokio::time::Instant::now() >= deadline
+                || tokio::time::timeout_at(deadline, notified).await.is_err()
+            {
                 result.waiting = true;
                 return Ok(result);
             }
@@ -1040,11 +723,13 @@ impl Bus {
         let mut result = self.read(id, since, wait, limit).await?;
         if acknowledge && !result.events.is_empty() {
             self.ack(id, &result.cursor, None).await?;
-            let state = self.state.lock().await;
-            result.consumed = state
-                .subscriptions
+            result.consumed = self
+                .state
+                .lock()
+                .await
+                .subs
                 .get(id)
-                .ok_or_else(|| "Unknown event subscription".to_string())?
+                .ok_or("Unknown event subscription")?
                 .buffer
                 .consumed();
         }
@@ -1054,797 +739,399 @@ impl Bus {
     pub async fn ack(&self, id: &str, cursor: &str, owner: Option<&str>) -> Result<(), String> {
         self.expire().await;
         let mut state = self.state.lock().await;
-        let subscription = state
-            .subscriptions
-            .get_mut(id)
-            .ok_or_else(|| "Unknown event subscription".to_string())?;
-        check_owner(subscription, owner)?;
-        subscription.buffer.ack_cursor(cursor).map_err(cursor_error)
+        let sub = state.subs.get_mut(id).ok_or("Unknown event subscription")?;
+        check_owner(sub, owner)?;
+        sub.buffer
+            .ack_cursor(cursor)
+            .map_err(|_| "Invalid event cursor".into())
     }
 
     pub async fn stop(&self, id: &str, owner: Option<&str>) -> Result<bool, String> {
         self.expire().await;
         let client = self.current_client().await;
-        let stopped = {
-            let mut state = self.state.lock().await;
-            let subscription = state
-                .subscriptions
-                .get(id)
-                .ok_or_else(|| "Unknown event subscription".to_string())?;
-            check_owner(subscription, owner)?;
-            finish_subscription(&mut state, id, "stopped")
-        };
-        if let (Some(source), Some(client)) = (stopped, client) {
-            source.stop(&client).await;
-        }
-        self.nudge_all_heads().await;
-        self.notify.notify_waiters();
+        let mut state = self.state.lock().await;
+        check_owner(
+            state.subs.get(id).ok_or("Unknown event subscription")?,
+            owner,
+        )?;
+        let sources = finish_many(&mut state, [id.to_owned()], "stopped");
+        drop(state);
+        self.cleanup(sources, client).await;
         Ok(true)
     }
 
     pub async fn list(&self, owner: Option<&str>, unread: bool) -> Vec<Value> {
         self.expire().await;
         let state = self.state.lock().await;
-        let mut subscriptions: Vec<&Subscription> = state
-            .subscriptions
+        let mut subs: Vec<_> = state
+            .subs
             .values()
-            .filter(|subscription| {
-                owner.is_none_or(|owner| subscription.owner.as_deref() == Some(owner))
-            })
-            .filter(|subscription| {
-                !unread || subscription.buffer.head() > subscription.buffer.consumed()
-            })
+            .filter(|sub| owner.is_none_or(|owner| sub.owner.as_deref() == Some(owner)))
+            .filter(|sub| !unread || sub.buffer.head() > sub.buffer.consumed())
             .collect();
-        subscriptions.sort_by_key(|subscription| subscription.created);
-        subscriptions
-            .into_iter()
-            .rev()
-            .take(MAX_LISTED)
-            .map(|subscription| {
-                json!({
-                    "id": subscription.id,
-                    "status": subscription.status,
-                    "reason": subscription.reason,
-                    "rule": subscription.rule,
-                    "owner": subscription.owner,
-                    "head": subscription.buffer.head(),
-                    "consumed": subscription.buffer.consumed(),
-                    "dropped": subscription.buffer.dropped(),
-                    "filtered": subscription.filtered,
-                    "rejected": subscription.rejected,
-                    "tab": subscription.tab,
-                    "expiresAt": subscription.expires_at.to_rfc3339()
-                })
-            })
-            .collect()
-    }
-
-    #[cfg(test)]
-    async fn test_add_subscription(
-        &self,
-        source: Arc<dyn EventSource>,
-        current: SourceSignal,
-        filter_key: &str,
-        once: bool,
-    ) -> String {
-        let source_key = source.sharing_key().unwrap();
-        let sharing_key = source_key.clone();
-        let tab = EventTab {
-            id: "t1".into(),
-            label: "test".into(),
-            target_id: source.target_id().into(),
-        };
-        let policy_actions = source
-            .policy_actions()
-            .iter()
-            .map(|action| (*action).to_owned())
-            .collect();
-        let mut state = self.state.lock().await;
-        check_active_capacity(&state).unwrap();
-        state.shared_keys.insert(sharing_key, source_key.clone());
-        state
-            .sources
-            .entry(source_key.clone())
-            .or_insert_with(|| SharedSource {
-                source,
-                subscriptions: HashSet::new(),
-                current: Some(current.clone()),
-                navigation_pending: false,
-                url: "https://allowed.test".into(),
-                tab: tab.clone(),
-            });
-        let already_satisfied =
-            matches!(&current, SourceSignal::Match { key, .. } if key == filter_key);
-        let now = chrono::Utc::now();
-        let response = add_subscription(
-            &mut state,
-            SubscriptionStart {
-                session_id: &self.session_id,
-                source_key,
-                policy_actions,
-                filter_key: filter_key.into(),
-                rule: json!({"selector": ".ready", "state": filter_key}),
-                tab,
-                owner: None,
-                idempotency_key: None,
-                once,
-                expires_at: now + chrono::Duration::hours(1),
-                current: &current,
-                already_satisfied,
-            },
-        );
-        response["id"].as_str().unwrap().to_owned()
-    }
-
-    #[cfg(test)]
-    fn test_bus() -> Arc<Self> {
-        Arc::new(Self::new(
-            "session-1".into(),
-            Arc::new(RwLock::new(None)),
-            Arc::new(RwLock::new(None)),
-        ))
+        subs.sort_by_key(|sub| sub.created);
+        subs.into_iter().rev().take(MAX_LISTED).map(|sub| json!({
+            "id": sub.id, "status": sub.status, "reason": sub.reason, "rule": sub.rule, "owner": sub.owner,
+            "head": sub.buffer.head(), "consumed": sub.buffer.consumed(), "dropped": sub.buffer.dropped(),
+            "filtered": sub.filtered, "rejected": sub.rejected, "tab": sub.tab, "expiresAt": sub.expires_at.to_rfc3339()
+        })).collect()
     }
 }
 
-fn add_subscription(state: &mut BusState, start: SubscriptionStart<'_>) -> Value {
-    let SubscriptionStart {
-        session_id,
-        source_key,
-        policy_actions,
-        filter_key,
-        rule,
-        tab,
-        owner,
-        idempotency_key,
-        once,
-        expires_at,
-        current,
-        already_satisfied,
-    } = start;
-    let buffer = EventBuffer::new();
+fn signal_key(signal: &SourceSignal) -> &str {
+    match signal {
+        SourceSignal::Match { key, .. } => key,
+        _ => "unknown",
+    }
+}
+
+fn envelope(name: &str, session: &str, tab: &EventTab, data: Value) -> EventEnvelope {
+    EventEnvelope::new(name, session, &tab.id, &tab.label, &tab.target_id, data)
+}
+
+fn register(
+    state: &mut BusState,
+    session: &str,
+    key: String,
+    req: SourceStart<'_>,
+    expires: chrono::DateTime<chrono::Utc>,
+) -> Value {
+    let actions = req.source.policy_actions();
+    let current = req.initial.clone();
+    let shared = state
+        .sources
+        .entry(key.clone())
+        .or_insert_with(|| SharedSource {
+            source: req.source,
+            subs: HashSet::new(),
+            current: req.initial,
+            pending: false,
+            url: req.current_url.to_owned(),
+            tab: req.tab.clone(),
+        });
+    let already_satisfied = current == req.filter_key;
+    let mut buffer = EventBuffer::new();
     let id = buffer.start_cursor().split(':').next().unwrap().to_owned();
-    let mut subscription = Subscription {
+    buffer.append(envelope(
+        "subscription.ready",
+        session,
+        &req.tab,
+        json!({"state": current, "alreadySatisfied": already_satisfied}),
+    ));
+    let sub = Subscription {
         id: id.clone(),
-        session_id: session_id.to_owned(),
-        source_key: source_key.clone(),
-        policy_actions,
-        filter_key,
-        rule,
-        owner,
-        idempotency_key,
-        once,
-        expires_at,
+        session_id: session.to_owned(),
+        source_key: key,
+        policy_actions: actions,
+        filter_key: req.filter_key,
+        rule: req.rule,
+        owner: req.owner,
+        idempotency_key: req.idempotency_key,
+        once: req.once,
+        expires_at: expires,
         created: Instant::now(),
         ended: None,
         status: "active",
         reason: None,
-        tab: tab.clone(),
+        tab: req.tab,
         buffer,
         filtered: 0,
         rejected: 0,
-        already_satisfied,
+        satisfied: already_satisfied,
     };
-    subscription.buffer.append(EventEnvelope::new(
-        "subscription.ready",
-        session_id,
-        &tab.id,
-        &tab.label,
-        &tab.target_id,
-        json!({
-            "state": match current {
-                SourceSignal::Match { key, .. } => key.as_str(),
-                _ => "unknown",
-            },
-            "alreadySatisfied": already_satisfied
-        }),
-    ));
-    let head = subscription.buffer.head();
-    let cursor = subscription.buffer.head_cursor();
-    let expires_at_value = expires_at.to_rfc3339();
-    state.subscriptions.insert(id.clone(), subscription);
-    if let Some(source) = state.sources.get_mut(&source_key) {
-        source.subscriptions.insert(id.clone());
-    }
-    json!({
-        "id": id,
-        "head": head,
-        "cursor": cursor,
-        "alreadySatisfied": already_satisfied,
-        "expiresAt": expires_at_value,
-        "owner": state.subscriptions[&id].owner,
-        "tab": tab
-    })
+    let response = start_response(&sub);
+    state.subs.insert(id.clone(), sub);
+    shared.subs.insert(id);
+    response
 }
 
-fn check_active_capacity(state: &BusState) -> Result<(), String> {
+fn finish_many(
+    state: &mut BusState,
+    ids: impl IntoIterator<Item = String>,
+    reason: &str,
+) -> Vec<Arc<dyn EventSource>> {
+    ids.into_iter()
+        .filter_map(|id| {
+            let sub = state
+                .subs
+                .get_mut(&id)
+                .filter(|sub| sub.status == "active")?;
+            sub.status = "ended";
+            sub.reason = Some(reason.to_owned());
+            sub.ended = Some(Instant::now());
+            sub.buffer.append(envelope(
+                "subscription.ended",
+                &sub.session_id,
+                &sub.tab,
+                json!({"reason": reason}),
+            ));
+            let key = sub.source_key.clone();
+            let shared = state.sources.get_mut(&key)?;
+            shared.subs.remove(&id);
+            if shared.subs.is_empty() {
+                Some(state.sources.remove(&key).unwrap().source)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn validate_ttl(ttl: Duration) -> Result<(), String> {
+    if ttl < Duration::from_secs(1) || ttl > MAX_TTL {
+        return Err("Event subscription TTL must be between 1 second and 30 minutes".into());
+    }
+    Ok(())
+}
+
+fn check_capacity(state: &BusState) -> Result<(), String> {
     if state
-        .subscriptions
+        .subs
         .values()
-        .filter(|subscription| subscription.status == "active")
+        .filter(|sub| sub.status == "active")
         .count()
         >= MAX_ACTIVE
     {
-        Err(format!(
+        return Err(format!(
             "At most {MAX_ACTIVE} event subscriptions may be active"
-        ))
-    } else {
-        Ok(())
+        ));
     }
-}
-
-fn observation_signal(observation: super::sources::dom::Observation) -> SourceSignal {
-    let (key, state) = match observation.state {
-        DomState::Visible => ("visible", "visible"),
-        DomState::Hidden => ("hidden", "hidden"),
-    };
-    SourceSignal::Match {
-        key: key.into(),
-        name: format!("element.{state}"),
-        data: json!({
-            "state": state,
-            "label": observation.label,
-            "truncated": observation.truncated
-        }),
-        initial: observation.initial,
-        location: None,
-    }
-}
-
-fn finish_subscription(
-    state: &mut BusState,
-    id: &str,
-    reason: &str,
-) -> Option<Arc<dyn EventSource>> {
-    let subscription = state.subscriptions.get_mut(id)?;
-    if subscription.status != "active" {
-        return None;
-    }
-    subscription.status = "ended";
-    subscription.reason = Some(reason.to_owned());
-    subscription.ended = Some(Instant::now());
-    subscription.buffer.append(EventEnvelope::new(
-        "subscription.ended",
-        &subscription.session_id,
-        &subscription.tab.id,
-        &subscription.tab.label,
-        &subscription.tab.target_id,
-        json!({"reason": reason}),
-    ));
-    let source_key = subscription.source_key.clone();
-    if let Some(source) = state.sources.get_mut(&source_key) {
-        source.subscriptions.remove(id);
-        if source.subscriptions.is_empty() {
-            let source = state.sources.remove(&source_key).unwrap();
-            state.shared_keys.retain(|_, key| key != &source_key);
-            return Some(source.source);
-        }
-    }
-    None
+    Ok(())
 }
 
 fn prune(state: &mut BusState) {
     let now = Instant::now();
-    state.subscriptions.retain(|_, subscription| {
-        subscription
-            .ended
+    state.subs.retain(|_, sub| {
+        sub.ended
             .is_none_or(|ended| now.duration_since(ended) < RETENTION)
     });
-    if state.subscriptions.len() > MAX_LISTED {
-        let mut ended: Vec<(String, Instant)> = state
-            .subscriptions
-            .iter()
-            .filter_map(|(id, subscription)| subscription.ended.map(|ended| (id.clone(), ended)))
-            .collect();
-        ended.sort_by_key(|(_, ended)| *ended);
-        for (id, _) in ended
-            .into_iter()
-            .take(state.subscriptions.len() - MAX_LISTED)
-        {
-            state.subscriptions.remove(&id);
-        }
+    let mut ended: Vec<_> = state
+        .subs
+        .iter()
+        .filter_map(|(id, sub)| sub.ended.map(|ended| (id.clone(), ended)))
+        .collect();
+    ended.sort_by_key(|(_, ended)| *ended);
+    for (id, _) in ended
+        .into_iter()
+        .take(state.subs.len().saturating_sub(MAX_LISTED))
+    {
+        state.subs.remove(&id);
     }
 }
 
-fn idempotent_subscription<'a>(
+fn idempotent<'a>(
     state: &'a BusState,
     owner: Option<&str>,
     key: Option<&str>,
 ) -> Option<&'a Subscription> {
     let key = key?;
-    state.subscriptions.values().find(|subscription| {
-        subscription.owner.as_deref() == owner
-            && subscription.idempotency_key.as_deref() == Some(key)
-    })
+    state
+        .subs
+        .values()
+        .find(|sub| sub.owner.as_deref() == owner && sub.idempotency_key.as_deref() == Some(key))
 }
 
-fn start_response(subscription: &Subscription) -> Value {
+fn start_response(sub: &Subscription) -> Value {
     json!({
-        "id": subscription.id,
-        "head": subscription.buffer.head(),
-        "cursor": subscription.buffer.head_cursor(),
-        "alreadySatisfied": subscription.already_satisfied,
-        "expiresAt": subscription.expires_at.to_rfc3339(),
-        "owner": subscription.owner,
-        "tab": subscription.tab
+        "id": sub.id, "head": sub.buffer.head(), "cursor": sub.buffer.head_cursor(),
+        "alreadySatisfied": sub.satisfied, "expiresAt": sub.expires_at.to_rfc3339(), "owner": sub.owner, "tab": sub.tab
     })
 }
 
-fn check_owner(subscription: &Subscription, owner: Option<&str>) -> Result<(), String> {
-    if let Some(owner) = owner {
-        if subscription.owner.as_deref() != Some(owner) {
-            return Err("Event subscription owner does not match".into());
-        }
+fn check_owner(sub: &Subscription, owner: Option<&str>) -> Result<(), String> {
+    if owner.is_some_and(|owner| sub.owner.as_deref() != Some(owner)) {
+        return Err("Event subscription owner does not match".into());
     }
     Ok(())
 }
 
-fn cursor_error(error: CursorError) -> String {
-    match error {
-        CursorError::CursorInvalid => "Invalid event cursor".into(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::{filter::Matchers, ops::CdpMethodSource, sources::cdp};
     use super::*;
 
     fn bus() -> Arc<Bus> {
-        Bus::test_bus()
-    }
-
-    fn source() -> Arc<dyn EventSource> {
-        Arc::new(DomObserver::test_observer())
-    }
-
-    fn observation(key: &str, initial: bool) -> SourceSignal {
-        SourceSignal::Match {
-            key: key.into(),
-            name: format!("element.{key}"),
-            data: json!({"state": key, "label": "Ready", "truncated": false}),
-            initial,
-            location: None,
-        }
+        Arc::new(Bus::new("session-1".into(), Arc::default(), Arc::default()))
     }
 
     fn raw(kind: &str, state: &str, nonce: &str) -> RawCdpMessage {
         RawCdpMessage {
-            text: json!({
-                "sessionId": "session-1",
-                "method": "Runtime.bindingCalled",
-                "params": {
-                    "name": "__ab_event_test",
-                    "payload": json!({
-                        "nonce": nonce,
-                        "kind": kind,
-                        "state": state,
-                        "label": "Ready",
-                        "truncated": false
-                    }).to_string()
-                }
-            })
-            .to_string(),
             session_id: Some("session-1".into()),
+            text: json!({"method": "Runtime.bindingCalled", "params": {
+                "name": "__ab_event_test", "payload": json!({
+                    "nonce": nonce, "kind": kind, "state": state, "label": "Ready", "truncated": false
+                }).to_string()
+            }}).to_string(),
         }
     }
 
-    async fn add(bus: &Bus, source: Arc<dyn EventSource>, once: bool) -> String {
-        bus.test_add_subscription(source, observation("hidden", true), "visible", once)
-            .await
+    async fn add(bus: &Bus, source: Arc<dyn EventSource>, filter: &str, once: bool) -> String {
+        let key = source.target_id().to_owned();
+        let mut state = bus.state.lock().await;
+        let initial = state
+            .sources
+            .get(&key)
+            .map(|shared| shared.current.clone())
+            .or_else(|| {
+                source
+                    .classify(&raw("initial", "hidden", "nonce-1"))
+                    .map(|signal| signal_key(&signal).to_owned())
+            })
+            .unwrap_or_else(|| "unknown".into());
+        let tab = EventTab {
+            id: "t1".into(),
+            label: "test".into(),
+            target_id: source.target_id().into(),
+        };
+        let req = SourceStart {
+            source,
+            initial,
+            tab,
+            current_url: "https://allowed.test",
+            filter_key: filter.into(),
+            rule: json!({}),
+            once,
+            ttl: MAX_TTL,
+            owner: None,
+            idempotency_key: None,
+        };
+        let response = register(
+            &mut state,
+            "session-1",
+            key,
+            req,
+            chrono::Utc::now() + chrono::Duration::minutes(30),
+        );
+        assert_eq!(response["head"], 1);
+        let id = response["id"].as_str().unwrap().to_owned();
+        assert_eq!(response["cursor"], format!("{id}:1"));
+        id
     }
 
     #[tokio::test]
-    async fn shared_selector_delivers_to_both_subscribers() {
+    async fn rejects_forged_payloads_and_filters_content_at_emit_time() {
         let bus = bus();
-        let source_handle = source();
-        let first = add(&bus, source_handle.clone(), false).await;
-        let second = add(&bus, source_handle, false).await;
-
-        bus.process_raw(raw("change", "visible", "nonce-1")).await;
-
-        let first_events = bus
-            .read(&first, None, Duration::ZERO, 10)
-            .await
-            .unwrap()
-            .events;
-        let second_events = bus
-            .read(&second, None, Duration::ZERO, 10)
-            .await
-            .unwrap()
-            .events;
-        assert_eq!(first_events.last().unwrap().meta.name, "element.visible");
-        assert_eq!(second_events.last().unwrap().meta.name, "element.visible");
-
-        let current = bus
-            .state
+        let id = add(
+            &bus,
+            Arc::new(DomObserver::test_observer()),
+            "visible",
+            false,
+        )
+        .await;
+        for nonce in ["forged".to_owned(), "x".repeat(16 * 1024)] {
+            bus.process_raw(raw("change", "visible", &nonce)).await;
+        }
+        assert_eq!(bus.list(None, false).await[0]["rejected"], 2);
+        *bus.domain_filter.write().await = Some(DomainFilter::new("allowed.test"));
+        bus.state
             .lock()
             .await
             .sources
-            .values()
+            .values_mut()
             .next()
             .unwrap()
-            .current
-            .clone()
-            .unwrap();
-        let late = bus
-            .test_add_subscription(source(), current, "visible", false)
-            .await;
-        let ready = bus.read(&late, None, Duration::ZERO, 10).await.unwrap();
-        assert_eq!(ready.events.len(), 1);
-        assert_eq!(ready.events[0].data["state"], "visible");
-        assert_eq!(ready.events[0].data["alreadySatisfied"], true);
-    }
-
-    #[tokio::test]
-    async fn stopping_one_shared_subscription_keeps_the_other_live() {
-        let bus = bus();
-        let source = source();
-        let first = add(&bus, source.clone(), false).await;
-        let second = add(&bus, source, false).await;
-
-        bus.stop(&first, None).await.unwrap();
+            .url = "https://blocked.test".into();
         bus.process_raw(raw("change", "visible", "nonce-1")).await;
-
-        let first = bus.read(&first, None, Duration::ZERO, 10).await.unwrap();
-        let second = bus.read(&second, None, Duration::ZERO, 10).await.unwrap();
-        assert_eq!(first.status, "ended");
-        assert_eq!(first.events.last().unwrap().meta.name, "subscription.ended");
-        assert_eq!(second.events.last().unwrap().meta.name, "element.visible");
-    }
-
-    #[tokio::test]
-    async fn once_ends_after_the_first_matching_transition() {
-        let bus = bus();
-        let id = add(&bus, source(), true).await;
-
-        bus.process_raw(raw("change", "visible", "nonce-1")).await;
-
-        let result = bus.read(&id, None, Duration::ZERO, 10).await.unwrap();
-        assert_eq!(result.status, "ended");
-        assert_eq!(result.events[1].meta.name, "element.visible");
-        assert_eq!(result.events[2].data, json!({"reason": "matched"}));
-    }
-
-    #[tokio::test]
-    async fn read_waits_until_a_new_event_arrives() {
-        let bus = bus();
-        let id = add(&bus, source(), false).await;
-        let cursor = bus.state.lock().await.subscriptions[&id]
-            .buffer
-            .head_cursor();
-        let waiting_bus = bus.clone();
-        let waiting_id = id.clone();
-        let read = tokio::spawn(async move {
-            waiting_bus
-                .read(&waiting_id, Some(&cursor), Duration::from_secs(1), 10)
+        assert_eq!(bus.list(None, false).await[0]["filtered"], 1);
+        assert_eq!(
+            bus.read(&id, None, Duration::ZERO, 10)
                 .await
                 .unwrap()
-        });
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        bus.process_raw(raw("change", "visible", "nonce-1")).await;
-
-        let result = read.await.unwrap();
-        assert!(!result.waiting);
-        assert_eq!(result.events[0].meta.name, "element.visible");
-    }
-
-    #[tokio::test]
-    async fn head_is_a_sequence_and_start_includes_a_cursor() {
-        let bus = bus();
-        let id = add(&bus, source(), false).await;
-        let response = start_response(&bus.state.lock().await.subscriptions[&id]);
-        assert_eq!(response["head"], 1);
-        assert_eq!(response["cursor"], format!("{id}:1"));
-
-        let result = bus.read(&id, None, Duration::ZERO, 10).await.unwrap();
-        assert_eq!(result.head, 1);
-        assert_eq!(result.cursor, format!("{id}:1"));
-
-        let listed = bus.list(None, false).await;
-        assert_eq!(listed[0]["head"], 1);
-    }
-
-    #[tokio::test]
-    async fn expired_subscription_ends_and_remains_readable() {
-        let bus = bus();
-        let id = add(&bus, source(), false).await;
-        bus.state
-            .lock()
-            .await
-            .subscriptions
-            .get_mut(&id)
-            .unwrap()
-            .expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
-
-        let result = bus.read(&id, None, Duration::ZERO, 10).await.unwrap();
-        assert_eq!(result.status, "ended");
-        assert_eq!(
-            result.events.last().unwrap().data,
-            json!({"reason": "expired"})
+                .events
+                .len(),
+            1
         );
     }
 
     #[tokio::test]
-    async fn browser_close_ends_subscriptions_without_erasing_their_buffers() {
-        let bus = bus();
-        let id = add(&bus, source(), false).await;
-
-        bus.end_all("browser_closed").await;
-
-        let result = bus.read(&id, None, Duration::ZERO, 10).await.unwrap();
-        assert_eq!(result.status, "ended");
-        assert_eq!(
-            result.events.last().unwrap().data,
-            json!({"reason": "browser_closed"})
-        );
+    async fn data_action_denial_and_failed_reload_end_without_content() {
+        for missing in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("policy.json");
+            std::fs::write(
+                &path,
+                if missing {
+                    r#"{"deny":[]}"#
+                } else {
+                    r#"{"deny":["download"]}"#
+                },
+            )
+            .unwrap();
+            let bus = bus();
+            *bus.policy.write().await = Some(ActionPolicy::load(path.to_str().unwrap()).unwrap());
+            let source = CdpMethodSource::new(
+                cdp::lookup("Browser.downloadWillBegin").unwrap(),
+                "session-1".into(),
+                "target-1".into(),
+                HashMap::new(),
+                Matchers::parse(&[], &[]).unwrap(),
+            );
+            let id = add(&bus, Arc::new(source), "Browser.downloadWillBegin", false).await;
+            if missing {
+                std::fs::remove_file(path).unwrap();
+            }
+            bus.process_raw(RawCdpMessage {
+                text: json!({"method": "Browser.downloadWillBegin", "params": {"url": "https://allowed.test/file"}}).to_string(),
+                session_id: None,
+            }).await;
+            let read = bus.read(&id, None, Duration::ZERO, 10).await.unwrap();
+            assert_eq!(read.status, "ended");
+            assert_eq!(read.events.len(), 2);
+            assert_eq!(read.events[1].data, json!({"reason": "policy_denied"}));
+        }
     }
 
     #[tokio::test]
-    async fn lag_records_gap_and_after_gap_observation() {
-        let bus = bus();
-        let id = add(&bus, source(), false).await;
-        let source_key = bus.state.lock().await.subscriptions[&id].source_key.clone();
-
-        bus.append_gap(4).await;
-        bus.emit_signal(&source_key, observation("visible", true), Some("afterGap"))
+    async fn lifecycle_bounds_retain_ended_buffers_until_retention() {
+        for reason in ["expired", "browser_closed", "stopped"] {
+            let bus = bus();
+            let id = add(
+                &bus,
+                Arc::new(DomObserver::test_observer()),
+                "visible",
+                false,
+            )
             .await;
-
-        let result = bus.read(&id, None, Duration::ZERO, 10).await.unwrap();
-        assert_eq!(result.events[1].meta.name, "subscription.gap");
-        assert_eq!(result.events[1].data, json!({"missed": 4}));
-        assert_eq!(result.events[2].meta.name, "element.visible");
-        assert_eq!(result.events[2].data["afterGap"], true);
-    }
-
-    #[tokio::test]
-    async fn rearmed_initial_observation_is_marked_after_navigation() {
-        let bus = bus();
-        let id = add(&bus, source(), false).await;
-        let source_key = bus.state.lock().await.subscriptions[&id].source_key.clone();
-
-        bus.mark_rearmed(&source_key).await;
-        bus.process_raw(raw("initial", "visible", "nonce-1")).await;
-
-        let result = bus.read(&id, None, Duration::ZERO, 10).await.unwrap();
-        assert_eq!(result.events[1].meta.name, "subscription.rearmed");
-        assert_eq!(result.events[2].data["afterNavigation"], true);
-    }
-
-    #[tokio::test]
-    async fn forged_and_oversized_payloads_are_counted_and_dropped() {
-        let bus = bus();
-        let id = add(&bus, source(), false).await;
-        bus.process_raw(raw("change", "visible", "wrong-nonce"))
-            .await;
-        let oversized = RawCdpMessage {
-            text: json!({
-                "sessionId": "session-1",
-                "method": "Runtime.bindingCalled",
-                "params": {
-                    "name": "__ab_event_test",
-                    "payload": "x".repeat(16 * 1024 + 1)
+            match reason {
+                "expired" => {
+                    bus.state.lock().await.subs.get_mut(&id).unwrap().expires_at =
+                        chrono::Utc::now()
                 }
-            })
-            .to_string(),
-            session_id: Some("session-1".into()),
-        };
-        bus.process_raw(oversized).await;
-
-        let listed = bus.list(None, false).await;
-        assert_eq!(listed[0]["rejected"], 2);
-        let result = bus.read(&id, None, Duration::ZERO, 10).await.unwrap();
-        assert_eq!(result.events.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn blocked_origin_filters_matching_events_and_counts_them() {
-        let bus = Arc::new(Bus::new(
-            "session-1".into(),
-            Arc::new(RwLock::new(Some(DomainFilter::new("elsewhere.test")))),
-            Arc::new(RwLock::new(None)),
-        ));
-        let id = add(&bus, source(), false).await;
-        bus.process_raw(raw("change", "visible", "nonce-1")).await;
-
-        let listed = bus.list(None, false).await;
-        let result = bus.read(&id, None, Duration::ZERO, 10).await.unwrap();
-        assert_eq!(listed[0]["filtered"], 1);
-        assert!(result
-            .events
-            .iter()
-            .all(|event| event.meta.name != "element.visible"));
-    }
-
-    #[tokio::test]
-    async fn mid_watch_redirect_to_a_blocked_origin_stops_event_content() {
-        let bus = Arc::new(Bus::new(
-            "session-1".into(),
-            Arc::new(RwLock::new(Some(DomainFilter::new("allowed.test")))),
-            Arc::new(RwLock::new(None)),
-        ));
-        let id = add(&bus, source(), false).await;
-
-        bus.update_url("session-1", "https://blocked.test/").await;
-        bus.process_raw(raw("change", "visible", "nonce-1")).await;
-
-        let listed = bus.list(None, false).await;
-        let result = bus.read(&id, None, Duration::ZERO, 10).await.unwrap();
-        assert_eq!(listed[0]["filtered"], 1);
-        assert!(result
-            .events
-            .iter()
-            .all(|event| event.meta.name != "element.visible"));
-    }
-
-    struct DataSource {
-        session_id: String,
-        target_id: String,
-        actions: [&'static str; 1],
-    }
-
-    impl DataSource {
-        fn console() -> Self {
-            Self {
-                session_id: "session-1".into(),
-                target_id: "target-1".into(),
-                actions: ["console"],
+                "browser_closed" => bus.end_all(reason).await,
+                _ => {
+                    bus.stop(&id, None).await.unwrap();
+                }
             }
+            let read = bus.read(&id, None, Duration::ZERO, 10).await.unwrap();
+            assert_eq!(read.status, "ended");
+            assert_eq!(read.events.len(), 2);
+            assert_eq!(read.events[1].data, json!({"reason": reason}));
+            bus.state.lock().await.subs.get_mut(&id).unwrap().ended =
+                Some(Instant::now() - RETENTION);
+            assert!(bus.read(&id, None, Duration::ZERO, 10).await.is_err());
         }
-    }
-
-    #[async_trait::async_trait]
-    impl EventSource for DataSource {
-        fn supported_engines(&self) -> &'static [&'static str] {
-            &["chrome"]
-        }
-
-        fn policy_actions(&self) -> &[&'static str] {
-            &self.actions
-        }
-
-        fn target_id(&self) -> &str {
-            &self.target_id
-        }
-
-        fn session_id(&self) -> &str {
-            &self.session_id
-        }
-
-        fn sharing_key(&self) -> Option<String> {
-            Some("session-1:console".into())
-        }
-
-        fn classify(&self, raw: &RawCdpMessage) -> Option<SourceSignal> {
-            let event: Value = serde_json::from_str(&raw.text).ok()?;
-            if event.get("method").and_then(Value::as_str) != Some("Runtime.consoleAPICalled") {
-                return None;
-            }
-            Some(SourceSignal::Match {
-                key: "Runtime.consoleAPICalled".into(),
-                name: "Runtime.consoleAPICalled".into(),
-                data: event.get("params").cloned()?,
-                initial: false,
-                location: None,
-            })
-        }
-
-        async fn observe(&self, _client: &CdpClient) -> Result<Option<SourceSignal>, String> {
-            Ok(None)
-        }
-
-        async fn stop(&self, _client: &CdpClient) {}
-    }
-
-    fn console_event() -> RawCdpMessage {
-        RawCdpMessage {
-            text: json!({
-                "sessionId": "session-1",
-                "method": "Runtime.consoleAPICalled",
-                "params": {"type": "log", "args": [{"type": "string", "value": "page text"}]}
-            })
-            .to_string(),
-            session_id: Some("session-1".into()),
-        }
-    }
-
-    fn policy_bus(policy: ActionPolicy) -> Arc<Bus> {
-        Arc::new(Bus::new(
-            "session-1".into(),
-            Arc::new(RwLock::new(None)),
-            Arc::new(RwLock::new(Some(policy))),
-        ))
-    }
-
-    async fn data_subscription(bus: &Bus) -> String {
-        bus.test_add_subscription(
-            Arc::new(DataSource::console()),
-            SourceSignal::Rearmed,
-            "Runtime.consoleAPICalled",
-            false,
-        )
-        .await
-    }
-
-    #[tokio::test]
-    async fn failed_policy_reload_mid_subscription_ends_it_with_policy_denied() {
-        let directory = tempfile::tempdir().unwrap();
-        let policy_path = directory.path().join("policy.json");
-        std::fs::write(&policy_path, r#"{"deny":[]}"#).unwrap();
-        let bus = policy_bus(ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
-        let id = data_subscription(&bus).await;
-        std::fs::remove_file(&policy_path).unwrap();
-
-        bus.process_raw(console_event()).await;
-
-        let result = bus.read(&id, None, Duration::ZERO, 10).await.unwrap();
-        assert_eq!(result.status, "ended");
-        assert_eq!(
-            result.events.last().unwrap().data,
-            json!({"reason": "policy_denied"})
-        );
-        assert!(result
-            .events
-            .iter()
-            .all(|event| event.meta.name != "Runtime.consoleAPICalled"));
-    }
-
-    #[tokio::test]
-    async fn denying_a_data_action_mid_subscription_ends_it_with_policy_denied() {
-        let directory = tempfile::tempdir().unwrap();
-        let policy_path = directory.path().join("policy.json");
-        std::fs::write(&policy_path, r#"{"deny":["console"]}"#).unwrap();
-        let bus = policy_bus(ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
-        let id = data_subscription(&bus).await;
-
-        bus.process_raw(console_event()).await;
-
-        let result = bus.read(&id, None, Duration::ZERO, 10).await.unwrap();
-        assert_eq!(result.status, "ended");
-        assert_eq!(
-            result.events.last().unwrap().data,
-            json!({"reason": "policy_denied"})
-        );
-    }
-
-    #[tokio::test]
-    async fn active_subscription_limit_is_twenty() {
         let bus = bus();
-        let source = source();
         for _ in 0..MAX_ACTIVE {
-            add(&bus, source.clone(), false).await;
+            add(
+                &bus,
+                Arc::new(DomObserver::test_observer()),
+                "visible",
+                false,
+            )
+            .await;
         }
-
-        let state = bus.state.lock().await;
-        assert_eq!(
-            check_active_capacity(&state).unwrap_err(),
-            "At most 20 event subscriptions may be active"
-        );
-    }
-
-    #[tokio::test]
-    async fn listing_keeps_only_fifty_recent_finished_subscriptions() {
-        let bus = bus();
+        assert!(check_capacity(&*bus.state.lock().await).is_err());
+        bus.end_all("browser_closed").await;
         for _ in 0..=MAX_LISTED {
-            let id = add(&bus, source(), false).await;
+            let id = add(
+                &bus,
+                Arc::new(DomObserver::test_observer()),
+                "visible",
+                false,
+            )
+            .await;
             bus.stop(&id, None).await.unwrap();
         }
-
         assert_eq!(bus.list(None, false).await.len(), MAX_LISTED);
-    }
-
-    #[tokio::test]
-    async fn ended_subscription_is_lost_after_retention() {
-        let bus = bus();
-        let id = add(&bus, source(), false).await;
-        bus.stop(&id, None).await.unwrap();
-        bus.state
-            .lock()
-            .await
-            .subscriptions
-            .get_mut(&id)
-            .unwrap()
-            .ended = Some(Instant::now() - RETENTION);
-
-        assert!(bus.read(&id, None, Duration::ZERO, 10).await.is_err());
     }
 }

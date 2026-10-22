@@ -26,13 +26,15 @@ pub(super) enum SourceSignal {
 #[async_trait]
 #[allow(clippy::double_must_use)]
 pub(super) trait EventSource: Send + Sync {
-    fn supported_engines(&self) -> &'static [&'static str];
-    fn policy_actions(&self) -> &[&'static str];
+    fn policy_actions(&self) -> Vec<String> {
+        Vec::new()
+    }
     fn target_id(&self) -> &str;
     fn session_id(&self) -> &str;
-    fn sharing_key(&self) -> Option<String>;
     fn classify(&self, raw: &RawCdpMessage) -> Option<SourceSignal>;
     fn update_url(&self, _session_id: &str, _url: &str) {}
-    async fn observe(&self, client: &CdpClient) -> Result<Option<SourceSignal>, String>;
-    async fn stop(&self, client: &CdpClient);
+    async fn observe(&self, _client: &CdpClient) -> Result<Option<SourceSignal>, String> {
+        Ok(None)
+    }
+    async fn stop(&self, _client: &CdpClient) {}
 }

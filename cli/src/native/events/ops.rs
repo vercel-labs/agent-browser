@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::bus::{Bus, DomStart, SourceStart};
@@ -11,22 +12,14 @@ use super::filter::Matchers;
 use super::source::{EventLocation, EventSource, SourceSignal};
 use super::sources::cdp::{self, Entry};
 use crate::native::actions::DaemonState;
-use crate::native::cdp::client::{CdpClient, RawCdpMessage};
+use crate::native::cdp::client::RawCdpMessage;
 
 const DEFAULT_TTL_SECS: u64 = 600;
 const MAX_TTL_SECS: u64 = 1_800;
 const MAX_WAIT_MS: u64 = 50_000;
-const DEFAULT_READ_LIMIT: usize = 100;
-const MAX_READ_LIMIT: usize = 200;
+const DEFAULT_READ_LIMIT: u64 = 100;
+const MAX_READ_LIMIT: u64 = 200;
 const MAX_EVENT_BYTES: usize = 16 * 1024;
-
-struct ReadRequest {
-    subscription_id: String,
-    since: Option<String>,
-    wait_ms: u64,
-    limit: usize,
-    ack: bool,
-}
 
 pub(crate) fn source_policy_action(cmd: &Value) -> Option<&'static str> {
     let method = cmd.get("method")?.as_str()?;
@@ -44,13 +37,11 @@ pub(crate) fn validate_start_request(cmd: &Value) -> Result<(), String> {
     optional_string(cmd, "key")?;
     if let Some(selector) = cmd.get("selector").and_then(Value::as_str) {
         super::sources::dom::normalize_selector(selector)?;
-        match cmd
-            .get("state")
-            .and_then(Value::as_str)
-            .unwrap_or("visible")
-        {
-            "visible" | "hidden" => {}
-            _ => return Err("Event state must be visible or hidden".into()),
+        if !matches!(
+            cmd["state"].as_str().unwrap_or("visible"),
+            "visible" | "hidden"
+        ) {
+            return Err("Event state must be visible or hidden".into());
         }
     } else {
         let method = cmd["method"]
@@ -69,30 +60,25 @@ pub(crate) fn validate_start_request(cmd: &Value) -> Result<(), String> {
 
 pub(crate) async fn start(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     validate_start_request(cmd)?;
-    let ttl_secs = ttl_seconds(cmd)?;
+    let ttl = Duration::from_secs(ttl_seconds(cmd)?);
     let browser = state.browser.as_ref().ok_or("Open a page first")?;
     let session_id = browser.active_session_id()?.to_owned();
     let target_id = browser.active_target_id()?.to_owned();
-    let page = browser
-        .pages_list()
-        .into_iter()
+    let pages = browser.pages_list();
+    let current_url = pages
+        .iter()
         .find(|page| page.target_id == target_id)
-        .ok_or("Open a page first")?;
-    let tab: EventTab = browser
+        .ok_or("Open a page first")?
+        .url
+        .clone();
+    let tab = browser
         .event_tab_for_target(&target_id)
         .ok_or("Open a page first")?;
     let client = browser.client.clone();
-    let pages = browser.pages_list();
-    let download_path = browser.download_path.clone();
     let owner = optional_string(cmd, "owner")?;
     let idempotency_key = optional_string(cmd, "key")?;
     let once = cmd.get("once").and_then(Value::as_bool).unwrap_or(false);
-    let ttl = Duration::from_secs(ttl_secs);
     if let Some(selector) = cmd.get("selector").and_then(Value::as_str) {
-        let state_name = cmd
-            .get("state")
-            .and_then(Value::as_str)
-            .unwrap_or("visible");
         state
             .events
             .start_dom(DomStart {
@@ -100,9 +86,9 @@ pub(crate) async fn start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
                 client,
                 session_id: &session_id,
                 tab,
-                current_url: &page.url,
+                current_url: &current_url,
                 selector,
-                state: state_name,
+                state: cmd["state"].as_str().unwrap_or("visible"),
                 once,
                 ttl,
                 owner,
@@ -122,7 +108,7 @@ pub(crate) async fn start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         let regexes = string_array(cmd, "matchRegex")?;
         let matchers = Matchers::parse(&equals, &regexes)?;
         if entry.policy_action == "download" {
-            let params = match download_path {
+            let params = match &browser.download_path {
                 Some(download_path) => json!({
                     "behavior": "allow",
                     "downloadPath": download_path,
@@ -141,57 +127,51 @@ pub(crate) async fn start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
                     page.target_id.clone(),
                     CdpTarget {
                         session_id: page.session_id,
-                        tab: EventTab {
-                            id: crate::native::browser::format_tab_id(page.tab_id),
-                            label: page.label.unwrap_or_default(),
-                            target_id: page.target_id,
-                        },
+                        tab: browser.event_tab_for_target(&page.target_id).unwrap(),
                         url: page.url,
                     },
                 )
             })
             .collect();
         let source = Arc::new(CdpMethodSource::new(
-            entry,
-            session_id.clone(),
-            target_id,
-            targets,
-            matchers,
+            entry, session_id, target_id, targets, matchers,
         ));
-        let filter_key = method.to_owned();
         state
             .events
-            .subscribe_source(SourceStart {
-                engine: &state.engine,
+            .subscribe_cdp(
                 client,
-                source,
-                initial: SourceSignal::Rearmed,
-                tab,
-                current_url: &page.url,
-                filter_key,
-                rule: json!({
-                    "method": method,
-                    "match": equals,
-                    "matchRegex": regexes
-                }),
-                once,
-                ttl,
-                owner,
-                idempotency_key,
-            })
+                SourceStart {
+                    source,
+                    initial: "unknown".into(),
+                    tab,
+                    current_url: &current_url,
+                    filter_key: method.to_owned(),
+                    rule: json!({
+                        "method": method,
+                        "match": equals,
+                        "matchRegex": regexes
+                    }),
+                    once,
+                    ttl,
+                    owner,
+                    idempotency_key,
+                },
+            )
             .await
     }
 }
 
 pub(crate) async fn read(cmd: &Value, bus: &Arc<Bus>) -> Result<Value, String> {
-    let request = read_request(cmd)?;
+    let id = subscription_id(cmd)?;
+    let (wait_ms, limit, ack) = read_options(cmd)?;
+    let since = optional_string(cmd, "since")?;
     let result = bus
         .read_with_ack(
-            &request.subscription_id,
-            request.since.as_deref(),
-            Duration::from_millis(request.wait_ms),
-            request.limit,
-            request.ack,
+            id,
+            since.as_deref(),
+            Duration::from_millis(wait_ms),
+            limit,
+            ack,
         )
         .await?;
     serde_json::to_value(result).map_err(|error| error.to_string())
@@ -199,10 +179,7 @@ pub(crate) async fn read(cmd: &Value, bus: &Arc<Bus>) -> Result<Value, String> {
 
 pub(crate) async fn ack(cmd: &Value, bus: &Arc<Bus>) -> Result<Value, String> {
     let id = subscription_id(cmd)?;
-    let cursor = cmd
-        .get("cursor")
-        .and_then(Value::as_str)
-        .ok_or("Missing event cursor")?;
+    let cursor = cmd["cursor"].as_str().ok_or("Missing event cursor")?;
     let owner = optional_string(cmd, "owner")?;
     bus.ack(id, cursor, owner.as_deref()).await?;
     Ok(json!({"id": id, "cursor": cursor}))
@@ -223,12 +200,11 @@ pub(crate) async fn stop(cmd: &Value, bus: &Arc<Bus>) -> Result<Value, String> {
     Ok(json!({"id": id, "stopped": stopped}))
 }
 
-fn read_request(cmd: &Value) -> Result<ReadRequest, String> {
-    let subscription_id = subscription_id(cmd)?.to_owned();
+fn read_options(cmd: &Value) -> Result<(u64, usize, bool), String> {
     let wait_ms = optional_u64(cmd, "waitMs")?.unwrap_or(0).min(MAX_WAIT_MS);
     let limit = optional_u64(cmd, "limit")?
-        .map(|value| value.min(MAX_READ_LIMIT as u64) as usize)
-        .unwrap_or(DEFAULT_READ_LIMIT);
+        .unwrap_or(DEFAULT_READ_LIMIT)
+        .min(MAX_READ_LIMIT) as usize;
     if limit == 0 {
         return Err("Event read limit must be at least 1".into());
     }
@@ -237,13 +213,7 @@ fn read_request(cmd: &Value) -> Result<ReadRequest, String> {
         Some(Value::Bool(value)) => *value,
         Some(_) => return Err("ack must be a boolean".into()),
     };
-    Ok(ReadRequest {
-        subscription_id,
-        since: optional_string(cmd, "since")?,
-        wait_ms,
-        limit: limit.min(MAX_READ_LIMIT),
-        ack,
-    })
+    Ok((wait_ms, limit, ack))
 }
 
 fn ttl_seconds(cmd: &Value) -> Result<u64, String> {
@@ -284,36 +254,29 @@ fn optional_string(cmd: &Value, name: &str) -> Result<Option<String>, String> {
 fn string_array(cmd: &Value, name: &str) -> Result<Vec<String>, String> {
     match cmd.get(name) {
         None | Some(Value::Null) => Ok(Vec::new()),
-        Some(Value::Array(values)) => values
-            .iter()
-            .map(|value| {
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| format!("{name} values must be strings"))
-            })
-            .collect(),
+        Some(value @ Value::Array(_)) => {
+            Vec::deserialize(value).map_err(|_| format!("{name} values must be strings"))
+        }
         Some(_) => Err(format!("{name} must be an array of strings")),
     }
 }
 
-struct CdpMethodSource {
+pub(super) struct CdpMethodSource {
     entry: &'static Entry,
     session_id: String,
     target_id: String,
     targets: RwLock<HashMap<String, CdpTarget>>,
     matchers: Matchers,
-    policy_actions: [&'static str; 1],
 }
 
-struct CdpTarget {
+pub(super) struct CdpTarget {
     session_id: String,
     tab: EventTab,
     url: String,
 }
 
 impl CdpMethodSource {
-    fn new(
+    pub(super) fn new(
         entry: &'static Entry,
         session_id: String,
         target_id: String,
@@ -326,19 +289,14 @@ impl CdpMethodSource {
             target_id,
             targets: RwLock::new(targets),
             matchers,
-            policy_actions: [entry.policy_action],
         }
     }
 }
 
 #[async_trait]
 impl EventSource for CdpMethodSource {
-    fn supported_engines(&self) -> &'static [&'static str] {
-        self.entry.engines
-    }
-
-    fn policy_actions(&self) -> &[&'static str] {
-        &self.policy_actions
+    fn policy_actions(&self) -> Vec<String> {
+        vec![self.entry.policy_action.to_owned()]
     }
 
     fn target_id(&self) -> &str {
@@ -347,10 +305,6 @@ impl EventSource for CdpMethodSource {
 
     fn session_id(&self) -> &str {
         &self.session_id
-    }
-
-    fn sharing_key(&self) -> Option<String> {
-        None
     }
 
     fn classify(&self, raw: &RawCdpMessage) -> Option<SourceSignal> {
@@ -379,10 +333,7 @@ impl EventSource for CdpMethodSource {
                     .find(|target| target.session_id == session_id)
             })
         };
-        if !browser_event && !target_event && mapped.is_none() {
-            return None;
-        }
-        if browser_event && mapped.is_none() && session_id.is_some() {
+        if mapped.is_none() && !target_event && (!browser_event || session_id.is_some()) {
             return None;
         }
         let event_url = params
@@ -395,9 +346,9 @@ impl EventSource for CdpMethodSource {
                 url: event_url.unwrap_or(&target.url).to_owned(),
             })
             .or_else(|| {
-                Some(EventLocation {
+                event_url.map(|url| EventLocation {
                     tab: None,
-                    url: event_url?.to_owned(),
+                    url: url.to_owned(),
                 })
             });
         let data = cdp::project(self.entry, params, MAX_EVENT_BYTES);
@@ -420,170 +371,86 @@ impl EventSource for CdpMethodSource {
             }
         }
     }
-
-    async fn observe(&self, _client: &CdpClient) -> Result<Option<SourceSignal>, String> {
-        Ok(None)
-    }
-
-    async fn stop(&self, _client: &CdpClient) {}
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use serde_json::json;
-
-    use super::{read_request, CdpMethodSource, CdpTarget};
-    use crate::native::cdp::client::RawCdpMessage;
-    use crate::native::events::filter::Matchers;
-    use crate::native::events::source::{EventSource, SourceSignal};
-    use crate::native::events::sources::cdp;
+    use super::*;
 
     #[test]
-    fn read_request_clamps_wait_and_defaults_to_no_ack() {
-        let request = read_request(&json!({
-            "subscriptionId": "sub-1",
-            "waitMs": 90_000
-        }))
-        .unwrap();
-        assert_eq!(request.wait_ms, 50_000);
-        assert!(!request.ack);
-    }
-
-    #[test]
-    fn target_events_are_classified_without_a_session_id() {
-        let source = CdpMethodSource::new(
-            cdp::lookup("Target.targetCreated").unwrap(),
-            "page-session".into(),
-            "page-target".into(),
-            HashMap::new(),
-            Matchers::parse(&[], &[]).unwrap(),
+    fn read_clamps_and_validates_ack() {
+        assert_eq!(read_options(&json!({})).unwrap(), (0, 100, false));
+        assert_eq!(
+            read_options(&json!({"waitMs": 90_000, "limit": u64::MAX, "ack": true})).unwrap(),
+            (50_000, 200, true)
         );
-        let raw = RawCdpMessage {
-            text: r#"{"method":"Target.targetCreated","params":{"targetInfo":{"targetId":"new-target","type":"page","url":"https://example.com"}}}"#.into(),
-            session_id: None,
-        };
-
-        let signal = source.classify(&raw).unwrap();
-
-        assert!(
-            matches!(signal, SourceSignal::Match { ref key, .. } if key == "Target.targetCreated")
+        for ack in [Value::Null, json!(0), json!("true")] {
+            assert_eq!(
+                read_options(&json!({"ack": ack})).unwrap_err(),
+                "ack must be a boolean"
+            );
+        }
+        assert_eq!(
+            read_options(&json!({"limit": 0})).unwrap_err(),
+            "Event read limit must be at least 1"
         );
     }
 
     #[test]
-    fn method_matchers_filter_projected_fields() {
+    fn projected_matchers_preserve_background_location_and_reject_other_sessions() {
         let source = CdpMethodSource::new(
             cdp::lookup("Page.javascriptDialogOpening").unwrap(),
-            "page-session".into(),
-            "page-target".into(),
+            "active-session".into(),
+            "active-target".into(),
             HashMap::from([(
-                "page-target".into(),
+                "background-target".into(),
                 CdpTarget {
-                    session_id: "page-session".into(),
-                    tab: crate::native::events::envelope::EventTab {
-                        id: "t1".into(),
-                        label: String::new(),
-                        target_id: "page-target".into(),
+                    session_id: "background-session".into(),
+                    tab: EventTab {
+                        id: "t2".into(),
+                        label: "background".into(),
+                        target_id: "background-target".into(),
                     },
-                    url: "https://example.com".into(),
+                    url: "https://background.example".into(),
                 },
             )]),
             Matchers::parse(&["/type=alert".into()], &[]).unwrap(),
         );
-        let classify = |dialog_type: &str| {
+        let classify = |session_id: &str, dialog_type: &str| {
             source.classify(&RawCdpMessage {
                 text: json!({
                     "method": "Page.javascriptDialogOpening",
                     "params": {"type": dialog_type, "message": "fixture"}
                 })
                 .to_string(),
-                session_id: Some("page-session".into()),
+                session_id: Some(session_id.into()),
             })
         };
 
-        assert!(classify("alert").is_some());
-        assert!(classify("confirm").is_none());
-    }
-
-    #[test]
-    fn page_events_use_the_background_tab_mapping() {
-        let source = CdpMethodSource::new(
-            cdp::lookup("Runtime.consoleAPICalled").unwrap(),
-            "active-session".into(),
-            "active-target".into(),
-            HashMap::from([
-                (
-                    "active-target".into(),
-                    CdpTarget {
-                        session_id: "active-session".into(),
-                        tab: crate::native::events::envelope::EventTab {
-                            id: "t1".into(),
-                            label: String::new(),
-                            target_id: "active-target".into(),
-                        },
-                        url: "https://active.example".into(),
-                    },
-                ),
-                (
-                    "background-target".into(),
-                    CdpTarget {
-                        session_id: "background-session".into(),
-                        tab: crate::native::events::envelope::EventTab {
-                            id: "t2".into(),
-                            label: "background".into(),
-                            target_id: "background-target".into(),
-                        },
-                        url: "https://background.example".into(),
-                    },
-                ),
-            ]),
-            Matchers::parse(&[], &[]).unwrap(),
-        );
-        let raw = RawCdpMessage {
-            text: json!({
-                "method": "Runtime.consoleAPICalled",
-                "params": {
-                    "type": "log",
-                    "args": [{"type": "string", "value": "background"}]
-                }
-            })
-            .to_string(),
-            session_id: Some("background-session".into()),
-        };
-
+        assert!(classify("background-session", "confirm").is_none());
+        assert!(classify("other-session", "alert").is_none());
         let Some(SourceSignal::Match {
             location: Some(location),
             data,
             ..
-        }) = source.classify(&raw)
+        }) = classify("background-session", "alert")
         else {
             panic!("background event should be classified");
         };
 
         assert_eq!(location.tab.as_ref().unwrap().id, "t2");
+        assert_eq!(location.tab.as_ref().unwrap().label, "background");
         assert_eq!(location.url, "https://background.example");
-        assert_eq!(data["text"], "background");
+        assert_eq!(data["message"], "fixture");
     }
 
     #[test]
     fn start_validation_names_refused_cdp_domains() {
-        let error = super::validate_start_request(&json!({
+        let error = validate_start_request(&json!({
             "method": "Network.requestWillBeSent"
         }))
         .unwrap_err();
 
         assert!(error.contains("Network"));
-    }
-
-    #[test]
-    fn source_policy_action_matches_the_projected_data() {
-        assert_eq!(
-            super::source_policy_action(&json!({
-                "method": "Page.javascriptDialogOpening"
-            })),
-            Some("dialog")
-        );
     }
 }
