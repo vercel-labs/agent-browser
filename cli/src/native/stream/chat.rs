@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use serde_json::{json, Value};
@@ -17,20 +17,29 @@ type WakeKey = (String, String, u64);
 #[derive(Default)]
 struct WakeRegistry {
     running: HashSet<WakeKey>,
-    completed: VecDeque<WakeKey>,
+    completed: HashMap<(String, String), u64>,
 }
 
 impl WakeRegistry {
     fn begin(&mut self, key: WakeKey) -> bool {
-        !self.completed.contains(&key) && self.running.insert(key)
+        let scope = (key.0.clone(), key.1.clone());
+        if self
+            .completed
+            .get(&scope)
+            .is_some_and(|completed| key.2 <= *completed)
+        {
+            return false;
+        }
+        self.running.insert(key)
     }
 
     fn complete(&mut self, key: &WakeKey) {
         self.running.remove(key);
-        self.completed.push_back(key.clone());
-        if self.completed.len() > 256 {
-            self.completed.pop_front();
-        }
+        let completed = self
+            .completed
+            .entry((key.0.clone(), key.1.clone()))
+            .or_default();
+        *completed = (*completed).max(key.2);
     }
 }
 
@@ -49,6 +58,36 @@ fn wake_registry() -> MutexGuard<'static, WakeRegistry> {
         .get_or_init(|| Mutex::new(WakeRegistry::default()))
         .lock()
         .unwrap_or_else(|error| error.into_inner())
+}
+
+fn wake_state_is_current(list: &Value, subscription_id: &str, seq: u64) -> bool {
+    list.pointer("/data/subscriptions")
+        .and_then(Value::as_array)
+        .is_some_and(|subscriptions| {
+            subscriptions.iter().any(|subscription| {
+                subscription["id"].as_str() == Some(subscription_id)
+                    && subscription["head"].as_u64().unwrap_or(0) >= seq
+                    && subscription["consumed"].as_u64().unwrap_or(0) < seq
+            })
+        })
+}
+
+async fn wake_is_current(session: &str, subscription_id: &str, seq: u64) -> bool {
+    let args = [
+        "--session",
+        session,
+        "--json",
+        "events",
+        "list",
+        "--owner",
+        &format!("chat:{session}"),
+    ]
+    .map(str::to_string);
+    match execute_chat_cli(&args).await {
+        Ok(output) if output.status.success() => serde_json::from_slice::<Value>(&output.stdout)
+            .is_ok_and(|list| wake_state_is_current(&list, subscription_id, seq)),
+        _ => false,
+    }
 }
 
 fn parse_event_wake(parsed: &Value, session: &str) -> Result<Option<WakeKey>, &'static str> {
@@ -654,6 +693,7 @@ async fn execute_chat_cli(args: &[String]) -> Result<std::process::Output, Strin
 
     tokio::process::Command::new(&exe)
         .args(args)
+        .env_remove("AGENT_BROWSER_DAEMON")
         .env_remove("AGENT_BROWSER_DASHBOARD")
         .env_remove("AGENT_BROWSER_DASHBOARD_PORT")
         .env_remove("AGENT_BROWSER_STREAM_PORT")
@@ -846,9 +886,12 @@ pub(super) async fn handle_chat_request(
         .and_then(|v| v.as_str())
         .unwrap_or("default")
         .to_string();
-    let duplicate_wake = event_wake
-        .as_ref()
-        .is_some_and(|wake| !wake_registry().begin(wake.clone()));
+    let duplicate_wake = match &event_wake {
+        Some(wake) => {
+            !wake_is_current(&wake.0, &wake.1, wake.2).await || !wake_registry().begin(wake.clone())
+        }
+        None => false,
+    };
     let wake_guard = WakeTurnGuard(event_wake.filter(|_| !duplicate_wake));
 
     let mut openai_messages: Vec<Value> =
@@ -1116,6 +1159,7 @@ pub(super) async fn handle_chat_request(
     stream.write_all(done_ev.as_bytes()).await.ok()?;
     if completed_normally {
         if let Some(key @ (session, subscription_id, seq)) = &wake_guard.0 {
+            wake_registry().complete(key);
             let args = [
                 "--session".into(),
                 session.clone(),
@@ -1127,12 +1171,7 @@ pub(super) async fn handle_chat_request(
                 "--owner".into(),
                 format!("chat:{session}"),
             ];
-            if execute_chat_cli(&args)
-                .await
-                .is_ok_and(|output| output.status.success())
-            {
-                wake_registry().complete(key);
-            }
+            let _ = execute_chat_cli(&args).await;
         }
     }
     Some(())
@@ -1170,15 +1209,31 @@ mod tests {
         registry.complete(&key);
         registry.running.remove(&key);
         assert!(!registry.begin(key.clone()));
-        for seq in 0..256 {
-            let next = (key.0.clone(), key.1.clone(), seq + 4);
-            assert!(registry.begin(next.clone()));
-            registry.complete(&next);
-        }
-        assert!(registry.begin(key.clone()));
         assert!(wake_registry().begin(key.clone()));
         drop(WakeTurnGuard(Some(key.clone())));
         assert!(wake_registry().begin(key));
+    }
+
+    #[test]
+    fn completed_turns_are_not_replayable_when_acknowledgement_fails() {
+        let key = ("chat-ack".into(), "sub-ack".into(), 7);
+        let guard = WakeTurnGuard(Some(key.clone()));
+        assert!(wake_registry().begin(key.clone()));
+        wake_registry().complete(&key);
+        drop(guard);
+        assert!(!wake_registry().begin(key));
+    }
+
+    #[test]
+    fn wake_requires_an_owned_unread_subscription_cursor() {
+        let list = json!({"data": {"subscriptions": [
+            {"id": "sub-1", "head": 5, "consumed": 1},
+            {"id": "sub-2", "head": 5, "consumed": 5}
+        ]}});
+        assert!(wake_state_is_current(&list, "sub-1", 3));
+        assert!(!wake_state_is_current(&list, "sub-2", 5));
+        assert!(!wake_state_is_current(&list, "missing", 1));
+        assert!(!wake_state_is_current(&list, "sub-1", 6));
     }
 
     #[test]

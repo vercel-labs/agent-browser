@@ -78,7 +78,7 @@ pub(crate) async fn start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let owner = optional_string(cmd, "owner")?;
     let idempotency_key = optional_string(cmd, "key")?;
     let once = cmd.get("once").and_then(Value::as_bool).unwrap_or(false);
-    if let Some(selector) = cmd.get("selector").and_then(Value::as_str) {
+    let response = if let Some(selector) = cmd.get("selector").and_then(Value::as_str) {
         state
             .events
             .start_dom(DomStart {
@@ -94,7 +94,7 @@ pub(crate) async fn start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
                 owner,
                 idempotency_key,
             })
-            .await
+            .await?
     } else {
         let method = cmd["method"].as_str().unwrap();
         let entry = cdp::lookup(method)?;
@@ -157,8 +157,15 @@ pub(crate) async fn start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
                     idempotency_key,
                 },
             )
-            .await
+            .await?
+    };
+    if let Some(id) = response.get("id").and_then(Value::as_str) {
+        state
+            .events
+            .approve_subscription(id, &state.confirmed_policy_actions)
+            .await;
     }
+    Ok(response)
 }
 
 pub(crate) async fn read(cmd: &Value, bus: &Arc<Bus>) -> Result<Value, String> {

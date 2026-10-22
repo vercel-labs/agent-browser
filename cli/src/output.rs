@@ -158,7 +158,11 @@ fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> 
     }
 }
 
-fn format_events_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
+fn format_events_text(
+    action: Option<&str>,
+    data: &serde_json::Value,
+    opts: &OutputOptions,
+) -> Option<String> {
     Some(match action? {
         "events_start" => format!(
             "Event subscription {} started at {}",
@@ -170,7 +174,11 @@ fn format_events_text(action: Option<&str>, data: &serde_json::Value) -> Option<
             [] => "No new events".into(),
             events => events
                 .iter()
-                .map(ToString::to_string)
+                .map(|event| {
+                    let mut event = event.clone();
+                    truncate_event_data(&mut event, opts.max_output);
+                    event.to_string()
+                })
                 .collect::<Vec<_>>()
                 .join("\n"),
         },
@@ -195,6 +203,51 @@ fn format_events_text(action: Option<&str>, data: &serde_json::Value) -> Option<
         "events_stop" => format!("Stopped event subscription {}", data["id"].as_str()?),
         _ => return None,
     })
+}
+
+fn truncate_events(value: &mut serde_json::Value, max: Option<usize>) {
+    if let Some(events) = value
+        .pointer_mut("/data/events")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for event in events {
+            truncate_event_data(event, max);
+        }
+    }
+}
+
+fn truncate_event_data(event: &mut serde_json::Value, max: Option<usize>) {
+    let Some(data) = event.get_mut("data") else {
+        return;
+    };
+    let text = data.to_string();
+    let truncated = truncate_if_needed(&text, max);
+    if truncated != text {
+        *data = serde_json::Value::String(truncated);
+    }
+}
+
+fn attach_boundary(value: &mut serde_json::Value) {
+    let origin = value
+        .get("data")
+        .and_then(boundary_origin)
+        .unwrap_or("unknown")
+        .to_string();
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "_boundary".to_string(),
+            serde_json::json!({"nonce": get_boundary_nonce(), "origin": origin}),
+        );
+    }
+}
+
+pub(crate) fn format_event_line(event: &serde_json::Value, opts: &OutputOptions) -> String {
+    let mut event = event.clone();
+    truncate_event_data(&mut event, opts.max_output);
+    if opts.content_boundaries {
+        attach_boundary(&mut event);
+    }
+    event.to_string()
 }
 
 fn format_webmcp_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
@@ -545,26 +598,14 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
 
 fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     if opts.json {
-        if opts.content_boundaries {
-            let mut json_val = serde_json::to_value(resp).unwrap_or_default();
-            if let Some(obj) = json_val.as_object_mut() {
-                let nonce = get_boundary_nonce();
-                let origin = obj
-                    .get("data")
-                    .and_then(boundary_origin)
-                    .unwrap_or("unknown");
-                obj.insert(
-                    "_boundary".to_string(),
-                    serde_json::json!({
-                        "nonce": nonce,
-                        "origin": origin,
-                    }),
-                );
-            }
-            println!("{}", serde_json::to_string(&json_val).unwrap_or_default());
-        } else {
-            println!("{}", serde_json::to_string(resp).unwrap_or_default());
+        let mut json_val = serde_json::to_value(resp).unwrap_or_default();
+        if action == Some("events_read") {
+            truncate_events(&mut json_val, opts.max_output);
         }
+        if opts.content_boundaries {
+            attach_boundary(&mut json_val);
+        }
+        println!("{}", serde_json::to_string(&json_val).unwrap_or_default());
         // JSON mode includes the warning field in the JSON payload already
         return;
     }
@@ -617,7 +658,7 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             println!("{}", output);
             return;
         }
-        if let Some(output) = format_events_text(action, data) {
+        if let Some(output) = format_events_text(action, data, opts) {
             if opts.content_boundaries {
                 print_with_boundaries(&output, None, opts);
             } else {
@@ -3397,7 +3438,7 @@ Global Options:
 
 Examples:
   agent-browser events start --selector '#notice' --once
-  agent-browser events start --method Network.responseReceived --match /response/url=https://example.com
+  agent-browser events start --method Page.frameNavigated --match /url=https://example.com
   agent-browser events read sub-1 --since sub-1:0 --ack
   agent-browser events wait sub-1 --timeout 5000
   agent-browser events list --owner chat:session --unread
@@ -4426,6 +4467,42 @@ mod tests {
         format_with_boundaries, OutputOptions,
     };
     use serde_json::json;
+
+    #[test]
+    fn test_events_text_truncates_payloads_without_boundaries() {
+        let data = json!({
+            "events": [{"data": {"text": "x".repeat(200)}, "meta": {"cursor": "sub-1:1"}}],
+            "waiting": false
+        });
+
+        let rendered = super::format_events_text(
+            Some("events_read"),
+            &data,
+            &OutputOptions {
+                max_output: Some(30),
+                ..OutputOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(rendered.contains("[truncated: showing 30 of"));
+    }
+
+    #[test]
+    fn test_json_events_truncate_payloads_and_keep_meta() {
+        let mut value = json!({
+            "data": {"events": [{"data": {"text": "x".repeat(200)}, "meta": {"cursor": "sub-1:1"}}]}
+        });
+
+        super::truncate_events(&mut value, Some(30));
+        let event = &value["data"]["events"][0];
+
+        assert!(event["data"]
+            .as_str()
+            .unwrap()
+            .contains("[truncated: showing 30 of"));
+        assert_eq!(event["meta"]["cursor"], "sub-1:1");
+    }
 
     #[test]
     fn test_format_stream_status_text_for_enabled_stream() {

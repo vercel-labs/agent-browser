@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use tokio::sync::{broadcast, Mutex, Notify, RwLock};
+use tokio::sync::{broadcast, watch, Mutex, Notify, RwLock};
 use tokio::task::JoinHandle;
 
 use super::buffer::EventBuffer;
@@ -14,7 +14,6 @@ use super::sources::dom::{normalize_selector, DomObserver, WORLD_NAME};
 use crate::native::cdp::client::{CdpClient, RawCdpMessage};
 use crate::native::network::DomainFilter;
 use crate::native::policy::ActionPolicy;
-use crate::native::stream::StreamServer;
 
 const MAX_ACTIVE: usize = 20;
 const MAX_LISTED: usize = 50;
@@ -27,7 +26,7 @@ pub struct Bus {
     session_id: String,
     domain_filter: Arc<RwLock<Option<DomainFilter>>>,
     policy: Arc<RwLock<Option<ActionPolicy>>>,
-    stream_server: RwLock<Option<Arc<StreamServer>>>,
+    head_sink: RwLock<Option<watch::Sender<HashMap<String, u64>>>>,
     state: Mutex<BusState>,
     notify: Notify,
     operation: Mutex<()>,
@@ -45,6 +44,7 @@ struct Subscription {
     session_id: String,
     source_key: String,
     policy_actions: Vec<String>,
+    approved_actions: Vec<String>,
     filter_key: String,
     rule: Value,
     owner: Option<String>,
@@ -125,7 +125,7 @@ impl Bus {
             session_id,
             domain_filter,
             policy,
-            stream_server: RwLock::new(None),
+            head_sink: RwLock::new(None),
             state: Mutex::new(BusState::default()),
             notify: Notify::new(),
             operation: Mutex::new(()),
@@ -258,36 +258,49 @@ impl Bus {
         Ok(response)
     }
 
-    pub async fn set_stream(&self, server: Option<Arc<StreamServer>>) {
-        *self.stream_server.write().await = server;
+    pub async fn set_head_sink(&self, sink: Option<watch::Sender<HashMap<String, u64>>>) {
+        *self.head_sink.write().await = sink;
         self.nudge_all_heads().await;
     }
 
-    pub async fn policy_actions_for_subscription(&self, id: &str) -> Result<Vec<String>, String> {
+    pub async fn policy_for_subscription(
+        &self,
+        id: &str,
+    ) -> Result<(Vec<String>, Vec<String>), String> {
         self.expire().await;
         let state = self.state.lock().await;
         state
             .subs
             .get(id)
-            .map(|sub| sub.policy_actions.clone())
+            .map(|sub| (sub.policy_actions.clone(), sub.approved_actions.clone()))
             .ok_or_else(|| LOST.into())
     }
 
-    async fn nudge_all_heads(&self) {
-        let server = self.stream_server.read().await.clone();
-        if let Some(server) = server {
-            let heads: Vec<_> = {
-                let state = self.state.lock().await;
-                state
-                    .subs
-                    .values()
-                    .map(|sub| (sub.id.clone(), sub.buffer.head()))
-                    .collect()
-            };
-            for (id, head) in heads {
-                server.nudge_event(&id, head);
-            }
+    pub async fn approve_subscription(&self, id: &str, approved: &HashSet<String>) {
+        let mut state = self.state.lock().await;
+        if let Some(sub) = state.subs.get_mut(id) {
+            sub.approved_actions = sub
+                .policy_actions
+                .iter()
+                .filter(|action| approved.contains(*action))
+                .cloned()
+                .collect();
         }
+    }
+
+    async fn nudge_all_heads(&self) {
+        let Some(sink) = self.head_sink.read().await.clone() else {
+            return;
+        };
+        let heads = {
+            let state = self.state.lock().await;
+            state
+                .subs
+                .values()
+                .map(|sub| (sub.id.clone(), sub.buffer.head()))
+                .collect()
+        };
+        sink.send_replace(heads);
     }
 
     async fn publish(&self) {
@@ -851,6 +864,7 @@ fn register(
         session_id: session.to_owned(),
         source_key: key,
         policy_actions: actions,
+        approved_actions: Vec::new(),
         filter_key: req.filter_key,
         rule: req.rule,
         owner: req.owner,

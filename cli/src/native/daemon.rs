@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -170,20 +171,26 @@ pub(crate) async fn execute_events_read(cmd: &Value, state: &Mutex<DaemonState>)
     let (bus, idle_activity) = {
         let mut state = state.lock().await;
         let mut policy_actions = vec!["events_read".to_owned()];
+        let mut approved = HashSet::new();
         if let Some(subscription_id) = cmd
             .get("subscriptionId")
             .or_else(|| cmd.get("subscription_id"))
             .and_then(Value::as_str)
         {
-            policy_actions.extend(
-                state
-                    .events
-                    .policy_actions_for_subscription(subscription_id)
-                    .await
-                    .unwrap_or_default(),
-            );
+            if let Ok((actions, confirmed)) =
+                state.events.policy_for_subscription(subscription_id).await
+            {
+                policy_actions.extend(actions);
+                approved.extend(confirmed);
+            }
         }
-        if let Some(response) = check_command_policy(cmd, &mut state, &policy_actions).await {
+        if cmd.get("ack").and_then(Value::as_bool).unwrap_or(false) {
+            policy_actions.push("events_ack".to_owned());
+        }
+        let previous = std::mem::replace(&mut state.confirmed_policy_actions, approved);
+        let denied = check_command_policy(cmd, &mut state, &policy_actions).await;
+        state.confirmed_policy_actions = previous;
+        if let Some(response) = denied {
             state.idle_activity.mark();
             return response;
         }
@@ -769,6 +776,25 @@ mod tests {
             assert_eq!(t.ms, DEFAULT_IDLE_TIMEOUT_MS);
             assert!(t.is_default);
         }
+    }
+
+    #[tokio::test]
+    async fn test_events_read_ack_requires_ack_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.json");
+        fs::write(&path, r#"{"deny":["events_ack"]}"#).unwrap();
+        let mut daemon = DaemonState::new();
+        daemon.policy =
+            Some(crate::native::policy::ActionPolicy::load(path.to_str().unwrap()).unwrap());
+        let state = Mutex::new(daemon);
+        let cmd = serde_json::json!({
+            "action": "events_read", "id": "read-ack", "subscriptionId": "sub-1", "ack": true
+        });
+
+        let response = execute_events_read(&cmd, &state).await;
+
+        assert_eq!(response["success"], false);
+        assert!(response["error"].as_str().unwrap().contains("events_ack"));
     }
 
     #[test]

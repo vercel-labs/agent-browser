@@ -664,7 +664,7 @@ pub struct DaemonState {
     /// plugins are allowed to omit a close-session payload.
     active_provider_connection: bool,
     /// Actions already approved while replaying a confirmed command.
-    confirmed_policy_actions: HashSet<String>,
+    pub(crate) confirmed_policy_actions: HashSet<String>,
     /// Strict session-to-tab binding (`--pin-tab` / AGENT_BROWSER_PIN_TAB).
     /// Sticky per session: persisted in the binding file so later commands
     /// and daemon restarts keep the strict semantics.
@@ -9417,7 +9417,10 @@ async fn handle_stream_enable(cmd: &Value, state: &mut DaemonState) -> Result<Va
     state.stream_client = Some(client_slot);
     let server = Arc::new(server);
     state.stream_server = Some(server.clone());
-    state.events.set_stream(Some(server)).await;
+    state
+        .events
+        .set_head_sink(Some(server.event_nudges.clone()))
+        .await;
     state.request_tracking = true;
     state.refresh_active_iframe_sessions().await;
     if state.screencasting {
@@ -9437,7 +9440,7 @@ async fn handle_stream_disable(state: &mut DaemonState) -> Result<Value, String>
 
     server.shutdown().await;
     state.stream_server = None;
-    state.events.set_stream(None).await;
+    state.events.set_head_sink(None).await;
     state.stream_client = None;
     remove_stream_file(&state.session_id)?;
     remove_engine_file(&state.session_id);
@@ -14972,6 +14975,26 @@ mod tests {
             .unwrap()
             .contains("plugin:stealth:launch.mutate"));
         assert!(state.pending_confirmation.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_confirmed_event_source_action_passes_later_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("policy.json");
+        fs::write(&policy_path, r#"{"confirm":["console"]}"#).unwrap();
+        let mut state = DaemonState::new();
+        state.policy = Some(ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
+        let cmd = json!({"action": "events_read", "id": "read", "subscriptionId": "sub-1"});
+        let actions = ["events_read".to_string(), "console".to_string()];
+
+        let denied = check_command_policy(&cmd, &mut state, &actions)
+            .await
+            .expect("read must need confirmation for the source action");
+        assert!(denied["error"].as_str().unwrap().contains("events_start"));
+        state.confirmed_policy_actions.insert("console".into());
+        assert!(check_command_policy(&cmd, &mut state, &actions)
+            .await
+            .is_none());
     }
 
     #[tokio::test]

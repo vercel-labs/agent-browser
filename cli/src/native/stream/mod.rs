@@ -188,7 +188,7 @@ pub struct StreamServer {
     /// Latest-value channel for screencast frames. Slow clients skip straight
     /// to the newest frame instead of draining a stale ordered backlog.
     frame_watch: watch::Sender<Option<Arc<StreamFrame>>>,
-    event_nudges: watch::Sender<HashMap<String, u64>>,
+    pub(crate) event_nudges: watch::Sender<HashMap<String, u64>>,
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
     /// The active CDP page session ID (from Target.attachToTarget).
@@ -242,11 +242,6 @@ impl StreamServer {
             idle_activity,
         )
         .await
-    }
-
-    /// Notify the background CDP listener that the client has changed (browser launched/closed).
-    pub fn notify_client_changed(&self) {
-        self.client_notify.notify_one();
     }
 
     /// Check whether the server currently has active screencast running.
@@ -516,13 +511,6 @@ impl StreamServer {
         let _ = self.frame_tx.send(msg.to_string());
     }
 
-    /// Publish the latest event head for a subscription to stream clients.
-    pub fn nudge_event(&self, subscription_id: &str, head: u64) {
-        self.event_nudges.send_modify(|nudges| {
-            nudges.insert(subscription_id.to_string(), head);
-        });
-    }
-
     /// Broadcast a command event when a command begins executing.
     pub fn broadcast_command(&self, action: &str, id: &str, params: &Value) {
         let msg = json!({
@@ -579,21 +567,6 @@ impl StreamServer {
             "text": text,
             "line": line,
             "column": column,
-            "timestamp": timestamp_ms(),
-        });
-        let _ = self.frame_tx.send(msg.to_string());
-    }
-
-    /// Broadcast the current tab list so the dashboard can render a tab bar.
-    /// Also caches the list so newly connected WebSocket clients receive it immediately.
-    pub async fn broadcast_tabs(&self, tabs: &[Value]) {
-        {
-            let mut guard = self.last_tabs.write().await;
-            *guard = tabs.to_vec();
-        }
-        let msg = json!({
-            "type": "tabs",
-            "tabs": tabs,
             "timestamp": timestamp_ms(),
         });
         let _ = self.frame_tx.send(msg.to_string());
@@ -816,8 +789,12 @@ mod tests {
             server.broadcast_error(&format!("error-{index}"));
             server.broadcast_screencast_frame("frame", &FrameMetadata::default());
         }
-        server.nudge_event("sub-1", 1);
-        server.nudge_event("sub-1", 3);
+        server
+            .event_nudges
+            .send_replace(HashMap::from([("sub-1".to_string(), 1)]));
+        server
+            .event_nudges
+            .send_replace(HashMap::from([("sub-1".to_string(), 3)]));
 
         loop {
             let parsed = next_message(&mut ws, "events_nudge").await;

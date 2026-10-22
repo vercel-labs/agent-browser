@@ -435,10 +435,10 @@ async fn handle_ws_client(
                     break;
                 }
                 let latest = event_nudges.borrow_and_update().clone();
-                for (subscription_id, head) in latest {
+                for (subscription_id, head) in &latest {
                     if sent_event_nudges
-                        .get(&subscription_id)
-                        .is_some_and(|sent| *sent >= head)
+                        .get(subscription_id)
+                        .is_some_and(|sent| *sent >= *head)
                     {
                         continue;
                     }
@@ -450,8 +450,8 @@ async fn handle_ws_client(
                     if ws_tx.send(Message::Text(nudge.to_string())).await.is_err() {
                         break 'writer;
                     }
-                    sent_event_nudges.insert(subscription_id, head);
                 }
+                sent_event_nudges = latest;
             }
             changed = frame_watch.changed(), if !pending_frame => {
                 if changed.is_err() {

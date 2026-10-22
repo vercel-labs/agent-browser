@@ -81,11 +81,16 @@ fn print_json_error_with_type(message: impl AsRef<str>, error_type: &str) {
     }));
 }
 
-fn run_event_watch(command: &serde_json::Value, session: &str) -> Result<(), String> {
+fn run_event_watch(
+    command: &serde_json::Value,
+    session: &str,
+    opts: &OutputOptions,
+) -> Result<(), String> {
+    const WATCH_LIMIT: usize = 100;
     let mut request = command.clone();
     request["action"] = json!("events_read");
     request["waitMs"] = json!(1_000);
-    request["limit"] = json!(100);
+    request["limit"] = json!(WATCH_LIMIT);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -117,13 +122,14 @@ fn run_event_watch(command: &serde_json::Value, session: &str) -> Result<(), Str
                 .ok_or("Event read response had no event list")?;
             for event in events {
                 let mut stdout = std::io::stdout().lock();
-                writeln!(stdout, "{event}").map_err(|error| error.to_string())?;
+                writeln!(stdout, "{}", output::format_event_line(event, opts))
+                    .map_err(|error| error.to_string())?;
                 stdout.flush().map_err(|error| error.to_string())?;
             }
             request["since"] = json!(data["cursor"]
                 .as_str()
                 .ok_or("Event read response had no cursor")?);
-            if data["status"] == "ended" {
+            if data["status"] == "ended" && events.len() < WATCH_LIMIT {
                 return Ok(());
             }
         }
@@ -2213,15 +2219,15 @@ fn main() {
         return;
     }
 
+    let output_opts = OutputOptions::from_flags(&flags);
+
     if cmd.get("action").and_then(|value| value.as_str()) == Some("events_watch") {
-        if let Err(error) = run_event_watch(&cmd, &flags.session) {
+        if let Err(error) = run_event_watch(&cmd, &flags.session, &output_opts) {
             eprintln!("{} {}", color::error_indicator(), error);
             exit(1);
         }
         return;
     }
-
-    let output_opts = OutputOptions::from_flags(&flags);
 
     match send_command_with_respawn(cmd.clone(), &flags.session, &daemon_opts) {
         Ok(mut resp) => {
