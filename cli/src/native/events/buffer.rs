@@ -156,7 +156,7 @@ impl EventBuffer {
             .filter(|(id, _)| *id == self.subscription_id)
             .and_then(|(_, seq)| seq.parse().ok())
             .filter(|seq| *seq <= self.head())
-            .ok_or(CursorError::CursorInvalid)
+            .ok_or(CursorError)
     }
 
     fn enforce_bounds(&mut self) {
@@ -192,9 +192,7 @@ impl EventBuffer {
             removed.event = EventEnvelope::new(
                 "subscription.gap",
                 &meta.session,
-                &meta.tab.id,
-                &meta.tab.label,
-                &meta.tab.target_id,
+                &meta.tab,
                 json!({"missed": missed}),
             );
             removed.gap_prefix = gap_prefix;
@@ -217,27 +215,21 @@ fn gap_missed(event: &EventEnvelope) -> u64 {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum CursorError {
-    CursorInvalid,
-}
-
-impl std::fmt::Display for CursorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("cursor_invalid")
-    }
-}
-
-impl std::error::Error for CursorError {}
+pub struct CursorError;
 
 #[cfg(test)]
 mod tests {
+    use super::super::envelope::EventTab;
     use super::*;
     use serde_json::Value;
 
     fn append(buffer: &mut EventBuffer, name: &str, data: Value) -> String {
-        buffer.append(EventEnvelope::new(
-            name, "session", "tab", "Tab", "target", data,
-        ))
+        let tab = EventTab {
+            id: "tab".into(),
+            label: "Tab".into(),
+            target_id: "target".into(),
+        };
+        buffer.append(EventEnvelope::new(name, "session", &tab, data))
     }
 
     #[test]
@@ -297,10 +289,10 @@ mod tests {
     #[test]
     fn merged_gaps_report_only_the_unread_suffix() {
         let mut buffer = EventBuffer::new();
-        append(&mut buffer, "change", json!({}));
+        let first = append(&mut buffer, "change", json!({}));
         append(&mut buffer, "subscription.gap", json!({"missed": 3}));
         append(&mut buffer, "subscription.gap", json!({"missed": 4}));
-        append(&mut buffer, "subscription.gap", json!({"missed": 5}));
+        let last = append(&mut buffer, "subscription.gap", json!({"missed": 5}));
         assert_eq!(
             buffer.read(Some(&buffer.cursor(2)), 1).unwrap()[0].data,
             json!({"missed": 9})
@@ -313,14 +305,6 @@ mod tests {
             buffer.read(Some(&buffer.cursor(1)), 1).unwrap()[0].data,
             json!({"missed": 12})
         );
-    }
-
-    #[test]
-    fn gap_totals_replay_and_acknowledgement() {
-        let mut buffer = EventBuffer::new();
-        let first = append(&mut buffer, "change", json!({}));
-        append(&mut buffer, "subscription.gap", json!({"missed": 3}));
-        let last = append(&mut buffer, "subscription.gap", json!({"missed": 4}));
         assert_eq!(buffer.read(None, 0).unwrap(), vec![]);
         let events = buffer.read(Some(&buffer.start_cursor()), 2).unwrap();
         assert_eq!(
@@ -330,33 +314,25 @@ mod tests {
                 .collect::<Vec<_>>(),
             [&first, &last]
         );
-        assert_eq!(events[1].data, json!({"missed": 7}));
-        assert_eq!(
-            buffer.read(Some(&buffer.cursor(2)), 1).unwrap()[0].data,
-            json!({"missed": 4})
-        );
+        assert_eq!(events[1].data, json!({"missed": 12}));
         assert_eq!(buffer.read(None, 1).unwrap(), events[..1]);
         assert!(buffer.read(Some(&last), 1).unwrap().is_empty());
         assert_eq!(buffer.head_cursor(), last);
         assert_eq!(buffer.consumed(), 0);
         for seq in [2, 1, 2, u64::MAX] {
             buffer.ack(seq);
-            assert_eq!(buffer.consumed(), seq.clamp(2, 3));
+            assert_eq!(buffer.consumed(), seq.clamp(2, 4));
         }
         buffer.ack_cursor(&first).unwrap();
         assert_eq!(buffer.consumed(), buffer.head());
         for cursor in [
             "bad".to_string(),
             "foreign:1".to_string(),
-            buffer.cursor(4),
+            buffer.cursor(5),
             buffer.cursor(1).replace(":1", ":bad"),
         ] {
-            assert_eq!(
-                buffer.read(Some(&cursor), 1),
-                Err(CursorError::CursorInvalid)
-            );
-            assert_eq!(buffer.ack_cursor(&cursor), Err(CursorError::CursorInvalid));
+            assert_eq!(buffer.read(Some(&cursor), 1), Err(CursorError));
+            assert_eq!(buffer.ack_cursor(&cursor), Err(CursorError));
         }
-        assert_eq!(CursorError::CursorInvalid.to_string(), "cursor_invalid");
     }
 }

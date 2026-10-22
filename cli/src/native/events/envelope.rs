@@ -31,14 +31,7 @@ pub struct EventTab {
 }
 
 impl EventEnvelope {
-    pub fn new(
-        name: &str,
-        session: &str,
-        tab_id: &str,
-        tab_label: &str,
-        target_id: &str,
-        data: Value,
-    ) -> Self {
+    pub fn new(name: &str, session: &str, tab: &EventTab, data: Value) -> Self {
         Self {
             version: ENVELOPE_VERSION,
             meta: EventMeta {
@@ -48,11 +41,7 @@ impl EventEnvelope {
                 cursor: String::new(),
                 subscription_id: String::new(),
                 session: session.to_owned(),
-                tab: EventTab {
-                    id: tab_id.to_owned(),
-                    label: tab_label.to_owned(),
-                    target_id: target_id.to_owned(),
-                },
+                tab: tab.clone(),
             },
             data,
         }

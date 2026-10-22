@@ -184,7 +184,6 @@ impl Bus {
         if source.session_id() != req.session_id {
             return Err("Event observer session changed while subscribing".into());
         }
-        let expires = chrono::Utc::now() + chrono::Duration::from_std(req.ttl).unwrap();
         let probe = installed.then(|| source.clone());
         let initial_key = initial.clone();
         let start = SourceStart {
@@ -204,7 +203,6 @@ impl Bus {
             &self.session_id,
             key.clone(),
             start,
-            expires,
         );
         if let Some(probe) = probe {
             if let Ok(Some(SourceSignal::Match {
@@ -251,8 +249,7 @@ impl Bus {
         }
         check_capacity(&state)?;
         let key = uuid::Uuid::new_v4().simple().to_string();
-        let expires = chrono::Utc::now() + chrono::Duration::from_std(req.ttl).unwrap();
-        let response = register(&mut state, &self.session_id, key, req, expires);
+        let response = register(&mut state, &self.session_id, key, req);
         drop(state);
         self.publish().await;
         Ok(response)
@@ -407,15 +404,9 @@ impl Bus {
                     for shared in state.sources.values_mut() {
                         if shared.source.session_id() == session {
                             shared.url = url.to_owned();
+                            shared.pending = true;
                         }
                         shared.source.update_url(session, url);
-                    }
-                    for shared in state
-                        .sources
-                        .values_mut()
-                        .filter(|shared| shared.source.session_id() == session)
-                    {
-                        shared.pending = true;
                     }
                 }
             }
@@ -495,7 +486,7 @@ impl Bus {
         let sources: Vec<_> = {
             let mut state = self.state.lock().await;
             for sub in state.subs.values_mut().filter(|sub| sub.status == "active") {
-                sub.buffer.append(envelope(
+                sub.buffer.append(EventEnvelope::new(
                     "subscription.gap",
                     &self.session_id,
                     &sub.tab,
@@ -593,7 +584,7 @@ impl Bus {
                 continue;
             };
             if rearmed {
-                sub.buffer.append(envelope(
+                sub.buffer.append(EventEnvelope::new(
                     "subscription.rearmed",
                     &self.session_id,
                     &tab,
@@ -607,8 +598,12 @@ impl Bus {
                 sub.filtered += 1;
                 continue;
             }
-            sub.buffer
-                .append(envelope(&name, &self.session_id, &tab, data.clone()));
+            sub.buffer.append(EventEnvelope::new(
+                &name,
+                &self.session_id,
+                &tab,
+                data.clone(),
+            ));
             if sub.once {
                 done.push(id);
             }
@@ -624,25 +619,16 @@ impl Bus {
         client: &Arc<CdpClient>,
         matches: impl Fn(&dyn EventSource) -> bool,
     ) {
-        let keys: Vec<_> = {
-            let state = self.state.lock().await;
-            state
-                .sources
-                .iter()
-                .filter(|(_, shared)| matches(shared.source.as_ref()))
-                .map(|(key, _)| key.clone())
-                .collect()
-        };
-        let mut stopped = Vec::new();
-        for key in keys {
+        let stopped = {
             let mut state = self.state.lock().await;
-            let ids = state
+            let ids: Vec<_> = state
                 .sources
-                .get(&key)
-                .map(|shared| shared.subs.clone())
-                .unwrap_or_default();
-            stopped.extend(finish_many(&mut state, ids, reason));
-        }
+                .values()
+                .filter(|shared| matches(shared.source.as_ref()))
+                .flat_map(|shared| shared.subs.iter().cloned())
+                .collect();
+            finish_many(&mut state, ids, reason)
+        };
         self.cleanup(stopped, Some(client.clone())).await;
     }
 
@@ -658,20 +644,8 @@ impl Bus {
     async fn end_all_with_client(&self, reason: &str, client: Option<Arc<CdpClient>>) {
         let sources = {
             let mut state = self.state.lock().await;
-            let sources = state
-                .sources
-                .values()
-                .map(|shared| shared.source.clone())
-                .collect();
-            let ids: Vec<_> = state
-                .subs
-                .values()
-                .filter(|sub| sub.status == "active")
-                .map(|sub| sub.id.clone())
-                .collect();
-            finish_many(&mut state, ids, reason);
-            state.sources.clear();
-            sources
+            let ids: Vec<_> = state.subs.keys().cloned().collect();
+            finish_many(&mut state, ids, reason)
         };
         self.cleanup(sources, client).await;
     }
@@ -825,17 +799,7 @@ fn signal_key(signal: &SourceSignal) -> &str {
     }
 }
 
-fn envelope(name: &str, session: &str, tab: &EventTab, data: Value) -> EventEnvelope {
-    EventEnvelope::new(name, session, &tab.id, &tab.label, &tab.target_id, data)
-}
-
-fn register(
-    state: &mut BusState,
-    session: &str,
-    key: String,
-    req: SourceStart<'_>,
-    expires: chrono::DateTime<chrono::Utc>,
-) -> Value {
+fn register(state: &mut BusState, session: &str, key: String, req: SourceStart<'_>) -> Value {
     let actions = req.source.policy_actions();
     let current = req.initial.clone();
     let shared = state
@@ -852,7 +816,7 @@ fn register(
     let already_satisfied = current == req.filter_key;
     let mut buffer = EventBuffer::new();
     let id = buffer.start_cursor().split(':').next().unwrap().to_owned();
-    buffer.append(envelope(
+    buffer.append(EventEnvelope::new(
         "subscription.ready",
         session,
         &req.tab,
@@ -870,7 +834,7 @@ fn register(
         owner: req.owner,
         idempotency_key: req.idempotency_key,
         once: req.once,
-        expires_at: expires,
+        expires_at: chrono::Utc::now() + chrono::Duration::from_std(req.ttl).unwrap(),
         created: Instant::now(),
         ended: None,
         status: "active",
@@ -901,7 +865,7 @@ fn finish_many(
             sub.status = "ended";
             sub.reason = Some(reason.to_owned());
             sub.ended = Some(Instant::now());
-            sub.buffer.append(envelope(
+            sub.buffer.append(EventEnvelope::new(
                 "subscription.ended",
                 &sub.session_id,
                 &sub.tab,
@@ -1040,13 +1004,7 @@ mod tests {
             owner: None,
             idempotency_key: None,
         };
-        let response = register(
-            &mut state,
-            "session-1",
-            key,
-            req,
-            chrono::Utc::now() + chrono::Duration::minutes(30),
-        );
+        let response = register(&mut state, "session-1", key, req);
         assert_eq!(response["head"], 1);
         let id = response["id"].as_str().unwrap().to_owned();
         assert_eq!(response["cursor"], format!("{id}:1"));
@@ -1054,18 +1012,14 @@ mod tests {
     }
 
     async fn read_all(bus: &Bus, id: &str) -> ReadResult {
-        let start = bus
-            .state
-            .lock()
-            .await
-            .subs
-            .get(id)
-            .unwrap()
-            .buffer
-            .start_cursor();
+        let start = bus.state.lock().await.subs[id].buffer.start_cursor();
         bus.read(id, Some(&start), Duration::ZERO, 10)
             .await
             .unwrap()
+    }
+
+    async fn add_dom(bus: &Bus, filter: &str) -> String {
+        add(bus, Arc::new(DomObserver::test_observer()), filter, false).await
     }
 
     async fn client_for(
@@ -1095,12 +1049,12 @@ mod tests {
         ))
     }
 
-    struct FailingObserver;
+    struct StalledObserver;
 
     #[async_trait::async_trait]
-    impl EventSource for FailingObserver {
+    impl EventSource for StalledObserver {
         fn target_id(&self) -> &str {
-            "target-fail"
+            "target-stalled"
         }
 
         fn session_id(&self) -> &str {
@@ -1114,24 +1068,6 @@ mod tests {
         async fn observe(&self, _: &CdpClient) -> Result<Option<SourceSignal>, String> {
             Err("observe failed".into())
         }
-    }
-
-    struct HangingObserver;
-
-    #[async_trait::async_trait]
-    impl EventSource for HangingObserver {
-        fn target_id(&self) -> &str {
-            "target-hang"
-        }
-
-        fn session_id(&self) -> &str {
-            "session-1"
-        }
-
-        fn classify(&self, _: &RawCdpMessage) -> Option<SourceSignal> {
-            None
-        }
-
         async fn stop(&self, _: &CdpClient) {
             std::future::pending::<()>().await
         }
@@ -1140,13 +1076,7 @@ mod tests {
     #[tokio::test]
     async fn creation_consumes_the_ready_marker() {
         let bus = bus();
-        let id = add(
-            &bus,
-            Arc::new(DomObserver::test_observer()),
-            "hidden",
-            false,
-        )
-        .await;
+        let id = add_dom(&bus, "hidden").await;
         let result = bus
             .read(&id, None, Duration::from_millis(50), 10)
             .await
@@ -1161,27 +1091,16 @@ mod tests {
     async fn failed_navigation_observation_stays_pending() {
         let client = client_for(|_| tokio::spawn(async {})).await;
         let bus = bus();
-        let id = add(&bus, Arc::new(FailingObserver), "visible", false).await;
+        add(&bus, Arc::new(StalledObserver), "visible", false).await;
         bus.state
             .lock()
             .await
             .sources
-            .values_mut()
-            .next()
+            .get_mut("target-stalled")
             .unwrap()
             .pending = true;
         bus.observe_pending("session-1", &client).await;
-        assert!(
-            bus.state
-                .lock()
-                .await
-                .sources
-                .values()
-                .next()
-                .unwrap()
-                .pending
-        );
-        let _ = id;
+        assert!(bus.state.lock().await.sources["target-stalled"].pending);
         client.close().await;
     }
 
@@ -1238,14 +1157,14 @@ mod tests {
         let client = client_for(|_| tokio::spawn(async {})).await;
         let bus = bus();
         bus.attach(client.clone()).await.unwrap();
-        add(&bus, Arc::new(HangingObserver), "visible", false).await;
+        add(&bus, Arc::new(StalledObserver), "visible", false).await;
         let notified = bus.notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
         let cleaning = bus.clone();
         let cleanup = tokio::spawn(async move {
             cleaning
-                .cleanup(vec![Arc::new(HangingObserver)], Some(client))
+                .cleanup(vec![Arc::new(StalledObserver)], Some(client))
                 .await;
         });
         tokio::time::timeout(Duration::from_millis(200), cleanup)
@@ -1260,13 +1179,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_forged_payloads_and_filters_content_at_emit_time() {
         let bus = bus();
-        let id = add(
-            &bus,
-            Arc::new(DomObserver::test_observer()),
-            "visible",
-            false,
-        )
-        .await;
+        let id = add_dom(&bus, "visible").await;
         for nonce in ["forged".to_owned(), "x".repeat(16 * 1024)] {
             bus.process_raw(raw("change", "visible", &nonce)).await;
         }
@@ -1276,8 +1189,7 @@ mod tests {
             .lock()
             .await
             .sources
-            .values_mut()
-            .next()
+            .get_mut("target-1")
             .unwrap()
             .url = "https://blocked.test".into();
         bus.process_raw(raw("change", "visible", "nonce-1")).await;
@@ -1301,14 +1213,7 @@ mod tests {
             .unwrap();
             let bus = bus();
             *bus.policy.write().await = Some(ActionPolicy::load(path.to_str().unwrap()).unwrap());
-            let source = CdpMethodSource::new(
-                cdp::lookup("Browser.downloadWillBegin").unwrap(),
-                "session-1".into(),
-                "target-1".into(),
-                HashMap::new(),
-                Matchers::parse(&[], &[]).unwrap(),
-            );
-            let id = add(&bus, Arc::new(source), "Browser.downloadWillBegin", false).await;
+            let id = add(&bus, cdp_source(), "Browser.downloadWillBegin", false).await;
             if missing {
                 std::fs::remove_file(path).unwrap();
             }
@@ -1327,13 +1232,7 @@ mod tests {
     async fn lifecycle_bounds_retain_ended_buffers_until_retention() {
         for reason in ["expired", "browser_closed", "stopped"] {
             let bus = bus();
-            let id = add(
-                &bus,
-                Arc::new(DomObserver::test_observer()),
-                "visible",
-                false,
-            )
-            .await;
+            let id = add_dom(&bus, "visible").await;
             match reason {
                 "expired" => {
                     bus.state.lock().await.subs.get_mut(&id).unwrap().expires_at =
@@ -1354,24 +1253,12 @@ mod tests {
         }
         let bus = bus();
         for _ in 0..MAX_ACTIVE {
-            add(
-                &bus,
-                Arc::new(DomObserver::test_observer()),
-                "visible",
-                false,
-            )
-            .await;
+            add_dom(&bus, "visible").await;
         }
         assert!(check_capacity(&*bus.state.lock().await).is_err());
         bus.end_all("browser_closed").await;
         for _ in 0..=MAX_LISTED {
-            let id = add(
-                &bus,
-                Arc::new(DomObserver::test_observer()),
-                "visible",
-                false,
-            )
-            .await;
+            let id = add_dom(&bus, "visible").await;
             bus.stop(&id, None).await.unwrap();
         }
         assert_eq!(bus.list(None, false).await.len(), MAX_LISTED);
