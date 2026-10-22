@@ -15,7 +15,7 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 if ! "$AB" events --help >/dev/null 2>&1; then
-  echo "This agent-browser binary has no events command. Rebuild it with: cargo build --features event-prototype (from cli/)." >&2
+  echo "This agent-browser binary has no events command. Build or install a binary that includes it." >&2
   exit 1
 fi
 

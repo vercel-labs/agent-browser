@@ -12,7 +12,7 @@ import { shikiTheme } from "@/lib/shiki-theme";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { useEventWake } from "@/hooks/use-event-wake";
-import { parseEventMessage } from "@/lib/event-wake";
+import { stripWakePrefix, type WakeMessageMetadata } from "@/lib/event-wake";
 import { ArrowUp, Square, Trash2, ChevronRight, ImagePlus, X, Loader, Copy, Check, Download, Radio } from "lucide-react";
 
 type ExtraProps = { node?: unknown };
@@ -199,19 +199,26 @@ function ToolCallBlock({ part, onImageLoad }: { part: ToolInvocationPart; onImag
   );
 }
 
-function EventCard({ selector, outcome }: { selector: string; outcome: string }) {
+function EventCard({
+  subscriptionId,
+  count,
+}: {
+  subscriptionId: string;
+  count: number;
+}) {
+  const events = count === 1 ? "unread event" : "unread events";
   return (
     <div className="rounded-md border border-success/40 bg-success/5 px-2.5 py-2 text-[11px]">
       <div className="flex items-center gap-2">
         <Radio className="size-3 shrink-0 text-success" />
         <span className="font-medium text-success">Event received</span>
-        {selector && (
-          <span className="min-w-0 truncate rounded bg-muted px-1.5 py-0.5 font-mono text-foreground">
-            {selector}
-          </span>
-        )}
+        <span className="min-w-0 truncate rounded bg-muted px-1.5 py-0.5 font-mono text-foreground">
+          {subscriptionId}
+        </span>
       </div>
-      {outcome && <p className="mt-1 pl-5 text-muted-foreground">{outcome}</p>}
+      <p className="mt-1 pl-5 text-muted-foreground">
+        {count} {events}. The agent was woken to read them from the bus.
+      </p>
     </div>
   );
 }
@@ -366,7 +373,7 @@ export function ChatPanel() {
     onError: () => setErrorDismissed(false),
   });
 
-  useEventWake({ messages, status, sendMessage });
+  useEventWake({ session: chatId, status, sendMessage });
 
   const visibleError = error && !errorDismissed ? error : undefined;
   const isLoading = status === "streaming" || status === "submitted";
@@ -632,13 +639,18 @@ export function ChatPanel() {
                         .filter((p): p is Extract<typeof p, { type: "text" }> => p.type === "text")
                         .map((p) => p.text)
                         .join("");
-                      const eventInfo = parseEventMessage(userText);
-                      if (eventInfo) {
-                        return <EventCard selector={eventInfo.selector} outcome={eventInfo.outcome} />;
+                      const wake = (message as { metadata?: WakeMessageMetadata }).metadata?.wake;
+                      if (wake) {
+                        return (
+                          <EventCard
+                            subscriptionId={wake.subscriptionId}
+                            count={wake.count}
+                          />
+                        );
                       }
                       return (
                         <div className="text-xs text-muted-foreground whitespace-pre-wrap leading-relaxed">
-                          {userText}
+                          {stripWakePrefix(userText)}
                         </div>
                       );
                     })()}

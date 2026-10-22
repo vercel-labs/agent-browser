@@ -2,16 +2,17 @@
 
 import { atom } from "jotai";
 import { useCallback, useEffect, useRef } from "react";
-import { useSetAtom } from "jotai/react";
+import { useAtomValue, useSetAtom } from "jotai/react";
 import type {
   ActivityEvent,
   ConsoleEntry,
+  EventSubscription,
   StreamMessage,
-  Subscription,
   TabInfo,
 } from "@/types";
 import { getSessionStreamUrl } from "@/lib/dashboard-routes";
-import { reduceSubscriptions, toActivityEvent } from "@/lib/event-subscriptions";
+import { execCommand, sessionArgs } from "@/lib/exec";
+import { isActiveStatus, parseEventsList } from "@/lib/event-subscriptions";
 import { tabCacheAtom, engineCacheAtom } from "@/store/tabs";
 
 const MAX_EVENTS = 500;
@@ -29,7 +30,8 @@ export const viewportHeightAtom = atom(720);
 export const currentFrameAtom = atom<string | null>(null);
 export const streamEventsAtom = atom<ActivityEvent[]>([]);
 export const consoleLogsAtom = atom<ConsoleEntry[]>([]);
-export const eventSubscriptionsAtom = atom<Subscription[]>([]);
+export const eventSubscriptionsAtom = atom<EventSubscription[]>([]);
+export const eventsNudgeAtom = atom<Record<string, number>>({});
 export const streamTabsAtom = atom<TabInfo[]>([]);
 export const streamEngineAtom = atom("");
 export const wsRefAtom = atom<WebSocket | null>(null);
@@ -52,7 +54,7 @@ export const hasConsoleErrorsAtom = atom((get) =>
 
 export const watchingCountAtom = atom(
   (get) =>
-    get(eventSubscriptionsAtom).filter((s) => s.status === "watching").length,
+    get(eventSubscriptionsAtom).filter((s) => isActiveStatus(s.status)).length,
 );
 
 // ---------------------------------------------------------------------------
@@ -92,6 +94,7 @@ export function useStreamSync(port: number) {
   const setEvents = useSetAtom(streamEventsAtom);
   const setConsoleLogs = useSetAtom(consoleLogsAtom);
   const setSubscriptions = useSetAtom(eventSubscriptionsAtom);
+  const setNudges = useSetAtom(eventsNudgeAtom);
   const setTabs = useSetAtom(streamTabsAtom);
   const setEngine = useSetAtom(streamEngineAtom);
   const setWsRef = useSetAtom(wsRefAtom);
@@ -103,7 +106,6 @@ export function useStreamSync(port: number) {
   const retryCountRef = useRef(0);
   const eventsRef = useRef<ActivityEvent[]>([]);
   const consoleRef = useRef<ConsoleEntry[]>([]);
-  const subscriptionsRef = useRef<Subscription[]>([]);
   const portRef = useRef(port);
 
   // Reset all stream state when port changes
@@ -112,7 +114,6 @@ export function useStreamSync(port: number) {
       portRef.current = port;
       eventsRef.current = [];
       consoleRef.current = [];
-      subscriptionsRef.current = [];
       setConnected(false);
       setBrowserConnected(false);
       setScreencasting(false);
@@ -123,10 +124,11 @@ export function useStreamSync(port: number) {
       setEvents([]);
       setConsoleLogs([]);
       setSubscriptions([]);
+      setNudges({});
       setTabs([]);
       setEngine("");
     }
-  }, [port, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setSubscriptions, setTabs, setEngine]);
+  }, [port, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setSubscriptions, setNudges, setTabs, setEngine]);
 
   const connect = useCallback(() => {
     if (port <= 0) return;
@@ -198,15 +200,12 @@ export function useStreamSync(port: number) {
           break;
         }
 
-        case "event": {
-          const subs = reduceSubscriptions(subscriptionsRef.current, msg);
-          subscriptionsRef.current = subs;
-          setSubscriptions(subs);
-          const updated = [...eventsRef.current, toActivityEvent(msg)].slice(
-            -MAX_EVENTS,
-          );
-          eventsRef.current = updated;
-          setEvents(updated);
+        case "events_nudge": {
+          setNudges((prev) => {
+            const current = prev[msg.subscriptionId];
+            if (current != null && current >= msg.head) return prev;
+            return { ...prev, [msg.subscriptionId]: msg.head };
+          });
           break;
         }
 
@@ -242,7 +241,7 @@ export function useStreamSync(port: number) {
           break;
       }
     };
-  }, [port, setWsRef, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setSubscriptions, setTabs, setEngine, setTabCache, setEngineCache]);
+  }, [port, setWsRef, setConnected, setBrowserConnected, setScreencasting, setRecording, setVpWidth, setVpHeight, setFrame, setEvents, setConsoleLogs, setSubscriptions, setNudges, setTabs, setEngine, setTabCache, setEngineCache]);
 
   useEffect(() => {
     connect();
@@ -252,4 +251,69 @@ export function useStreamSync(port: number) {
       setWsRef(null);
     };
   }, [connect, setWsRef]);
+}
+
+const EVENTS_SYNC_INTERVAL_MS = 30_000;
+
+/**
+ * Rebuilds the subscription list from `events list` on connect, on nudges and
+ * on a slow timer, so the dashboard never depends on pushed event payloads.
+ */
+export function useEventHydration(session: string) {
+  const connected = useAtomValue(streamConnectedAtom);
+  const nudges = useAtomValue(eventsNudgeAtom);
+  const setSubscriptions = useSetAtom(eventSubscriptionsAtom);
+  const setNudges = useSetAtom(eventsNudgeAtom);
+  const busyRef = useRef(false);
+  const pendingRef = useRef(false);
+  const requestRef = useRef(0);
+
+  const hydrate = useCallback(async () => {
+    if (!session) return;
+    if (busyRef.current) {
+      pendingRef.current = true;
+      return;
+    }
+    busyRef.current = true;
+    const request = requestRef.current + 1;
+    requestRef.current = request;
+    try {
+      const result = await execCommand(
+        sessionArgs(
+          session,
+          "events",
+          "list",
+          "--owner",
+          `chat:${session}`,
+        ),
+      );
+      if (!result.success || requestRef.current !== request) return;
+      const subscriptions = parseEventsList(result.stdout);
+      if (subscriptions) setSubscriptions(subscriptions);
+    } finally {
+      busyRef.current = false;
+      if (pendingRef.current) {
+        pendingRef.current = false;
+        void hydrate();
+      }
+    }
+  }, [session, setSubscriptions]);
+
+  useEffect(() => {
+    requestRef.current++;
+    setSubscriptions([]);
+    setNudges({});
+  }, [session, setSubscriptions, setNudges]);
+
+  useEffect(() => {
+    if (connected) void hydrate();
+  }, [connected, nudges, hydrate]);
+
+  useEffect(() => {
+    if (!connected) return;
+    const timer = setInterval(() => {
+      void hydrate();
+    }, EVENTS_SYNC_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [connected, hydrate]);
 }

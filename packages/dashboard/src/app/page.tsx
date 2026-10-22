@@ -1,9 +1,9 @@
 "use client";
 
 import { useAtomValue, useSetAtom } from "jotai/react";
-import { activePortAtom, sessionsAtom, newSessionDialogAtom } from "@/store/sessions";
+import { activePortAtom, activeSessionNameAtom, sessionsAtom, newSessionDialogAtom } from "@/store/sessions";
 import { useSessionsSync } from "@/store/sessions";
-import { useStreamSync, hasConsoleErrorsAtom, consoleLogsAtom, watchingCountAtom } from "@/store/stream";
+import { useStreamSync, useEventHydration, hasConsoleErrorsAtom, consoleLogsAtom, watchingCountAtom } from "@/store/stream";
 import { useActivitySync } from "@/store/activity";
 import { activeExtensionsAtom } from "@/store/sessions";
 import { useChatStatusSync } from "@/store/chat";
@@ -30,7 +30,9 @@ import { Plus } from "lucide-react";
 export default function DashboardPage() {
   initializeDashboardAccessToken();
   const activePort = useAtomValue(activePortAtom);
+  const activeSession = useAtomValue(activeSessionNameAtom);
   useStreamSync(activePort);
+  useEventHydration(activeSession);
   useSessionsSync();
   useActivitySync();
   useChatStatusSync();

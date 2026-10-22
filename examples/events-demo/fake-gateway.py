@@ -8,7 +8,7 @@ fixed agent run through the single agent_browser tool: open the page, look for
 hidden elements, snapshot, fill the form, upload the file, start an events
 subscription for the element that appears on completion, click Deploy, then end
 the turn with a short message. When the conversation's last user message starts
-with "[agent-browser event]" (the dashboard delivering the fired subscription),
+with "[agent-browser event]" (the dashboard waking the chat with bus metadata),
 it replies with the final summary and no tool calls. Refs and selectors are read
 from the earlier tool results in the messages, never hardcoded.
 """
@@ -22,7 +22,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 EVENT_PREFIX = "[agent-browser event]"
-EVENT_RE = re.compile(r'Subscription (\S+) on "(.*)": (.*?)\. Page text: "(.*?)"\.', re.S)
+WAKE_RE = re.compile(r"Subscription (\S+) has (\d+) unread event")
 
 HIDDEN_JS = (
     '[...document.querySelectorAll("[hidden]")].map(e => "hidden #" + e.id'
@@ -53,6 +53,11 @@ def parse_request(messages):
     """Extracts the user's inputs and the tool results that follow the last user message."""
     user_texts = [(i, message_text(m)) for i, m in enumerate(messages) if m.get("role") == "user"]
     event_text = user_texts[-1][1] if user_texts and user_texts[-1][1].startswith(EVENT_PREFIX) else None
+    event_results = [
+        message_text(m)
+        for m in messages[(user_texts[-1][0] + 1):]
+        if message_text(m) and m.get("role") == "tool"
+    ] if event_text else []
     prompts = [(i, t) for i, t in user_texts if not t.startswith(EVENT_PREFIX)]
     last_user, text = prompts[-1] if prompts else (-1, "")
     results = [message_text(m) for m in messages[last_user + 1:] if m.get("role") == "tool"]
@@ -70,7 +75,15 @@ def parse_request(messages):
     project = name_match.group(1).strip() if name_match else "Acme Dashboard"
     env_match = re.search(r"\b(production|preview|development)\b", text, re.I)
     environment = env_match.group(1).capitalize() if env_match else "Production"
-    return {"url": url, "path": path, "project": project, "environment": environment, "results": results, "event": event_text}
+    return {
+        "url": url,
+        "path": path,
+        "project": project,
+        "environment": environment,
+        "results": results,
+        "event": event_text,
+        "event_results": event_results,
+    }
 
 
 def find_ref(snapshot, name_pattern, roles=None):
@@ -131,7 +144,7 @@ def build_steps():
     def start_events(c):
         selector = find_completion_selector(c["results"][1])
         c["selector"] = selector
-        return "agent-browser events start --selector '%s'" % selector
+        return "agent-browser events start --selector '%s' --once" % selector
 
     def click_deploy(c):
         ref = find_ref(c["results"][2], r"^deploy$", {"button"})
@@ -155,18 +168,17 @@ def submitted_text(c):
 
 
 def final_text(c):
-    """Builds the closing summary from the event message that woke the agent."""
-    m = EVENT_RE.search(c["event"])
+    """Builds the closing summary from the wake message the dashboard sent."""
+    m = WAKE_RE.search(c["event"])
     if not m:
-        return "I received an event but could not read it: " + c["event"][:300]
-    _id, selector, outcome, page_text = m.groups()
-    if not outcome.startswith("element became"):
-        return "The subscription on %s %s, so the upload did not report completion." % (selector, outcome)
-    shown = "" if page_text == "none" else ' The page says "%s".' % page_text
+        return "I received an event wake-up but could not read it: " + c["event"][:300]
+    subscription, count = m.groups()
+    selector = c.get("selector") or "the completion signal"
     return (
-        "The upload finished: the event for %s fired (%s).%s "
-        "I filled %s for the %s environment, attached the package, subscribed before submitting, and picked this up from the event without polling."
-        % (selector, outcome, shown, c["project"], c["environment"])
+        "The upload finished: subscription %s on %s has %s unread event(s). "
+        "I read the subscription, filled %s for the %s environment, attached the package, "
+        "subscribed before submitting, and picked this up from the bus without polling."
+        % (subscription, selector, count, c["project"], c["environment"])
     )
 
 
@@ -174,7 +186,18 @@ def next_action(messages):
     """Decides the reply for the current step: a tool call or a closing text."""
     c = parse_request(messages)
     if c["event"]:
-        log("event message, final answer")
+        m = WAKE_RE.search(c["event"])
+        if not m:
+            log("wake message without a subscription id")
+            return {"text": final_text(c), "command": None}
+        if not c["event_results"]:
+            subscription = m.group(1)
+            log("wake received, reading subscription %s" % subscription)
+            return {
+                "text": "The subscription has unread events. Reading them now.",
+                "command": "agent-browser events read %s" % subscription,
+            }
+        log("read result received, final answer")
         return {"text": final_text(c), "command": None}
     steps = build_steps()
     index = len(c["results"])

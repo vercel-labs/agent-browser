@@ -2,9 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useAtomValue, useSetAtom } from "jotai/react";
-import type { ActivityEvent, EventActivity } from "@/types";
+import type { ActivityEvent } from "@/types";
 import { combinedEventsAtom, persistActivityAtom, togglePersistAtom, clearActivityAtom } from "@/store/activity";
-import { Bookmark, CircleStop, Eye, EyeOff, Radio, Trash2 } from "lucide-react";
+import { Bookmark, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -161,56 +161,6 @@ function ConsoleEntry({
   );
 }
 
-const EVENT_LABELS: Record<EventActivity["name"], string> = {
-  "subscription.ready": "watching",
-  "element.visible": "became visible",
-  "element.hidden": "became hidden",
-  "subscription.ended": "ended",
-};
-
-const EVENT_ICONS = {
-  "subscription.ready": Radio,
-  "element.visible": Eye,
-  "element.hidden": EyeOff,
-  "subscription.ended": CircleStop,
-} as const;
-
-function EventEntry({ event }: { event: EventActivity }) {
-  const Icon = EVENT_ICONS[event.name];
-  const fired =
-    event.name === "element.visible" || event.name === "element.hidden";
-  return (
-    <>
-      <div className="flex items-center gap-2 py-1.5 px-3 text-xs">
-        <span className="shrink-0 font-mono text-muted-foreground">
-          {formatTime(event.timestamp)}
-        </span>
-        <Icon
-          className={cn(
-            "size-3 shrink-0",
-            fired ? "text-success" : "text-muted-foreground",
-          )}
-        />
-        <span className="shrink-0">{EVENT_LABELS[event.name]}</span>
-        <span className="truncate font-mono text-muted-foreground">
-          {event.selector}
-        </span>
-        {event.name === "subscription.ended" && event.reason && (
-          <span className="shrink-0 text-muted-foreground">
-            {event.reason}
-          </span>
-        )}
-        {event.label && (
-          <span className="ml-auto max-w-[40%] shrink-0 truncate">
-            {event.label}
-          </span>
-        )}
-      </div>
-      <Separator />
-    </>
-  );
-}
-
 export function ActivityFeed() {
   const events = useAtomValue(combinedEventsAtom);
   const persist = useAtomValue(persistActivityAtom);
@@ -287,8 +237,6 @@ export function ActivityFeed() {
                 return <ResultEntry key={key} event={event} />;
               case "console":
                 return <ConsoleEntry key={key} event={event} />;
-              case "event":
-                return <EventEntry key={key} event={event} />;
             }
           })
         )}

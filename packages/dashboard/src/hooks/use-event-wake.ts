@@ -4,47 +4,67 @@ import { useEffect, useRef } from "react";
 import { useAtomValue } from "jotai/react";
 import { chatEnabledAtom } from "@/store/chat";
 import { eventSubscriptionsAtom } from "@/store/stream";
-import { buildWakeText, shouldWake, type WakeContext } from "@/lib/event-wake";
+import {
+  buildWakeText,
+  shouldWake,
+  type WakeMessageMetadata,
+  type WakePayload,
+} from "@/lib/event-wake";
+import { unreadCount } from "@/lib/event-subscriptions";
 
 interface UseEventWakeOptions {
-  messages: WakeContext["messages"];
+  session: string;
   status: string;
-  sendMessage: (message: { text: string }) => unknown;
+  sendMessage: (
+    message: { text: string; metadata?: WakeMessageMetadata },
+    options: { body: { wake: WakePayload } },
+  ) => unknown;
 }
 
 /**
- * Sends the agent a new message when a subscription started in this panel finishes,
- * once per subscription, and only while the chat is idle.
+ * Wakens the agent when an owned subscription has unread events and the chat is
+ * idle, at most once per subscription every ten seconds.
  */
-export function useEventWake({ messages, status, sendMessage }: UseEventWakeOptions) {
+export function useEventWake({
+  session,
+  status,
+  sendMessage,
+}: UseEventWakeOptions) {
   const subscriptions = useAtomValue(eventSubscriptionsAtom);
   const chatEnabled = useAtomValue(chatEnabledAtom);
-  const preexisting = useRef<Set<string> | null>(null);
-  if (preexisting.current === null) {
-    preexisting.current = new Set(subscriptions.map((s) => s.id));
-  }
-  const tracked = useRef(new Set<string>());
-  const woken = useRef(new Set<string>());
+  const sentKeys = useRef(new Set<string>());
+  const lastSentAt = useRef(new Map<string, number>());
 
   useEffect(() => {
+    if (!chatEnabled || !session) return;
+    const now = Date.now();
     for (const sub of subscriptions) {
-      if (sub.status === "watching" && !preexisting.current!.has(sub.id)) {
-        tracked.current.add(sub.id);
-      }
-    }
-    for (const sub of subscriptions) {
+      const key = `${sub.id}:${sub.head}`;
       const ok = shouldWake({
         sub,
-        tracked: tracked.current.has(sub.id),
-        woken: woken.current.has(sub.id),
+        session,
         chatReady: status === "ready",
         chatEnabled,
-        messages,
+        sent: sentKeys.current.has(key),
+        lastSentAt: lastSentAt.current.get(sub.id),
+        now,
       });
       if (!ok) continue;
-      woken.current.add(sub.id);
-      sendMessage({ text: buildWakeText(sub) });
+      sentKeys.current.add(key);
+      lastSentAt.current.set(sub.id, now);
+      const wake: WakePayload = {
+        subscriptionId: sub.id,
+        seq: sub.head,
+        cursor: `${sub.id}:${sub.head}`,
+      };
+      sendMessage(
+        {
+          text: buildWakeText(sub),
+          metadata: { wake: { ...wake, count: unreadCount(sub) } },
+        },
+        { body: { wake } },
+      );
       return;
     }
-  }, [subscriptions, status, chatEnabled, messages, sendMessage]);
+  }, [subscriptions, status, chatEnabled, session, sendMessage]);
 }
