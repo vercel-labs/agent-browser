@@ -4271,6 +4271,103 @@ async fn e2e_domain_filter_reports_blocked_redirect() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_domain_filter_navigates_page_with_cross_origin_iframes() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+    let requests_for_server = requests.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..20 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let requests = requests_for_server.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let request_line = request.lines().next().unwrap_or("").to_string();
+                let body = if request_line.contains(" /probe ") {
+                    "<p id=r>pending</p><script>fetch('https://example.com/').then(() => r.textContent = 'fetch allowed', (e) => r.textContent = 'fetch ' + e.name)</script>".to_string()
+                } else {
+                    format!(
+                        "<title>frames</title><iframe src=\"http://127.0.0.1:{port}/probe\"></iframe><iframe src=\"http://blocked.localtest.me:{port}/denied\"></iframe>"
+                    )
+                };
+                if let Ok(mut logged) = requests.lock() {
+                    logged.push(request_line);
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    {
+        let mut df = state.domain_filter.write().await;
+        *df = Some(super::network::DomainFilter::new("localhost,127.0.0.1"));
+    }
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Both iframes are cross-origin, so each attaches paused before it has an
+    // execution context.
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": format!("http://localhost:{}/", port),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The probe frame reports its fetch result asynchronously.
+    let mut snapshot = String::new();
+    for _ in 0..50 {
+        let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+        assert_success(&resp);
+        snapshot = get_data(&resp)["snapshot"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        if snapshot.contains("fetch SecurityError")
+            && snapshot.contains("not allowed by domain filter")
+        {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        snapshot.contains("fetch SecurityError"),
+        "Allowed iframe should run the domain filter script: {}",
+        snapshot
+    );
+    assert!(
+        snapshot.contains("not allowed by domain filter"),
+        "Blocked iframe should receive the domain filter block page: {}",
+        snapshot
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_domain_filter_blocks_page_created_popup_before_first_request() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
