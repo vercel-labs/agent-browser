@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { runEvents, SELECTOR_HINT } from "../lib/browser";
 
-const pointerPath = z.string().describe('JSON pointer into the event payload, e.g. "/params/url".');
+const pointerPath = z.string().describe('JSON pointer into the event payload, e.g. "/url" for a navigation event.');
 
 export default defineTool({
   description:

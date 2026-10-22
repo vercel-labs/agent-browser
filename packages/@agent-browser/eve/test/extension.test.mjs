@@ -548,9 +548,9 @@ for (const contentBoundaries of [false, true]) {
         "start --selector '#dialog' --state hidden --once --ttl 30 --owner session-42 --key dialog"],
       ["events_start", {
         method: "Page.frameNavigated",
-        matches: [{ path: "/params/url", value: "https://example.com/" }],
-        matchRegex: [{ path: "/params/url", regex: "^https://" }],
-      }, "start --method Page.frameNavigated --match /params/url=https://example.com/ --match-regex '/params/url=^https://' --owner session-42"],
+        matches: [{ path: "/url", value: "https://example.com/" }],
+        matchRegex: [{ path: "/url", regex: "^https://" }],
+      }, "start --method Page.frameNavigated --match /url=https://example.com/ --match-regex '/url=^https://' --owner session-42"],
       ["events_read", { id: "ev_1", since: "ev_1:2", waitMs: 5000, limit: 10, ack: true },
         "read ev_1 --since ev_1:2 --wait 5000 --limit 10 --ack"],
       ["events_ack", { id: "ev_1", cursor: "ev_1:3" }, "ack ev_1 ev_1:3 --owner session-42"],
@@ -569,6 +569,20 @@ for (const contentBoundaries of [false, true]) {
     resetConfig();
   });
 }
+
+test("events results keep the content boundary metadata", async () => {
+  resetConfig();
+  const waiting = { id: "ev_1", status: "watching", events: [], cursor: "ev_1:0", head: 0, consumed: 0, waiting: true };
+  const boundary = { nonce: "n-1", origin: "page" };
+  const sandbox = fakeSandbox({
+    id: "events-boundary",
+    respond: () => ({
+      stdout: JSON.stringify({ success: true, data: waiting, error: null, _boundary: boundary }),
+    }),
+  });
+  const result = await tools.events_read.execute({ id: "ev_1" }, fakeCtx(sandbox));
+  assert.deepEqual(result, { boundary, data: waiting });
+});
 
 test("events start requires exactly one source", async () => {
   resetConfig();

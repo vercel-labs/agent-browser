@@ -169,7 +169,7 @@ export default function DashboardPage() {
         <TabsContent value="viewport" className="min-h-0 overflow-hidden">
           <Viewport />
         </TabsContent>
-        <TabsContent value="activity" className="min-h-0 overflow-hidden">
+        <TabsContent value="activity" forceMount className="min-h-0 overflow-hidden data-[state=inactive]:hidden">
           {sidePanel}
         </TabsContent>
       </Tabs>

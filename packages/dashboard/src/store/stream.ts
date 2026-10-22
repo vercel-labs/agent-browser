@@ -266,9 +266,12 @@ export function useEventHydration(session: string) {
   const busyRef = useRef(false);
   const pendingRef = useRef(false);
   const requestRef = useRef(0);
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
 
   const hydrate = useCallback(async () => {
-    if (!session) return;
+    const current = sessionRef.current;
+    if (!current) return;
     if (busyRef.current) {
       pendingRef.current = true;
       return;
@@ -277,9 +280,9 @@ export function useEventHydration(session: string) {
     const request = ++requestRef.current;
     try {
       const result = await execCommand(
-        sessionArgs(session, "events", "list", "--owner", `chat:${session}`),
+        sessionArgs(current, "events", "list", "--owner", `chat:${current}`),
       );
-      if (!result.success || requestRef.current !== request) return;
+      if (!result.success || requestRef.current !== request || sessionRef.current !== current) return;
       const subscriptions = parseEventsList(result.stdout);
       if (subscriptions) setSubscriptions(subscriptions);
     } finally {
@@ -289,7 +292,7 @@ export function useEventHydration(session: string) {
         void hydrate();
       }
     }
-  }, [session, setSubscriptions]);
+  }, [setSubscriptions]);
 
   useEffect(() => {
     requestRef.current++;
@@ -299,7 +302,7 @@ export function useEventHydration(session: string) {
 
   useEffect(() => {
     if (connected) void hydrate();
-  }, [connected, nudges, hydrate]);
+  }, [connected, nudges, hydrate, session]);
 
   useEffect(() => {
     if (!connected) return;

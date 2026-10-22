@@ -10,6 +10,26 @@ import { unreadCount } from "@/lib/event-subscriptions";
 
 type UseEventWakeOptions = Pick<ReturnType<typeof useChat>, "status" | "sendMessage"> & { session: string };
 
+const WAKE_TIMES_KEY = "agent-browser:event-wake-times";
+
+function readWakeTimes(): Map<string, number> {
+  try {
+    const raw = sessionStorage.getItem(WAKE_TIMES_KEY);
+    if (raw === null) return new Map();
+    return new Map(Object.entries(JSON.parse(raw) as Record<string, number>));
+  } catch {
+    return new Map();
+  }
+}
+
+function writeWakeTimes(times: Map<string, number>): void {
+  try {
+    sessionStorage.setItem(WAKE_TIMES_KEY, JSON.stringify(Object.fromEntries(times)));
+  } catch {
+    return;
+  }
+}
+
 /**
  * Wakens the agent when an owned subscription has unread events and the chat is
  * idle, at most once per subscription every ten seconds.
@@ -18,14 +38,15 @@ export function useEventWake({ session, status, sendMessage }: UseEventWakeOptio
   const subscriptions = useAtomValue(eventSubscriptionsAtom);
   const chatEnabled = useAtomValue(chatEnabledAtom);
   const sentKeys = useRef(new Set<string>());
-  const lastSentAt = useRef(new Map<string, number>());
+  const lastSentAt = useRef<Map<string, number> | null>(null);
 
   useEffect(() => {
     if (!chatEnabled || !session || status !== "ready") return;
+    const times = (lastSentAt.current ??= readWakeTimes());
     const now = Date.now();
     for (const sub of subscriptions) {
       const key = `${sub.id}:${sub.head}`;
-      const last = lastSentAt.current.get(sub.id);
+      const last = times.get(sub.id);
       if (
         sub.owner !== `chat:${session}` ||
         unreadCount(sub) <= 0 ||
@@ -33,19 +54,24 @@ export function useEventWake({ session, status, sendMessage }: UseEventWakeOptio
         (last != null && now - last < WAKE_MIN_INTERVAL_MS)
       ) continue;
       sentKeys.current.add(key);
-      lastSentAt.current.set(sub.id, now);
+      times.set(sub.id, now);
+      writeWakeTimes(times);
       const wake: WakePayload = {
         subscriptionId: sub.id,
         seq: sub.head,
         cursor: key,
       };
-      sendMessage(
+      void sendMessage(
         {
           text: buildWakeText(sub),
           metadata: { wake: { ...wake, count: unreadCount(sub) } },
         },
         { body: { wake } },
-      );
+      ).catch(() => {
+        sentKeys.current.delete(key);
+        times.delete(sub.id);
+        writeWakeTimes(times);
+      });
       return;
     }
   }, [subscriptions, status, chatEnabled, session, sendMessage]);

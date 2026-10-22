@@ -15,7 +15,13 @@ export interface BrowserToolContext {
   readonly session: { readonly id: string };
 }
 
+interface ContentBoundary {
+  readonly nonce: string;
+  readonly origin: string;
+}
+
 interface CommandEnvelope<TData> {
+  readonly _boundary?: ContentBoundary;
   readonly data: TData | null;
   readonly error: string | null;
   readonly success: boolean;
@@ -63,6 +69,27 @@ export async function runBrowser<TData = unknown>(
   ctx: BrowserToolContext,
   args: readonly string[],
 ): Promise<TData> {
+  const envelope = await runCommand<TData>(ctx, args);
+  return (envelope?.data ?? null) as TData;
+}
+
+/** Run an events command with content boundaries forced on, keeping the boundary with the data. */
+export async function runEvents<TData = unknown>(
+  ctx: BrowserToolContext,
+  args: readonly string[],
+): Promise<TData> {
+  const boundaries = extension.config.contentBoundaries ? [] : ["--content-boundaries"];
+  const envelope = await runCommand<TData>(ctx, [...args, ...boundaries]);
+  const data = envelope?.data ?? null;
+  return (envelope?._boundary === undefined
+    ? data
+    : { boundary: envelope._boundary, data }) as TData;
+}
+
+async function runCommand<TData>(
+  ctx: BrowserToolContext,
+  args: readonly string[],
+): Promise<CommandEnvelope<TData> | null> {
   const sandbox = await requireSandbox(ctx);
   await ensureInstalled(sandbox, ctx.abortSignal);
 
@@ -89,16 +116,7 @@ export async function runBrowser<TData = unknown>(
   if (result.exitCode !== 0) {
     throw new AgentBrowserCommandError(result);
   }
-  return (envelope?.data ?? null) as TData;
-}
-
-/** Run an events command with content boundaries forced on for its untrusted page data. */
-export async function runEvents<TData = unknown>(
-  ctx: BrowserToolContext,
-  args: readonly string[],
-): Promise<TData> {
-  const boundaries = extension.config.contentBoundaries ? [] : ["--content-boundaries"];
-  return await runBrowser<TData>(ctx, [...args, ...boundaries]);
+  return envelope;
 }
 
 async function requireSandbox(ctx: BrowserToolContext): Promise<EveSandboxSession> {
