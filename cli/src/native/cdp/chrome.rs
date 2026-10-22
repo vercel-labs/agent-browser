@@ -710,6 +710,135 @@ fn terminate_launched_chrome(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// Name prefixes of per-launch temp profile directories that are always
+/// throwaway: `agent-browser-chrome-*` (default profile of a launch) and
+/// `agent-browser-profile-*` (copy of a named Chrome profile). Both are
+/// user-data-dirs, so a live Chrome holds a `SingletonLock` inside them.
+///
+/// `agent-browser-nss-*` is deliberately not swept: it is the HOME of a
+/// Chrome process, has no liveness marker, and one prepared home can be shared
+/// across several launches, so a stale-looking one may still be in use.
+#[cfg(unix)]
+const STALE_PROFILE_PREFIXES: [&str; 2] = ["agent-browser-chrome-", "agent-browser-profile-"];
+
+/// Only directories untouched for at least this long are considered.
+#[cfg(unix)]
+const STALE_PROFILE_MIN_AGE: Duration = Duration::from_secs(2 * 60 * 60);
+
+/// Upper bound on matching directories handled per sweep, so a very full temp
+/// directory can never delay a launch for long.
+#[cfg(unix)]
+const STALE_PROFILE_MAX_PER_SWEEP: usize = 50;
+
+/// Removes temp profiles leaked by daemons that were killed or crashed before
+/// `ChromeProcess::drop` could run. Best effort: every error is ignored and
+/// anything that looks possibly in use is kept. Returns the number removed.
+pub fn sweep_stale_temp_profiles() -> usize {
+    #[cfg(unix)]
+    {
+        let removed = sweep_stale_profiles_in(
+            &std::env::temp_dir(),
+            &STALE_PROFILE_PREFIXES,
+            STALE_PROFILE_MIN_AGE,
+        );
+        if removed > 0 && std::env::var_os("AGENT_BROWSER_DEBUG").is_some() {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[chrome] Removed {} stale temp profile(s) left by earlier sessions",
+                removed
+            );
+        }
+        removed
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
+#[cfg(unix)]
+fn sweep_stale_profiles_in(root: &Path, prefixes: &[&str], min_age: Duration) -> usize {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return 0,
+    };
+    let mut handled = 0;
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        if handled >= STALE_PROFILE_MAX_PER_SWEEP {
+            break;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !prefixes.iter().any(|p| name.starts_with(p)) {
+            continue;
+        }
+        handled += 1;
+        let path = entry.path();
+        if is_stale_profile_dir(&path, min_age) && std::fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// True only for a real (non-symlink) directory that is old enough and whose
+/// Chrome `SingletonLock` does not point at a live process.
+#[cfg(unix)]
+fn is_stale_profile_dir(path: &Path, min_age: Duration) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !meta.file_type().is_dir() {
+        return false;
+    }
+    let old_enough = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.elapsed().ok())
+        .is_some_and(|age| age >= min_age);
+    if !old_enough {
+        return false;
+    }
+    match std::fs::read_link(path.join("SingletonLock")) {
+        // No lock: Chrome never started here, or it shut down cleanly.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        // Unreadable or not a symlink: cannot tell, keep it.
+        Err(_) => false,
+        // Chrome writes the target as "<hostname>-<pid>".
+        Ok(target) => lock_owner_is_dead(&target.to_string_lossy()),
+    }
+}
+
+#[cfg(unix)]
+fn lock_owner_is_dead(target: &str) -> bool {
+    let Some((host, pid)) = target.rsplit_once('-') else {
+        return false;
+    };
+    let Ok(pid) = pid.parse::<i32>() else {
+        return false;
+    };
+    if pid <= 0 || host != local_hostname().unwrap_or_default() {
+        // A lock from another host or PID namespace says nothing about our pids.
+        return false;
+    }
+    // SAFETY: signal 0 only checks that the process exists.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(unix)]
+fn local_hostname() -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: buf is valid for buf.len() bytes.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if rc != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    Some(String::from_utf8_lossy(&buf[..end]).into_owned())
+}
+
 pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
     let chrome_path = match &options.executable_path {
         Some(p) => PathBuf::from(p),
@@ -726,6 +855,10 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
             )
         })?,
     };
+
+    // Reclaim temp profiles leaked by daemons that were killed before Drop ran.
+    // Once per launch, before this launch creates any temp dir of its own.
+    sweep_stale_temp_profiles();
 
     // Profile name preprocessing: if --profile is a Chrome profile name (not a
     // path), resolve it to a directory, copy the profile to a temp dir, and
@@ -3001,5 +3134,151 @@ exec sleep 60
     fn auto_connect_wait_stays_below_client_read_timeout() {
         let client_floor = crate::connection::read_timeout_for(&serde_json::json!({}));
         assert!(AUTO_CONNECT_WS_VERIFY_TIMEOUT < client_floor);
+    }
+
+    #[cfg(unix)]
+    mod sweep {
+        use super::super::*;
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        const PFX: &str = "abtest-sweep-";
+
+        fn root() -> PathBuf {
+            let r =
+                std::env::temp_dir().join(format!("abtest-sweep-root-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&r).unwrap();
+            r
+        }
+
+        fn run(root: &Path, min_age: Duration) -> usize {
+            sweep_stale_profiles_in(root, &[PFX], min_age)
+        }
+
+        fn lock(dir: &Path, pid: u32) {
+            let target = format!("{}-{}", local_hostname().unwrap(), pid);
+            symlink(target, dir.join("SingletonLock")).unwrap();
+        }
+
+        fn dead_pid() -> u32 {
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            let pid = child.id();
+            child.wait().unwrap();
+            pid
+        }
+
+        #[test]
+        fn removes_dir_with_dead_pid_lock() {
+            let r = root();
+            let d = r.join(format!("{PFX}dead"));
+            std::fs::create_dir_all(d.join("Default")).unwrap();
+            lock(&d, dead_pid());
+            assert_eq!(run(&r, Duration::ZERO), 1);
+            assert!(!d.exists());
+            let _ = std::fs::remove_dir_all(&r);
+        }
+
+        #[test]
+        fn removes_dir_without_lock() {
+            let r = root();
+            let d = r.join(format!("{PFX}nolock"));
+            std::fs::create_dir_all(&d).unwrap();
+            assert_eq!(run(&r, Duration::ZERO), 1);
+            assert!(!d.exists());
+            let _ = std::fs::remove_dir_all(&r);
+        }
+
+        #[test]
+        fn keeps_dir_with_live_pid_lock() {
+            let r = root();
+            let d = r.join(format!("{PFX}live"));
+            std::fs::create_dir_all(&d).unwrap();
+            lock(&d, std::process::id());
+            assert_eq!(run(&r, Duration::ZERO), 0);
+            assert!(d.exists());
+            let _ = std::fs::remove_dir_all(&r);
+        }
+
+        #[test]
+        fn keeps_lock_from_other_host_or_garbage() {
+            let r = root();
+            let a = r.join(format!("{PFX}otherhost"));
+            std::fs::create_dir_all(&a).unwrap();
+            symlink(
+                format!("not-this-host-{}", dead_pid()),
+                a.join("SingletonLock"),
+            )
+            .unwrap();
+            let b = r.join(format!("{PFX}garbage"));
+            std::fs::create_dir_all(&b).unwrap();
+            symlink("garbage", b.join("SingletonLock")).unwrap();
+            assert_eq!(run(&r, Duration::ZERO), 0);
+            assert!(a.exists() && b.exists());
+            let _ = std::fs::remove_dir_all(&r);
+        }
+
+        #[test]
+        fn keeps_recent_dir() {
+            let r = root();
+            let d = r.join(format!("{PFX}recent"));
+            std::fs::create_dir_all(&d).unwrap();
+            assert_eq!(run(&r, STALE_PROFILE_MIN_AGE), 0);
+            assert!(d.exists());
+            let _ = std::fs::remove_dir_all(&r);
+        }
+
+        #[test]
+        fn keeps_unrelated_names() {
+            let r = root();
+            let a = r.join("something-else");
+            let b = r.join(format!("x{PFX}nested"));
+            std::fs::create_dir_all(&a).unwrap();
+            std::fs::create_dir_all(&b).unwrap();
+            assert_eq!(run(&r, Duration::ZERO), 0);
+            assert!(a.exists() && b.exists());
+            let _ = std::fs::remove_dir_all(&r);
+        }
+
+        #[test]
+        fn keeps_symlink_and_its_target() {
+            let r = root();
+            let target = r.join("precious");
+            std::fs::create_dir_all(&target).unwrap();
+            std::fs::write(target.join("f"), "x").unwrap();
+            let link = r.join(format!("{PFX}link"));
+            symlink(&target, &link).unwrap();
+            let file = r.join(format!("{PFX}file"));
+            std::fs::write(&file, "x").unwrap();
+            assert_eq!(run(&r, Duration::ZERO), 0);
+            assert!(link.exists() && target.join("f").exists() && file.exists());
+            let _ = std::fs::remove_dir_all(&r);
+        }
+
+        #[test]
+        fn unreadable_dir_does_not_panic() {
+            let r = root();
+            let d = r.join(format!("{PFX}locked"));
+            std::fs::create_dir_all(d.join("inner")).unwrap();
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let _ = run(&r, Duration::ZERO);
+            let _ = std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755));
+            let _ = std::fs::remove_dir_all(&r);
+        }
+
+        #[test]
+        fn missing_root_does_not_panic() {
+            let missing =
+                std::env::temp_dir().join(format!("abtest-sweep-none-{}", uuid::Uuid::new_v4()));
+            assert_eq!(run(&missing, Duration::ZERO), 0);
+        }
+
+        #[test]
+        fn caps_work_per_sweep() {
+            let r = root();
+            for i in 0..(STALE_PROFILE_MAX_PER_SWEEP + 5) {
+                std::fs::create_dir_all(r.join(format!("{PFX}{i}"))).unwrap();
+            }
+            assert_eq!(run(&r, Duration::ZERO), STALE_PROFILE_MAX_PER_SWEEP);
+            let _ = std::fs::remove_dir_all(&r);
+        }
     }
 }
