@@ -290,8 +290,9 @@ async function eventsApproach(scenario: Scenario): Promise<ApproachResult> {
       };
     }
     id = started;
+    const cursor = String(at(start.json, ["data", "cursor"]) ?? "");
     const wait = await cli(
-      ["events", "wait", id, "--timeout", String(CAP_MS)],
+      ["events", "wait", id, "--since", cursor, "--timeout", String(CAP_MS)],
       CAP_MS + 5_000,
     );
     calls += 1;
@@ -301,7 +302,9 @@ async function eventsApproach(scenario: Scenario): Promise<ApproachResult> {
     const signalAt = await readSignalAt();
     const events = at(wait.json, ["data", "events"]);
     const waiting = at(wait.json, ["data", "waiting"]);
-    const observed = Array.isArray(events) && events.length > 0;
+    const observed =
+      Array.isArray(events) &&
+      events.some((event) => !String(at(event, ["meta", "name"])).startsWith("subscription."));
     if (!wait.ok || waiting === true || !observed || signalAt === null) {
       return {
         status: wait.ok ? "failed" : "unsupported",
