@@ -28,8 +28,8 @@ function fakeSandbox({ respond } = {}) {
   };
 }
 
-function fakeCtx(sandbox) {
-  return { getSandbox: async () => sandbox };
+function fakeCtx(sandbox, sessionId = "sess-test") {
+  return { getSandbox: async () => sandbox, session: { id: sessionId } };
 }
 
 function resetConfig(overrides = {}) {
@@ -43,6 +43,11 @@ test("exports the full tool set", () => {
     "console",
     "drag",
     "evaluate",
+    "events_ack",
+    "events_list",
+    "events_read",
+    "events_start",
+    "events_stop",
     "fill",
     "find",
     "get",
@@ -527,6 +532,70 @@ test("wait_for reports load-state timeout as unsatisfied instead of throwing", a
     satisfied: false,
     timedOut: true,
   });
+});
+
+for (const contentBoundaries of [false, true]) {
+  test(`events commands enforce ownership and one boundary flag (config: ${contentBoundaries})`, async () => {
+    resetConfig({ contentBoundaries });
+    const waiting = { id: "ev_1", status: "watching", events: [], cursor: "ev_1:0", head: 0, consumed: 0, waiting: true };
+    const sandbox = fakeSandbox({ id: "events", respond: () => ({ stdout: OK(waiting) }) });
+    const ctx = fakeCtx(sandbox, "session-42");
+    const cases = [
+      ["events_start", { selector: "#dialog", state: "hidden", once: true, ttlSeconds: 30, key: "dialog" },
+        "start --selector '#dialog' --state hidden --once --ttl 30 --owner session-42 --key dialog"],
+      ["events_start", {
+        method: "Page.frameNavigated",
+        matches: [{ path: "/url", value: "https://example.com/" }],
+        matchRegex: [{ path: "/url", regex: "^https://" }],
+      }, "start --method Page.frameNavigated --match /url=https://example.com/ --match-regex '/url=^https://' --owner session-42"],
+      ["events_read", { id: "ev_1", since: "ev_1:2", waitMs: 5000, limit: 10, ack: true },
+        "read ev_1 --since ev_1:2 --wait 5000 --limit 10 --ack"],
+      ["events_ack", { id: "ev_1", cursor: "ev_1:3" }, "ack ev_1 ev_1:3 --owner session-42"],
+      ["events_list", { unread: true }, "list --unread --owner session-42"],
+      ["events_list", { unread: false }, "list --owner session-42"],
+      ["events_stop", { id: "ev_1" }, "stop ev_1 --owner session-42"],
+    ];
+    for (const [name, input, expected] of cases) {
+      const result = await tools[name].execute({ ...input, owner: "someone-else" }, ctx);
+      const command = sandbox.commands.at(-1);
+      assert.equal(command, `agent-browser --session eve-default events ${expected} --content-boundaries --json`);
+      assert.ok(!command.includes("someone-else"), command);
+      assert.equal(command.match(/--content-boundaries/g)?.length, 1);
+      if (name === "events_read") assert.deepEqual(result, waiting);
+    }
+    resetConfig();
+  });
+}
+
+test("events results keep the content boundary metadata", async () => {
+  resetConfig();
+  const waiting = { id: "ev_1", status: "watching", events: [], cursor: "ev_1:0", head: 0, consumed: 0, waiting: true };
+  const boundary = { nonce: "n-1", origin: "page" };
+  const sandbox = fakeSandbox({
+    id: "events-boundary",
+    respond: () => ({
+      stdout: JSON.stringify({ success: true, data: waiting, error: null, _boundary: boundary }),
+    }),
+  });
+  const result = await tools.events_read.execute({ id: "ev_1" }, fakeCtx(sandbox));
+  assert.deepEqual(result, { boundary, data: waiting });
+});
+
+test("events start requires exactly one source", async () => {
+  resetConfig();
+  const ctx = fakeCtx(fakeSandbox());
+  await assert.rejects(() => tools.events_start.execute({}, ctx), /selector or method/);
+  await assert.rejects(
+    () => tools.events_start.execute({ selector: "#x", method: "Page.frameNavigated" }, ctx),
+    /selector or method/,
+  );
+});
+
+test("events_read clamps waits below the tool deadline", async () => {
+  resetConfig();
+  const sandbox = fakeSandbox({ id: "events-clamp" });
+  await tools.events_read.execute({ id: "ev_1", waitMs: 120_000 }, fakeCtx(sandbox));
+  assert.ok(sandbox.commands.at(-1).includes("--wait 50000"), sandbox.commands.at(-1));
 });
 
 test("mount factory validates config", () => {

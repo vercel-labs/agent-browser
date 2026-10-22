@@ -72,6 +72,10 @@ Inspect https://example.com and summarize what is visible.
 
 For reading articles or docs, prefer `browser__read`. For apps, use `browser__snapshot` before interaction and resnapshot after page changes.
 
+## Events
+
+Use the [event subscription workflow](/streaming#event-subscriptions) through `browser__events_start`, `browser__events_read`, `browser__events_ack`, `browser__events_list` and `browser__events_stop`; `events_read` takes `waitMs` and `events_list` accepts `unread`. The tools set the owner to the eve session id, force content boundaries around untrusted data, and cap waits at 50 seconds.
+
 ## Security
 
 Cookie, storage, and saved-auth-state commands are intentionally not exposed by the extension because they can reveal credential material to the model. Use standard eve extension overrides when you need to disable a tool, add approval requirements, or provide an app-specific guarded tool.

@@ -7,8 +7,12 @@ import {
   ArrowDownUp,
   ArrowLeft,
   ArrowRight,
+  Bell,
+  BellOff,
+  BellRing,
   BookOpen,
   Camera,
+  CircleCheck,
   ClipboardList,
   Code2,
   Globe,
@@ -164,6 +168,16 @@ function describeActivity(
     }
     case "wait_for":
       return { icon: Hourglass, label: pick("Waiting for the page", "Waited for the page") };
+    case "events_start":
+      return { icon: Bell, label: pick("Starting a page watch", "Started a page watch") };
+    case "events_read":
+      return { icon: BellRing, label: pick("Checking for page changes", "Checked for page changes") };
+    case "events_ack":
+      return { icon: CircleCheck, label: pick("Acknowledging page changes", "Acknowledged page changes") };
+    case "events_list":
+      return { icon: ListChecks, label: pick("Listing page watches", "Listed page watches") };
+    case "events_stop":
+      return { icon: BellOff, label: pick("Stopping a page watch", "Stopped a page watch") };
     case "get":
       return { icon: Info, label: pick("Reading page details", "Read page details") };
     case "find": {
