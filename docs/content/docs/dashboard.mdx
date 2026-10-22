@@ -40,7 +40,7 @@ agent-browser stream disable
 
 ## Dashboard features
 
-The dashboard is a single-page web app with three areas:
+The dashboard is a single-page web app with four areas:
 
 <table>
   <thead>
@@ -57,6 +57,10 @@ The dashboard is a single-page web app with three areas:
     <tr>
       <td><strong>Activity feed</strong></td>
       <td>Chronological stream of commands, results, and console messages with expandable details</td>
+    </tr>
+    <tr>
+      <td><strong>Events</strong></td>
+      <td>Live event subscriptions, their unread state, and the chat wake-up that resumes the agent when one fires</td>
     </tr>
     <tr>
       <td><strong>Session creation</strong></td>
@@ -119,7 +123,43 @@ Sent when the browser logs to the console:
 
 The `args` array contains the raw CDP `Runtime.consoleAPICalled` arguments for programmatic access. Object arguments include preview data (e.g. `{userId: "abc", count: 42}` instead of `"Object"`).
 
+### Event nudges
+
+Event subscriptions get a dedicated channel, separate from screencast frames, that carries only a subscription id and its latest head:
+
+```json
+{
+  "type": "events_nudge",
+  "subscriptionId": "ev_1a2b3c4d",
+  "head": 4
+}
+```
+
+The newest head wins per subscription id, so a burst of page activity never replaces a terminal event with an older one, and a nudge cannot be lost behind frame traffic.
+
 These are in addition to the existing `frame`, `status`, and `error` message types documented on the [Streaming](/streaming) page.
+
+## Events tab
+
+The Events tab shows the subscriptions on the session's event bus. Subscriptions the chat started are tagged with the owner `chat:<session>`; the dashboard hydrates them with `events list --owner chat:<session>` on connect, on every reconnect, on each nudge, and on a 30 second backstop.
+
+The dashboard wakes the chat only when a subscription it owns has `head` above `consumed`, the chat is idle, and that `(subscriptionId, head)` has not already been sent. The wake message carries bus metadata only, such as the subscription id, rule, event name, count and tab id, and tells the agent to run `agent-browser events read <id>` for the event itself. Page strings from a label are never placed in the wake text. Repeating subscriptions are limited to one wake per subscription every 10 seconds.
+
+The wake request body includes its key:
+
+```json
+{
+  "wake": {
+    "subscriptionId": "ev_1a2b3c4d",
+    "seq": 4,
+    "cursor": "ev_1a2b3c4d:4"
+  }
+}
+```
+
+The chat handler ignores a key whose turn is running or has completed. It runs `events ack <id> <cursor> --owner chat:<session>` only when that turn completes, so the dashboard never acknowledges on its own. An event that arrives during a turn stays unread until the next wake. If a reload cuts a wake's turn short, the event stays unread and the next wake retries it; a completed wake is never repeated.
+
+The chat argument builder also stamps the owner on the server. Any model-supplied `--owner` is replaced with `--owner chat:<session>` for `events start`, `ack` and `stop`, and content boundaries are forced on for every `events` verb.
 
 ## Architecture
 
@@ -133,7 +173,7 @@ The dashboard is embedded into the CLI binary at compile time using `rust-embed`
 
 ## AI Chat
 
-The dashboard includes an optional AI chat panel powered by the [Vercel AI Gateway](https://vercel.com/docs/ai-gateway). When enabled, a **Chat** tab appears in the right pane alongside Activity, Console, Network, Storage, and Extensions.
+The dashboard includes an optional AI chat panel powered by the [Vercel AI Gateway](https://vercel.com/docs/ai-gateway). When enabled, a **Chat** tab appears in the right pane alongside Activity, Events, Console, Network, Storage, and Extensions.
 
 ### Setup
 

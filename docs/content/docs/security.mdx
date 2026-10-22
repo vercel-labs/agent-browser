@@ -178,7 +178,7 @@ agent-browser --content-boundaries snapshot
 export AGENT_BROWSER_CONTENT_BOUNDARIES=1
 ```
 
-Affected output types: `snapshot`, `get text`, `get html`, `eval`, `console`.
+Affected output types: `snapshot`, `get text`, `get html`, `eval`, `console`. Event data from `events read` and `events watch` is page-derived and covered too.
 
 In `--json` mode, boundary metadata is injected into the JSON response as a `_boundary` object containing `nonce` and `origin` fields, allowing orchestrators to verify provenance programmatically:
 
@@ -304,7 +304,26 @@ agent-browser --max-output 50000 get text body
 export AGENT_BROWSER_MAX_OUTPUT=50000
 ```
 
-Affected output types: `snapshot`, `get text`, `get html`, `eval`, `console`.
+Affected output types: `snapshot`, `get text`, `get html`, `eval`, `console`. Event data from `events read` and `events watch` is capped by the same limit.
+
+## Event Subscriptions
+
+Every event bus operation is checked under its own action name: `events_start`, `events_read`, `events_ack`, `events_list` and `events_stop`. An allow list that permits ordinary browser commands still needs these actions before it can create, read, acknowledge, list or stop a subscription.
+
+Starting or reading a subscription also needs the policy of the existing action that exposes the same data. A deny on `console` blocks a console event even when `events_start` is allowed, so event delivery cannot bypass a policy that protects the same information.
+
+```json
+{
+  "default": "allow",
+  "deny": ["console", "download", "events_start", "events_read", "events_ack", "events_list", "events_stop"]
+}
+```
+
+Confirmation applies at `events_start` only. A confirm entry for `events_read`, `events_ack`, `events_list` or `events_stop` is refused with a clear error rather than prompting, because a blocking read must not wait on a confirmation prompt.
+
+A policy reload that fails closes event operations instead of falling back to the previous policy. The daemon also re-checks policy before storing each event, so a reload that newly denies a subscription ends it with reason `policy_denied`.
+
+The domain allowlist is consulted when an event is emitted, so a tab on a blocked origin produces no event content. Payloads are capped when stored. Content boundaries and `--max-output` apply when event data is printed by the CLI or MCP.
 
 ## Environment Variables
 
