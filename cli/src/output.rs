@@ -158,6 +158,98 @@ fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> 
     }
 }
 
+fn format_events_text(
+    action: Option<&str>,
+    data: &serde_json::Value,
+    opts: &OutputOptions,
+) -> Option<String> {
+    Some(match action? {
+        "events_start" => format!(
+            "Event subscription {} started at {}",
+            data["id"].as_str()?,
+            data["cursor"].as_str()?
+        ),
+        "events_read" => match data["events"].as_array()?.as_slice() {
+            [] if data["waiting"] == true => "No new events before timeout".into(),
+            [] => "No new events".into(),
+            events => events
+                .iter()
+                .map(|event| {
+                    let mut event = event.clone();
+                    truncate_event_data(&mut event, opts.max_output);
+                    event.to_string()
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        },
+        "events_ack" => format!("Acknowledged through {}", data["cursor"].as_str()?),
+        "events_list" => match data["subscriptions"].as_array()?.as_slice() {
+            [] => "No event subscriptions".into(),
+            subscriptions => subscriptions
+                .iter()
+                .map(|subscription| {
+                    let text = |key: &str| subscription[key].as_str().unwrap_or("?");
+                    format!(
+                        "{} {} head={} consumed={}",
+                        text("id"),
+                        text("status"),
+                        subscription["head"],
+                        subscription["consumed"]
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        },
+        "events_stop" => format!("Stopped event subscription {}", data["id"].as_str()?),
+        _ => return None,
+    })
+}
+
+fn truncate_events(value: &mut serde_json::Value, max: Option<usize>) {
+    if let Some(events) = value
+        .pointer_mut("/data/events")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for event in events {
+            truncate_event_data(event, max);
+        }
+    }
+}
+
+fn truncate_event_data(event: &mut serde_json::Value, max: Option<usize>) {
+    let Some(data) = event.get_mut("data") else {
+        return;
+    };
+    let text = data.to_string();
+    let truncated = truncate_if_needed(&text, max);
+    if truncated != text {
+        *data = serde_json::Value::String(truncated);
+    }
+}
+
+fn attach_boundary(value: &mut serde_json::Value) {
+    let origin = value
+        .get("data")
+        .and_then(boundary_origin)
+        .unwrap_or("unknown")
+        .to_string();
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "_boundary".to_string(),
+            serde_json::json!({"nonce": get_boundary_nonce(), "origin": origin}),
+        );
+    }
+}
+
+pub(crate) fn format_event_line(event: &serde_json::Value, opts: &OutputOptions) -> String {
+    let mut event = event.clone();
+    truncate_event_data(&mut event, opts.max_output);
+    if opts.content_boundaries {
+        attach_boundary(&mut event);
+    }
+    event.to_string()
+}
+
 fn format_webmcp_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
     match action {
         Some("webmcp_list") => {
@@ -506,26 +598,14 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
 
 fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     if opts.json {
-        if opts.content_boundaries {
-            let mut json_val = serde_json::to_value(resp).unwrap_or_default();
-            if let Some(obj) = json_val.as_object_mut() {
-                let nonce = get_boundary_nonce();
-                let origin = obj
-                    .get("data")
-                    .and_then(boundary_origin)
-                    .unwrap_or("unknown");
-                obj.insert(
-                    "_boundary".to_string(),
-                    serde_json::json!({
-                        "nonce": nonce,
-                        "origin": origin,
-                    }),
-                );
-            }
-            println!("{}", serde_json::to_string(&json_val).unwrap_or_default());
-        } else {
-            println!("{}", serde_json::to_string(resp).unwrap_or_default());
+        let mut json_val = serde_json::to_value(resp).unwrap_or_default();
+        if action == Some("events_read") {
+            truncate_events(&mut json_val, opts.max_output);
         }
+        if opts.content_boundaries {
+            attach_boundary(&mut json_val);
+        }
+        println!("{}", serde_json::to_string(&json_val).unwrap_or_default());
         // JSON mode includes the warning field in the JSON payload already
         return;
     }
@@ -576,6 +656,14 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         }
         if let Some(output) = format_stream_status_text(action, data) {
             println!("{}", output);
+            return;
+        }
+        if let Some(output) = format_events_text(action, data, opts) {
+            if opts.content_boundaries {
+                print_with_boundaries(&output, None, opts);
+            } else {
+                println!("{}", output);
+            }
             return;
         }
         if action == Some("webmcp_list") {
@@ -3332,6 +3420,41 @@ Examples:
 "##
         }
 
+        "events" => {
+            r##"
+agent-browser events - Subscribe to browser events
+
+Usage:
+  agent-browser events start --selector <css> [--state visible|hidden] [--once] [--ttl <secs>] [--owner <label>] [--key <key>]
+  agent-browser events start --method <CDP method> [--match <pointer>=<value>]... [--match-regex <pointer>=<regex>]... [--once] [--ttl <secs>] [--owner <label>] [--key <key>]
+  agent-browser events read <id> [--since <cursor>] [--wait <ms>] [--limit <n>] [--ack]
+  agent-browser events wait <id> [--since <cursor>] [--timeout <ms>]
+  agent-browser events ack <id> <cursor> [--owner <label>]
+  agent-browser events list [--owner <label>] [--unread]
+  agent-browser events stop <id> [--owner <label>]
+  agent-browser events watch <id> [--since <cursor>]
+
+Selector subscriptions store visible or hidden transitions. CDP subscriptions
+accept repeated JSON pointer matchers. Read returns subscription metadata and
+event envelopes; --ack advances through the last returned event. wait is a
+read that waits and acknowledges, defaulting to 50000 ms. watch prints one
+JSON envelope per line and stops when the subscription ends or Ctrl-C is
+pressed.
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser events start --selector '#notice' --once
+  agent-browser events start --method Page.frameNavigated --match /url=https://example.com
+  agent-browser events read sub-1 --since sub-1:0 --ack
+  agent-browser events wait sub-1 --timeout 5000
+  agent-browser events list --owner chat:session --unread
+  agent-browser events watch sub-1
+"##
+        }
+
         // === Runtime streaming ===
         "stream" => {
             r##"
@@ -3912,6 +4035,14 @@ Streaming:
   stream disable             Stop runtime WebSocket streaming
   stream status              Show streaming status and active port
 
+Events:
+  events start --selector <css>  Subscribe to selector visibility changes
+  events start --method <CDP>    Subscribe to a CDP method
+  events read <id>               Read events after a cursor
+  events wait <id>               Wait for and acknowledge an event
+  events watch <id>              Stream event envelopes as NDJSON
+  events ack/list/stop           Manage subscriptions
+
 WebMCP (experimental):
   webmcp list [tool]         Full metadata; optional --frame <frame-id>
   webmcp invoke <tool>       Invoke a page tool; accepts --params <json|@file>,
@@ -4346,6 +4477,42 @@ mod tests {
         format_with_boundaries, OutputOptions,
     };
     use serde_json::json;
+
+    #[test]
+    fn test_events_text_truncates_payloads_without_boundaries() {
+        let data = json!({
+            "events": [{"data": {"text": "x".repeat(200)}, "meta": {"cursor": "sub-1:1"}}],
+            "waiting": false
+        });
+
+        let rendered = super::format_events_text(
+            Some("events_read"),
+            &data,
+            &OutputOptions {
+                max_output: Some(30),
+                ..OutputOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(rendered.contains("[truncated: showing 30 of"));
+    }
+
+    #[test]
+    fn test_json_events_truncate_payloads_and_keep_meta() {
+        let mut value = json!({
+            "data": {"events": [{"data": {"text": "x".repeat(200)}, "meta": {"cursor": "sub-1:1"}}]}
+        });
+
+        super::truncate_events(&mut value, Some(30));
+        let event = &value["data"]["events"][0];
+
+        assert!(event["data"]
+            .as_str()
+            .unwrap()
+            .contains("[truncated: showing 30 of"));
+        assert_eq!(event["meta"]["cursor"], "sub-1:1");
+    }
 
     #[test]
     fn test_format_stream_status_text_for_enabled_stream() {

@@ -1583,6 +1583,10 @@ This is useful when:
 
 Stream the browser viewport via WebSocket for live preview or "pair browsing" where a human can watch and interact alongside an AI agent.
 
+### Event subscriptions
+
+Subscribe with `events start` before acting, then collect the result with `events wait` instead of polling. See [Streaming](https://agent-browser.dev/streaming#event-subscriptions) for verbs, flags, CLI/MCP/eve parity, envelopes, markers, cursors, safety rules and harness recipes.
+
 ### Streaming
 
 Every session automatically starts a WebSocket stream server on an OS-assigned port. Use `stream status` to see the bound port and connection state:

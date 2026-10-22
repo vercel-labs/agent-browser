@@ -40,7 +40,7 @@ agent-browser stream disable
 
 ## Dashboard features
 
-The dashboard is a single-page web app with three areas:
+The dashboard is a single-page web app with four areas:
 
 <table>
   <thead>
@@ -57,6 +57,10 @@ The dashboard is a single-page web app with three areas:
     <tr>
       <td><strong>Activity feed</strong></td>
       <td>Chronological stream of commands, results, and console messages with expandable details</td>
+    </tr>
+    <tr>
+      <td><strong>Events</strong></td>
+      <td>Live event subscriptions, their unread state, and the chat wake-up that resumes the agent when one fires</td>
     </tr>
     <tr>
       <td><strong>Session creation</strong></td>
@@ -119,7 +123,17 @@ Sent when the browser logs to the console:
 
 The `args` array contains the raw CDP `Runtime.consoleAPICalled` arguments for programmatic access. Object arguments include preview data (e.g. `{userId: "abc", count: 42}` instead of `"Object"`).
 
+### Event nudges
+
+A dedicated channel, separate from screencast frames, coalesces to the newest head per subscription: `{"type":"events_nudge","subscriptionId":"ev_1a2b3c4d","head":4}`.
+
 These are in addition to the existing `frame`, `status`, and `error` message types documented on the [Streaming](/streaming) page.
+
+## Events tab
+
+The Events tab shows subscriptions. Chat-owned subscriptions use `chat:<session>`; the dashboard hydrates them on connect, reconnect, nudge and a 30-second backstop. Idle chat wakes only for unread heads not already sent, at most once per subscription every 10 seconds, with `{"wake":{"subscriptionId":"ev_1a2b3c4d","seq":4,"cursor":"ev_1a2b3c4d:4"}}`. Wake text contains bus metadata, not page labels, and directs the agent to read the event.
+
+The server ignores running/completed wake keys and acknowledges only after the turn completes. New arrivals stay unread; interrupted turns retry after reload, completed turns do not. It also replaces model-supplied owners on start/ack/stop with `chat:<session>` and forces content boundaries on every event verb.
 
 ## Architecture
 
@@ -133,7 +147,7 @@ The dashboard is embedded into the CLI binary at compile time using `rust-embed`
 
 ## AI Chat
 
-The dashboard includes an optional AI chat panel powered by the [Vercel AI Gateway](https://vercel.com/docs/ai-gateway). When enabled, a **Chat** tab appears in the right pane alongside Activity, Console, Network, Storage, and Extensions.
+The dashboard includes an optional AI chat panel powered by the [Vercel AI Gateway](https://vercel.com/docs/ai-gateway). When enabled, a **Chat** tab appears in the right pane alongside Activity, Events, Console, Network, Storage, and Extensions.
 
 ### Setup
 

@@ -726,12 +726,14 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_input_mode: false,
     };
 
+    let mut events_start = false;
     let mut i = 0;
     let mut seen_command = false;
     while i < args.len() {
         let arg = args[i].as_str();
-        if !arg.starts_with('-') && looks_like_command(arg) {
+        if !seen_command && !arg.starts_with('-') && looks_like_command(arg) {
             seen_command = true;
+            events_start = arg == "events" && args.get(i + 1).map(String::as_str) == Some("start");
         }
         match arg {
             s if s.starts_with("--restore=") => {
@@ -902,6 +904,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--state" if events_start => {}
             "--state" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.state = Some(s.clone());
@@ -1217,7 +1220,6 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--quick",
         "--fix",
     ];
-    // Global flags that always take a value (need to skip the next arg too)
     const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
         "--session",
         "--restore-save",
@@ -1257,7 +1259,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--ca-cert",
         "--model",
     ];
-
+    let mut events_start = false;
     let mut i = 0;
     let mut seen_command = false;
     while i < args.len() {
@@ -1271,7 +1273,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             i += 1;
             continue;
         }
-        if GLOBAL_FLAGS_WITH_VALUE.contains(&arg.as_str()) {
+        if GLOBAL_FLAGS_WITH_VALUE.contains(&arg.as_str()) && !(arg == "--state" && events_start) {
             skip_next = true;
             i += 1;
             continue;
@@ -1296,8 +1298,9 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             i += 1;
             continue;
         }
-        if !arg.starts_with('-') && looks_like_command(arg) {
+        if !seen_command && !arg.starts_with('-') && looks_like_command(arg) {
             seen_command = true;
+            events_start = arg == "events" && args.get(i + 1).map(String::as_str) == Some("start");
         }
         result.push(arg.clone());
         i += 1;
@@ -1593,6 +1596,15 @@ mod tests {
         // when global flags are mixed in.
         let cleaned = clean_args(&args("--json record start demo.webm --fps 60"));
         assert_eq!(cleaned, vec!["record", "start", "demo.webm", "--fps", "60"]);
+    }
+
+    #[test]
+    fn test_global_state_before_events() {
+        let input = args("--state /tmp/state.json events list");
+        let flags = parse_flags(&input);
+        assert!(flags.cli_state);
+        assert_eq!(flags.state.as_deref(), Some("/tmp/state.json"));
+        assert_eq!(clean_args(&input), vec!["events", "list"]);
     }
 
     #[test]

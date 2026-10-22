@@ -16,6 +16,16 @@
         "to": "Browser trust does not support"
       }
     ],
+    "/dashboard": [
+      {
+        "from": "The dashboard is a single-page web app with three areas:",
+        "to": "The dashboard is a single-page web app with four areas:"
+      },
+      {
+        "from": "alongside Activity, Console, Network, Storage, and Extensions.",
+        "to": "alongside Activity, Events, Console, Network, Storage, and Extensions."
+      }
+    ],
     "/proxy": [
       {
         "from": "--ca-cert /etc/ssl/certs/proxy-ca.pem open https://example.com",

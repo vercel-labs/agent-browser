@@ -133,6 +133,7 @@ pub fn is_top_level_command(value: &str) -> bool {
             | "deny"
             | "connect"
             | "stream"
+            | "events"
             | "get"
             | "is"
             | "find"
@@ -426,6 +427,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "forward" => Ok(json!({ "id": id, "action": "forward" })),
         "reload" => Ok(json!({ "id": id, "action": "reload" })),
         "read" => parse_read(&rest, &id, flags),
+        "events" => parse_events(&rest, &id),
         "webmcp" => parse_webmcp(&rest, &id),
 
         // === Core Actions ===
@@ -2074,6 +2076,119 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
     }
 }
 
+fn parse_events(rest: &[&str], id: &str) -> Result<Value, ParseError> {
+    const START_USAGE: &str = "events start (--selector <css> [--state visible|hidden] | --method <CDP method> [--match <pointer>=<value>]... [--match-regex <pointer>=<regex>]...) [--once] [--ttl <secs>] [--owner <label>] [--key <key>]";
+    const READ_USAGE: &str =
+        "events read <id> [--since <cursor>] [--wait <ms>] [--limit <n>] [--ack]";
+    let mut rest = rest.iter().copied();
+    let verb = rest.next().ok_or_else(|| ParseError::MissingArguments {
+        context: "events".to_string(),
+        usage: "events <start|read|wait|ack|list|stop|watch>",
+    })?;
+    let (usage, positionals): (&str, &[&str]) = match verb {
+        "start" => (START_USAGE, &[]),
+        "read" => (READ_USAGE, &["subscriptionId"]),
+        "wait" => (
+            "events wait <id> [--since <cursor>] [--timeout <ms>]",
+            &["subscriptionId"],
+        ),
+        "ack" => (
+            "events ack <id> <cursor> [--owner <label>]",
+            &["subscriptionId", "cursor"],
+        ),
+        "list" => ("events list [--owner <label>] [--unread]", &[]),
+        "stop" => ("events stop <id> [--owner <label>]", &["subscriptionId"]),
+        "watch" => ("events watch <id> [--since <cursor>]", &["subscriptionId"]),
+        other => {
+            return Err(ParseError::UnknownSubcommand {
+                subcommand: other.to_string(),
+                valid_options: &["start", "read", "wait", "ack", "list", "stop", "watch"],
+            })
+        }
+    };
+    let missing = |context| ParseError::MissingArguments { context, usage };
+    let invalid = |message| ParseError::InvalidValue { message, usage };
+    let mut command = match verb {
+        "start" => json!({ "id": id, "action": "events_start", "once": false }),
+        "wait" => json!({ "id": id, "action": "events_read", "ack": true, "waitMs": 50_000 }),
+        _ => json!({ "id": id, "action": format!("events_{}", verb) }),
+    };
+    for key in positionals {
+        command[*key] = json!(rest
+            .next()
+            .filter(|value| !value.starts_with("--"))
+            .ok_or_else(|| missing(format!("events {}", verb)))?);
+    }
+    while let Some(flag) = rest.next() {
+        let key = match (verb, flag) {
+            (
+                "start",
+                "--selector" | "--state" | "--method" | "--match" | "--key" | "--once" | "--ttl",
+            ) => &flag[2..],
+            ("start", "--match-regex") => "matchRegex",
+            ("start" | "ack" | "list" | "stop", "--owner") => "owner",
+            ("read" | "wait" | "watch", "--since") => "since",
+            ("read", "--wait") | ("wait", "--timeout") => "waitMs",
+            ("read", "--limit" | "--ack") => &flag[2..],
+            ("list", "--unread") => "unread",
+            _ => {
+                let label = if verb == "start" && !flag.starts_with("--") {
+                    "Unexpected argument"
+                } else {
+                    "Unknown flag"
+                };
+                return Err(invalid(format!("{} for events {}: {}", label, verb, flag)));
+            }
+        };
+        if matches!(key, "once" | "ack" | "unread") {
+            command[key] = json!(true);
+            continue;
+        }
+        let value = rest
+            .next()
+            .ok_or_else(|| missing(format!("events {} {}", verb, flag)))?;
+        let value = match key {
+            "ttl" | "waitMs" | "limit" => {
+                let label = match key {
+                    "ttl" => "TTL",
+                    "waitMs" => "wait duration",
+                    _ => "read limit",
+                };
+                json!(value
+                    .parse::<u64>()
+                    .map_err(|_| invalid(format!("Invalid event {}: {}", label, value)))?)
+            }
+            _ => json!(value),
+        };
+        if matches!(key, "match" | "matchRegex") {
+            if command.get(key).is_none() {
+                command[key] = json!([]);
+            }
+            command[key].as_array_mut().unwrap().push(value);
+        } else {
+            command[key] = value;
+        }
+    }
+    if verb == "start" {
+        let selector = command.get("selector").is_some();
+        let method = command.get("method").is_some();
+        if selector == method {
+            return Err(invalid(
+                "Specify exactly one of --selector or --method".to_string(),
+            ));
+        }
+        if (method && command.get("state").is_some())
+            || (selector && (command.get("match").is_some() || command.get("matchRegex").is_some()))
+        {
+            return Err(invalid(
+                "--state is only valid with --selector; --match options require --method"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(command)
+}
+
 fn parse_webmcp(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     let subcommand = rest.first().ok_or_else(|| ParseError::MissingArguments {
         context: "webmcp".to_string(),
@@ -3664,6 +3779,45 @@ mod tests {
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn events_map_to_daemon_fields() {
+        let cases = json!({
+            "events wait sub-1 --since sub-1:4 --timeout 800": {"action": "events_read", "subscriptionId": "sub-1", "since": "sub-1:4", "waitMs": 800, "ack": true},
+            "events wait sub-1": {"action": "events_read", "subscriptionId": "sub-1", "waitMs": 50000, "ack": true},
+            "events watch sub-1 --since sub-1:6": {"action": "events_watch", "subscriptionId": "sub-1", "since": "sub-1:6"}
+        });
+        for (input, expected) in cases.as_object().unwrap() {
+            let mut command = parse_command(&args(input), &default_flags()).unwrap();
+            command.as_object_mut().unwrap().remove("id");
+            assert_eq!(&command, expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn events_reject_unknown_options_and_missing_ids() {
+        let cases = json!({
+            "events list --mystery": "Unknown flag for events list: --mystery",
+            "events start extra": "Unexpected argument for events start: extra",
+            "events start --selector #notice --method Network.responseReceived": "Specify exactly one of --selector or --method",
+            "events start --method Network.responseReceived --state visible": "--state is only valid with --selector; --match options require --method",
+            "events start --selector #notice --match /status=200": "--state is only valid with --selector; --match options require --method",
+            "events start --ttl invalid": "Invalid event TTL: invalid",
+            "events wait sub-1 --timeout -1": "Invalid event wait duration: -1",
+            "events read sub-1 --limit 18446744073709551616": "Invalid event read limit: 18446744073709551616",
+            "events read": "Missing arguments for: events read",
+            "events read --ack": "Missing arguments for: events read",
+            "events ack sub-1 --owner label": "Missing arguments for: events ack",
+            "events stop sub-1 --owner": "Missing arguments for: events stop --owner",
+            "events watch sub-1 --owner label": "Unknown flag for events watch: --owner",
+            "events wait sub-1 --ack": "Unknown flag for events wait: --ack"
+        });
+        for (input, expected) in cases.as_object().unwrap() {
+            let error = parse_command(&args(input), &default_flags()).unwrap_err();
+            assert_eq!(error.format().lines().next(), expected.as_str(), "{input}");
+            assert!(error.format().contains("Usage: agent-browser events "));
+        }
     }
 
     // === Cookies Tests ===

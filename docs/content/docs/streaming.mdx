@@ -5,6 +5,82 @@ navTitle: "Streaming"
 
 Stream the browser viewport via WebSocket for live preview or "pair browsing" where a human can watch and interact alongside an AI agent.
 
+## Event subscriptions
+
+The Chrome-only event bus stores page changes without polling or an extra listener. CLI, MCP and eve expose `start`, `read`, `ack`, `list` and `stop` with identical JSON; `wait` and `watch` are CLI conveniences. Other engines return an unsupported error.
+
+### Commands and flags
+
+Run `agent-browser events --help` for command syntax. Start accepts exactly one of `--selector <css>` or `--method <cdp-event>`. Selector `--state` defaults to `visible` and emits `element.visible` or `element.hidden`; CDP `--match <json-pointer>=<value>` and `--match-regex <json-pointer>=<regex>` filters must all hold against projected `data`.
+
+`--once` ends after the first stored event. `--ttl` defaults to 600 seconds and is capped at 1800. `--owner` labels a subscription and restricts owned ack/stop operations. Reusing `--key` with the same rule returns the existing id. At most 20 subscriptions are active; finished subscriptions remain readable for 10 minutes, with at most 50 entries listed.
+
+Start returns `id`, `head`, `cursor`, `alreadySatisfied`, `expiresAt`, `owner` and `tab` (`id`, `label`, `targetId`). `head` is the sequence number and `cursor` addresses that head. An initial match sets `alreadySatisfied` and emits `subscription.ready`, not a transition event.
+
+Subscriptions stay bound to their tab. A shared page observer re-arms after same-document and new-document navigation; an initial match in the new document becomes an event with `afterNavigation`. Closing or crashing the tab ends its subscriptions.
+
+### Read, cursors and acks
+
+Read returns `status`, `events`, `cursor`, `head`, `consumed` and `waiting`. Pass the returned `cursor` as the next `--since`; omitted cursors start at the oldest retained item. Cursors are opaque (`ev_1a2b3c4d:4`); another subscription's cursor or one ahead of the head returns `cursor_invalid`. Unknown ids, including after daemon restart or idle shutdown, return a daemon-restarted error.
+
+`read --limit` bounds returned items and `--wait` bounds blocking time, with `waiting: true` on an empty timeout. MCP and chat clamp waits to their tool limits. Plain reads do not change `consumed`; `--ack` advances it only to the last returned sequence, never backwards or beyond a truncated result. `wait --timeout <ms>` reads with waiting and acknowledgement. `watch` writes NDJSON; Ctrl-C leaves the subscription active until stop or expiry. Use `ack <id> <cursor>` after processing a plain read.
+
+`list [--owner <label>] [--unread]` entries contain `id`, `status`, `reason`, `rule`, `owner`, `head`, `consumed`, `dropped`, `tab` and `expiresAt`. Unread means `head > consumed`; `dropped` counts buffer losses. Status is `waiting`, then `matched`, `timeout`, `cancelled` or `ended`. End reasons are `matched`, `timeout`, `cancelled`, `tab_closed`, `tab_crashed`, `browser_closed` or `policy_denied`.
+
+### Envelopes and markers
+
+Envelopes have `version: "agent-browser.event.v1"`, bus-generated `meta` (`eventId`, `name`, `timestamp`, `cursor`, `subscriptionId`, `session`, `tab`) and capped, untrusted `data`. Selector data contains `state`, `label` and `afterNavigation`. See [Security](/security#event-subscriptions) for policy and output rules.
+
+<table>
+  <thead><tr><th>Marker</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>subscription.ready</code></td><td>Initial observation, including the current state for a late joiner sharing an observer.</td></tr>
+    <tr><td><code>subscription.rearmed</code></td><td>Observer re-armed after same-document or new-document navigation.</td></tr>
+    <tr><td><code>subscription.gap</code></td><td>Buffer loss or CDP lag; <code>data.missed</code> counts lost events. The next page observation carries <code>afterGap</code>; transitions entirely within the gap cannot be recovered. Gaps and slow readers do not end subscriptions.</td></tr>
+    <tr><td><code>subscription.ended</code></td><td>Subscription ended with <code>data.reason</code>.</td></tr>
+  </tbody>
+</table>
+
+### Selector recipes
+
+Run `agent-browser events start --selector '#deploy-complete' --once` before `agent-browser click '#deploy'`, then `agent-browser events wait <id>` with the returned id. This also covers clicks that navigate before revealing the element.
+
+For disappearance, start with `--selector '#progress' --state hidden --once`, click the cancel control, then wait on the returned id.
+
+### CDP tap recipes
+
+Start with `events start --method <method> [--match <pointer>=<value>] --once`, trigger the action, then run `events wait <id>`. Only these methods and projected fields are allowed; raw CDP payloads and Network, Fetch, storage and authentication domains are excluded.
+
+<table>
+  <thead><tr><th>Method</th><th>Projected data fields</th><th>Trigger example</th></tr></thead>
+  <tbody>
+    <tr><td><code>Page.javascriptDialogOpening</code></td><td>type, message, url, defaultPrompt (prompts only)</td><td>Filter with <code>--match /type=alert</code>; run <code>agent-browser eval "setTimeout(() =&gt; alert('hello'), 0)"</code>, then dismiss with <code>agent-browser dialog dismiss</code> after reading.</td></tr>
+    <tr><td><code>Page.navigatedWithinDocument</code>, <code>Page.frameNavigated</code></td><td>frameId, url; parentId for child-frame navigation</td><td><code>agent-browser eval "history.pushState({}, '', '/step-2')"</code> triggers same-document navigation.</td></tr>
+    <tr><td><code>Runtime.consoleAPICalled</code></td><td>level, text</td><td>Filter with <code>--match /level=warning</code>; run <code>agent-browser eval "console.warn('disk space low')"</code>.</td></tr>
+    <tr><td><code>Runtime.exceptionThrown</code></td><td>text, url, lineNumber, columnNumber</td><td><code>agent-browser eval "setTimeout(() =&gt; &#123; throw new Error('boom') &#125;, 0)"</code></td></tr>
+    <tr><td><code>Target.targetCreated</code></td><td>targetId, type, url</td><td>Filter with <code>--match /type=page</code>; run <code>agent-browser tab new https://example.com</code>.</td></tr>
+    <tr><td><code>Browser.downloadWillBegin</code></td><td>guid, url, suggestedFilename, frameId</td><td>Launch with <code>--download-path</code> to save the file, then run <code>agent-browser click '#download'</code>.</td></tr>
+  </tbody>
+</table>
+
+## Harness setup
+
+Wake messages must contain bus metadata only, never page strings. Tell the agent to read the subscription for its content.
+
+### Claude Code
+
+In a `Stop` command hook, run `agent-browser events list --unread --json`; when `.data.subscriptions` is nonempty, return `{"decision":"block","reason":"Browser events waiting: <ids>. Run agent-browser events read <id> --ack."}`. Build `<ids>` from subscription ids only. Acknowledging clears the unread condition; inspect `stop_hook_active` to limit repeated continuations.
+
+Register the executable script in `.claude/settings.json` under `hooks.Stop[].hooks[]` with `type: "command"` and `command: "${CLAUDE_PROJECT_DIR}/.claude/hooks/events-unread.sh"`. For an asynchronous hook, add `async: true` and `asyncRewake: true`; wait with `events wait <id> --timeout 60000 --json`, and exit 2 with a metadata-only stderr message when `.data.events` is nonempty.
+
+### Cursor
+
+Use the same unread check in an executable `.cursor/hooks/events-unread.sh`, consuming stdin first. Return `{}` when empty, otherwise `{"followup_message":"Browser events waiting: <ids>. Run agent-browser events read <id> --ack."}`. Register it in `.cursor/hooks.json` as `{"version":1,"hooks":{"stop":[{"command":".cursor/hooks/events-unread.sh"}]}}`. Cursor limits repeated follow-ups.
+
+### Shell or script loop
+
+A harness that wakes from background output can run `agent-browser events wait <id> --timeout 120000`. For a script loop, use `agent-browser events watch "$id" | jq -c '.meta | {name, cursor, subscriptionId}'`, then read and acknowledge envelopes after handling them.
+
 ## Streaming
 
 Every session automatically starts a WebSocket stream server on an OS-assigned port. The server streams viewport frames and accepts input events (mouse, keyboard, touch).
