@@ -36,6 +36,8 @@ agent-browser snapshot
 agent-browser snapshot -i
 ```
 
+Use `snapshot -c` to remove empty structural elements while retaining visible status text. Adding `-i` filters non-interactive text; for MCP snapshots, set `interactive: false` when you need that text.
+
 ### Snapshot Output Format
 
 ```

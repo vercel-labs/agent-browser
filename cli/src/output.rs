@@ -2247,6 +2247,7 @@ Options:
   -i, --interactive    Only include interactive elements
   -u, --urls           Include href URLs for link elements
   -c, --compact        Remove empty structural elements
+                       Preserve visible text unless --interactive is set
   -d, --depth <n>      Limit tree depth
   -s, --selector <sel> Scope snapshot to CSS selector
       --delta          Return full state once, then unchanged or structural deltas

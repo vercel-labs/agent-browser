@@ -1007,6 +1007,8 @@ agent-browser snapshot --delta --full      # Force full state and refresh the ba
 | `--delta`              | Return full state once, then `unchanged` or a structural JSON delta     |
 | `--full`               | Force full state and update the delta baseline                          |
 
+`--compact` preserves visible text, including status messages. Add `--interactive` only when you want to omit non-interactive content.
+
 `--delta` returns `full`, `unchanged`, or incremental updates per tab and option set. It falls back to full state after URL changes or when a delta would not save space. See the [delta response format](skill-data/core/references/commands.md#snapshot-page-analysis) for applying updates.
 
 ## Annotated Screenshots

@@ -839,7 +839,7 @@ fn tools() -> Vec<Value> {
             "Return an accessibility-tree snapshot with reusable element refs. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref.",
             json!({
                 "interactive": { "type": "boolean", "default": true, "description": "Only include interactive elements." },
-                "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements." },
+                "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements, preserving visible text when interactive is false." },
                 "depth": { "type": "integer", "minimum": 0, "description": "Limit tree depth." },
                 "selector": { "type": "string", "description": "Scope the snapshot to a CSS selector." },
                 "includeUrls": { "type": "boolean", "default": false, "description": "Include href URLs on links." },
@@ -4270,13 +4270,17 @@ mod tests {
     fn snapshot_observations_use_canonical_cli_command() {
         for arguments in [
             json!({}),
-            json!({"interactive": false, "selector": "#content"}),
+            json!({"interactive": false, "selector": "#content", "compact": true}),
         ] {
             let args = snapshot_command_args(&arguments).unwrap();
             let flags = crate::flags::parse_flags(&args);
             let command = crate::commands::parse_command(&args, &flags).unwrap();
             assert_eq!(command["action"], "snapshot");
             assert_eq!(command.get("selector"), arguments.get("selector"));
+            assert_eq!(
+                command["compact"].as_bool().unwrap_or(false),
+                arguments["compact"].as_bool().unwrap_or(false)
+            );
             assert_eq!(
                 command["interactive"].as_bool().unwrap_or(false),
                 arguments["interactive"].as_bool().unwrap_or(true)

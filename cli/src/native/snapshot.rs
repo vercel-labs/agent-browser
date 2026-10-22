@@ -1352,6 +1352,7 @@ fn render_tree(
     }
 }
 
+// Keep rendered names as content, even when a node has no interactive ref or value.
 fn compact_tree(tree: &str, interactive: bool) -> String {
     let lines: Vec<&str> = tree.lines().collect();
     if lines.is_empty() {
@@ -1361,7 +1362,7 @@ fn compact_tree(tree: &str, interactive: bool) -> String {
     let mut keep = vec![false; lines.len()];
 
     for (i, line) in lines.iter().enumerate() {
-        if line.contains("ref=") || line.contains(": ") {
+        if line.contains("ref=") || line.contains(": ") || (!interactive && line.contains(" \"")) {
             keep[i] = true;
             // Mark ancestors
             let my_indent = count_indent(line);
@@ -1538,6 +1539,33 @@ mod tests {
         assert!(result.contains("[ref=e1]"));
         assert!(result.contains("[ref=e2]"));
         assert!(result.contains("Hello"));
+    }
+
+    #[test]
+    fn test_compact_tree_preserves_rendered_status_text() {
+        for text in [
+            "Saved successfully",
+            "Status: saved successfully",
+            "not clicked",
+        ] {
+            let mut nodes = vec![
+                make_node("main", "", None),
+                make_node("status", "", None),
+                make_node("StaticText", text, None),
+                make_node("heading", "Confirmation", None),
+                make_node("paragraph", "", None),
+            ];
+            nodes[0].children = vec![1, 3, 4];
+            nodes[1].children = vec![2];
+            let mut rendered = String::new();
+            render_tree(&nodes, 0, 0, &mut rendered, &SnapshotOptions::default());
+
+            let compact = compact_tree(&rendered, false);
+            assert!(compact.contains(text), "visible text was lost: {compact}");
+            assert!(compact.contains("- status"));
+            assert!(compact.contains("heading \"Confirmation\""));
+            assert!(!compact.contains("- paragraph"));
+        }
     }
 
     #[test]
