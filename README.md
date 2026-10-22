@@ -1074,6 +1074,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--webgpu` | Enable WebGPU; SwiftShader software Vulkan on Linux, no GPU required (or `AGENT_BROWSER_WEBGPU` env) |
 | `--no-webmcp` | Disable experimental WebMCP support, which is enabled by default for locally launched Chrome (or `AGENT_BROWSER_NO_WEBMCP` env) |
 | `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) |
+| `--cdp-headers <json>` | Headers sent on CDP discovery and the WebSocket handshake, such as `Authorization` (or `AGENT_BROWSER_CDP_HEADERS` env) |
 | `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
 | `--pin-tab` | Pin the session to its bound tab; fail with `tab_gone` instead of falling back to another tab (or `AGENT_BROWSER_PIN_TAB` env) |
 | `--no-pin-tab` | Disable a sticky pin previously enabled with `--pin-tab` |
