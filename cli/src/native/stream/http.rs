@@ -289,7 +289,7 @@ pub(super) async fn handle_http_request(
         }
 
         if path == "/api/chat" {
-            handle_chat_request(&mut stream, body_str, origin.as_deref()).await;
+            handle_chat_request(stream, body_str, origin.as_deref()).await;
             return;
         }
     }

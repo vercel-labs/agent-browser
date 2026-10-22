@@ -17,6 +17,8 @@ pub mod diff;
 #[allow(dead_code)]
 pub mod element;
 #[allow(dead_code)]
+pub mod events;
+#[allow(dead_code)]
 pub mod inspect_server;
 #[allow(dead_code)]
 pub mod interaction;

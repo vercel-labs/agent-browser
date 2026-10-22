@@ -1042,6 +1042,9 @@ const READ_ONLY_ACTIONS: &[&str] = &[
     "tab_list",
     "cdp_url",
     "stream_status",
+    "events_read",
+    "events_ack",
+    "events_list",
 ];
 
 fn is_read_only(cmd: &Value) -> bool {
@@ -1158,6 +1161,14 @@ pub(crate) fn read_timeout_for(cmd: &Value) -> Duration {
     let mut op_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(0);
     if cmd.get("action").and_then(Value::as_str) == Some("mousemove") {
         op_ms = op_ms.max(cmd.get("duration").and_then(Value::as_u64).unwrap_or(0));
+    }
+    if cmd.get("action").and_then(Value::as_str) == Some("events_read") {
+        op_ms = op_ms.max(
+            cmd.get("waitMs")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .min(50_000),
+        );
     }
     Duration::from_millis(op_ms.saturating_add(10_000).max(30_000))
 }

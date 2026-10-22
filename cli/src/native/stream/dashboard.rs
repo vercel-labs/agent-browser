@@ -753,7 +753,7 @@ async fn handle_dashboard_connection(mut stream: tokio::net::TcpStream) {
 
     if method == "POST" && path == "/api/chat" {
         let body_str = read_post_body(&mut stream, &buf, n).await;
-        handle_chat_request(&mut stream, &body_str, origin.as_deref()).await;
+        handle_chat_request(stream, &body_str, origin.as_deref()).await;
         return;
     }
 

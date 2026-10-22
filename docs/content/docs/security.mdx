@@ -178,7 +178,7 @@ agent-browser --content-boundaries snapshot
 export AGENT_BROWSER_CONTENT_BOUNDARIES=1
 ```
 
-Affected output types: `snapshot`, `get text`, `get html`, `eval`, `console`.
+Affected output types: `snapshot`, `get text`, `get html`, `eval`, `console`. Event data from `events read` and `events watch` is page-derived and covered too.
 
 In `--json` mode, boundary metadata is injected into the JSON response as a `_boundary` object containing `nonce` and `origin` fields, allowing orchestrators to verify provenance programmatically:
 
@@ -306,7 +306,13 @@ agent-browser --max-output 50000 get text body
 export AGENT_BROWSER_MAX_OUTPUT=50000
 ```
 
-Affected output types: `snapshot`, `get text`, `get html`, `eval`, `console`.
+Affected output types: `snapshot`, `get text`, `get html`, `eval`, `console`. Event data from `events read` and `events watch` is capped by the same limit.
+
+## Event Subscriptions
+
+The single policy gate checks `events_start`, `events_read`, `events_ack`, `events_list` and `events_stop`, plus the existing action exposing the same data (for example, denying `console` also blocks console subscriptions). Confirmation is allowed only for `events_start`; confirming other event operations is refused rather than prompting during a read.
+
+Policy reloads fail closed. Policy and domain allowlists are checked before each emit; a new policy denial ends the subscription with `policy_denied`, and blocked origins emit no content. Stored payloads are capped; printed CLI/MCP data obeys content boundaries and `--max-output`. Envelope `meta` is bus-generated, but `data` and page labels are untrusted. Wake messages must never copy page strings. See [Streaming](/streaming#event-subscriptions) for commands and envelopes.
 
 ## Environment Variables
 

@@ -4,8 +4,14 @@ Stream a session's viewport over WebSocket and drive it with remote input. This 
 
 **Related**: [commands.md](commands.md) for full command reference, [SKILL.md](../SKILL.md) for quick start.
 
+## Event subscriptions
+
+Use the [event reference](https://agent-browser.dev/streaming#event-subscriptions) for commands, flags, envelopes, cursors, selector/CDP recipes and harness setup. The [security rules](https://agent-browser.dev/security#event-subscriptions) apply to CLI, MCP and eve.
+
 ## Contents
 
+- [Event subscriptions](#event-subscriptions)
+- [Harness setup](#harness-setup)
 - [Enabling the stream](#enabling-the-stream)
 - [Connecting](#connecting)
 - [Messages from the server](#messages-from-the-server)

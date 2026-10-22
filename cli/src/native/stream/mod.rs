@@ -11,6 +11,7 @@ pub use dashboard::{
 };
 
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -187,6 +188,7 @@ pub struct StreamServer {
     /// Latest-value channel for screencast frames. Slow clients skip straight
     /// to the newest frame instead of draining a stale ordered backlog.
     frame_watch: watch::Sender<Option<Arc<StreamFrame>>>,
+    pub(crate) event_nudges: watch::Sender<HashMap<String, u64>>,
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
     /// The active CDP page session ID (from Target.attachToTarget).
@@ -240,11 +242,6 @@ impl StreamServer {
             idle_activity,
         )
         .await
-    }
-
-    /// Notify the background CDP listener that the client has changed (browser launched/closed).
-    pub fn notify_client_changed(&self) {
-        self.client_notify.notify_one();
     }
 
     /// Check whether the server currently has active screencast running.
@@ -330,6 +327,7 @@ impl StreamServer {
 
         let (frame_tx, _) = broadcast::channel::<String>(64);
         let (frame_watch_tx, frame_watch_rx) = watch::channel::<Option<Arc<StreamFrame>>>(None);
+        let (event_nudges_tx, event_nudges_rx) = watch::channel(HashMap::new());
         let screencast_config = Arc::new(ScreencastConfig::from_env());
         let client_count = Arc::new(Mutex::new(0usize));
         let client_notify = Arc::new(Notify::new());
@@ -363,6 +361,7 @@ impl StreamServer {
                 listener,
                 frame_tx_clone,
                 frame_watch_accept,
+                event_nudges_rx,
                 client_count_clone,
                 client_slot_clone,
                 notify_clone,
@@ -419,6 +418,7 @@ impl StreamServer {
                 session_name: session_id,
                 frame_tx,
                 frame_watch: frame_watch_tx,
+                event_nudges: event_nudges_tx,
                 screencast_config,
                 client_count,
                 client_slot: client_slot.clone(),
@@ -567,21 +567,6 @@ impl StreamServer {
             "text": text,
             "line": line,
             "column": column,
-            "timestamp": timestamp_ms(),
-        });
-        let _ = self.frame_tx.send(msg.to_string());
-    }
-
-    /// Broadcast the current tab list so the dashboard can render a tab bar.
-    /// Also caches the list so newly connected WebSocket clients receive it immediately.
-    pub async fn broadcast_tabs(&self, tabs: &[Value]) {
-        {
-            let mut guard = self.last_tabs.write().await;
-            *guard = tabs.to_vec();
-        }
-        let msg = json!({
-            "type": "tabs",
-            "tabs": tabs,
             "timestamp": timestamp_ms(),
         });
         let _ = self.frame_tx.send(msg.to_string());
@@ -763,6 +748,10 @@ mod tests {
     /// Read until a "frame" arrives, skipping status and tabs. Timed out so a
     /// broken server fails instead of hanging.
     async fn next_frame(ws: &mut WsClient) -> Value {
+        next_message(ws, "frame").await
+    }
+
+    async fn next_message(ws: &mut WsClient, kind: &str) -> Value {
         loop {
             let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
                 .await
@@ -771,7 +760,7 @@ mod tests {
                 .expect("ws error");
             if let Message::Text(text) = msg {
                 let parsed: Value = serde_json::from_str(&text).expect("valid json");
-                if parsed.get("type").and_then(|v| v.as_str()) == Some("frame") {
+                if parsed["type"] == kind {
                     return parsed;
                 }
             }
@@ -779,7 +768,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn test_new_client_receives_latest_frame_only() {
+    async fn test_latest_frame_and_event_nudges_survive_bursts() {
         let (server, _slot) = StreamServer::start_without_client(
             0,
             "t1".to_string(),
@@ -795,6 +784,25 @@ mod tests {
         let mut ws = connect_client(server.port()).await;
         let frame = next_frame(&mut ws).await;
         assert_eq!(frame.get("data").and_then(|v| v.as_str()), Some("fresh"));
+
+        for index in 0..100 {
+            server.broadcast_error(&format!("error-{index}"));
+            server.broadcast_screencast_frame("frame", &FrameMetadata::default());
+        }
+        server
+            .event_nudges
+            .send_replace(HashMap::from([("sub-1".to_string(), 1)]));
+        server
+            .event_nudges
+            .send_replace(HashMap::from([("sub-1".to_string(), 3)]));
+
+        loop {
+            let parsed = next_message(&mut ws, "events_nudge").await;
+            assert_eq!(parsed["subscriptionId"], "sub-1");
+            if parsed["head"] == 3 {
+                break;
+            }
+        }
 
         server.shutdown().await;
     }
