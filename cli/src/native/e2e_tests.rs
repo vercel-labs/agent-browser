@@ -6392,6 +6392,113 @@ async fn e2e_snapshot_cursor_interactive() {
     assert_success(&resp);
 }
 
+/// Share of pixels in a screenshot that are pure red (#c00), for checking
+/// that an element clip actually contains the element.
+fn red_fraction(path: &str) -> (u32, u32, f64) {
+    let img = image::open(path).expect("decode screenshot").to_rgb8();
+    let (w, h) = img.dimensions();
+    let red = img
+        .pixels()
+        .filter(|p| p[0] > 150 && p[1] < 60 && p[2] < 60)
+        .count();
+    (w, h, red as f64 / (w * h) as f64)
+}
+
+/// Element screenshots must contain the element wherever it sits: below the
+/// initial viewport, after scrolling, and inside a same-origin iframe, at a
+/// device scale factor of 2.
+#[tokio::test]
+#[ignore]
+async fn e2e_screenshot_selector_beyond_viewport() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "viewport", "width": 1024, "height": 640, "deviceScaleFactor": 2.0 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let boxed = |id: &str| {
+        format!("<button id='{id}' style='width:200px;height:200px;border:0;background:%23c00'>{id}</button>")
+    };
+    let html = format!(
+        "data:text/html,<body style='margin:0'><div style='height:700px'></div>{}\
+         <div style='height:300px'></div><iframe style='border:0;width:600px;height:1500px' \
+         srcdoc=\"<body style='margin:0'><div style='height:800px'></div>{}\
+         <div style='height:400px'></div>\"></iframe><div style='height:2000px'></div>",
+        boxed("box"),
+        boxed("ibox"),
+    );
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // Elements inside the iframe are only addressable through snapshot refs.
+    let snapshot = execute_command(&json!({ "id": "4", "action": "snapshot" }), &mut state).await;
+    assert_success(&snapshot);
+    let iframe_ref = get_data(&snapshot)["refs"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, node)| node["name"] == "ibox")
+        .map(|(ref_id, _)| format!("@{ref_id}"))
+        .expect("ref for the button inside the iframe");
+
+    let path = |name: &str| {
+        std::env::temp_dir()
+            .join(format!("agent-browser-e2e-selector-{name}.png"))
+            .to_string_lossy()
+            .to_string()
+    };
+
+    for (step, (selector, name, scroll)) in [
+        ("#box", "below-fold", false),
+        ("#box", "scrolled", true),
+        (iframe_ref.as_str(), "iframe", false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if scroll {
+            let resp = execute_command(
+                &json!({ "id": format!("scroll-{step}"), "action": "scrollintoview", "selector": selector }),
+                &mut state,
+            )
+            .await;
+            assert_success(&resp);
+        }
+        let out = path(name);
+        let resp = execute_command(
+            &json!({ "id": format!("shot-{step}"), "action": "screenshot", "selector": selector, "path": out }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        let (w, h, red) = red_fraction(&out);
+        let _ = std::fs::remove_file(&out);
+        assert_eq!((w, h), (400, 400), "{name}: size");
+        assert!(
+            red > 0.99,
+            "{name}: only {:.0}% of the clip is the element",
+            red * 100.0
+        );
+    }
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// Verifies that `screenshot --annotate` completes in bounded time even with
 /// many interactive elements. Guards against the sequential CDP round-trip
 /// regression that caused hangs over high-latency WSS (Issue #841).
