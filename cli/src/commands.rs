@@ -1741,7 +1741,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     "recording_start",
                     &rest[1..],
                     "record start",
-                    "record start <output.webm|output.mp4> [url] [--fps <n>] [--cursor] [--contact-sheet] [--contact-sheet-threshold <0-1>]",
+                    "record start <output.webm|output.mp4> [url] [--fps <n>] [--cursor] [--contact-sheet] [--contact-sheet-threshold <0-1>] [--condense]",
                 ),
                 Some("stop") => Ok(json!({ "id": id, "action": "recording_stop" })),
                 Some("restart") => parse_record_take(
@@ -1749,7 +1749,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     "recording_restart",
                     &rest[1..],
                     "record restart",
-                    "record restart <output.webm|output.mp4> [url] [--fps <n>] [--cursor] [--contact-sheet] [--contact-sheet-threshold <0-1>]",
+                    "record restart <output.webm|output.mp4> [url] [--fps <n>] [--cursor] [--contact-sheet] [--contact-sheet-threshold <0-1>] [--condense]",
                 ),
                 Some(sub) => Err(ParseError::UnknownSubcommand {
                     subcommand: sub.to_string(),
@@ -2400,8 +2400,8 @@ fn parse_read(rest: &[&str], id: &str, flags: &Flags) -> Result<Value, ParseErro
 }
 
 /// Parse the arguments shared by `record start` and `record restart`:
-/// `<path> [url] [--fps <n>] [--cursor] [--contact-sheet]` plus an optional
-/// contact-sheet pixel-difference threshold.
+/// `<path> [url] [--fps <n>] [--cursor] [--contact-sheet] [--condense]` plus
+/// an optional contact-sheet pixel-difference threshold.
 ///
 /// `rest` excludes the subcommand. `path` needs an extension so ffmpeg can
 /// pick a container (`.webm` and `.mp4` are the tuned ones). Recording
@@ -2422,6 +2422,7 @@ fn parse_record_take(
     let mut cursor = false;
     let mut contact_sheet = false;
     let mut contact_sheet_threshold: Option<f64> = None;
+    let mut condense = false;
 
     let mut i = 0;
     while i < rest.len() {
@@ -2455,6 +2456,10 @@ fn parse_record_take(
             }
             "--contact-sheet" => {
                 contact_sheet = true;
+                i += 1;
+            }
+            "--condense" => {
+                condense = true;
                 i += 1;
             }
             "--contact-sheet-threshold" => {
@@ -2532,6 +2537,9 @@ fn parse_record_take(
     }
     if let Some(threshold) = contact_sheet_threshold {
         cmd["contactSheetThreshold"] = json!(threshold);
+    }
+    if condense {
+        cmd["condense"] = json!(true);
     }
     Ok(cmd)
 }
@@ -5099,6 +5107,20 @@ mod tests {
         .unwrap();
         assert_eq!(cmd["contactSheet"], true);
         assert_eq!(cmd["contactSheetThreshold"], 0.12);
+    }
+
+    #[test]
+    fn test_record_condense() {
+        for operation in ["start", "restart"] {
+            let cmd = parse_command(
+                &args(&format!("record {operation} output.webm --condense")),
+                &default_flags(),
+            )
+            .unwrap();
+            assert_eq!(cmd["condense"], true);
+        }
+        let cmd = parse_command(&args("record start output.webm"), &default_flags()).unwrap();
+        assert!(cmd.get("condense").is_none());
     }
 
     #[test]

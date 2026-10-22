@@ -44,6 +44,11 @@ const CONTACT_SHEET_BURST_RATE: usize = 25;
 const CONTACT_SHEET_BURST_QUIET_MS: u64 = 250;
 const CONTACT_SHEET_BURST_FRAMES: usize = 7;
 
+/// Longest an unchanged picture stays on screen in a condensed recording:
+/// long enough to read the new state, short enough that waiting on the
+/// network or a loader plays back like a fast operator.
+pub const CONDENSE_HOLD: Duration = Duration::from_millis(750);
+
 /// Rate above which the live encoder uses additional threads.
 const HIGH_FPS_THRESHOLD: u32 = 30;
 const HIGH_FPS_ENCODER_THREADS: &str = "4";
@@ -542,6 +547,8 @@ pub struct RecordingState {
     pub contact_sheet: bool,
     pub contact_sheet_threshold: f64,
     pub contact_sheet_path: Option<String>,
+    /// Whether still stretches are cut to [`CONDENSE_HOLD`] in the video.
+    pub condense: bool,
 }
 
 impl RecordingState {
@@ -565,6 +572,7 @@ impl RecordingState {
             contact_sheet: false,
             contact_sheet_threshold: DEFAULT_CONTACT_SHEET_THRESHOLD,
             contact_sheet_path: None,
+            condense: false,
         }
     }
 }
@@ -575,6 +583,7 @@ pub struct RecordingOptions {
     pub cursor: bool,
     pub contact_sheet: bool,
     pub contact_sheet_threshold: f64,
+    pub condense: bool,
 }
 
 impl Default for RecordingOptions {
@@ -584,6 +593,7 @@ impl Default for RecordingOptions {
             cursor: false,
             contact_sheet: false,
             contact_sheet_threshold: DEFAULT_CONTACT_SHEET_THRESHOLD,
+            condense: false,
         }
     }
 }
@@ -655,13 +665,15 @@ pub fn recording_start(
     state.contact_sheet = options.contact_sheet;
     state.contact_sheet_threshold = threshold;
     state.contact_sheet_path = options.contact_sheet.then(|| contact_sheet_path(path));
+    state.condense = options.condense;
 
     let mut result = json!({
         "started": true,
         "path": path,
         "fps": fps,
         "cursor": options.cursor,
-        "contactSheet": options.contact_sheet
+        "contactSheet": options.contact_sheet,
+        "condense": options.condense
     });
     if let Some(ref contact_path) = state.contact_sheet_path {
         result["contactSheetPath"] = json!(contact_path);
@@ -686,6 +698,7 @@ pub fn recording_stop(state: &mut RecordingState) -> Result<Value, String> {
         "frames": state.frame_count,
         "capturedFrames": state.captured_count,
         "fps": state.fps,
+        "condense": state.condense,
     });
     if let Some(ref path) = state.contact_sheet_path {
         result["contactSheetPath"] = json!(path);
@@ -1443,6 +1456,7 @@ pub fn spawn_recording_task(
     contact_sheet_path: Option<String>,
     contact_sheet_threshold: f64,
     shared_contact_sheet_count: Arc<AtomicU64>,
+    condense: bool,
     cancel_rx: oneshot::Receiver<()>,
 ) -> tokio::task::JoinHandle<Result<(), String>> {
     tokio::spawn(async move {
@@ -1479,6 +1493,7 @@ pub fn spawn_recording_task(
             output_path,
             fps,
             false,
+            condense,
             shared_cursor.clone(),
             frame_rx,
         ));
@@ -1806,10 +1821,40 @@ fn render_cursor_frame(
     Ok(bytes)
 }
 
+/// Drops video frames once the picture has been unchanged for longer than
+/// [`CONDENSE_HOLD`]. The encoder input runs at a constant rate, so every
+/// dropped frame shortens the video while motion keeps its real speed.
+struct StillFrameCondenser {
+    hold_frames: u64,
+    unchanged_frames: u64,
+    previous: Option<Vec<u8>>,
+}
+
+impl StillFrameCondenser {
+    fn new(fps: u32) -> Self {
+        Self {
+            hold_frames: (CONDENSE_HOLD.as_secs_f64() * fps as f64).ceil() as u64,
+            unchanged_frames: 0,
+            previous: None,
+        }
+    }
+
+    fn keep(&mut self, frame: &[u8]) -> bool {
+        if self.previous.as_deref() == Some(frame) {
+            self.unchanged_frames += 1;
+            return self.unchanged_frames <= self.hold_frames;
+        }
+        self.unchanged_frames = 0;
+        self.previous = Some(frame.to_vec());
+        true
+    }
+}
+
 async fn encode_stream(
     output_path: String,
     fps: u32,
     cursor: bool,
+    condense: bool,
     shared_cursor: SharedRecordingCursor,
     mut frames: mpsc::Receiver<CapturedVideoFrame>,
 ) -> Result<u64, String> {
@@ -1825,6 +1870,7 @@ async fn encode_stream(
     let mut latest: Option<CapturedVideoFrame> = None;
     let mut decoded = None;
     let mut written = 0u64;
+    let mut condenser = condense.then(|| StillFrameCondenser::new(fps));
 
     loop {
         tokio::select! {
@@ -1848,13 +1894,16 @@ async fn encode_stream(
                     .lock()
                     .map(|history| history.clone())
                     .unwrap_or_default();
-                if cursor {
-                    let bytes =
-                        render_cursor_frame(frame, &history, output_timestamp, &mut decoded)?;
-                    write_encoder_bytes(&mut stdin, &bytes).await?;
+                let rendered = if cursor {
+                    Some(render_cursor_frame(frame, &history, output_timestamp, &mut decoded)?)
                 } else {
-                    write_encoder_bytes(&mut stdin, &frame.image_data).await?;
+                    None
+                };
+                let bytes = rendered.as_deref().unwrap_or(&frame.image_data);
+                if condenser.as_mut().is_some_and(|condenser| !condenser.keep(bytes)) {
+                    continue;
                 }
+                write_encoder_bytes(&mut stdin, bytes).await?;
                 written += 1;
             }
         }
@@ -2332,6 +2381,7 @@ mod tests {
                 path.to_string_lossy().into_owned(),
                 30,
                 cursor,
+                false,
                 Arc::new(Mutex::new(RecordingCursorHistory::default())),
                 rx,
             ));
@@ -2409,6 +2459,82 @@ mod tests {
             assert!(
                 (0.7..1.1).contains(times.last().unwrap()),
                 "{extension}: {times:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn still_frame_condenser_holds_each_still_picture_briefly() {
+        let mut condenser = StillFrameCondenser::new(4);
+        let kept: Vec<bool> = [b"a", b"a", b"a", b"a", b"a", b"a", b"b", b"b", b"a"]
+            .into_iter()
+            .map(|frame| condenser.keep(frame))
+            .collect();
+        assert_eq!(
+            kept,
+            [true, true, true, true, false, false, true, true, true]
+        );
+    }
+
+    /// Requires FFmpeg and ffprobe, but no browser.
+    #[tokio::test]
+    #[ignore]
+    async fn recording_condense_cuts_still_stretches() {
+        for extension in ["webm", "mp4"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("condensed.{extension}"));
+            let (tx, rx) = mpsc::channel(4);
+            let encoder = tokio::spawn(encode_stream(
+                path.to_string_lossy().into_owned(),
+                30,
+                false,
+                true,
+                Arc::new(Mutex::new(RecordingCursorHistory::default())),
+                rx,
+            ));
+            for (sequence, color) in [[255, 0, 0], [0, 0, 255]].into_iter().enumerate() {
+                let image = image::RgbImage::from_pixel(64, 64, image::Rgb(color));
+                let mut png = std::io::Cursor::new(Vec::new());
+                image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+                tx.send(CapturedVideoFrame {
+                    sequence: sequence as u64,
+                    image_data: Arc::new(png.into_inner()),
+                    elapsed: Duration::ZERO,
+                    captured_at: tokio::time::Instant::now(),
+                    timestamp: cursor_timestamp(),
+                    device_width: 64.0,
+                    device_height: 64.0,
+                })
+                .await
+                .unwrap();
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            drop(tx);
+            encoder.await.unwrap().unwrap();
+            let probe = std::process::Command::new("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "csv=p=0",
+                ])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(
+                probe.status.success(),
+                "{}",
+                String::from_utf8_lossy(&probe.stderr)
+            );
+            let duration: f64 = String::from_utf8_lossy(&probe.stdout)
+                .trim()
+                .parse()
+                .unwrap();
+            assert!(
+                (1.4..1.7).contains(&duration),
+                "{extension}: 4 s of two still pictures lasted {duration} s"
             );
         }
     }

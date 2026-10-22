@@ -12,6 +12,7 @@ Capture browser automation as video for debugging, documentation, or verificatio
 - [Frame Rate](#frame-rate)
 - [Visible Cursor](#visible-cursor)
 - [Contact Sheets](#contact-sheets)
+- [Condensed Recordings](#condensed-recordings)
 - [Use Cases](#use-cases)
 - [Best Practices](#best-practices)
 - [Output Format](#output-format)
@@ -110,6 +111,16 @@ agent-browser record start ./checkout.webm --contact-sheet-threshold 0.02
 ```
 
 The threshold accepts values from `0` to `1` and defaults to `0.05`. Passing `--contact-sheet-threshold` implies `--contact-sheet`. At most 100 frames are included.
+
+## Condensed Recordings
+
+Pass `--condense` to cut every stretch where the picture does not change, such as waiting on the network or a loader, to a 0.75 second hold. Motion such as scrolls, transitions, and the `--cursor` pointer keeps its real speed, so the video reads like a fast operator instead of a stopwatch.
+
+```bash
+agent-browser record start ./checkout.webm --cursor --condense
+```
+
+Contact sheet timestamps keep measuring capture time, so they stop matching the video position after the first cut. Anything that keeps repainting, such as a spinner, counts as motion and is kept.
 
 ## Use Cases
 

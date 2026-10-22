@@ -448,6 +448,7 @@ agent-browser record start ./demo.webm           # Start video recording at 30 f
 agent-browser record start ./demo.webm --fps 60  # 60 fps for motion-heavy takes (1-60 allowed)
 agent-browser record start ./demo.webm --cursor  # Include an animated pointer
 agent-browser record start ./demo.webm --contact-sheet # Save a PNG with distinct changed areas
+agent-browser record start ./demo.webm --condense # Cut still stretches to a brief hold
 agent-browser record stop                        # Stop and save the video
 agent-browser record restart ./take2.webm        # Stop the current recording, start a new one
 agent-browser console                 # View console messages (log, error, warn, info)

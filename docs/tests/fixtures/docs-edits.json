@@ -8,6 +8,10 @@
       {
         "from": "# Clear CA trust retained by the running session",
         "to": "# Clear CA trust retained by the running session\n--use-system-ca          # Use the OS trust store for CLI requests (read, install, upgrade, doctor)"
+      },
+      {
+        "from": "agent-browser record start <path> --contact-sheet-threshold 0.02 # Tune changed-frame selection",
+        "to": "agent-browser record start <path> --contact-sheet-threshold 0.02 # Tune changed-frame selection\nagent-browser record start <path> --condense # Cut still stretches to a brief hold"
       }
     ],
     "/configuration": [
@@ -36,6 +40,12 @@
       {
         "from": "It is not supported on macOS or Windows.",
         "to": "Browser trust is not supported on macOS or Windows, where Chromium already uses the operating system trust store."
+      }
+    ],
+    "/recording": [
+      {
+        "from": "[--cursor] [--contact-sheet]</code>",
+        "to": "[--cursor] [--contact-sheet] [--condense]</code>"
       }
     ]
   },
