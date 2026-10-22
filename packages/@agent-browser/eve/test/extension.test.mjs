@@ -29,8 +29,8 @@ function fakeSandbox({ id, respond } = {}) {
   };
 }
 
-function fakeCtx(sandbox) {
-  return { getSandbox: async () => sandbox };
+function fakeCtx(sandbox, sessionId = "sess-test") {
+  return { getSandbox: async () => sandbox, session: { id: sessionId } };
 }
 
 function resetConfig(overrides = {}) {
@@ -44,6 +44,11 @@ test("exports the full tool set", () => {
     "console",
     "drag",
     "evaluate",
+    "events_ack",
+    "events_list",
+    "events_read",
+    "events_start",
+    "events_stop",
     "fill",
     "find",
     "get",
@@ -540,6 +545,135 @@ test("wait_for reports load-state timeout as unsatisfied instead of throwing", a
     satisfied: false,
     timedOut: true,
   });
+});
+
+test("events tools build start, read, ack, list, and stop commands", async () => {
+  resetConfig();
+  const sandbox = fakeSandbox({ id: "events-commands", respond: () => ({ stdout: OK({}) }) });
+  const ctx = fakeCtx(sandbox, "sess-abc");
+  await tools.events_start.execute(
+    { selector: "#dialog", state: "hidden", once: true, ttlSeconds: 30, key: "dialog" },
+    ctx,
+  );
+  await tools.events_start.execute(
+    {
+      method: "Page.frameNavigated",
+      matches: [{ path: "/params/url", value: "https://example.com/" }],
+      matchRegex: [{ path: "/params/url", regex: "^https://" }],
+    },
+    ctx,
+  );
+  await tools.events_read.execute(
+    { id: "ev_1", since: "ev_1:2", waitMs: 5000, limit: 10, ack: true },
+    ctx,
+  );
+  await tools.events_ack.execute({ id: "ev_1", cursor: "ev_1:3" }, ctx);
+  await tools.events_list.execute({ unread: true }, ctx);
+  await tools.events_stop.execute({ id: "ev_1" }, ctx);
+
+  const commands = sandbox.commands.filter((command) => command.includes(" events "));
+  assert.equal(commands.length, 6);
+  assert.ok(
+    commands[0].includes(
+      "events start --selector '#dialog' --state hidden --once --ttl 30 --owner sess-abc --key dialog --content-boundaries",
+    ),
+    commands[0],
+  );
+  assert.ok(
+    commands[1].includes(
+      "events start --method Page.frameNavigated --match /params/url=https://example.com/ --match-regex '/params/url=^https://' --owner sess-abc --content-boundaries",
+    ),
+    commands[1],
+  );
+  assert.ok(
+    commands[2].includes(
+      "events read ev_1 --since ev_1:2 --wait 5000 --limit 10 --ack --content-boundaries",
+    ),
+    commands[2],
+  );
+  assert.ok(
+    commands[3].includes("events ack ev_1 ev_1:3 --owner sess-abc --content-boundaries"),
+    commands[3],
+  );
+  assert.ok(
+    commands[4].includes("events list --unread --owner sess-abc --content-boundaries"),
+    commands[4],
+  );
+  assert.ok(
+    commands[5].includes("events stop ev_1 --owner sess-abc --content-boundaries"),
+    commands[5],
+  );
+});
+
+test("events start requires exactly one source", async () => {
+  resetConfig();
+  const ctx = fakeCtx(fakeSandbox());
+  await assert.rejects(() => tools.events_start.execute({}, ctx), /selector or method/);
+  await assert.rejects(
+    () => tools.events_start.execute({ selector: "#x", method: "Page.frameNavigated" }, ctx),
+    /selector or method/,
+  );
+});
+
+test("events owner comes from the eve session, not tool input", async () => {
+  resetConfig();
+  const sandbox = fakeSandbox({ id: "events-owner" });
+  const ctx = fakeCtx(sandbox, "session-42");
+  await tools.events_start.execute({ selector: "#x", owner: "someone-else" }, ctx);
+  await tools.events_ack.execute({ id: "ev_1", cursor: "ev_1:1", owner: "someone-else" }, ctx);
+  await tools.events_list.execute({ unread: false, owner: "someone-else" }, ctx);
+  await tools.events_stop.execute({ id: "ev_1", owner: "someone-else" }, ctx);
+  const commands = sandbox.commands.filter((command) => command.includes(" events "));
+  assert.equal(commands.length, 4);
+  for (const command of commands) {
+    assert.ok(command.includes("--owner session-42"), command);
+    assert.ok(!command.includes("someone-else"), command);
+  }
+});
+
+test("events_read returns a waiting result instead of failing when a wait times out", async () => {
+  resetConfig();
+  const sandbox = fakeSandbox({
+    id: "events-waiting",
+    respond: () => ({
+      stdout: OK({
+        id: "ev_1",
+        status: "watching",
+        events: [],
+        cursor: "ev_1:0",
+        head: 0,
+        consumed: 0,
+        waiting: true,
+      }),
+    }),
+  });
+  const result = await tools.events_read.execute({ id: "ev_1", waitMs: 2000 }, fakeCtx(sandbox));
+  assert.equal(result.waiting, true);
+  assert.deepEqual(result.events, []);
+});
+
+test("events_read clamps waits below the tool deadline", async () => {
+  resetConfig();
+  const sandbox = fakeSandbox({ id: "events-clamp" });
+  await tools.events_read.execute({ id: "ev_1", waitMs: 120_000 }, fakeCtx(sandbox));
+  assert.ok(sandbox.commands.at(-1).includes("--wait 50000"), sandbox.commands.at(-1));
+});
+
+test("events commands force content boundaries even when config is off", async () => {
+  resetConfig({ contentBoundaries: false });
+  const sandbox = fakeSandbox({ id: "events-boundaries-off" });
+  await tools.events_read.execute({ id: "ev_1" }, fakeCtx(sandbox));
+  const command = sandbox.commands.at(-1);
+  assert.ok(command.includes("--content-boundaries"), command);
+});
+
+test("events commands do not duplicate content boundaries when config is on", async () => {
+  resetConfig({ contentBoundaries: true });
+  const sandbox = fakeSandbox({ id: "events-boundaries-on" });
+  await tools.events_read.execute({ id: "ev_1" }, fakeCtx(sandbox));
+  const command = sandbox.commands.at(-1);
+  assert.equal(command.match(/--content-boundaries/g)?.length, 1);
+  resetConfig();
 });
 
 test("mount factory validates config", () => {

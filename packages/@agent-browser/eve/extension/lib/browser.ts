@@ -12,6 +12,7 @@ import extension from "../extension";
 export interface BrowserToolContext {
   readonly abortSignal?: AbortSignal;
   getSandbox(): PromiseLike<EveSandboxSession | null | undefined>;
+  readonly session: { readonly id: string };
 }
 
 interface CommandEnvelope<TData> {
@@ -89,6 +90,15 @@ export async function runBrowser<TData = unknown>(
     throw new AgentBrowserCommandError(result);
   }
   return (envelope?.data ?? null) as TData;
+}
+
+/** Run an events command with content boundaries forced on for its untrusted page data. */
+export async function runEvents<TData = unknown>(
+  ctx: BrowserToolContext,
+  args: readonly string[],
+): Promise<TData> {
+  const boundaries = extension.config.contentBoundaries ? [] : ["--content-boundaries"];
+  return await runBrowser<TData>(ctx, [...args, ...boundaries]);
 }
 
 async function requireSandbox(ctx: BrowserToolContext): Promise<EveSandboxSession> {

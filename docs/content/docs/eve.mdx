@@ -72,6 +72,14 @@ Inspect https://example.com and summarize what is visible.
 
 For reading articles or docs, prefer `browser__read`. For apps, use `browser__snapshot` before interaction and resnapshot after page changes.
 
+## Events
+
+The extension also exposes `events_start`, `events_read`, `events_ack`, `events_list`, and `events_stop`. Start a subscription before the action that should cause a change, then read with a wait instead of polling.
+
+Call `browser__events_start` with an element selector, or with a CDP method and JSON-pointer filters. Then call `browser__events_read` with `waitMs`, pass the returned cursor to `browser__events_ack` to mark events consumed, and use `browser__events_list` with `unread` set to find subscriptions with new events. `browser__events_stop` cancels a subscription.
+
+The owner of a subscription is the eve session id and the tool sets it, so the model cannot choose it. Event data is untrusted page content and is always wrapped in content boundaries. Waits are capped at 50 seconds to stay under the tool deadline.
+
 ## Security
 
 Cookie, storage, and saved-auth-state commands are intentionally not exposed by the extension because they can reveal credential material to the model. Use standard eve extension overrides when you need to disable a tool, add approval requirements, or provide an app-specific guarded tool.

@@ -2,7 +2,7 @@
 
 An [eve](https://eve.dev) extension that gives your agent a full browser automation tool set, backed by [agent-browser](https://agent-browser.dev) running inside the agent's sandbox.
 
-Mount it once and the agent gets ~20 namespaced tools — navigation, accessibility snapshots with stable element refs, clicking, form filling, semantic element finding, waiting, screenshots, JavaScript evaluation, tab management, network and console inspection — without writing a single tool by hand.
+Mount it once and the agent gets about 25 namespaced tools — navigation, accessibility snapshots with stable element refs, clicking, form filling, semantic element finding, waiting, event subscriptions, screenshots, JavaScript evaluation, tab management, network and console inspection — without writing a single tool by hand.
 
 ## Install
 
@@ -94,6 +94,11 @@ export default browser({
 | `drag` | Drag and drop |
 | `upload` | Attach sandbox files to a file input |
 | `wait_for` | Wait for an element, text, URL pattern, load state, JS condition, or delay |
+| `events_start` | Start a subscription to an element visibility change or a filtered CDP event |
+| `events_read` | Read events after a cursor, optionally waiting for new ones |
+| `events_ack` | Mark events up to a cursor as consumed |
+| `events_list` | List this session's subscriptions, optionally only those with unread events |
+| `events_stop` | Stop a subscription |
 | `get` | Read text/html/value/attribute/title/url/count/box/styles |
 | `find` | Semantic locator: act on an element by role, label, text, placeholder, or test id |
 | `screenshot` | Capture the page (full-page and annotated modes); output includes an inline data URL for UIs |
@@ -104,6 +109,12 @@ export default browser({
 | `close` | Close the browser session |
 
 Cookie, storage, and saved-auth-state commands are intentionally not exposed as tools — they make credential material visible to the model. If you need them, add a scoped tool in your own agent (or an [override](#overrides)) with the guardrails your app requires.
+
+## Events
+
+`events_start` subscribes to something happening in the browser: an element becoming visible or hidden, or a CDP event matching JSON-pointer filters. Start the subscription before the action that should cause the change, then use `events_read` with `waitMs` instead of polling. Reads return the cursor to pass next, `events_ack` marks events consumed, `events_list` with `unread` shows subscriptions with new events, and `events_stop` cancels one.
+
+The owner of a subscription is the eve session id, injected by the tool, so the model cannot choose it. Event data is page content and untrusted, so these commands always run with content boundaries enabled even when `contentBoundaries` is off for other tools. Waits are capped at 50 seconds to stay under the tool deadline.
 
 ## Overrides
 
