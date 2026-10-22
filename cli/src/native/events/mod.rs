@@ -12,6 +12,11 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{broadcast, watch, Mutex, Notify};
 use tokio::task::JoinHandle;
 
+#[allow(dead_code)]
+pub mod buffer;
+#[allow(dead_code)]
+pub mod envelope;
+
 use super::actions::{error_response, success_response, DaemonState};
 use super::cdp::client::{CdpClient, RawCdpMessage};
 use super::policy::PolicyResult;
@@ -109,7 +114,7 @@ impl Watch {
                 Some(&self.session),
             )
             .await?;
-        let source = include_str!("event-observer.js")
+        let source = include_str!("../event-observer.js")
             .replace("__BINDING_JSON__", &json!(self.binding).to_string())
             .replace("__SELECTOR_JSON__", &json!(selector).to_string());
         let result = self
