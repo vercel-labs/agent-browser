@@ -253,7 +253,6 @@ async fn handle_connection(
     if is_websocket_upgrade(&request) {
         let frame_rx = frame_tx.subscribe();
         let initial_config = config_from_upgrade(&request);
-        let event_nudges = event_nudges.clone();
         handle_ws_client(
             stream,
             addr,
@@ -407,7 +406,7 @@ async fn handle_ws_client(
     let mut next_allowed = deadline_from(last_sent, initial_config.max_fps);
     let mut pending_frame = false;
 
-    loop {
+    'writer: loop {
         tokio::select! {
             changed = shutdown_rx.changed() => {
                 if changed.is_err() || *shutdown_rx.borrow() {
@@ -436,7 +435,6 @@ async fn handle_ws_client(
                     break;
                 }
                 let latest = event_nudges.borrow_and_update().clone();
-                let mut send_failed = false;
                 for (subscription_id, head) in latest {
                     if sent_event_nudges
                         .get(&subscription_id)
@@ -450,13 +448,9 @@ async fn handle_ws_client(
                         "head": head,
                     });
                     if ws_tx.send(Message::Text(nudge.to_string())).await.is_err() {
-                        send_failed = true;
-                        break;
+                        break 'writer;
                     }
                     sent_event_nudges.insert(subscription_id, head);
-                }
-                if send_failed {
-                    break;
                 }
             }
             changed = frame_watch.changed(), if !pending_frame => {

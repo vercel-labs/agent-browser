@@ -711,7 +711,6 @@ fn initialize_result(params: Option<&Value>, config: &McpConfig) -> Value {
     })
 }
 
-/// Filters registered tools by the active startup profiles.
 fn tools_for_config(config: &McpConfig) -> Vec<Value> {
     tools()
         .into_iter()
@@ -2289,11 +2288,11 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_TOOLS_PROFILES => call_tools_profiles(config),
         TOOL_OPEN => call_open(arguments),
         TOOL_READ => call_read(arguments),
-        TOOL_EVENTS_START => call_events_start(arguments),
-        TOOL_EVENTS_READ => call_events_read(arguments),
-        TOOL_EVENTS_ACK => call_events_ack(arguments),
-        TOOL_EVENTS_LIST => call_events_list(arguments),
-        TOOL_EVENTS_STOP => call_events_stop(arguments),
+        TOOL_EVENTS_START => call_cli_tool(arguments, events_args(arguments, "start")?, None),
+        TOOL_EVENTS_READ => call_cli_tool(arguments, events_args(arguments, "read")?, None),
+        TOOL_EVENTS_ACK => call_cli_tool(arguments, events_args(arguments, "ack")?, None),
+        TOOL_EVENTS_LIST => call_cli_tool(arguments, events_args(arguments, "list")?, None),
+        TOOL_EVENTS_STOP => call_cli_tool(arguments, events_args(arguments, "stop")?, None),
         TOOL_SNAPSHOT => call_snapshot(arguments),
         TOOL_CLICK => call_click(arguments),
         TOOL_BACK => call_literal(arguments, &["back"]),
@@ -3593,119 +3592,46 @@ fn call_stream_enable(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool(arguments, args, None)
 }
 
-fn call_events_start(arguments: &Value) -> Result<Value, ProtocolError> {
-    call_cli_tool(arguments, events_start_args(arguments)?, None)
-}
-
-fn events_start_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
-    let mut args = vec!["events".to_string(), "start".to_string()];
-    for (field, flag) in [
-        ("selector", "--selector"),
-        ("state", "--state"),
-        ("method", "--method"),
-        ("owner", "--owner"),
-        ("key", "--key"),
-    ] {
+fn events_args(arguments: &Value, verb: &str) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec!["events".to_string(), verb.to_string()];
+    if matches!(verb, "read" | "ack" | "stop") {
+        args.push(required_string(arguments, "id")?);
+    }
+    if verb == "ack" {
+        args.push(required_string(arguments, "cursor")?);
+    }
+    let fields: &[&str] = match verb {
+        "start" => &["selector", "state", "method", "owner", "key"],
+        "read" => &["since"],
+        _ => &["owner"],
+    };
+    for field in fields {
         if let Some(value) = optional_string(arguments, field)? {
-            args.push(flag.to_string());
-            args.push(value);
+            args.extend([format!("--{}", field), value]);
         }
     }
-    for (field, flag) in [("match", "--match"), ("matchRegex", "--match-regex")] {
-        if let Some(values) = optional_string_array(arguments, field)? {
-            for value in values {
-                args.push(flag.to_string());
-                args.push(value);
+    if verb == "start" {
+        for (field, flag) in [("match", "--match"), ("matchRegex", "--match-regex")] {
+            for value in optional_string_array(arguments, field)?.unwrap_or_default() {
+                args.extend([flag.to_string(), value]);
             }
         }
     }
-    if optional_bool(arguments, "once")?.unwrap_or(false) {
-        args.push("--once".to_string());
-    }
-    if let Some(ttl) = optional_u64(arguments, "ttl")? {
-        args.push("--ttl".to_string());
-        args.push(ttl.to_string());
-    }
-    Ok(args)
-}
-
-fn call_events_read(arguments: &Value) -> Result<Value, ProtocolError> {
-    call_cli_tool(arguments, events_read_args(arguments)?, None)
-}
-
-fn events_read_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
-    let mut args = vec![
-        "events".to_string(),
-        "read".to_string(),
-        required_string(arguments, "id")?,
-    ];
-    for (field, flag) in [
-        ("since", "--since"),
-        ("waitMs", "--wait"),
-        ("limit", "--limit"),
-    ] {
-        let value = match field {
-            "since" => optional_string(arguments, field)?,
-            _ => optional_u64(arguments, field)?.map(|value| value.to_string()),
-        };
-        if let Some(value) = value {
-            args.push(flag.to_string());
-            args.push(value);
+    let scalars: &[&str] = match verb {
+        "start" => &["once", "ttl"],
+        "read" => &["waitMs", "limit", "ack"],
+        "list" => &["unread"],
+        _ => &[],
+    };
+    for &field in scalars {
+        let flag = if field == "waitMs" { "wait" } else { field };
+        if matches!(field, "once" | "ack" | "unread") {
+            if optional_bool(arguments, field)?.unwrap_or(false) {
+                args.push(format!("--{}", flag));
+            }
+        } else if let Some(value) = optional_u64(arguments, field)? {
+            args.extend([format!("--{}", flag), value.to_string()]);
         }
-    }
-    if optional_bool(arguments, "ack")?.unwrap_or(false) {
-        args.push("--ack".to_string());
-    }
-    Ok(args)
-}
-
-fn call_events_ack(arguments: &Value) -> Result<Value, ProtocolError> {
-    call_cli_tool(arguments, events_ack_args(arguments)?, None)
-}
-
-fn events_ack_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
-    let mut args = vec![
-        "events".to_string(),
-        "ack".to_string(),
-        required_string(arguments, "id")?,
-        required_string(arguments, "cursor")?,
-    ];
-    if let Some(owner) = optional_string(arguments, "owner")? {
-        args.push("--owner".to_string());
-        args.push(owner);
-    }
-    Ok(args)
-}
-
-fn call_events_list(arguments: &Value) -> Result<Value, ProtocolError> {
-    call_cli_tool(arguments, events_list_args(arguments)?, None)
-}
-
-fn events_list_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
-    let mut args = vec!["events".to_string(), "list".to_string()];
-    if let Some(owner) = optional_string(arguments, "owner")? {
-        args.push("--owner".to_string());
-        args.push(owner);
-    }
-    if optional_bool(arguments, "unread")?.unwrap_or(false) {
-        args.push("--unread".to_string());
-    }
-    Ok(args)
-}
-
-fn call_events_stop(arguments: &Value) -> Result<Value, ProtocolError> {
-    call_cli_tool(arguments, events_stop_args(arguments)?, None)
-}
-
-fn events_stop_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
-    let mut args = vec![
-        "events".to_string(),
-        "stop".to_string(),
-        required_string(arguments, "id")?,
-    ];
-    if let Some(owner) = optional_string(arguments, "owner")? {
-        args.push("--owner".to_string());
-        args.push(owner);
     }
     Ok(args)
 }
@@ -4363,136 +4289,39 @@ fn write_json_line(stdout: &mut io::Stdout, value: &Value) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn events_mcp_tools_are_registered_in_the_core_profile() {
-        let expected = [
-            "agent_browser_events_start",
-            "agent_browser_events_read",
-            "agent_browser_events_ack",
-            "agent_browser_events_list",
-            "agent_browser_events_stop",
-        ];
-        let tools = super::tools();
-        let registered = tools
-            .iter()
-            .filter_map(|tool| tool["name"].as_str())
-            .collect::<Vec<_>>();
-        let profile = super::McpConfig::default();
-
-        for name in expected {
-            assert!(registered.contains(&name), "missing {name}");
-            assert!(profile.allows(name), "{name} is not in the core profile");
-        }
-    }
-
-    #[test]
     fn events_mcp_arguments_use_the_cli_parser_fields() {
-        let cases = [
-            (
-                super::events_start_args(&json!({
-                    "selector": "#notice",
-                    "state": "hidden",
-                    "once": true,
-                    "ttl": 30,
-                    "owner": "chat:test",
-                    "key": "k1"
-                }))
-                .unwrap(),
-                json!({
-                    "action": "events_start",
-                    "selector": "#notice",
-                    "state": "hidden",
-                    "once": true,
-                    "ttl": 30,
-                    "owner": "chat:test",
-                    "key": "k1"
-                }),
-            ),
-            (
-                super::events_start_args(&json!({
-                    "method": "Network.responseReceived",
-                    "match": ["/response/url=https://example.com"],
-                    "matchRegex": ["/response/url=example"]
-                }))
-                .unwrap(),
-                json!({
-                    "action": "events_start",
-                    "method": "Network.responseReceived",
-                    "match": ["/response/url=https://example.com"],
-                    "matchRegex": ["/response/url=example"]
-                }),
-            ),
-            (
-                super::events_read_args(&json!({
-                    "id": "sub-1",
-                    "since": "sub-1:4",
-                    "waitMs": 500,
-                    "limit": 12,
-                    "ack": true
-                }))
-                .unwrap(),
-                json!({
-                    "action": "events_read",
-                    "subscriptionId": "sub-1",
-                    "since": "sub-1:4",
-                    "waitMs": 500,
-                    "limit": 12,
-                    "ack": true
-                }),
-            ),
-            (
-                super::events_ack_args(&json!({
-                    "id": "sub-1",
-                    "cursor": "sub-1:6",
-                    "owner": "chat:test"
-                }))
-                .unwrap(),
-                json!({
-                    "action": "events_ack",
-                    "subscriptionId": "sub-1",
-                    "cursor": "sub-1:6",
-                    "owner": "chat:test"
-                }),
-            ),
-            (
-                super::events_list_args(&json!({"owner": "chat:test", "unread": true})).unwrap(),
-                json!({ "action": "events_list", "owner": "chat:test", "unread": true }),
-            ),
-            (
-                super::events_stop_args(&json!({"id": "sub-1", "owner": "chat:test"})).unwrap(),
-                json!({ "action": "events_stop", "subscriptionId": "sub-1", "owner": "chat:test" }),
-            ),
-        ];
-
-        for (args, expected) in cases {
+        let cases = json!([
+            ["start", {"selector": "#notice", "state": "hidden", "once": true, "ttl": 30, "owner": "chat:test", "key": "k1"}, {"action": "events_start", "selector": "#notice", "state": "hidden", "once": true, "ttl": 30, "owner": "chat:test", "key": "k1"}],
+            ["start", {"method": "Network.responseReceived", "match": ["/response/url=https://example.com", "/status=200"], "matchRegex": ["/response/url=example", "/type=json"]}, {"action": "events_start", "method": "Network.responseReceived", "match": ["/response/url=https://example.com", "/status=200"], "matchRegex": ["/response/url=example", "/type=json"], "once": false}],
+            ["read", {"id": "sub-1", "since": "sub-1:4", "waitMs": 500, "limit": 12, "ack": true}, {"action": "events_read", "subscriptionId": "sub-1", "since": "sub-1:4", "waitMs": 500, "limit": 12, "ack": true}],
+            ["read", {"id": "sub-1", "ack": false}, {"action": "events_read", "subscriptionId": "sub-1"}],
+            ["ack", {"id": "sub-1", "cursor": "sub-1:6", "owner": "chat:test"}, {"action": "events_ack", "subscriptionId": "sub-1", "cursor": "sub-1:6", "owner": "chat:test"}],
+            ["list", {"owner": "chat:test", "unread": true}, {"action": "events_list", "owner": "chat:test", "unread": true}],
+            ["stop", {"id": "sub-1", "owner": "chat:test"}, {"action": "events_stop", "subscriptionId": "sub-1", "owner": "chat:test"}]
+        ]);
+        let tools = super::tools_for_config(&super::McpConfig::default());
+        for case in cases.as_array().unwrap() {
+            let verb = case[0].as_str().unwrap();
+            let name = format!("agent_browser_events_{verb}");
+            assert!(tools.iter().any(|tool| tool["name"] == name));
+            let args = super::events_args(&case[1], verb).unwrap();
             let flags = crate::flags::parse_flags(&args);
-            let command =
+            assert!(!flags.cli_state);
+            let mut command =
                 crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
-            for (key, value) in expected.as_object().unwrap() {
-                assert_eq!(&command[key], value, "field {key} from {args:?}");
-            }
+            command.as_object_mut().unwrap().remove("id");
+            assert_eq!(command, case[2], "{args:?}");
         }
-    }
-
-    #[test]
-    fn events_mcp_result_preserves_the_cli_json_response() {
-        let responses = [
-            json!({ "success": true, "data": { "id": "sub-1", "cursor": "sub-1:0" } }),
-            json!({ "success": true, "data": { "id": "sub-1", "events": [] } }),
-            json!({ "success": true, "data": { "id": "sub-1", "cursor": "sub-1:1" } }),
-            json!({ "success": true, "data": { "subscriptions": [] } }),
-            json!({ "success": true, "data": { "id": "sub-1", "stopped": true } }),
-        ];
-
-        for response in responses {
-            let stdout = serde_json::to_string(&response).unwrap();
-            let result = super::tool_result_from_run(super::CliRun {
-                exit_code: Some(0),
-                stdout: stdout.clone(),
-                stderr: String::new(),
-            });
-
-            assert_eq!(result["structuredContent"]["response"], response);
-            assert_eq!(result["structuredContent"]["stdout"], stdout);
+        let invalid = json!([
+            ["start", {"selector": false, "state": 0}, "selector must be a string"],
+            ["start", {"match": [0], "once": 0}, "match[0] must be a string"],
+            ["start", {"once": 0, "ttl": -1}, "once must be a boolean"],
+            ["start", {"ttl": -1}, "ttl must be a non-negative integer"],
+            ["read", {"since": 0}, "id must be a string"]
+        ]);
+        for case in invalid.as_array().unwrap() {
+            let error = super::events_args(&case[1], case[0].as_str().unwrap()).unwrap_err();
+            assert_eq!(error.message, case[2].as_str().unwrap());
         }
     }
 

@@ -70,7 +70,6 @@ fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
         "event_navigation_probe" => include_str!("test_fixtures/event_navigation_probe.html"),
-        "event_tap_probe" => include_str!("test_fixtures/event_tap_probe.html"),
         "events_probe" => include_str!("test_fixtures/events_probe.html"),
         "html5_drag_probe" => include_str!("test_fixtures/html5_drag_probe.html"),
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
@@ -84,231 +83,148 @@ fn native_test_fixture_html(name: &str) -> &'static str {
     }
 }
 
-async fn start_event_tap_fixture_server() -> (String, tokio::task::JoinHandle<()>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let handle = tokio::spawn(async move {
-        while let Ok((mut stream, _)) = listener.accept().await {
-            let mut request = vec![0u8; 4096];
-            let length = stream.read(&mut request).await.unwrap_or(0);
-            let request = String::from_utf8_lossy(&request[..length]);
-            let (content_type, extra_header, body) = if request.starts_with("GET /download ") {
-                (
-                    "application/octet-stream",
-                    "Content-Disposition: attachment; filename=event-tap.txt\r\n",
-                    "event tap download",
-                )
-            } else {
-                (
-                    "text/html; charset=utf-8",
-                    "",
-                    native_test_fixture_html("event_tap_probe"),
-                )
-            };
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{extra_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.write_all(response.as_bytes()).await;
-        }
-    });
-    (format!("http://{address}/events"), handle)
+macro_rules! event {
+    ($session:ident, $($command:tt)*) => {
+        $session.command(json!($($command)*)).await
+    };
 }
 
-async fn start_cdp_tap(
-    state: &mut DaemonState,
-    id: &str,
-    method: &str,
-    once: bool,
-    matcher: Option<&str>,
-) -> Value {
-    let mut command = json!({
-        "id": id,
-        "action": "events_start",
-        "method": method,
-        "once": once
-    });
-    if let Some(matcher) = matcher {
-        command["match"] = json!([matcher]);
-    }
-    let response = execute_command(&command, state).await;
-    assert_success(&response);
-    get_data(&response).clone()
-}
-
-async fn read_cdp_tap_event(state: &DaemonState, subscription: &Value, method: &str) -> Value {
-    let id = subscription["id"].as_str().unwrap();
-    let cursor = subscription["cursor"].as_str().unwrap();
-    let read = state
-        .events
-        .read(id, Some(cursor), std::time::Duration::from_secs(5), 20)
-        .await
-        .unwrap();
-    let events: Vec<_> = read
-        .events
-        .into_iter()
-        .filter(|event| event.meta.name == method)
-        .collect();
-    assert_eq!(events.len(), 1, "expected one {method} event");
-    serde_json::to_value(&events[0]).unwrap()
-}
-
-struct EventTapSession {
+struct EventSession {
     _environment: EnvGuard<'static>,
-    state: DaemonState,
+    state: tokio::sync::Mutex<DaemonState>,
     url: String,
-    download_directory: tempfile::TempDir,
+    downloads: tempfile::TempDir,
+    leak_requests: Arc<AtomicUsize>,
     server: tokio::task::JoinHandle<()>,
 }
 
-impl EventTapSession {
-    async fn start() -> Self {
-        let environment = EnvGuard::new(&[
+impl EventSession {
+    async fn start(domains: Option<&str>) -> Self {
+        let names = [
             "AGENT_BROWSER_ACTION_POLICY",
             "AGENT_BROWSER_POLICY",
             "AGENT_BROWSER_CONFIRM_ACTIONS",
             "AGENT_BROWSER_ALLOWED_DOMAINS",
             "AGENT_BROWSER_NO_AUTO_DIALOG",
-        ]);
-        environment.remove("AGENT_BROWSER_ACTION_POLICY");
-        environment.remove("AGENT_BROWSER_POLICY");
-        environment.remove("AGENT_BROWSER_CONFIRM_ACTIONS");
-        environment.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        ];
+        let environment = EnvGuard::new(&names);
+        for name in names {
+            environment.remove(name);
+        }
         environment.set("AGENT_BROWSER_NO_AUTO_DIALOG", "1");
-        let (url, server) = start_event_tap_fixture_server().await;
-        let download_directory = tempfile::tempdir().unwrap();
-        let mut state = DaemonState::new();
-        let response = execute_command(
-            &json!({
-                "id": "launch",
-                "action": "launch",
-                "headless": true,
-                "downloadPath": download_directory.path().to_string_lossy()
-            }),
-            &mut state,
-        )
-        .await;
-        assert_success(&response);
-        let response = execute_command(
-            &json!({"id": "navigate", "action": "navigate", "url": url}),
-            &mut state,
-        )
-        .await;
-        assert_success(&response);
-        Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let leak_requests = Arc::new(AtomicUsize::new(0));
+        let logged = leak_requests.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let logged = logged.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 8192];
+                    let length = stream.read(&mut buffer).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buffer[..length]);
+                    let request = request.lines().next().unwrap_or("");
+                    let response = if request.contains(" /redirect ") {
+                        format!("HTTP/1.1 302 Found\r\nLocation: http://{address}/leak\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    } else {
+                        let (headers, body) = if request.contains(" /download ") {
+                            ("application/octet-stream\r\nContent-Disposition: attachment; filename=event-tap.txt", "event tap download")
+                        } else if request.contains(" /leak ") {
+                            logged.fetch_add(1, Ordering::SeqCst);
+                            ("text/html", "<!doctype html><div id=leaked>secret</div>")
+                        } else {
+                            (
+                                "text/html",
+                                include_str!("test_fixtures/event_tap_probe.html"),
+                            )
+                        };
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: {headers}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                    };
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        let session = Self {
             _environment: environment,
-            state,
-            url,
-            download_directory,
+            state: tokio::sync::Mutex::new(DaemonState::new()),
+            url: format!("http://{address}/events"),
+            downloads: tempfile::tempdir().unwrap(),
+            leak_requests,
             server,
+        };
+        event!(session, {"action": "launch", "headless": true, "allowedDomains": domains, "downloadPath": session.downloads.path().to_string_lossy()});
+        event!(session, {"action": "navigate", "url": if domains == Some("localhost") { session.url.replace("127.0.0.1", "localhost") } else { session.url.clone() }});
+        session
+    }
+
+    async fn response(&self, mut command: Value) -> Value {
+        command["id"] = json!("event-test");
+        if command["action"] == "events_read" {
+            super::daemon::execute_events_read(&command, &self.state).await
+        } else {
+            Box::pin(execute_command(&command, &mut *self.state.lock().await)).await
         }
     }
 
-    async fn finish(mut self) {
-        let response =
-            execute_command(&json!({"id": "close", "action": "close"}), &mut self.state).await;
+    async fn command(&self, command: Value) -> Value {
+        let response = self.response(command).await;
         assert_success(&response);
+        get_data(&response).clone()
+    }
+
+    async fn tap(&self, method: &str, matchers: &[&str]) -> Value {
+        event!(self, {"action": "events_start", "method": method, "once": true, "match": matchers})
+    }
+
+    async fn read(&self, subscription: &Value, cursor: &Value) -> Value {
+        event!(self, {"action":"events_read", "subscriptionId":subscription["id"], "since":cursor, "waitMs":5_000, "limit":20})
+    }
+
+    async fn tap_event(&self, subscription: &Value, method: &str) -> Value {
+        let read = self.read(subscription, &subscription["cursor"]).await;
+        assert_bus_event(&read, method).clone()
+    }
+
+    async fn finish(self) {
+        event!(self, {"action": "close"});
         self.server.abort();
     }
+}
+
+async fn tap_fixture(method: &str, matchers: &[&str], selector: &str) {
+    let session = EventSession::start(None).await;
+    let subscription = session.tap(method, matchers).await;
+    event!(session, {"action": "evaluate", "script": format!("setTimeout(() => document.querySelector('{selector}').click(), 0)")});
+    session.tap_event(&subscription, method).await;
+    session.finish().await;
 }
 
 #[tokio::test]
 #[ignore]
 async fn e2e_cdp_event_tap_dialog() {
-    let mut session = EventTapSession::start().await;
-    let dialog = start_cdp_tap(
-        &mut session.state,
-        "dialog-start",
-        "Page.javascriptDialogOpening",
-        true,
-        Some("/type=alert"),
-    )
-    .await;
-    let response = execute_command(
-        &json!({
-            "id": "dialog-trigger",
-            "action": "evaluate",
-            "script": "setTimeout(() => alert('fixture dialog'), 0)"
-        }),
-        &mut session.state,
-    )
-    .await;
-    assert_success(&response);
-    let event = read_cdp_tap_event(&session.state, &dialog, "Page.javascriptDialogOpening").await;
-    assert_eq!(event["data"]["type"], "alert");
-    session.finish().await;
+    tap_fixture("Page.javascriptDialogOpening", &["/type=alert"], "#alert").await;
 }
 
 #[tokio::test]
 #[ignore]
 async fn e2e_cdp_event_tap_navigation() {
-    let mut session = EventTapSession::start().await;
-    let navigation = start_cdp_tap(
-        &mut session.state,
-        "navigation-start",
-        "Page.navigatedWithinDocument",
-        true,
-        None,
-    )
-    .await;
-    let response = execute_command(
-        &json!({
-            "id": "navigation-trigger",
-            "action": "evaluate",
-            "script": "history.pushState({}, '', '/events#changed')"
-        }),
-        &mut session.state,
-    )
-    .await;
-    assert_success(&response);
-    let event =
-        read_cdp_tap_event(&session.state, &navigation, "Page.navigatedWithinDocument").await;
-    assert!(event["data"]["url"].as_str().unwrap().ends_with("#changed"));
-    session.finish().await;
+    tap_fixture("Page.navigatedWithinDocument", &[], "#navigate").await;
 }
 
 #[tokio::test]
 #[ignore]
 async fn e2e_cdp_event_tap_console_from_background_tab() {
-    let mut session = EventTapSession::start().await;
-    let response = execute_command(
-        &json!({"id": "background-tab", "action": "tab_new", "url": session.url}),
-        &mut session.state,
-    )
-    .await;
-    assert_success(&response);
-    let (background_session, background_tab) = {
-        let browser = session.state.browser.as_ref().unwrap();
-        let active_target = browser.active_target_id().unwrap();
-        let page = browser
-            .pages_list()
-            .into_iter()
-            .find(|page| page.target_id != active_target)
-            .unwrap();
-        (
-            page.session_id,
-            crate::native::browser::format_tab_id(page.tab_id),
-        )
-    };
-    let console = start_cdp_tap(
-        &mut session.state,
-        "console-start",
-        "Runtime.consoleAPICalled",
-        true,
-        None,
-    )
-    .await;
-    let client = session.state.browser.as_ref().unwrap().client.clone();
-    client
-        .send_command(
-            "Runtime.evaluate",
-            Some(json!({"expression": "console.log('fixture background console')"})),
-            Some(&background_session),
-        )
-        .await
-        .unwrap();
-    let event = read_cdp_tap_event(&session.state, &console, "Runtime.consoleAPICalled").await;
-    assert_eq!(event["meta"]["tab"]["id"], background_tab);
+    let session = EventSession::start(None).await;
+    let tabs = event!(session, {"action": "tab_list"});
+    let background_tab = &tabs["tabs"][0]["tabId"];
+    event!(session, {"action": "evaluate", "script": "window.eventTapChannel = new BroadcastChannel('event-tap'); eventTapChannel.onmessage = () => console.log('fixture background console')"});
+    event!(session, {"action": "tab_new", "url": session.url});
+    let subscription = session.tap("Runtime.consoleAPICalled", &[]).await;
+    event!(session, {"action": "evaluate", "script": "new BroadcastChannel('event-tap').postMessage(true)"});
+    let event = session
+        .tap_event(&subscription, "Runtime.consoleAPICalled")
+        .await;
+    assert_eq!(&event["meta"]["tab"]["id"], background_tab);
     assert_eq!(event["data"]["text"], "fixture background console");
     session.finish().await;
 }
@@ -316,296 +232,70 @@ async fn e2e_cdp_event_tap_console_from_background_tab() {
 #[tokio::test]
 #[ignore]
 async fn e2e_cdp_event_tap_page_error() {
-    let mut session = EventTapSession::start().await;
-    let exception = start_cdp_tap(
-        &mut session.state,
-        "exception-start",
-        "Runtime.exceptionThrown",
-        true,
-        None,
-    )
-    .await;
-    let response = execute_command(
-        &json!({
-            "id": "exception-trigger",
-            "action": "evaluate",
-            "script": "setTimeout(() => { throw new Error('fixture page error') }, 0)"
-        }),
-        &mut session.state,
-    )
-    .await;
-    assert_success(&response);
-    let event = read_cdp_tap_event(&session.state, &exception, "Runtime.exceptionThrown").await;
-    assert!(event["data"]["text"]
-        .as_str()
-        .unwrap()
-        .contains("fixture page error"));
-    session.finish().await;
+    tap_fixture("Runtime.exceptionThrown", &[], "#error").await;
 }
 
 #[tokio::test]
 #[ignore]
 async fn e2e_cdp_event_tap_download() {
-    let mut session = EventTapSession::start().await;
-    let download = start_cdp_tap(
-        &mut session.state,
-        "download-start",
-        "Browser.downloadWillBegin",
-        true,
-        None,
-    )
-    .await;
-    let response = execute_command(
-        &json!({
-            "id": "download-trigger",
-            "action": "click",
-            "selector": "#download"
-        }),
-        &mut session.state,
-    )
-    .await;
-    assert_success(&response);
-    let event = read_cdp_tap_event(&session.state, &download, "Browser.downloadWillBegin").await;
-    assert_eq!(event["data"]["suggestedFilename"], "event-tap.txt");
-    let download_path = session.download_directory.path().join("event-tap.txt");
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !download_path.exists() && tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    assert!(
-        download_path.exists(),
-        "download was not written to the policy path"
-    );
+    let session = EventSession::start(None).await;
+    let subscription = session.tap("Browser.downloadWillBegin", &[]).await;
+    let path = session.downloads.path().join("event-tap.txt");
+    event!(session, {"action": "download", "selector": "#download", "path": path.to_string_lossy()});
+    session
+        .tap_event(&subscription, "Browser.downloadWillBegin")
+        .await;
+    assert!(path.exists(), "download was not written to the policy path");
     session.finish().await;
 }
 
 #[tokio::test]
 #[ignore]
 async fn e2e_cdp_event_tap_target_created() {
-    let mut session = EventTapSession::start().await;
-    let target = start_cdp_tap(
-        &mut session.state,
-        "target-start",
-        "Target.targetCreated",
-        true,
-        None,
-    )
-    .await;
-    let client = session.state.browser.as_ref().unwrap().client.clone();
-    client
-        .send_command_typed::<_, Value>("Target.createTarget", &json!({"url": "about:blank"}), None)
-        .await
-        .unwrap();
-    let event = read_cdp_tap_event(&session.state, &target, "Target.targetCreated").await;
-    assert_eq!(event["data"]["type"], "page");
-    assert!(!event["data"]["targetId"].as_str().unwrap().is_empty());
+    let session = EventSession::start(None).await;
+    let subscription = session.tap("Target.targetCreated", &[]).await;
+    event!(session, {"action": "tab_new", "url": "about:blank"});
+    session
+        .tap_event(&subscription, "Target.targetCreated")
+        .await;
     session.finish().await;
+}
+
+fn bus_events(read: &Value) -> impl Iterator<Item = &Value> {
+    read["events"].as_array().unwrap().iter()
+}
+
+fn assert_bus_event<'response>(read: &'response Value, name: &str) -> &'response Value {
+    bus_events(read)
+        .find(|event| event["meta"]["name"] == name)
+        .expect("missing bus event")
 }
 
 #[tokio::test]
 #[ignore]
 async fn e2e_event_bus_shares_observer_and_rearms_after_navigation() {
-    let mut state = DaemonState::new();
-    let response = execute_command(
-        &json!({"id": "launch", "action": "launch", "headless": true}),
-        &mut state,
-    )
-    .await;
-    assert_success(&response);
-    let response = execute_command(
-        &json!({"id": "open", "action": "navigate", "url": native_test_fixture_url("events_probe")}),
-        &mut state,
-    )
-    .await;
-    assert_success(&response);
-
-    let (client, session_id, tab, current_url) = {
-        let browser = state.browser.as_ref().unwrap();
-        let target_id = browser.active_target_id().unwrap().to_owned();
-        let page = browser
-            .pages_list()
-            .into_iter()
-            .find(|page| page.target_id == target_id)
-            .unwrap();
-        (
-            browser.client.clone(),
-            page.session_id,
-            browser.event_tab_for_target(&target_id).unwrap(),
-            page.url,
-        )
-    };
-    let first = state
-        .events
-        .start_dom(super::events::bus::DomStart {
-            engine: "chrome",
-            client: client.clone(),
-            session_id: &session_id,
-            tab: tab.clone(),
-            current_url: &current_url,
-            selector: "#done",
-            state: "visible",
-            once: true,
-            ttl: std::time::Duration::from_secs(60),
-            owner: None,
-            idempotency_key: None,
-        })
-        .await
-        .unwrap();
-    let second = state
-        .events
-        .start_dom(super::events::bus::DomStart {
-            engine: "chrome",
-            client,
-            session_id: &session_id,
-            tab,
-            current_url: &current_url,
-            selector: "#done",
-            state: "visible",
-            once: false,
-            ttl: std::time::Duration::from_secs(60),
-            owner: None,
-            idempotency_key: None,
-        })
-        .await
-        .unwrap();
-    let first_id = first["id"].as_str().unwrap().to_owned();
-    let second_id = second["id"].as_str().unwrap().to_owned();
-    let first_head = first["cursor"].as_str().unwrap().to_owned();
-    let second_head = second["cursor"].as_str().unwrap().to_owned();
-
-    let response = execute_command(
-        &json!({"id": "show", "action": "evaluate", "script": "document.querySelector('#go').click()"}),
-        &mut state,
-    )
-    .await;
-    assert_success(&response);
-    let first_read = state
-        .events
-        .read(
-            &first_id,
-            Some(&first_head),
-            std::time::Duration::from_secs(5),
-            10,
-        )
-        .await
-        .unwrap();
-    let second_read = state
-        .events
-        .read(
-            &second_id,
-            Some(&second_head),
-            std::time::Duration::from_secs(5),
-            10,
-        )
-        .await
-        .unwrap();
-    assert!(first_read
-        .events
-        .iter()
-        .any(|event| event.meta.name == "element.visible"));
-    assert!(second_read
-        .events
-        .iter()
-        .any(|event| event.meta.name == "element.visible"));
-    assert_eq!(first_read.status, "ended");
-
-    for script in [
-        "document.querySelector('#done').remove()",
-        "const ready = document.createElement('div'); ready.id = 'done'; ready.textContent = 'Again'; document.body.append(ready)",
-    ] {
-        let response = execute_command(
-            &json!({"id": "transition", "action": "evaluate", "script": script}),
-            &mut state,
-        )
-        .await;
-        assert_success(&response);
+    let session = EventSession::start(None).await;
+    event!(session, {"action": "navigate", "url": native_test_fixture_url("events_probe")});
+    let first = event!(session, {"action":"events_start", "selector":"#done", "once":true});
+    let second = event!(session, {"action":"events_start", "selector":"#done", "once":false});
+    event!(session, {"action": "evaluate", "script": "document.querySelector('#go').click()"});
+    let first_read = session.read(&first, &first["cursor"]).await;
+    let second_read = session.read(&second, &second["cursor"]).await;
+    assert_bus_event(&first_read, "element.visible");
+    assert_bus_event(&second_read, "element.visible");
+    assert_eq!(first_read["status"], "ended");
+    for script in ["document.querySelector('#done').remove()", "const ready = document.createElement('div'); ready.id = 'done'; ready.textContent = 'Again'; document.body.append(ready)"] {
+        event!(session, {"action": "evaluate", "script": script});
     }
-    let after_refcount = state
-        .events
-        .read(
-            &second_id,
-            Some(&second_read.cursor),
-            std::time::Duration::from_secs(5),
-            10,
-        )
-        .await
-        .unwrap();
-    assert!(after_refcount
-        .events
-        .iter()
-        .any(|event| event.meta.name == "element.visible"));
-
-    let response = execute_command(
-        &json!({"id": "push", "action": "evaluate", "script": "history.pushState({}, '', '#route')"}),
-        &mut state,
-    )
-    .await;
-    assert_success(&response);
-    let rearmed = state
-        .events
-        .read(
-            &second_id,
-            Some(&after_refcount.cursor),
-            std::time::Duration::from_secs(5),
-            10,
-        )
-        .await
-        .unwrap();
-    assert!(rearmed
-        .events
-        .iter()
-        .any(|event| event.meta.name == "subscription.rearmed"));
-
-    let response = execute_command(
-        &json!({"id": "navigate", "action": "navigate", "url": native_test_fixture_url("event_navigation_probe")}),
-        &mut state,
-    )
-    .await;
-    assert_success(&response);
-    let navigated = state
-        .events
-        .read(
-            &second_id,
-            Some(&rearmed.cursor),
-            std::time::Duration::from_secs(5),
-            10,
-        )
-        .await
-        .unwrap();
-    assert!(navigated
-        .events
-        .iter()
-        .any(|event| event.meta.name == "subscription.rearmed"));
-    assert!(navigated.events.iter().any(|event| {
-        event.meta.name == "element.visible" && event.data["afterNavigation"] == true
-    }));
-
-    let response = execute_command(
-        &json!({"id": "other-tab", "action": "tab_new", "url": "about:blank"}),
-        &mut state,
-    )
-    .await;
-    assert_success(&response);
-    let response = execute_command(
-        &json!({"id": "close-tab", "action": "tab_close", "tabId": "t1"}),
-        &mut state,
-    )
-    .await;
-    assert_success(&response);
-    let closed = state
-        .events
-        .read(
-            &second_id,
-            Some(&navigated.cursor),
-            std::time::Duration::from_secs(5),
-            10,
-        )
-        .await
-        .unwrap();
-    assert_eq!(closed.status, "ended");
-    assert_eq!(closed.events.last().unwrap().data["reason"], "tab_closed");
-    let response = execute_command(&json!({"id": "close", "action": "close"}), &mut state).await;
-    assert_success(&response);
+    let after_refcount = session.read(&second, &second_read["cursor"]).await;
+    assert_bus_event(&after_refcount, "element.visible");
+    event!(session, {"action": "evaluate", "script": "history.pushState({}, '', '#route')"});
+    let rearmed = session.read(&second, &after_refcount["cursor"]).await;
+    assert_bus_event(&rearmed, "subscription.rearmed");
+    event!(session, {"action": "navigate", "url": native_test_fixture_url("event_navigation_probe")});
+    let navigated = session.read(&second, &rearmed["cursor"]).await;
+    assert_bus_event(&navigated, "subscription.rearmed");
+    session.finish().await;
 }
 
 #[tokio::test]
@@ -2152,447 +1842,58 @@ async fn e2e_stream_command_requires_same_origin_before_daemon_relay() {
 #[tokio::test]
 #[ignore]
 async fn e2e_events_operations_use_cursor_reads() {
-    let environment = crate::test_utils::EnvGuard::new(&[
-        "AGENT_BROWSER_ACTION_POLICY",
-        "AGENT_BROWSER_POLICY",
-        "AGENT_BROWSER_CONFIRM_ACTIONS",
-    ]);
-    environment.remove("AGENT_BROWSER_ACTION_POLICY");
-    environment.remove("AGENT_BROWSER_POLICY");
-    environment.remove("AGENT_BROWSER_CONFIRM_ACTIONS");
-    let mut initial_state = DaemonState::new();
-    let response = execute_command(
-        &json!({ "id": "1", "action": "launch", "headless": true }),
-        &mut initial_state,
-    )
-    .await;
-    assert_success(&response);
-    let response = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": native_test_fixture_url("event_navigation_probe") }),
-        &mut initial_state,
-    )
-    .await;
-    assert_success(&response);
-    let state = tokio::sync::Mutex::new(initial_state);
-
-    let response = execute_command(
-        &json!({
-            "id": "3",
-            "action": "events_start",
-            "selector": "#done",
-            "owner": "worker-a",
-            "key": "visible-done"
-        }),
-        &mut *state.lock().await,
-    )
-    .await;
-    assert_success(&response);
-    let already_satisfied = get_data(&response).clone();
-    assert_eq!(already_satisfied["alreadySatisfied"], true);
-    assert_eq!(already_satisfied["owner"], "worker-a");
-    let duplicate = execute_command(
-        &json!({
-            "id": "3b",
-            "action": "events_start",
-            "selector": "#done",
-            "owner": "worker-a",
-            "key": "visible-done"
-        }),
-        &mut *state.lock().await,
-    )
-    .await;
-    assert_success(&duplicate);
-    assert_eq!(get_data(&duplicate)["id"], already_satisfied["id"]);
-    let wrong_owner = execute_command(
-        &json!({
-            "id": "3c",
-            "action": "events_stop",
-            "subscriptionId": already_satisfied["id"],
-            "owner": "worker-b"
-        }),
-        &mut *state.lock().await,
-    )
-    .await;
-    assert_eq!(wrong_owner["success"], false);
-    let wrong_owner = execute_command(
-        &json!({
-            "id": "3d",
-            "action": "events_ack",
-            "subscriptionId": already_satisfied["id"],
-            "cursor": already_satisfied["cursor"],
-            "owner": "worker-b"
-        }),
-        &mut *state.lock().await,
-    )
-    .await;
-    assert_eq!(wrong_owner["success"], false);
-    let response = execute_command(
-        &json!({
-            "id": "3e",
-            "action": "events_list",
-            "owner": "worker-b"
-        }),
-        &mut *state.lock().await,
-    )
-    .await;
-    assert_success(&response);
-    assert_eq!(get_data(&response)["subscriptions"], json!([]));
-    let read = super::daemon::execute_events_read(
-        &json!({
-            "id": "4",
-            "action": "events_read",
-            "subscriptionId": already_satisfied["id"],
-            "since": already_satisfied["cursor"],
-        }),
-        &state,
-    )
-    .await;
-    assert_success(&read);
-    assert_eq!(get_data(&read)["events"], json!([]));
-    let waiting = super::daemon::execute_events_read(
-        &json!({
-            "id": "4b",
-            "action": "events_read",
-            "subscriptionId": already_satisfied["id"],
-            "since": already_satisfied["cursor"],
-            "waitMs": 1,
-        }),
-        &state,
-    )
-    .await;
-    assert_success(&waiting);
-    assert_eq!(get_data(&waiting)["waiting"], true);
-
-    let response = execute_command(
-        &json!({ "id": "5", "action": "navigate", "url": native_test_fixture_url("events_probe") }),
-        &mut *state.lock().await,
-    )
-    .await;
-    assert_success(&response);
-    let response = execute_command(
-        &json!({ "id": "6", "action": "events_start", "selector": "#done", "once": true }),
-        &mut *state.lock().await,
-    )
-    .await;
-    assert_success(&response);
-    let appeared = get_data(&response).clone();
-    let response = execute_command(
-        &json!({ "id": "7", "action": "click", "selector": "#go" }),
-        &mut *state.lock().await,
-    )
-    .await;
-    assert_success(&response);
-    let mut cursor = appeared["cursor"].clone();
-    let mut saw_visible = false;
-    for _ in 0..4 {
-        let read = super::daemon::execute_events_read(
-            &json!({
-                "id": "8",
-                "action": "events_read",
-                "subscriptionId": appeared["id"],
-                "since": cursor,
-                "waitMs": 5_000,
-                "ack": true,
-                "limit": 1,
-            }),
-            &state,
-        )
-        .await;
-        assert_success(&read);
-        let data = get_data(&read);
-        let seq = data["cursor"]
-            .as_str()
-            .unwrap()
-            .rsplit_once(':')
-            .unwrap()
-            .1
-            .parse::<u64>()
-            .unwrap();
-        assert_eq!(data["consumed"], seq);
-        saw_visible |= data["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|event| event["meta"]["name"] == "element.visible");
-        cursor = data["cursor"].clone();
-        if saw_visible || data["status"] == "ended" {
-            break;
-        }
+    let session = EventSession::start(None).await;
+    event!(session, {"action": "navigate", "url": native_test_fixture_url("event_navigation_probe")});
+    let ready =
+        event!(session, {"action": "events_start", "selector": "#done", "owner": "worker-a"});
+    assert_eq!(ready["alreadySatisfied"], true);
+    for action in ["events_stop", "events_ack"] {
+        let response = session.response(json!({"action": action, "subscriptionId": ready["id"], "cursor": ready["cursor"], "owner": "worker-b"})).await;
+        assert_eq!(response["success"], false);
     }
-    assert!(saw_visible);
-
-    let response = execute_command(
-        &json!({ "id": "9", "action": "events_start", "selector": "#done" }),
-        &mut *state.lock().await,
-    )
-    .await;
-    assert_success(&response);
-    let after_navigation = get_data(&response).clone();
-    assert_eq!(after_navigation["alreadySatisfied"], true);
-    let response = execute_command(
-        &json!({ "id": "10", "action": "navigate", "url": native_test_fixture_url("event_navigation_probe") }),
-        &mut *state.lock().await,
-    )
-    .await;
-    assert_success(&response);
-    let nav_read = super::daemon::execute_events_read(
-        &json!({
-            "id": "11",
-            "action": "events_read",
-            "subscriptionId": after_navigation["id"],
-            "since": after_navigation["cursor"],
-            "waitMs": 5_000,
-        }),
-        &state,
-    )
-    .await;
-    assert_success(&nav_read);
-    assert!(get_data(&nav_read)["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|event| {
-            event["meta"]["name"] == "element.visible" && event["data"]["afterNavigation"] == true
-        }));
-    let nav_cursor = get_data(&nav_read)["cursor"].clone();
-
-    let response = execute_command(
-        &json!({ "id": "12", "action": "tab_new", "url": "about:blank" }),
-        &mut *state.lock().await,
-    )
-    .await;
-    assert_success(&response);
-    let watched_tab = after_navigation["tab"]["id"].as_str().unwrap();
-    let response = execute_command(
-        &json!({ "id": "13", "action": "tab_close", "tabId": watched_tab }),
-        &mut *state.lock().await,
-    )
-    .await;
-    assert_success(&response);
-    let read = super::daemon::execute_events_read(
-        &json!({
-            "id": "14",
-            "action": "events_read",
-            "subscriptionId": after_navigation["id"],
-            "since": nav_cursor,
-            "waitMs": 5_000,
-        }),
-        &state,
-    )
-    .await;
-    assert_success(&read);
-    assert_eq!(get_data(&read)["status"], "ended");
-    assert_eq!(get_data(&read)["events"][0]["data"]["reason"], "tab_closed");
-
-    let policy_dir = tempfile::tempdir().unwrap();
-    let policy_path = policy_dir.path().join("policy.json");
+    let listed = event!(session, {"action": "events_list", "owner": "worker-b"});
+    assert_eq!(listed["subscriptions"], json!([]));
+    event!(session, {"action": "navigate", "url": native_test_fixture_url("event_navigation_probe")});
+    let read = session.read(&ready, &ready["cursor"]).await;
+    assert!(bus_events(&read).any(|event| {
+        event["meta"]["name"] == "element.visible" && event["data"]["afterNavigation"] == true
+    }));
+    let policy_path = session.downloads.path().join("policy.json");
     std::fs::write(&policy_path, r#"{"deny":["events_read"]}"#).unwrap();
-    state.lock().await.policy =
+    session.state.lock().await.policy =
         Some(super::policy::ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
-    let denied_read = super::daemon::execute_events_read(
-        &json!({
-            "id": "15",
-            "action": "events_read",
-            "subscriptionId": after_navigation["id"],
-            "since": nav_cursor,
-        }),
-        &state,
-    )
-    .await;
-    assert_eq!(denied_read["success"], false);
-    assert!(denied_read["error"]
-        .as_str()
-        .unwrap()
-        .contains("events_read"));
+    let denied = session.response(json!({"action": "events_read", "subscriptionId": ready["id"], "since": read["cursor"]})).await;
+    assert_eq!(denied["success"], false);
+    assert!(denied["error"].as_str().unwrap().contains("events_read"));
+    session.finish().await;
 }
 
 #[tokio::test]
 #[ignore]
 async fn e2e_events_do_not_store_data_for_blocked_origin() {
-    let environment = crate::test_utils::EnvGuard::new(&[
-        "AGENT_BROWSER_ACTION_POLICY",
-        "AGENT_BROWSER_POLICY",
-        "AGENT_BROWSER_CONFIRM_ACTIONS",
-        "AGENT_BROWSER_ALLOWED_DOMAINS",
-    ]);
-    environment.remove("AGENT_BROWSER_ACTION_POLICY");
-    environment.remove("AGENT_BROWSER_POLICY");
-    environment.remove("AGENT_BROWSER_CONFIRM_ACTIONS");
-    environment.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
-    let (base_url, _server) = start_link_fixture_server().await;
-    let mut daemon = DaemonState::new();
-    *daemon.domain_filter.write().await = Some(super::network::DomainFilter::new("127.0.0.1"));
-
-    let response = execute_command(
-        &json!({ "id": "1", "action": "launch", "headless": true }),
-        &mut daemon,
-    )
-    .await;
-    assert_success(&response);
-    let response = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": base_url }),
-        &mut daemon,
-    )
-    .await;
-    assert_success(&response);
-    let response = execute_command(
-        &json!({ "id": "3", "action": "events_start", "selector": "#blocked" }),
-        &mut daemon,
-    )
-    .await;
-    assert_success(&response);
-    let subscription = get_data(&response).clone();
-
-    let response = execute_command(
-        &json!({ "id": "4", "action": "navigate", "url": "https://blocked.example" }),
-        &mut daemon,
-    )
-    .await;
-    assert_eq!(response["success"], false);
-
-    let state = tokio::sync::Mutex::new(daemon);
-    let read = super::daemon::execute_events_read(
-        &json!({
-            "id": "5",
-            "action": "events_read",
-            "subscriptionId": subscription["id"],
-            "since": subscription["cursor"],
-        }),
-        &state,
-    )
-    .await;
-    assert_success(&read);
-    assert_eq!(get_data(&read)["events"], json!([]));
+    let session = EventSession::start(Some("127.0.0.1")).await;
+    let subscription = event!(session, {"action": "events_start", "selector": "#blocked"});
+    let blocked = session
+        .response(json!({"action": "navigate", "url": "https://blocked.example"}))
+        .await;
+    assert_eq!(blocked["success"], false);
+    let read = event!(session, {"action": "events_read", "subscriptionId": subscription["id"], "since": subscription["cursor"]});
+    assert_eq!(read["events"], json!([]));
+    session.finish().await;
 }
 
 #[tokio::test]
 #[ignore]
 async fn e2e_events_lose_content_after_a_redirect_to_a_blocked_origin() {
-    let environment = crate::test_utils::EnvGuard::new(&[
-        "AGENT_BROWSER_ACTION_POLICY",
-        "AGENT_BROWSER_POLICY",
-        "AGENT_BROWSER_CONFIRM_ACTIONS",
-        "AGENT_BROWSER_ALLOWED_DOMAINS",
-    ]);
-    environment.remove("AGENT_BROWSER_ACTION_POLICY");
-    environment.remove("AGENT_BROWSER_POLICY");
-    environment.remove("AGENT_BROWSER_CONFIRM_ACTIONS");
-    environment.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let requests = Arc::new(Mutex::new(Vec::<String>::new()));
-    let requests_for_server = requests.clone();
-    let server = tokio::spawn(async move {
-        for _ in 0..20 {
-            let Ok((mut stream, _)) = listener.accept().await else {
-                break;
-            };
-            let requests = requests_for_server.clone();
-            tokio::spawn(async move {
-                let mut request = vec![0u8; 8192];
-                let length = stream.read(&mut request).await.unwrap_or(0);
-                let request = String::from_utf8_lossy(&request[..length]);
-                let request_line = request.lines().next().unwrap_or("").to_string();
-                if let Ok(mut logged) = requests.lock() {
-                    logged.push(request_line.clone());
-                }
-                let response = if request_line.contains(" /redirect ") {
-                    format!(
-                        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/leak\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                    )
-                } else if request_line.contains(" /leak ") {
-                    let body = "<!doctype html><div id=\"leaked\">secret</div>";
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(),
-                        body,
-                    )
-                } else {
-                    let body = "<!doctype html><title>Start</title>";
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(),
-                        body,
-                    )
-                };
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.flush().await;
-            });
-        }
-    });
-
-    let mut daemon = DaemonState::new();
-    *daemon.domain_filter.write().await = Some(super::network::DomainFilter::new("localhost"));
-
-    let response = execute_command(
-        &json!({ "id": "1", "action": "launch", "headless": true }),
-        &mut daemon,
-    )
-    .await;
-    assert_success(&response);
-    let response = execute_command(
-        &json!({
-            "id": "2",
-            "action": "navigate",
-            "url": format!("http://localhost:{port}/start"),
-        }),
-        &mut daemon,
-    )
-    .await;
-    assert_success(&response);
-    let response = execute_command(
-        &json!({ "id": "3", "action": "events_start", "selector": "#leaked" }),
-        &mut daemon,
-    )
-    .await;
-    assert_success(&response);
-    let subscription = get_data(&response).clone();
-
-    let response = execute_command(
-        &json!({
-            "id": "4",
-            "action": "evaluate",
-            "script": "location.href = '/redirect'"
-        }),
-        &mut daemon,
-    )
-    .await;
-    assert_success(&response);
+    let session = EventSession::start(Some("localhost")).await;
+    let subscription = event!(session, {"action": "events_start", "selector": "#leaked"});
+    event!(session, {"action": "evaluate", "script": "location.href = '/redirect'"});
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    let state = tokio::sync::Mutex::new(daemon);
-    let read = super::daemon::execute_events_read(
-        &json!({
-            "id": "5",
-            "action": "events_read",
-            "subscriptionId": subscription["id"],
-            "since": subscription["cursor"],
-            "waitMs": 1_000,
-        }),
-        &state,
-    )
-    .await;
-    assert_success(&read);
-    let events = get_data(&read)["events"].as_array().unwrap();
-    assert!(events
-        .iter()
-        .all(|event| event["meta"]["name"] != "element.visible"));
-    assert!(events
-        .iter()
-        .all(|event| !event.to_string().contains("secret")));
-    assert!(!requests
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|line| line.contains(" /leak ")));
-
-    let response = execute_command(
-        &json!({ "id": "6", "action": "close" }),
-        &mut *state.lock().await,
-    )
-    .await;
-    assert_success(&response);
-    server.abort();
+    let read = event!(session, {"action": "events_read", "subscriptionId": subscription["id"], "since": subscription["cursor"], "waitMs": 1_000});
+    assert!(bus_events(&read).all(|event| event["meta"]["name"] != "element.visible"));
+    assert!(bus_events(&read).all(|event| !event.to_string().contains("secret")));
+    assert_eq!(session.leak_requests.load(Ordering::SeqCst), 0);
+    session.finish().await;
 }
 
 #[tokio::test]

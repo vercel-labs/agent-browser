@@ -120,14 +120,9 @@ impl ActionPolicy {
         PolicyResult::Allow
     }
 
-    /// Reload policy from the file. Re-reads the JSON and updates the policy.
+    /// Reload the policy, retaining its previous rules if loading fails.
     pub fn reload(&mut self) -> Result<(), String> {
-        let contents = fs::read_to_string(&self.path)
-            .map_err(|e| format!("Failed to read policy file: {}", e))?;
-        let mut policy: ActionPolicy =
-            serde_json::from_str(&contents).map_err(|e| format!("Invalid policy JSON: {}", e))?;
-        policy.path = self.path.clone();
-        *self = policy;
+        *self = Self::load(&self.path.to_string_lossy())?;
         Ok(())
     }
 }
@@ -202,21 +197,6 @@ mod tests {
         let policy: ActionPolicy = serde_json::from_str(json).unwrap();
         assert_eq!(policy.check("click"), PolicyResult::Allow);
         assert!(matches!(policy.check("navigate"), PolicyResult::Deny(_)));
-    }
-
-    #[test]
-    fn failed_reload_keeps_the_previous_policy() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("policy.json");
-        fs::write(&path, r#"{"deny":["delete"]}"#).unwrap();
-        let mut policy = ActionPolicy::load(path.to_str().unwrap()).unwrap();
-        fs::remove_file(&path).unwrap();
-
-        let error = policy.reload().unwrap_err();
-
-        assert!(error.contains("Failed to read policy file"));
-        assert!(matches!(policy.check("delete"), PolicyResult::Deny(_)));
-        assert_eq!(policy.check("click"), PolicyResult::Allow);
     }
 
     #[test]

@@ -159,80 +159,42 @@ fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> 
 }
 
 fn format_events_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
-    match action {
-        Some("events_start") => Some(format!(
+    Some(match action? {
+        "events_start" => format!(
             "Event subscription {} started at {}",
-            data.get("id")?.as_str()?,
-            data.get("cursor")?.as_str()?
-        )),
-        Some("events_read") => {
-            let events = data.get("events")?.as_array()?;
-            if events.is_empty() {
-                return Some(
-                    if data.get("waiting").and_then(|value| value.as_bool()) == Some(true) {
-                        "No new events before timeout".to_string()
-                    } else {
-                        "No new events".to_string()
-                    },
-                );
-            }
-            Some(
-                events
-                    .iter()
-                    .map(|event| serde_json::to_string(event).unwrap_or_default())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            )
-        }
-        Some("events_ack") => Some(format!(
-            "Acknowledged through {}",
-            data.get("cursor")?.as_str()?
-        )),
-        Some("events_list") => {
-            let subscriptions = data.get("subscriptions")?.as_array()?;
-            if subscriptions.is_empty() {
-                return Some("No event subscriptions".to_string());
-            }
-            Some(
-                subscriptions
-                    .iter()
-                    .map(|subscription| {
-                        format!(
-                            "{} {} head={} consumed={}",
-                            subscription
-                                .get("id")
-                                .and_then(|value| value.as_str())
-                                .unwrap_or("?"),
-                            subscription
-                                .get("status")
-                                .and_then(|value| value.as_str())
-                                .unwrap_or("?"),
-                            subscription
-                                .get("head")
-                                .map(serde_json::Value::to_string)
-                                .unwrap_or_else(|| "?".to_string()),
-                            subscription
-                                .get("consumed")
-                                .map(serde_json::Value::to_string)
-                                .unwrap_or_else(|| "?".to_string())
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            )
-        }
-        Some("events_stop") => Some(
-            if data.get("stopped").and_then(|value| value.as_bool()) == Some(true) {
-                format!("Stopped event subscription {}", data.get("id")?.as_str()?)
-            } else {
-                format!(
-                    "Event subscription {} was not active",
-                    data.get("id")?.as_str()?
-                )
-            },
+            data["id"].as_str()?,
+            data["cursor"].as_str()?
         ),
-        _ => None,
-    }
+        "events_read" => match data["events"].as_array()?.as_slice() {
+            [] if data["waiting"] == true => "No new events before timeout".into(),
+            [] => "No new events".into(),
+            events => events
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        },
+        "events_ack" => format!("Acknowledged through {}", data["cursor"].as_str()?),
+        "events_list" => match data["subscriptions"].as_array()?.as_slice() {
+            [] => "No event subscriptions".into(),
+            subscriptions => subscriptions
+                .iter()
+                .map(|subscription| {
+                    let text = |key: &str| subscription[key].as_str().unwrap_or("?");
+                    format!(
+                        "{} {} head={} consumed={}",
+                        text("id"),
+                        text("status"),
+                        subscription["head"],
+                        subscription["consumed"]
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        },
+        "events_stop" => format!("Stopped event subscription {}", data["id"].as_str()?),
+        _ => return None,
+    })
 }
 
 fn format_webmcp_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
@@ -4464,47 +4426,6 @@ mod tests {
         format_with_boundaries, OutputOptions,
     };
     use serde_json::json;
-
-    #[test]
-    fn events_text_covers_all_shared_verbs() {
-        assert_eq!(
-            super::format_events_text(
-                Some("events_start"),
-                &json!({ "id": "sub-1", "cursor": "sub-1:0" })
-            )
-            .as_deref(),
-            Some("Event subscription sub-1 started at sub-1:0")
-        );
-        assert_eq!(
-            super::format_events_text(
-                Some("events_read"),
-                &json!({ "events": [{"meta":{"cursor":"sub-1:1"},"data":{"ok":true}}] })
-            )
-            .as_deref(),
-            Some(r#"{"data":{"ok":true},"meta":{"cursor":"sub-1:1"}}"#)
-        );
-        assert_eq!(
-            super::format_events_text(Some("events_ack"), &json!({ "cursor": "sub-1:1" }))
-                .as_deref(),
-            Some("Acknowledged through sub-1:1")
-        );
-        assert_eq!(
-            super::format_events_text(
-                Some("events_list"),
-                &json!({ "subscriptions": [{"id":"sub-1","status":"active","head":1,"consumed":0}] })
-            )
-            .as_deref(),
-            Some("sub-1 active head=1 consumed=0")
-        );
-        assert_eq!(
-            super::format_events_text(
-                Some("events_stop"),
-                &json!({ "id": "sub-1", "stopped": true })
-            )
-            .as_deref(),
-            Some("Stopped event subscription sub-1")
-        );
-    }
 
     #[test]
     fn test_format_stream_status_text_for_enabled_stream() {

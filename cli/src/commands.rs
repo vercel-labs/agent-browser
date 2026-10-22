@@ -2080,350 +2080,113 @@ fn parse_events(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const START_USAGE: &str = "events start (--selector <css> [--state visible|hidden] | --method <CDP method> [--match <pointer>=<value>]... [--match-regex <pointer>=<regex>]...) [--once] [--ttl <secs>] [--owner <label>] [--key <key>]";
     const READ_USAGE: &str =
         "events read <id> [--since <cursor>] [--wait <ms>] [--limit <n>] [--ack]";
-    const WAIT_USAGE: &str = "events wait <id> [--since <cursor>] [--timeout <ms>]";
-    const ACK_USAGE: &str = "events ack <id> <cursor> [--owner <label>]";
-    const LIST_USAGE: &str = "events list [--owner <label>] [--unread]";
-    const STOP_USAGE: &str = "events stop <id> [--owner <label>]";
-    const WATCH_USAGE: &str = "events watch <id> [--since <cursor>]";
-
-    let Some(verb) = rest.first().copied() else {
-        return Err(ParseError::MissingArguments {
-            context: "events".to_string(),
-            usage: "events <start|read|wait|ack|list|stop|watch>",
-        });
+    let mut rest = rest.iter().copied();
+    let verb = rest.next().ok_or_else(|| ParseError::MissingArguments {
+        context: "events".to_string(),
+        usage: "events <start|read|wait|ack|list|stop|watch>",
+    })?;
+    let (usage, positionals): (&str, &[&str]) = match verb {
+        "start" => (START_USAGE, &[]),
+        "read" => (READ_USAGE, &["subscriptionId"]),
+        "wait" => (
+            "events wait <id> [--since <cursor>] [--timeout <ms>]",
+            &["subscriptionId"],
+        ),
+        "ack" => (
+            "events ack <id> <cursor> [--owner <label>]",
+            &["subscriptionId", "cursor"],
+        ),
+        "list" => ("events list [--owner <label>] [--unread]", &[]),
+        "stop" => ("events stop <id> [--owner <label>]", &["subscriptionId"]),
+        "watch" => ("events watch <id> [--since <cursor>]", &["subscriptionId"]),
+        other => {
+            return Err(ParseError::UnknownSubcommand {
+                subcommand: other.to_string(),
+                valid_options: &["start", "read", "wait", "ack", "list", "stop", "watch"],
+            })
+        }
     };
-    match verb {
-        "start" => {
-            let mut selector = None;
-            let mut state = None;
-            let mut method = None;
-            let mut equals = Vec::new();
-            let mut regexes = Vec::new();
-            let mut once = false;
-            let mut ttl = None;
-            let mut owner = None;
-            let mut key = None;
-            let mut i = 1;
-            while i < rest.len() {
-                let flag = rest[i];
-                let takes_value = match flag {
-                    "--selector" | "--state" | "--method" | "--match" | "--match-regex"
-                    | "--ttl" | "--owner" | "--key" => true,
-                    "--once" => {
-                        once = true;
-                        i += 1;
-                        continue;
-                    }
-                    _ => false,
-                };
-                if takes_value {
-                    let value =
-                        rest.get(i + 1)
-                            .copied()
-                            .ok_or_else(|| ParseError::MissingArguments {
-                                context: format!("events start {}", flag),
-                                usage: START_USAGE,
-                            })?;
-                    match flag {
-                        "--selector" => selector = Some(value),
-                        "--state" => state = Some(value),
-                        "--method" => method = Some(value),
-                        "--match" => equals.push(value),
-                        "--match-regex" => regexes.push(value),
-                        "--ttl" => {
-                            ttl = Some(value.parse::<u64>().map_err(|_| {
-                                ParseError::InvalidValue {
-                                    message: format!("Invalid event TTL: {}", value),
-                                    usage: START_USAGE,
-                                }
-                            })?);
-                        }
-                        "--owner" => owner = Some(value),
-                        "--key" => key = Some(value),
-                        _ => unreachable!(),
-                    }
-                    i += 2;
-                } else {
-                    return Err(ParseError::InvalidValue {
-                        message: if flag.starts_with("--") {
-                            format!("Unknown flag for events start: {}", flag)
-                        } else {
-                            format!("Unexpected argument for events start: {}", flag)
-                        },
-                        usage: START_USAGE,
-                    });
-                }
-            }
-            if selector.is_some() == method.is_some() {
-                return Err(ParseError::InvalidValue {
-                    message: "Specify exactly one of --selector or --method".to_string(),
-                    usage: START_USAGE,
-                });
-            }
-            if (method.is_some() && state.is_some())
-                || (selector.is_some() && (!equals.is_empty() || !regexes.is_empty()))
-            {
-                return Err(ParseError::InvalidValue {
-                    message:
-                        "--state is only valid with --selector; --match options require --method"
-                            .to_string(),
-                    usage: START_USAGE,
-                });
-            }
-            let mut command = json!({ "id": id, "action": "events_start", "once": once });
-            if let Some(selector) = selector {
-                command["selector"] = json!(selector);
-            }
-            if let Some(state) = state {
-                command["state"] = json!(state);
-            }
-            if let Some(method) = method {
-                command["method"] = json!(method);
-            }
-            if !equals.is_empty() {
-                command["match"] = json!(equals);
-            }
-            if !regexes.is_empty() {
-                command["matchRegex"] = json!(regexes);
-            }
-            if let Some(ttl) = ttl {
-                command["ttl"] = json!(ttl);
-            }
-            if let Some(owner) = owner {
-                command["owner"] = json!(owner);
-            }
-            if let Some(key) = key {
-                command["key"] = json!(key);
-            }
-            Ok(command)
-        }
-        "read" | "wait" => {
-            let waiting = verb == "wait";
-            let usage = if waiting { WAIT_USAGE } else { READ_USAGE };
-            let subscription_id = rest
-                .get(1)
-                .filter(|value| !value.starts_with("--"))
-                .ok_or_else(|| ParseError::MissingArguments {
-                    context: format!("events {}", verb),
-                    usage,
-                })?;
-            let mut since = None;
-            let mut wait_ms = if waiting { Some(50_000) } else { None };
-            let mut limit = None;
-            let mut ack = waiting;
-            let mut i = 2;
-            while i < rest.len() {
-                let flag = rest[i];
-                if flag == "--ack" && !waiting {
-                    ack = true;
-                    i += 1;
-                    continue;
-                }
-                let value = match flag {
-                    "--since" => {
-                        since = Some(rest.get(i + 1).copied().ok_or_else(|| {
-                            ParseError::MissingArguments {
-                                context: format!("events {} --since", verb),
-                                usage,
-                            }
-                        })?);
-                        i += 2;
-                        continue;
-                    }
-                    "--wait" if !waiting => rest.get(i + 1).copied(),
-                    "--timeout" if waiting => rest.get(i + 1).copied(),
-                    "--limit" if !waiting => rest.get(i + 1).copied(),
-                    _ => {
-                        return Err(ParseError::InvalidValue {
-                            message: format!("Unknown flag for events {}: {}", verb, flag),
-                            usage,
-                        });
-                    }
-                }
-                .ok_or_else(|| ParseError::MissingArguments {
-                    context: format!("events {} {}", verb, flag),
-                    usage,
-                })?;
-                match flag {
-                    "--wait" | "--timeout" => {
-                        wait_ms =
-                            Some(value.parse::<u64>().map_err(|_| ParseError::InvalidValue {
-                                message: format!("Invalid event wait duration: {}", value),
-                                usage,
-                            })?);
-                    }
-                    "--limit" => {
-                        limit =
-                            Some(value.parse::<u64>().map_err(|_| ParseError::InvalidValue {
-                                message: format!("Invalid event read limit: {}", value),
-                                usage,
-                            })?);
-                    }
-                    _ => unreachable!(),
-                }
-                i += 2;
-            }
-            let mut command = json!({
-                "id": id,
-                "action": "events_read",
-                "subscriptionId": subscription_id,
-            });
-            if let Some(since) = since {
-                command["since"] = json!(since);
-            }
-            if let Some(wait_ms) = wait_ms {
-                command["waitMs"] = json!(wait_ms);
-            }
-            if let Some(limit) = limit {
-                command["limit"] = json!(limit);
-            }
-            if ack {
-                command["ack"] = json!(true);
-            }
-            Ok(command)
-        }
-        "ack" => {
-            let subscription_id = rest
-                .get(1)
-                .filter(|value| !value.starts_with("--"))
-                .ok_or_else(|| ParseError::MissingArguments {
-                    context: "events ack".to_string(),
-                    usage: ACK_USAGE,
-                })?;
-            let cursor = rest
-                .get(2)
-                .filter(|value| !value.starts_with("--"))
-                .ok_or_else(|| ParseError::MissingArguments {
-                    context: "events ack".to_string(),
-                    usage: ACK_USAGE,
-                })?;
-            let mut owner = None;
-            let mut i = 3;
-            while i < rest.len() {
-                if rest[i] != "--owner" {
-                    return Err(ParseError::InvalidValue {
-                        message: format!("Unknown flag for events ack: {}", rest[i]),
-                        usage: ACK_USAGE,
-                    });
-                }
-                owner =
-                    Some(
-                        rest.get(i + 1)
-                            .copied()
-                            .ok_or_else(|| ParseError::MissingArguments {
-                                context: "events ack --owner".to_string(),
-                                usage: ACK_USAGE,
-                            })?,
-                    );
-                i += 2;
-            }
-            let mut command = json!({
-                "id": id,
-                "action": "events_ack",
-                "subscriptionId": subscription_id,
-                "cursor": cursor,
-            });
-            if let Some(owner) = owner {
-                command["owner"] = json!(owner);
-            }
-            Ok(command)
-        }
-        "list" => {
-            let mut owner = None;
-            let mut unread = false;
-            let mut i = 1;
-            while i < rest.len() {
-                match rest[i] {
-                    "--owner" => {
-                        owner = Some(rest.get(i + 1).copied().ok_or_else(|| {
-                            ParseError::MissingArguments {
-                                context: "events list --owner".to_string(),
-                                usage: LIST_USAGE,
-                            }
-                        })?);
-                        i += 2;
-                    }
-                    "--unread" => {
-                        unread = true;
-                        i += 1;
-                    }
-                    flag => {
-                        return Err(ParseError::InvalidValue {
-                            message: format!("Unknown flag for events list: {}", flag),
-                            usage: LIST_USAGE,
-                        });
-                    }
-                }
-            }
-            let mut command = json!({ "id": id, "action": "events_list" });
-            if let Some(owner) = owner {
-                command["owner"] = json!(owner);
-            }
-            if unread {
-                command["unread"] = json!(true);
-            }
-            Ok(command)
-        }
-        "stop" | "watch" => {
-            let watching = verb == "watch";
-            let usage = if watching { WATCH_USAGE } else { STOP_USAGE };
-            let subscription_id = rest
-                .get(1)
-                .filter(|value| !value.starts_with("--"))
-                .ok_or_else(|| ParseError::MissingArguments {
-                    context: format!("events {}", verb),
-                    usage,
-                })?;
-            let mut owner = None;
-            let mut since = None;
-            let mut i = 2;
-            while i < rest.len() {
-                let flag = rest[i];
-                match flag {
-                    "--owner" if !watching => {
-                        owner = Some(rest.get(i + 1).copied().ok_or_else(|| {
-                            ParseError::MissingArguments {
-                                context: "events stop --owner".to_string(),
-                                usage,
-                            }
-                        })?);
-                        i += 2;
-                    }
-                    "--since" if watching => {
-                        since = Some(rest.get(i + 1).copied().ok_or_else(|| {
-                            ParseError::MissingArguments {
-                                context: "events watch --since".to_string(),
-                                usage,
-                            }
-                        })?);
-                        i += 2;
-                    }
-                    _ => {
-                        return Err(ParseError::InvalidValue {
-                            message: format!("Unknown flag for events {}: {}", verb, flag),
-                            usage,
-                        });
-                    }
-                }
-            }
-            let mut command = json!({
-                "id": id,
-                "action": if watching { "events_watch" } else { "events_stop" },
-                "subscriptionId": subscription_id,
-            });
-            if let Some(owner) = owner {
-                command["owner"] = json!(owner);
-            }
-            if let Some(since) = since {
-                command["since"] = json!(since);
-            }
-            Ok(command)
-        }
-        other => Err(ParseError::UnknownSubcommand {
-            subcommand: other.to_string(),
-            valid_options: &["start", "read", "wait", "ack", "list", "stop", "watch"],
-        }),
+    let missing = |context| ParseError::MissingArguments { context, usage };
+    let invalid = |message| ParseError::InvalidValue { message, usage };
+    let mut command = match verb {
+        "start" => json!({ "id": id, "action": "events_start", "once": false }),
+        "wait" => json!({ "id": id, "action": "events_read", "ack": true, "waitMs": 50_000 }),
+        _ => json!({ "id": id, "action": format!("events_{}", verb) }),
+    };
+    for key in positionals {
+        command[*key] = json!(rest
+            .next()
+            .filter(|value| !value.starts_with("--"))
+            .ok_or_else(|| missing(format!("events {}", verb)))?);
     }
+    while let Some(flag) = rest.next() {
+        let key = match (verb, flag) {
+            (
+                "start",
+                "--selector" | "--state" | "--method" | "--match" | "--key" | "--once" | "--ttl",
+            ) => &flag[2..],
+            ("start", "--match-regex") => "matchRegex",
+            ("start" | "ack" | "list" | "stop", "--owner") => "owner",
+            ("read" | "wait" | "watch", "--since") => "since",
+            ("read", "--wait") | ("wait", "--timeout") => "waitMs",
+            ("read", "--limit" | "--ack") => &flag[2..],
+            ("list", "--unread") => "unread",
+            _ => {
+                let label = if verb == "start" && !flag.starts_with("--") {
+                    "Unexpected argument"
+                } else {
+                    "Unknown flag"
+                };
+                return Err(invalid(format!("{} for events {}: {}", label, verb, flag)));
+            }
+        };
+        if matches!(key, "once" | "ack" | "unread") {
+            command[key] = json!(true);
+            continue;
+        }
+        let value = rest
+            .next()
+            .ok_or_else(|| missing(format!("events {} {}", verb, flag)))?;
+        let value = match key {
+            "ttl" | "waitMs" | "limit" => {
+                let label = match key {
+                    "ttl" => "TTL",
+                    "waitMs" => "wait duration",
+                    _ => "read limit",
+                };
+                json!(value
+                    .parse::<u64>()
+                    .map_err(|_| invalid(format!("Invalid event {}: {}", label, value)))?)
+            }
+            _ => json!(value),
+        };
+        if matches!(key, "match" | "matchRegex") {
+            if command.get(key).is_none() {
+                command[key] = json!([]);
+            }
+            command[key].as_array_mut().unwrap().push(value);
+        } else {
+            command[key] = value;
+        }
+    }
+    if verb == "start" {
+        let selector = command.get("selector").is_some();
+        let method = command.get("method").is_some();
+        if selector == method {
+            return Err(invalid(
+                "Specify exactly one of --selector or --method".to_string(),
+            ));
+        }
+        if (method && command.get("state").is_some())
+            || (selector && (command.get("match").is_some() || command.get("matchRegex").is_some()))
+        {
+            return Err(invalid(
+                "--state is only valid with --selector; --match options require --method"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(command)
 }
 
 fn parse_webmcp(rest: &[&str], id: &str) -> Result<Value, ParseError> {
@@ -4019,112 +3782,42 @@ mod tests {
     }
 
     #[test]
-    fn events_start_parses_dom_and_cdp_rules() {
-        let selector = parse_command(
-            &args("events start --selector #notice --state hidden --once --ttl 30 --owner test --key key-1"),
-            &default_flags(),
-        )
-        .unwrap();
-        assert_eq!(selector["action"], "events_start");
-        assert_eq!(selector["selector"], "#notice");
-        assert_eq!(selector["state"], "hidden");
-        assert_eq!(selector["once"], true);
-        assert_eq!(selector["ttl"], 30);
-        assert_eq!(selector["owner"], "test");
-        assert_eq!(selector["key"], "key-1");
-
-        let method = parse_command(
-            &args("events start --method Network.responseReceived --match /response/url=https://example.com --match-regex /response/url=example"),
-            &default_flags(),
-        )
-        .unwrap();
-        assert_eq!(method["action"], "events_start");
-        assert_eq!(method["method"], "Network.responseReceived");
-        assert_eq!(
-            method["match"],
-            json!(["/response/url=https://example.com"])
-        );
-        assert_eq!(method["matchRegex"], json!(["/response/url=example"]));
-    }
-
-    #[test]
-    fn events_read_wait_ack_list_and_stop_map_to_daemon_fields() {
-        let read = parse_command(
-            &args("events read sub-1 --since sub-1:4 --wait 500 --limit 12 --ack"),
-            &default_flags(),
-        )
-        .unwrap();
-        assert_eq!(read["action"], "events_read");
-        assert_eq!(read["subscriptionId"], "sub-1");
-        assert_eq!(read["since"], "sub-1:4");
-        assert_eq!(read["waitMs"], 500);
-        assert_eq!(read["limit"], 12);
-        assert_eq!(read["ack"], true);
-
-        let wait = parse_command(
-            &args("events wait sub-1 --since sub-1:4 --timeout 800"),
-            &default_flags(),
-        )
-        .unwrap();
-        assert_eq!(wait["action"], "events_read");
-        assert_eq!(wait["waitMs"], 800);
-        assert_eq!(wait["ack"], true);
-
-        let ack = parse_command(
-            &args("events ack sub-1 sub-1:6 --owner chat:test"),
-            &default_flags(),
-        )
-        .unwrap();
-        assert_eq!(ack["action"], "events_ack");
-        assert_eq!(ack["subscriptionId"], "sub-1");
-        assert_eq!(ack["cursor"], "sub-1:6");
-        assert_eq!(ack["owner"], "chat:test");
-
-        let list = parse_command(
-            &args("events list --owner chat:test --unread"),
-            &default_flags(),
-        )
-        .unwrap();
-        assert_eq!(list["action"], "events_list");
-        assert_eq!(list["owner"], "chat:test");
-        assert_eq!(list["unread"], true);
-
-        let stop = parse_command(
-            &args("events stop sub-1 --owner chat:test"),
-            &default_flags(),
-        )
-        .unwrap();
-        assert_eq!(stop["action"], "events_stop");
-        assert_eq!(stop["subscriptionId"], "sub-1");
-        assert_eq!(stop["owner"], "chat:test");
-
-        let watch = parse_command(
-            &args("events watch sub-1 --since sub-1:6"),
-            &default_flags(),
-        )
-        .unwrap();
-        assert_eq!(watch["action"], "events_watch");
-        assert_eq!(watch["subscriptionId"], "sub-1");
-        assert_eq!(watch["since"], "sub-1:6");
+    fn events_map_to_daemon_fields() {
+        let cases = json!({
+            "events wait sub-1 --since sub-1:4 --timeout 800": {"action": "events_read", "subscriptionId": "sub-1", "since": "sub-1:4", "waitMs": 800, "ack": true},
+            "events wait sub-1": {"action": "events_read", "subscriptionId": "sub-1", "waitMs": 50000, "ack": true},
+            "events watch sub-1 --since sub-1:6": {"action": "events_watch", "subscriptionId": "sub-1", "since": "sub-1:6"}
+        });
+        for (input, expected) in cases.as_object().unwrap() {
+            let mut command = parse_command(&args(input), &default_flags()).unwrap();
+            command.as_object_mut().unwrap().remove("id");
+            assert_eq!(&command, expected, "{input}");
+        }
     }
 
     #[test]
     fn events_reject_unknown_options_and_missing_ids() {
-        let unknown = parse_command(&args("events list --mystery"), &default_flags())
-            .unwrap_err()
-            .format();
-        assert!(unknown.contains("Unknown flag for events list: --mystery"));
-
-        let missing_id = parse_command(&args("events read"), &default_flags())
-            .unwrap_err()
-            .format();
-        assert!(missing_id.contains("events read"));
-        assert!(missing_id.contains("<id>"));
-    }
-
-    #[test]
-    fn events_is_a_top_level_command() {
-        assert!(is_top_level_command("events"));
+        let cases = json!({
+            "events list --mystery": "Unknown flag for events list: --mystery",
+            "events start extra": "Unexpected argument for events start: extra",
+            "events start --selector #notice --method Network.responseReceived": "Specify exactly one of --selector or --method",
+            "events start --method Network.responseReceived --state visible": "--state is only valid with --selector; --match options require --method",
+            "events start --selector #notice --match /status=200": "--state is only valid with --selector; --match options require --method",
+            "events start --ttl invalid": "Invalid event TTL: invalid",
+            "events wait sub-1 --timeout -1": "Invalid event wait duration: -1",
+            "events read sub-1 --limit 18446744073709551616": "Invalid event read limit: 18446744073709551616",
+            "events read": "Missing arguments for: events read",
+            "events read --ack": "Missing arguments for: events read",
+            "events ack sub-1 --owner label": "Missing arguments for: events ack",
+            "events stop sub-1 --owner": "Missing arguments for: events stop --owner",
+            "events watch sub-1 --owner label": "Unknown flag for events watch: --owner",
+            "events wait sub-1 --ack": "Unknown flag for events wait: --ack"
+        });
+        for (input, expected) in cases.as_object().unwrap() {
+            let error = parse_command(&args(input), &default_flags()).unwrap_err();
+            assert_eq!(error.format().lines().next(), expected.as_str(), "{input}");
+            assert!(error.format().contains("Usage: agent-browser events "));
+        }
     }
 
     // === Cookies Tests ===

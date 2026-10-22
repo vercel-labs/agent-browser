@@ -2674,20 +2674,7 @@ fn policy_actions_for_command(
     }
     if action == "launch" {
         let plugins = plugins_from_command_or_env(cmd);
-        if let Some(provider) = cmd.get("provider").and_then(|v| v.as_str()) {
-            append_browser_provider_policy_action_for(&mut actions, provider, &plugins);
-        }
-
-        let local_launch = cmd.get("provider").is_none()
-            && cmd.get("cdpUrl").is_none()
-            && cmd.get("cdpPort").is_none()
-            && !cmd
-                .get("autoConnect")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-        if local_launch {
-            append_launch_mutator_policy_actions_for(&mut actions, &plugins);
-        }
+        append_launch_policy_actions(&mut actions, cmd, &plugins);
     } else if !skip_launch_action(action) && needs_implicit_launch {
         let plugins = plugins_from_command_or_env(cmd);
         let provider_launch = env::var("AGENT_BROWSER_PROVIDER")
@@ -2703,6 +2690,27 @@ fn policy_actions_for_command(
     actions
 }
 
+fn append_launch_policy_actions(
+    actions: &mut Vec<String>,
+    launch: &Value,
+    plugins: &[crate::plugins::PluginConfig],
+) {
+    if let Some(provider) = launch.get("provider").and_then(|v| v.as_str()) {
+        append_browser_provider_policy_action_for(actions, provider, plugins);
+    }
+
+    let local_launch = launch.get("provider").is_none()
+        && launch.get("cdpUrl").is_none()
+        && launch.get("cdpPort").is_none()
+        && !launch
+            .get("autoConnect")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    if local_launch {
+        append_launch_mutator_policy_actions_for(actions, plugins);
+    }
+}
+
 pub(crate) async fn check_command_policy(
     cmd: &Value,
     state: &mut DaemonState,
@@ -2710,118 +2718,80 @@ pub(crate) async fn check_command_policy(
 ) -> Option<Value> {
     let id = cmd.get("id").and_then(Value::as_str).unwrap_or("");
     let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
+    let denied = |reason: String| Some(error_response(id, &reason));
     let event_action = action.starts_with("events_");
+    let confirmation_unsupported = event_action && action != "events_start";
+    let mut confirmation_required = None;
     if let Some(policy) = state.policy.as_mut() {
         match policy.reload() {
             Ok(()) => *state.event_policy.write().await = Some(policy.clone()),
             Err(error) if event_action => {
-                return Some(error_response(
-                    id,
-                    &format!(
-                        "Action '{}' denied because policy reload failed: {}",
-                        action, error
-                    ),
+                return denied(format!(
+                    "Action '{action}' denied because policy reload failed: {error}"
                 ));
             }
             Err(_) => {}
         }
-        let mut confirmation_required = None;
         for policy_action in policy_actions {
             match policy.check(policy_action) {
                 PolicyResult::Allow => {}
                 PolicyResult::Deny(reason) => {
-                    return Some(error_response(
-                        id,
-                        &format!("Action '{}' denied by policy: {}", policy_action, reason),
+                    return denied(format!(
+                        "Action '{policy_action}' denied by policy: {reason}"
                     ));
                 }
                 PolicyResult::RequiresConfirmation => {
-                    if event_action && action != "events_start" {
-                        if policy_action.starts_with("events_")
-                            || !state.confirmed_policy_actions.contains(policy_action)
-                        {
-                            return Some(error_response(
-                                id,
-                                &format!(
-                                    "Action '{}' requires confirmation, which is only supported at events_start",
-                                    policy_action
-                                ),
-                            ));
-                        }
-                    } else if !state.confirmed_policy_actions.contains(policy_action)
-                        && confirmation_required.is_none()
+                    if (confirmation_unsupported && policy_action.starts_with("events_"))
+                        || !state.confirmed_policy_actions.contains(policy_action)
                     {
-                        confirmation_required = Some(policy_action.to_string());
+                        confirmation_required.get_or_insert(policy_action);
+                        if confirmation_unsupported {
+                            break;
+                        }
                     }
                 }
             }
         }
-        if let Some(policy_action) = confirmation_required {
-            state.pending_confirmation = Some(PendingConfirmation {
-                action: policy_action.clone(),
-                cmd: cmd.clone(),
-                approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
-            });
-            return Some(json!({
-                "id": id,
-                "success": true,
-                "data": {
-                    "confirmation_required": true,
-                    "confirmation_id": id,
-                    "action": policy_action
-                },
-            }));
-        }
     }
-    if action != "confirm" && action != "deny" {
+    if confirmation_required.is_none() && action != "confirm" && action != "deny" {
         if let Some(confirm_actions) = &state.confirm_actions {
-            for policy_action in policy_actions {
-                if state.confirmed_policy_actions.contains(policy_action)
-                    || !confirm_actions.requires_confirmation(policy_action)
-                {
-                    continue;
-                }
-                if event_action && action != "events_start" {
-                    return Some(error_response(
-                        id,
-                        &format!(
-                            "Action '{}' requires confirmation, which is only supported at events_start",
-                            policy_action
-                        ),
-                    ));
-                }
-                state.pending_confirmation = Some(PendingConfirmation {
-                    action: policy_action.to_string(),
-                    cmd: cmd.clone(),
-                    approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
-                });
-                return Some(json!({
-                    "id": id,
-                    "success": true,
-                    "data": {
-                        "confirmation_required": true,
-                        "confirmation_id": id,
-                        "action": policy_action
-                    },
-                }));
-            }
+            confirmation_required = policy_actions.iter().find(|policy_action| {
+                !state.confirmed_policy_actions.contains(*policy_action)
+                    && confirm_actions.requires_confirmation(policy_action)
+            });
         }
     }
-    None
+    let policy_action = confirmation_required?;
+    if confirmation_unsupported {
+        return denied(format!(
+            "Action '{policy_action}' requires confirmation, which is only supported at events_start"
+        ));
+    }
+    state.pending_confirmation = Some(PendingConfirmation {
+        action: policy_action.to_string(),
+        cmd: cmd.clone(),
+        approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
+    });
+    Some(success_response(
+        id,
+        json!({
+            "confirmation_required": true,
+            "confirmation_id": id,
+            "action": policy_action
+        }),
+    ))
 }
 
 pub(crate) async fn check_event_source_policy(
     policy: &Arc<RwLock<Option<ActionPolicy>>>,
     actions: &[String],
 ) -> Result<(), String> {
-    let mut policy = policy.write().await;
-    let Some(policy) = policy.as_mut() else {
-        return Ok(());
-    };
-    policy.reload()?;
-    for action in actions {
-        if let PolicyResult::Deny(reason) = policy.check(action) {
-            return Err(format!("Action '{}' denied by policy: {}", action, reason));
+    if let Some(policy) = policy.write().await.as_mut() {
+        policy.reload()?;
+        for action in actions {
+            if let PolicyResult::Deny(reason) = policy.check(action) {
+                return Err(format!("Action '{}' denied by policy: {}", action, reason));
+            }
         }
     }
     Ok(())

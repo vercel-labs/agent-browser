@@ -175,13 +175,13 @@ pub(crate) async fn execute_events_read(cmd: &Value, state: &Mutex<DaemonState>)
             .or_else(|| cmd.get("subscription_id"))
             .and_then(Value::as_str)
         {
-            if let Ok(actions) = state
-                .events
-                .policy_actions_for_subscription(subscription_id)
-                .await
-            {
-                policy_actions.extend(actions);
-            }
+            policy_actions.extend(
+                state
+                    .events
+                    .policy_actions_for_subscription(subscription_id)
+                    .await
+                    .unwrap_or_default(),
+            );
         }
         if let Some(response) = check_command_policy(cmd, &mut state, &policy_actions).await {
             state.idle_activity.mark();

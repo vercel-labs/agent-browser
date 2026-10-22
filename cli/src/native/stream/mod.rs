@@ -361,13 +361,12 @@ impl StreamServer {
         let accept_shutdown_rx = shutdown_rx.clone();
         let session_name_clone = session_id.clone();
         let frame_watch_accept = frame_watch_rx.clone();
-        let event_nudges_accept = event_nudges_rx.clone();
         let accept_task = tokio::spawn(async move {
             websocket::accept_loop(
                 listener,
                 frame_tx_clone,
                 frame_watch_accept,
-                event_nudges_accept,
+                event_nudges_rx,
                 client_count_clone,
                 client_slot_clone,
                 notify_clone,
@@ -776,6 +775,10 @@ mod tests {
     /// Read until a "frame" arrives, skipping status and tabs. Timed out so a
     /// broken server fails instead of hanging.
     async fn next_frame(ws: &mut WsClient) -> Value {
+        next_message(ws, "frame").await
+    }
+
+    async fn next_message(ws: &mut WsClient, kind: &str) -> Value {
         loop {
             let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
                 .await
@@ -784,7 +787,7 @@ mod tests {
                 .expect("ws error");
             if let Message::Text(text) = msg {
                 let parsed: Value = serde_json::from_str(&text).expect("valid json");
-                if parsed.get("type").and_then(|v| v.as_str()) == Some("frame") {
+                if parsed["type"] == kind {
                     return parsed;
                 }
             }
@@ -792,7 +795,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn test_new_client_receives_latest_frame_only() {
+    async fn test_latest_frame_and_event_nudges_survive_bursts() {
         let (server, _slot) = StreamServer::start_without_client(
             0,
             "t1".to_string(),
@@ -809,21 +812,6 @@ mod tests {
         let frame = next_frame(&mut ws).await;
         assert_eq!(frame.get("data").and_then(|v| v.as_str()), Some("fresh"));
 
-        server.shutdown().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn test_event_nudge_survives_broadcast_and_screencast_bursts() {
-        let (server, _slot) = StreamServer::start_without_client(
-            0,
-            "events-nudge".to_string(),
-            true,
-            Arc::new(IdleActivity::new()),
-        )
-        .await
-        .expect("server start");
-        let mut ws = connect_client(server.port()).await;
-
         for index in 0..100 {
             server.broadcast_error(&format!("error-{index}"));
             server.broadcast_screencast_frame("frame", &FrameMetadata::default());
@@ -832,21 +820,10 @@ mod tests {
         server.nudge_event("sub-1", 3);
 
         loop {
-            let message = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
-                .await
-                .expect("timed out waiting for event nudge")
-                .expect("stream ended")
-                .expect("ws error");
-            let Message::Text(text) = message else {
-                continue;
-            };
-            let parsed: Value = serde_json::from_str(&text).expect("valid json");
-            if parsed.get("type").and_then(|value| value.as_str()) == Some("events_nudge") {
-                assert_eq!(parsed["subscriptionId"], "sub-1");
-                assert!(parsed["head"].as_u64().unwrap() <= 3);
-                if parsed["head"] == 3 {
-                    break;
-                }
+            let parsed = next_message(&mut ws, "events_nudge").await;
+            assert_eq!(parsed["subscriptionId"], "sub-1");
+            if parsed["head"] == 3 {
+                break;
             }
         }
 
