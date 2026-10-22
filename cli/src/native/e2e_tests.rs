@@ -153,42 +153,71 @@ async fn read_cdp_tap_event(state: &DaemonState, subscription: &Value, method: &
     serde_json::to_value(&events[0]).unwrap()
 }
 
+struct EventTapSession {
+    _environment: EnvGuard<'static>,
+    state: DaemonState,
+    url: String,
+    download_directory: tempfile::TempDir,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl EventTapSession {
+    async fn start() -> Self {
+        let environment = EnvGuard::new(&[
+            "AGENT_BROWSER_ACTION_POLICY",
+            "AGENT_BROWSER_POLICY",
+            "AGENT_BROWSER_CONFIRM_ACTIONS",
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_NO_AUTO_DIALOG",
+        ]);
+        environment.remove("AGENT_BROWSER_ACTION_POLICY");
+        environment.remove("AGENT_BROWSER_POLICY");
+        environment.remove("AGENT_BROWSER_CONFIRM_ACTIONS");
+        environment.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        environment.set("AGENT_BROWSER_NO_AUTO_DIALOG", "1");
+        let (url, server) = start_event_tap_fixture_server().await;
+        let download_directory = tempfile::tempdir().unwrap();
+        let mut state = DaemonState::new();
+        let response = execute_command(
+            &json!({
+                "id": "launch",
+                "action": "launch",
+                "headless": true,
+                "downloadPath": download_directory.path().to_string_lossy()
+            }),
+            &mut state,
+        )
+        .await;
+        assert_success(&response);
+        let response = execute_command(
+            &json!({"id": "navigate", "action": "navigate", "url": url}),
+            &mut state,
+        )
+        .await;
+        assert_success(&response);
+        Self {
+            _environment: environment,
+            state,
+            url,
+            download_directory,
+            server,
+        }
+    }
+
+    async fn finish(mut self) {
+        let response =
+            execute_command(&json!({"id": "close", "action": "close"}), &mut self.state).await;
+        assert_success(&response);
+        self.server.abort();
+    }
+}
+
 #[tokio::test]
 #[ignore]
-async fn e2e_cdp_event_tap_recipes() {
-    let environment = EnvGuard::new(&[
-        "AGENT_BROWSER_ACTION_POLICY",
-        "AGENT_BROWSER_POLICY",
-        "AGENT_BROWSER_CONFIRM_ACTIONS",
-        "AGENT_BROWSER_ALLOWED_DOMAINS",
-    ]);
-    environment.remove("AGENT_BROWSER_ACTION_POLICY");
-    environment.remove("AGENT_BROWSER_POLICY");
-    environment.remove("AGENT_BROWSER_CONFIRM_ACTIONS");
-    environment.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
-    let (url, server) = start_event_tap_fixture_server().await;
-    let download_directory = tempfile::tempdir().unwrap();
-    let mut state = DaemonState::new();
-    let response = execute_command(
-        &json!({
-            "id": "launch",
-            "action": "launch",
-            "headless": true,
-            "downloadPath": download_directory.path().to_string_lossy()
-        }),
-        &mut state,
-    )
-    .await;
-    assert_success(&response);
-    let response = execute_command(
-        &json!({"id": "navigate", "action": "navigate", "url": url}),
-        &mut state,
-    )
-    .await;
-    assert_success(&response);
-
+async fn e2e_cdp_event_tap_dialog() {
+    let mut session = EventTapSession::start().await;
     let dialog = start_cdp_tap(
-        &mut state,
+        &mut session.state,
         "dialog-start",
         "Page.javascriptDialogOpening",
         true,
@@ -201,21 +230,21 @@ async fn e2e_cdp_event_tap_recipes() {
             "action": "evaluate",
             "script": "setTimeout(() => alert('fixture dialog'), 0)"
         }),
-        &mut state,
+        &mut session.state,
     )
     .await;
     assert_success(&response);
-    let event = read_cdp_tap_event(&state, &dialog, "Page.javascriptDialogOpening").await;
+    let event = read_cdp_tap_event(&session.state, &dialog, "Page.javascriptDialogOpening").await;
     assert_eq!(event["data"]["type"], "alert");
-    let response = execute_command(
-        &json!({"id": "dialog-dismiss", "action": "dialog", "response": "dismiss"}),
-        &mut state,
-    )
-    .await;
-    assert_success(&response);
+    session.finish().await;
+}
 
+#[tokio::test]
+#[ignore]
+async fn e2e_cdp_event_tap_navigation() {
+    let mut session = EventTapSession::start().await;
     let navigation = start_cdp_tap(
-        &mut state,
+        &mut session.state,
         "navigation-start",
         "Page.navigatedWithinDocument",
         true,
@@ -228,21 +257,28 @@ async fn e2e_cdp_event_tap_recipes() {
             "action": "evaluate",
             "script": "history.pushState({}, '', '/events#changed')"
         }),
-        &mut state,
+        &mut session.state,
     )
     .await;
     assert_success(&response);
-    let event = read_cdp_tap_event(&state, &navigation, "Page.navigatedWithinDocument").await;
+    let event =
+        read_cdp_tap_event(&session.state, &navigation, "Page.navigatedWithinDocument").await;
     assert!(event["data"]["url"].as_str().unwrap().ends_with("#changed"));
+    session.finish().await;
+}
 
+#[tokio::test]
+#[ignore]
+async fn e2e_cdp_event_tap_console_from_background_tab() {
+    let mut session = EventTapSession::start().await;
     let response = execute_command(
-        &json!({"id": "background-tab", "action": "tab_new", "url": url}),
-        &mut state,
+        &json!({"id": "background-tab", "action": "tab_new", "url": session.url}),
+        &mut session.state,
     )
     .await;
     assert_success(&response);
     let (background_session, background_tab) = {
-        let browser = state.browser.as_ref().unwrap();
+        let browser = session.state.browser.as_ref().unwrap();
         let active_target = browser.active_target_id().unwrap();
         let page = browser
             .pages_list()
@@ -254,21 +290,15 @@ async fn e2e_cdp_event_tap_recipes() {
             crate::native::browser::format_tab_id(page.tab_id),
         )
     };
-    let response = execute_command(
-        &json!({"id": "foreground-tab", "action": "tab_switch", "tabId": "t1"}),
-        &mut state,
-    )
-    .await;
-    assert_success(&response);
     let console = start_cdp_tap(
-        &mut state,
+        &mut session.state,
         "console-start",
         "Runtime.consoleAPICalled",
         true,
         None,
     )
     .await;
-    let client = state.browser.as_ref().unwrap().client.clone();
+    let client = session.state.browser.as_ref().unwrap().client.clone();
     client
         .send_command(
             "Runtime.evaluate",
@@ -277,12 +307,18 @@ async fn e2e_cdp_event_tap_recipes() {
         )
         .await
         .unwrap();
-    let event = read_cdp_tap_event(&state, &console, "Runtime.consoleAPICalled").await;
+    let event = read_cdp_tap_event(&session.state, &console, "Runtime.consoleAPICalled").await;
     assert_eq!(event["meta"]["tab"]["id"], background_tab);
     assert_eq!(event["data"]["text"], "fixture background console");
+    session.finish().await;
+}
 
+#[tokio::test]
+#[ignore]
+async fn e2e_cdp_event_tap_page_error() {
+    let mut session = EventTapSession::start().await;
     let exception = start_cdp_tap(
-        &mut state,
+        &mut session.state,
         "exception-start",
         "Runtime.exceptionThrown",
         true,
@@ -295,18 +331,24 @@ async fn e2e_cdp_event_tap_recipes() {
             "action": "evaluate",
             "script": "setTimeout(() => { throw new Error('fixture page error') }, 0)"
         }),
-        &mut state,
+        &mut session.state,
     )
     .await;
     assert_success(&response);
-    let event = read_cdp_tap_event(&state, &exception, "Runtime.exceptionThrown").await;
+    let event = read_cdp_tap_event(&session.state, &exception, "Runtime.exceptionThrown").await;
     assert!(event["data"]["text"]
         .as_str()
         .unwrap()
         .contains("fixture page error"));
+    session.finish().await;
+}
 
+#[tokio::test]
+#[ignore]
+async fn e2e_cdp_event_tap_download() {
+    let mut session = EventTapSession::start().await;
     let download = start_cdp_tap(
-        &mut state,
+        &mut session.state,
         "download-start",
         "Browser.downloadWillBegin",
         true,
@@ -319,34 +361,45 @@ async fn e2e_cdp_event_tap_recipes() {
             "action": "click",
             "selector": "#download"
         }),
-        &mut state,
+        &mut session.state,
     )
     .await;
     assert_success(&response);
-    let event = read_cdp_tap_event(&state, &download, "Browser.downloadWillBegin").await;
+    let event = read_cdp_tap_event(&session.state, &download, "Browser.downloadWillBegin").await;
     assert_eq!(event["data"]["suggestedFilename"], "event-tap.txt");
-    assert!(download_directory.path().join("event-tap.txt").exists());
+    let download_path = session.download_directory.path().join("event-tap.txt");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !download_path.exists() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        download_path.exists(),
+        "download was not written to the policy path"
+    );
+    session.finish().await;
+}
 
+#[tokio::test]
+#[ignore]
+async fn e2e_cdp_event_tap_target_created() {
+    let mut session = EventTapSession::start().await;
     let target = start_cdp_tap(
-        &mut state,
+        &mut session.state,
         "target-start",
         "Target.targetCreated",
         true,
         None,
     )
     .await;
-    let client = state.browser.as_ref().unwrap().client.clone();
+    let client = session.state.browser.as_ref().unwrap().client.clone();
     client
         .send_command_typed::<_, Value>("Target.createTarget", &json!({"url": "about:blank"}), None)
         .await
         .unwrap();
-    let event = read_cdp_tap_event(&state, &target, "Target.targetCreated").await;
+    let event = read_cdp_tap_event(&session.state, &target, "Target.targetCreated").await;
     assert_eq!(event["data"]["type"], "page");
     assert!(!event["data"]["targetId"].as_str().unwrap().is_empty());
-
-    let response = execute_command(&json!({"id": "close", "action": "close"}), &mut state).await;
-    assert_success(&response);
-    server.abort();
+    session.finish().await;
 }
 
 #[tokio::test]
