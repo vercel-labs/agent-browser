@@ -16,6 +16,10 @@ use tokio::task::JoinHandle;
 pub mod buffer;
 #[allow(dead_code)]
 pub mod envelope;
+#[allow(dead_code)]
+mod source;
+#[allow(dead_code)]
+mod sources;
 
 use super::actions::{error_response, success_response, DaemonState};
 use super::cdp::client::{CdpClient, RawCdpMessage};
