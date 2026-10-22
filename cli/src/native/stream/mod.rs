@@ -573,9 +573,6 @@ impl StreamServer {
         let _ = self.frame_tx.send(msg.to_string());
     }
 
-    /// Keep prototype callers compiling without forwarding event payloads.
-    pub fn broadcast_event(&self, _event: &Value) {}
-
     /// Broadcast a page error (uncaught exception) from the browser.
     pub fn broadcast_page_error(&self, text: &str, line: Option<i64>, column: Option<i64>) {
         let msg = json!({
