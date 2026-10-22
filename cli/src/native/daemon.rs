@@ -9,11 +9,12 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::signal;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 
 use super::actions::{
-    auto_save_restore_state, close_all_browser_backends, close_current_browser, execute_command,
-    maybe_autosave_restore_state, DaemonState,
+    auto_save_restore_state, check_command_policy, close_all_browser_backends,
+    close_current_browser, error_response, execute_command, maybe_autosave_restore_state,
+    success_response, DaemonState,
 };
 use super::cdp::client::CdpClient;
 use super::state;
@@ -162,6 +163,38 @@ pub async fn run_daemon(session: &str) {
         let _ = writeln!(std::io::stderr(), "Daemon error: {}", e);
         process::exit(1);
     }
+}
+
+pub(crate) async fn execute_events_read(cmd: &Value, state: &Mutex<DaemonState>) -> Value {
+    let id = cmd.get("id").and_then(Value::as_str).unwrap_or("");
+    let (bus, idle_activity) = {
+        let mut state = state.lock().await;
+        let mut policy_actions = vec!["events_read".to_owned()];
+        if let Some(subscription_id) = cmd
+            .get("subscriptionId")
+            .or_else(|| cmd.get("subscription_id"))
+            .and_then(Value::as_str)
+        {
+            if let Ok(actions) = state
+                .events
+                .policy_actions_for_subscription(subscription_id)
+                .await
+            {
+                policy_actions.extend(actions);
+            }
+        }
+        if let Some(response) = check_command_policy(cmd, &mut state, &policy_actions).await {
+            state.idle_activity.mark();
+            return response;
+        }
+        (state.events.clone(), state.idle_activity.clone())
+    };
+    let response = match super::events::ops::read(cmd, &bus).await {
+        Ok(data) => success_response(id, data),
+        Err(error) => error_response(id, &error),
+    };
+    idle_activity.mark();
+    response
 }
 
 /// Idle timeout applied when AGENT_BROWSER_IDLE_TIMEOUT_MS is unset, so an
@@ -581,35 +614,13 @@ async fn handle_connection<S>(
                     .unwrap_or_default()
                     .to_string();
 
-                let response = {
-                    #[cfg(feature = "event-prototype")]
-                    if action == "events_subscribe" {
-                        super::events::serve(&cmd, state.clone(), &mut buf_reader, &mut writer)
-                            .await;
-                        return;
-                    }
-                    #[cfg(feature = "event-prototype")]
-                    let waited = if action == "events_wait" {
-                        let response = super::events::wait(&cmd, &state).await;
-                        idle_activity.mark();
-                        Some(response)
-                    } else {
-                        None
-                    };
-                    #[cfg(not(feature = "event-prototype"))]
-                    let waited: Option<Value> = None;
-                    match waited {
-                        Some(response) => response,
-                        None => {
-                            let mut s = state.lock().await;
-                            let response = execute_command(&cmd, &mut s).await;
-                            // Refresh while the state lock is still held. An idle
-                            // timer waiting on this command will observe the updated
-                            // clock as soon as it acquires the lock.
-                            idle_activity.mark();
-                            response
-                        }
-                    }
+                let response = if action == "events_read" {
+                    execute_events_read(&cmd, &state).await
+                } else {
+                    let mut state = state.lock().await;
+                    let response = execute_command(&cmd, &mut state).await;
+                    idle_activity.mark();
+                    response
                 };
 
                 let mut resp = serde_json::to_string(&response).unwrap_or_default();

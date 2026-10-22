@@ -83,7 +83,6 @@ fn native_test_fixture_html(name: &str) -> &'static str {
     }
 }
 
-#[cfg(feature = "event-prototype")]
 #[tokio::test]
 #[ignore]
 async fn e2e_event_bus_shares_observer_and_rearms_after_navigation() {
@@ -1831,96 +1830,298 @@ async fn e2e_stream_command_requires_same_origin_before_daemon_relay() {
 // Snapshot with refs and ref-based click
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "event-prototype")]
 #[tokio::test]
 #[ignore]
-async fn e2e_events_subscription_survives_across_commands() {
-    let state = tokio::sync::Mutex::new(DaemonState::new());
-    let run = |command: Value| {
-        let state = &state;
-        async move { execute_command(&command, &mut *state.lock().await).await }
-    };
-    let wait = |id: String, timeout_ms: u64| {
-        let state = &state;
-        async move {
-            super::events::wait(
-                &json!({
-                    "id": "w", "action": "events_wait",
-                    "subscriptionId": id, "timeout_ms": timeout_ms
-                }),
-                state,
-            )
-            .await
-        }
-    };
-
-    assert_success(&run(json!({ "id": "1", "action": "launch", "headless": true })).await);
-    assert_success(
-        &run(json!({ "id": "2", "action": "navigate", "url": native_test_fixture_url("events_probe") }))
-            .await,
-    );
-
-    let resp = run(json!({ "id": "3", "action": "events_start", "selector": "#done" })).await;
-    assert_success(&resp);
-    let started = get_data(&resp).clone();
-    let id = started["id"].as_str().unwrap().to_string();
-    assert!(
-        id.starts_with("ev_") && id.len() == 11,
-        "unexpected id {id}"
-    );
-    assert_eq!(started["state"], "armed");
-    assert_eq!(started["initial"], "hidden");
-    assert!(started["tabId"].as_str().is_some_and(|tab| !tab.is_empty()));
-
-    let resp = wait(id.clone(), 100).await;
-    assert_success(&resp);
-    assert_eq!(get_data(&resp)["status"], "waiting");
-    assert_eq!(get_data(&resp)["events"], json!([]));
-
-    let resp = run(json!({ "id": "4", "action": "events_list" })).await;
-    assert_success(&resp);
-    let listed = &get_data(&resp)["subscriptions"];
-    assert_eq!(listed[0]["id"], id);
-    assert_eq!(listed[0]["status"], "armed");
-    assert_eq!(listed[0]["selector"], "#done");
-
-    assert_success(&run(json!({ "id": "5", "action": "click", "selector": "#go" })).await);
-
-    let resp = wait(id.clone(), 10_000).await;
-    assert_success(&resp);
-    let data = get_data(&resp);
-    assert_eq!(data["status"], "matched", "{data}");
-    assert_eq!(data["events"][0]["name"], "element.visible");
-    assert_eq!(data["events"][0]["subscriptionId"], id);
-    assert_eq!(data["events"][0]["data"]["observation"]["label"], "All set");
-    assert_eq!(data["events"][1]["name"], "subscription.ended");
-
-    let again = wait(id.clone(), 10).await;
-    assert_eq!(get_data(&again)["events"], data["events"]);
-
-    let resp = run(json!({ "id": "6", "action": "events_list" })).await;
-    let listed = &get_data(&resp)["subscriptions"];
-    assert_eq!(listed[0]["status"], "matched");
-    assert_eq!(listed[0]["eventCount"], 2);
-    assert!(listed[0]["firedAt"].is_string());
-
-    let stopped = run(json!({ "id": "7", "action": "events_stop", "subscriptionId": id })).await;
-    assert_success(&stopped);
-    assert_eq!(get_data(&stopped)["status"], "cancelled");
-    let stopped = run(json!({ "id": "8", "action": "events_stop", "subscriptionId": id })).await;
-    assert_success(&stopped);
-
-    let resp = run(json!({
-        "id": "9", "action": "evaluate",
-        "script": format!("typeof globalThis['__ab_event_{id}_stop']")
-    }))
+async fn e2e_events_operations_use_cursor_reads() {
+    let environment = crate::test_utils::EnvGuard::new(&[
+        "AGENT_BROWSER_ACTION_POLICY",
+        "AGENT_BROWSER_POLICY",
+        "AGENT_BROWSER_CONFIRM_ACTIONS",
+    ]);
+    environment.remove("AGENT_BROWSER_ACTION_POLICY");
+    environment.remove("AGENT_BROWSER_POLICY");
+    environment.remove("AGENT_BROWSER_CONFIRM_ACTIONS");
+    let mut initial_state = DaemonState::new();
+    let response = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut initial_state,
+    )
     .await;
-    assert_eq!(get_data(&resp)["result"], "undefined");
+    assert_success(&response);
+    let response = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": native_test_fixture_url("event_navigation_probe") }),
+        &mut initial_state,
+    )
+    .await;
+    assert_success(&response);
+    let state = tokio::sync::Mutex::new(initial_state);
 
-    let missing = wait("ev_missing0".to_string(), 10).await;
-    assert_eq!(missing["success"], false);
+    let response = execute_command(
+        &json!({
+            "id": "3",
+            "action": "events_start",
+            "selector": "#done",
+            "owner": "worker-a",
+            "key": "visible-done"
+        }),
+        &mut *state.lock().await,
+    )
+    .await;
+    assert_success(&response);
+    let already_satisfied = get_data(&response).clone();
+    assert_eq!(already_satisfied["alreadySatisfied"], true);
+    assert_eq!(already_satisfied["owner"], "worker-a");
+    let duplicate = execute_command(
+        &json!({
+            "id": "3b",
+            "action": "events_start",
+            "selector": "#done",
+            "owner": "worker-a",
+            "key": "visible-done"
+        }),
+        &mut *state.lock().await,
+    )
+    .await;
+    assert_success(&duplicate);
+    assert_eq!(get_data(&duplicate)["id"], already_satisfied["id"]);
+    let wrong_owner = execute_command(
+        &json!({
+            "id": "3c",
+            "action": "events_stop",
+            "subscriptionId": already_satisfied["id"],
+            "owner": "worker-b"
+        }),
+        &mut *state.lock().await,
+    )
+    .await;
+    assert_eq!(wrong_owner["success"], false);
+    let wrong_owner = execute_command(
+        &json!({
+            "id": "3d",
+            "action": "events_ack",
+            "subscriptionId": already_satisfied["id"],
+            "cursor": already_satisfied["head"],
+            "owner": "worker-b"
+        }),
+        &mut *state.lock().await,
+    )
+    .await;
+    assert_eq!(wrong_owner["success"], false);
+    let response = execute_command(
+        &json!({
+            "id": "3e",
+            "action": "events_list",
+            "owner": "worker-b"
+        }),
+        &mut *state.lock().await,
+    )
+    .await;
+    assert_success(&response);
+    assert_eq!(get_data(&response)["subscriptions"], json!([]));
+    let read = super::daemon::execute_events_read(
+        &json!({
+            "id": "4",
+            "action": "events_read",
+            "subscriptionId": already_satisfied["id"],
+            "since": already_satisfied["head"],
+        }),
+        &state,
+    )
+    .await;
+    assert_success(&read);
+    assert_eq!(get_data(&read)["events"], json!([]));
+    let waiting = super::daemon::execute_events_read(
+        &json!({
+            "id": "4b",
+            "action": "events_read",
+            "subscriptionId": already_satisfied["id"],
+            "since": already_satisfied["head"],
+            "waitMs": 1,
+        }),
+        &state,
+    )
+    .await;
+    assert_success(&waiting);
+    assert_eq!(get_data(&waiting)["waiting"], true);
 
-    assert_success(&run(json!({ "id": "99", "action": "close" })).await);
+    let response = execute_command(
+        &json!({ "id": "5", "action": "navigate", "url": native_test_fixture_url("events_probe") }),
+        &mut *state.lock().await,
+    )
+    .await;
+    assert_success(&response);
+    let response = execute_command(
+        &json!({ "id": "6", "action": "events_start", "selector": "#done", "once": true }),
+        &mut *state.lock().await,
+    )
+    .await;
+    assert_success(&response);
+    let appeared = get_data(&response).clone();
+    let response = execute_command(
+        &json!({ "id": "7", "action": "click", "selector": "#go" }),
+        &mut *state.lock().await,
+    )
+    .await;
+    assert_success(&response);
+    let read = super::daemon::execute_events_read(
+        &json!({
+            "id": "8",
+            "action": "events_read",
+            "subscriptionId": appeared["id"],
+            "since": appeared["head"],
+            "waitMs": 5_000,
+            "ack": true,
+            "limit": 1,
+        }),
+        &state,
+    )
+    .await;
+    assert_success(&read);
+    assert_eq!(get_data(&read)["events"][0]["name"], "element.visible");
+    assert_eq!(get_data(&read)["consumed"], 2);
+
+    let response = execute_command(
+        &json!({ "id": "9", "action": "events_start", "selector": "#done" }),
+        &mut *state.lock().await,
+    )
+    .await;
+    assert_success(&response);
+    let after_navigation = get_data(&response).clone();
+    assert_eq!(after_navigation["alreadySatisfied"], true);
+    let response = execute_command(
+        &json!({ "id": "10", "action": "navigate", "url": native_test_fixture_url("event_navigation_probe") }),
+        &mut *state.lock().await,
+    )
+    .await;
+    assert_success(&response);
+    let nav_read = super::daemon::execute_events_read(
+        &json!({
+            "id": "11",
+            "action": "events_read",
+            "subscriptionId": after_navigation["id"],
+            "since": after_navigation["head"],
+            "waitMs": 5_000,
+        }),
+        &state,
+    )
+    .await;
+    assert_success(&nav_read);
+    assert!(get_data(&nav_read)["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| {
+            event["name"] == "element.visible" && event["data"]["afterNavigation"] == true
+        }));
+    let nav_cursor = get_data(&nav_read)["cursor"].clone();
+
+    let response = execute_command(
+        &json!({ "id": "12", "action": "tab_new", "url": "about:blank" }),
+        &mut *state.lock().await,
+    )
+    .await;
+    assert_success(&response);
+    let watched_tab = after_navigation["tab"]["id"].as_str().unwrap();
+    let response = execute_command(
+        &json!({ "id": "13", "action": "tab_close", "tabId": watched_tab }),
+        &mut *state.lock().await,
+    )
+    .await;
+    assert_success(&response);
+    let read = super::daemon::execute_events_read(
+        &json!({
+            "id": "14",
+            "action": "events_read",
+            "subscriptionId": after_navigation["id"],
+            "since": nav_cursor,
+            "waitMs": 5_000,
+        }),
+        &state,
+    )
+    .await;
+    assert_success(&read);
+    assert_eq!(get_data(&read)["status"], "ended");
+    assert_eq!(get_data(&read)["events"][0]["data"]["reason"], "tab_closed");
+
+    let policy_dir = tempfile::tempdir().unwrap();
+    let policy_path = policy_dir.path().join("policy.json");
+    std::fs::write(&policy_path, r#"{"deny":["events_read"]}"#).unwrap();
+    state.lock().await.policy =
+        Some(super::policy::ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
+    let denied_read = super::daemon::execute_events_read(
+        &json!({
+            "id": "15",
+            "action": "events_read",
+            "subscriptionId": after_navigation["id"],
+            "since": nav_cursor,
+        }),
+        &state,
+    )
+    .await;
+    assert_eq!(denied_read["success"], false);
+    assert!(denied_read["error"]
+        .as_str()
+        .unwrap()
+        .contains("events_read"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_events_do_not_store_data_for_blocked_origin() {
+    let environment = crate::test_utils::EnvGuard::new(&[
+        "AGENT_BROWSER_ACTION_POLICY",
+        "AGENT_BROWSER_POLICY",
+        "AGENT_BROWSER_CONFIRM_ACTIONS",
+        "AGENT_BROWSER_ALLOWED_DOMAINS",
+    ]);
+    environment.remove("AGENT_BROWSER_ACTION_POLICY");
+    environment.remove("AGENT_BROWSER_POLICY");
+    environment.remove("AGENT_BROWSER_CONFIRM_ACTIONS");
+    environment.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+    let (base_url, _server) = start_link_fixture_server().await;
+    let mut daemon = DaemonState::new();
+    *daemon.domain_filter.write().await = Some(super::network::DomainFilter::new("127.0.0.1"));
+
+    let response = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut daemon,
+    )
+    .await;
+    assert_success(&response);
+    let response = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": base_url }),
+        &mut daemon,
+    )
+    .await;
+    assert_success(&response);
+    let response = execute_command(
+        &json!({ "id": "3", "action": "events_start", "selector": "#blocked" }),
+        &mut daemon,
+    )
+    .await;
+    assert_success(&response);
+    let subscription = get_data(&response).clone();
+
+    let response = execute_command(
+        &json!({ "id": "4", "action": "navigate", "url": "https://blocked.example" }),
+        &mut daemon,
+    )
+    .await;
+    assert_eq!(response["success"], false);
+
+    let state = tokio::sync::Mutex::new(daemon);
+    let read = super::daemon::execute_events_read(
+        &json!({
+            "id": "5",
+            "action": "events_read",
+            "subscriptionId": subscription["id"],
+            "since": subscription["head"],
+        }),
+        &state,
+    )
+    .await;
+    assert_success(&read);
+    assert_eq!(get_data(&read)["events"], json!([]));
 }
 
 #[tokio::test]

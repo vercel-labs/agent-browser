@@ -160,6 +160,11 @@ const DOCUMENTED_ACTIONS: &[&str] = &[
     "evalhandle",
     "drag",
     "expose",
+    "events_start",
+    "events_read",
+    "events_ack",
+    "events_list",
+    "events_stop",
     "pause",
     "multiselect",
     "responsebody",
@@ -263,6 +268,13 @@ fn minimal_command(action: &str, id: &str) -> Value {
         }
         "tab_switch" | "tab_close" => {
             obj.insert("index".to_string(), json!(0));
+        }
+        "events_read" | "events_stop" => {
+            obj.insert("subscriptionId".to_string(), json!("missing"));
+        }
+        "events_ack" => {
+            obj.insert("subscriptionId".to_string(), json!("missing"));
+            obj.insert("cursor".to_string(), json!("missing:0"));
         }
         "viewport" | "user_agent" | "set_media" | "timezone" | "locale" | "geolocation"
         | "permissions" | "device" => {
@@ -447,6 +459,84 @@ async fn test_error_response_format() {
     assert_eq!(result["success"], false);
     assert!(result.get("id").is_some());
     assert!(result.get("error").is_some());
+}
+
+#[tokio::test]
+async fn events_read_policy_denial_blocks_without_a_browser() {
+    use crate::native::policy::ActionPolicy;
+    use crate::test_utils::EnvGuard;
+
+    let _environment = EnvGuard::new(&[
+        "AGENT_BROWSER_ACTION_POLICY",
+        "AGENT_BROWSER_POLICY",
+        "AGENT_BROWSER_CONFIRM_ACTIONS",
+    ]);
+    _environment.remove("AGENT_BROWSER_ACTION_POLICY");
+    _environment.remove("AGENT_BROWSER_POLICY");
+    _environment.remove("AGENT_BROWSER_CONFIRM_ACTIONS");
+    let directory = tempfile::tempdir().unwrap();
+    let policy_path = directory.path().join("policy.json");
+    std::fs::write(&policy_path, r#"{"deny":["events_read"]}"#).unwrap();
+    let mut daemon = DaemonState::new();
+    daemon.policy = Some(ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
+    let state = tokio::sync::Mutex::new(daemon);
+
+    let response = super::daemon::execute_events_read(
+        &json!({
+            "id": "policy-read",
+            "action": "events_read",
+            "subscriptionId": "missing"
+        }),
+        &state,
+    )
+    .await;
+
+    assert_eq!(response["success"], false);
+    assert!(response["error"].as_str().unwrap().contains("events_read"));
+}
+
+#[tokio::test]
+async fn event_policy_reload_fails_closed_but_other_commands_keep_old_policy() {
+    use crate::native::policy::ActionPolicy;
+    use crate::test_utils::EnvGuard;
+
+    let _environment = EnvGuard::new(&[
+        "AGENT_BROWSER_ACTION_POLICY",
+        "AGENT_BROWSER_POLICY",
+        "AGENT_BROWSER_CONFIRM_ACTIONS",
+    ]);
+    _environment.remove("AGENT_BROWSER_ACTION_POLICY");
+    _environment.remove("AGENT_BROWSER_POLICY");
+    _environment.remove("AGENT_BROWSER_CONFIRM_ACTIONS");
+    let directory = tempfile::tempdir().unwrap();
+    let policy_path = directory.path().join("policy.json");
+    std::fs::write(&policy_path, r#"{"allow":["state_list"]}"#).unwrap();
+    let mut daemon = DaemonState::new();
+    daemon.policy = Some(ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
+    let state = tokio::sync::Mutex::new(daemon);
+    std::fs::remove_file(&policy_path).unwrap();
+
+    let event_response = super::daemon::execute_events_read(
+        &json!({
+            "id": "reload-read",
+            "action": "events_read",
+            "subscriptionId": "missing"
+        }),
+        &state,
+    )
+    .await;
+    assert_eq!(event_response["success"], false);
+    assert!(event_response["error"]
+        .as_str()
+        .unwrap()
+        .contains("reload failed"));
+
+    let command_response = execute_command(
+        &json!({ "id": "state-list", "action": "state_list" }),
+        &mut *state.lock().await,
+    )
+    .await;
+    assert_eq!(command_response["success"], true);
 }
 
 // ---------------------------------------------------------------------------

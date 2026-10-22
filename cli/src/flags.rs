@@ -1149,7 +1149,6 @@ pub fn parse_flags(args: &[String]) -> Flags {
 
 fn looks_like_command(value: &str) -> bool {
     crate::commands::is_top_level_command(value)
-        || (cfg!(feature = "event-prototype") && value == "events")
 }
 
 pub fn clean_args(args: &[String]) -> Vec<String> {

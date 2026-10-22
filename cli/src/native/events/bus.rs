@@ -13,15 +13,19 @@ use super::source::{EventSource, SourceSignal};
 use super::sources::dom::{normalize_selector, DomObserver, DomState, WORLD_NAME};
 use crate::native::cdp::client::{CdpClient, RawCdpMessage};
 use crate::native::network::DomainFilter;
+use crate::native::policy::ActionPolicy;
+use crate::native::stream::StreamServer;
 
 const MAX_ACTIVE: usize = 20;
 const MAX_LISTED: usize = 50;
 const RETENTION: Duration = Duration::from_secs(600);
-const MAX_TTL: Duration = Duration::from_secs(86_400);
+const MAX_TTL: Duration = Duration::from_secs(1_800);
 
 pub struct Bus {
     session_id: String,
     domain_filter: Arc<RwLock<Option<DomainFilter>>>,
+    policy: Arc<RwLock<Option<ActionPolicy>>>,
+    stream_server: RwLock<Option<Arc<StreamServer>>>,
     state: Mutex<BusState>,
     notify: Notify,
     operation: Mutex<()>,
@@ -38,6 +42,7 @@ struct Subscription {
     id: String,
     session_id: String,
     source_key: String,
+    policy_actions: Vec<String>,
     filter_key: String,
     rule: Value,
     owner: Option<String>,
@@ -113,6 +118,7 @@ pub(super) struct SourceStart<'request> {
 struct SubscriptionStart<'request> {
     session_id: &'request str,
     source_key: String,
+    policy_actions: Vec<String>,
     filter_key: String,
     rule: Value,
     tab: EventTab,
@@ -125,10 +131,16 @@ struct SubscriptionStart<'request> {
 }
 
 impl Bus {
-    pub fn new(session_id: String, domain_filter: Arc<RwLock<Option<DomainFilter>>>) -> Self {
+    pub fn new(
+        session_id: String,
+        domain_filter: Arc<RwLock<Option<DomainFilter>>>,
+        policy: Arc<RwLock<Option<ActionPolicy>>>,
+    ) -> Self {
         Self {
             session_id,
             domain_filter,
+            policy,
+            stream_server: RwLock::new(None),
             state: Mutex::new(BusState {
                 subscriptions: HashMap::new(),
                 sources: HashMap::new(),
@@ -160,7 +172,7 @@ impl Bus {
         let selector = normalize_selector(selector)?;
         let target_id = tab.target_id.as_str();
         if ttl < Duration::from_secs(1) || ttl > MAX_TTL {
-            return Err("Event subscription TTL must be between 1 second and 24 hours".into());
+            return Err("Event subscription TTL must be between 1 second and 30 minutes".into());
         }
         let filter_key = match state {
             "visible" => "visible",
@@ -225,6 +237,11 @@ impl Bus {
             matches!(&current, SourceSignal::Match { key, .. } if key == &filter_key);
         let expires_at = chrono::Utc::now()
             + chrono::Duration::from_std(ttl).map_err(|error| error.to_string())?;
+        let policy_actions = source
+            .policy_actions()
+            .iter()
+            .map(|action| (*action).to_owned())
+            .collect();
         let response = {
             let mut state_guard = self.state.lock().await;
             if !state_guard.sources.contains_key(&source_key) {
@@ -248,6 +265,7 @@ impl Bus {
                 SubscriptionStart {
                     session_id: &self.session_id,
                     source_key,
+                    policy_actions,
                     filter_key,
                     rule: json!({"selector": selector, "state": state_name}),
                     tab,
@@ -260,6 +278,7 @@ impl Bus {
                 },
             )
         };
+        self.nudge_all_heads().await;
         self.notify.notify_waiters();
         Ok(response)
     }
@@ -275,9 +294,15 @@ impl Bus {
             return Err("Event source does not support the selected browser engine".into());
         }
         if request.ttl < Duration::from_secs(1) || request.ttl > MAX_TTL {
-            return Err("Event subscription TTL must be between 1 second and 24 hours".into());
+            return Err("Event subscription TTL must be between 1 second and 30 minutes".into());
         }
         let mut state = self.state.lock().await;
+        let policy_actions = request
+            .source
+            .policy_actions()
+            .iter()
+            .map(|action| (*action).to_owned())
+            .collect();
         prune(&mut state);
         if let Some(existing) = idempotent_subscription(
             &state,
@@ -343,6 +368,7 @@ impl Bus {
             SubscriptionStart {
                 session_id: &self.session_id,
                 source_key,
+                policy_actions,
                 filter_key: request.filter_key,
                 rule: request.rule,
                 tab: request.tab,
@@ -358,8 +384,43 @@ impl Bus {
         if stop_duplicate {
             request.source.stop(&request.client).await;
         }
+        self.nudge_all_heads().await;
         self.notify.notify_waiters();
         Ok(response)
+    }
+
+    pub async fn set_stream(&self, server: Option<Arc<StreamServer>>) {
+        *self.stream_server.write().await = server;
+        self.nudge_all_heads().await;
+    }
+
+    pub async fn policy_actions_for_subscription(&self, id: &str) -> Result<Vec<String>, String> {
+        self.expire().await;
+        let state = self.state.lock().await;
+        state
+            .subscriptions
+            .get(id)
+            .map(|subscription| subscription.policy_actions.clone())
+            .ok_or_else(|| {
+                "Event subscription was lost; the daemon may have restarted or the subscription expired".into()
+            })
+    }
+
+    async fn nudge_all_heads(&self) {
+        let Some(server) = self.stream_server.read().await.clone() else {
+            return;
+        };
+        let heads = self
+            .state
+            .lock()
+            .await
+            .subscriptions
+            .values()
+            .map(|subscription| (subscription.id.clone(), subscription.buffer.head()))
+            .collect::<Vec<_>>();
+        for (id, head) in heads {
+            server.nudge_event(&id, head);
+        }
     }
 
     async fn attach(self: &Arc<Self>, client: Arc<CdpClient>) -> Result<(), String> {
@@ -514,6 +575,8 @@ impl Bus {
                 }
             }
         }
+        drop(state);
+        self.nudge_all_heads().await;
         self.notify.notify_waiters();
     }
 
@@ -584,6 +647,7 @@ impl Bus {
                 .map(|(key, source)| (key.clone(), source.source.clone()))
                 .collect()
         };
+        self.nudge_all_heads().await;
         self.notify.notify_waiters();
         sources
     }
@@ -598,6 +662,28 @@ impl Bus {
         else {
             return;
         };
+        let policy_actions = {
+            let state = self.state.lock().await;
+            state
+                .sources
+                .get(source_key)
+                .map(|source| {
+                    source
+                        .source
+                        .policy_actions()
+                        .iter()
+                        .map(|action| (*action).to_owned())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        if crate::native::actions::check_event_source_policy(&self.policy, &policy_actions)
+            .await
+            .is_err()
+        {
+            self.end_source(source_key, "policy_denied").await;
+            return;
+        }
         let (ids, url, tab, navigation_pending) = {
             let mut state = self.state.lock().await;
             let Some(source) = state.sources.get_mut(source_key) else {
@@ -668,6 +754,31 @@ impl Bus {
                 source.stop(&client).await;
             }
         }
+        self.nudge_all_heads().await;
+        self.notify.notify_waiters();
+    }
+
+    async fn end_source(&self, source_key: &str, reason: &str) {
+        let mut stopped = Vec::new();
+        {
+            let mut state = self.state.lock().await;
+            let ids = state
+                .sources
+                .get(source_key)
+                .map(|source| source.subscriptions.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            for id in ids {
+                if let Some(source) = finish_subscription(&mut state, &id, reason) {
+                    stopped.push(source);
+                }
+            }
+        }
+        if let Some(client) = self.current_client().await {
+            for source in stopped {
+                source.stop(&client).await;
+            }
+        }
+        self.nudge_all_heads().await;
         self.notify.notify_waiters();
     }
 
@@ -736,6 +847,7 @@ impl Bus {
         for source in stopped {
             source.stop(client).await;
         }
+        self.nudge_all_heads().await;
         self.notify.notify_waiters();
     }
 
@@ -774,6 +886,7 @@ impl Bus {
                 source.stop(&client).await;
             }
         }
+        self.nudge_all_heads().await;
         self.notify.notify_waiters();
     }
 
@@ -802,6 +915,7 @@ impl Bus {
                 source.stop(&client).await;
             }
         }
+        self.nudge_all_heads().await;
         self.notify.notify_waiters();
     }
 
@@ -832,7 +946,9 @@ impl Bus {
                 let subscription = state
                     .subscriptions
                     .get(id)
-                    .ok_or_else(|| "Event subscription was lost or expired".to_string())?;
+                    .ok_or_else(|| {
+                        "Event subscription was lost; the daemon may have restarted or the subscription expired".to_string()
+                    })?;
                 let events = subscription
                     .buffer
                     .read(since, limit)
@@ -868,6 +984,28 @@ impl Bus {
         }
     }
 
+    pub async fn read_with_ack(
+        &self,
+        id: &str,
+        since: Option<&str>,
+        wait: Duration,
+        limit: usize,
+        acknowledge: bool,
+    ) -> Result<ReadResult, String> {
+        let mut result = self.read(id, since, wait, limit).await?;
+        if acknowledge && !result.events.is_empty() {
+            self.ack(id, &result.cursor, None).await?;
+            let state = self.state.lock().await;
+            result.consumed = state
+                .subscriptions
+                .get(id)
+                .ok_or_else(|| "Unknown event subscription".to_string())?
+                .buffer
+                .consumed();
+        }
+        Ok(result)
+    }
+
     pub async fn ack(&self, id: &str, cursor: &str, owner: Option<&str>) -> Result<(), String> {
         self.expire().await;
         let mut state = self.state.lock().await;
@@ -894,6 +1032,7 @@ impl Bus {
         if let (Some(source), Some(client)) = (stopped, client) {
             source.stop(&client).await;
         }
+        self.nudge_all_heads().await;
         self.notify.notify_waiters();
         Ok(true)
     }
@@ -950,6 +1089,11 @@ impl Bus {
             label: "test".into(),
             target_id: source.target_id().into(),
         };
+        let policy_actions = source
+            .policy_actions()
+            .iter()
+            .map(|action| (*action).to_owned())
+            .collect();
         let mut state = self.state.lock().await;
         check_active_capacity(&state).unwrap();
         state.shared_keys.insert(sharing_key, source_key.clone());
@@ -972,6 +1116,7 @@ impl Bus {
             SubscriptionStart {
                 session_id: &self.session_id,
                 source_key,
+                policy_actions,
                 filter_key: filter_key.into(),
                 rule: json!({"selector": ".ready", "state": filter_key}),
                 tab,
@@ -988,7 +1133,11 @@ impl Bus {
 
     #[cfg(test)]
     fn test_bus() -> Arc<Self> {
-        Arc::new(Self::new("session-1".into(), Arc::new(RwLock::new(None))))
+        Arc::new(Self::new(
+            "session-1".into(),
+            Arc::new(RwLock::new(None)),
+            Arc::new(RwLock::new(None)),
+        ))
     }
 }
 
@@ -996,6 +1145,7 @@ fn add_subscription(state: &mut BusState, start: SubscriptionStart<'_>) -> Value
     let SubscriptionStart {
         session_id,
         source_key,
+        policy_actions,
         filter_key,
         rule,
         tab,
@@ -1012,6 +1162,7 @@ fn add_subscription(state: &mut BusState, start: SubscriptionStart<'_>) -> Value
         id: id.clone(),
         session_id: session_id.to_owned(),
         source_key: source_key.clone(),
+        policy_actions,
         filter_key,
         rule,
         owner,
@@ -1424,6 +1575,7 @@ mod tests {
         let bus = Arc::new(Bus::new(
             "session-1".into(),
             Arc::new(RwLock::new(Some(DomainFilter::new("elsewhere.test")))),
+            Arc::new(RwLock::new(None)),
         ));
         let id = add(&bus, source(), false).await;
         bus.process_raw(raw("change", "visible", "nonce-1")).await;

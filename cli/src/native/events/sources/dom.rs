@@ -308,16 +308,8 @@ impl EventSource for DomObserver {
         &["chrome"]
     }
 
-    fn policy_actions(&self) -> &'static [&'static str] {
-        &[
-            "events_start",
-            "events_read",
-            "events_ack",
-            "events_list",
-            "events_stop",
-            "events_wait",
-            "events_watch",
-        ]
+    fn policy_actions(&self) -> &[&'static str] {
+        &[]
     }
 
     fn target_id(&self) -> &str {

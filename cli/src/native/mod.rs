@@ -16,7 +16,7 @@ pub mod daemon;
 pub mod diff;
 #[allow(dead_code)]
 pub mod element;
-#[cfg(feature = "event-prototype")]
+#[allow(dead_code)]
 pub mod events;
 #[allow(dead_code)]
 pub mod inspect_server;

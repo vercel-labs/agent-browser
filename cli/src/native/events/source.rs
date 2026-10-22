@@ -19,7 +19,7 @@ pub(super) enum SourceSignal {
 #[allow(clippy::double_must_use)]
 pub(super) trait EventSource: Send + Sync {
     fn supported_engines(&self) -> &'static [&'static str];
-    fn policy_actions(&self) -> &'static [&'static str];
+    fn policy_actions(&self) -> &[&'static str];
     fn target_id(&self) -> &str;
     fn session_id(&self) -> &str;
     fn sharing_key(&self) -> Option<String>;

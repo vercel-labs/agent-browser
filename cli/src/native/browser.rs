@@ -2273,7 +2273,6 @@ impl BrowserManager {
         self.pages.clone()
     }
 
-    #[cfg(feature = "event-prototype")]
     pub fn event_tab_for_target(
         &self,
         target_id: &str,

@@ -571,7 +571,6 @@ pub struct DaemonState {
     /// used to enforce the minimum interval between periodic saves.
     pub last_autosave_attempt: Option<std::time::Instant>,
     pub session_id: String,
-    #[cfg(feature = "event-prototype")]
     pub events: Arc<super::events::bus::Bus>,
     pub tracing_state: TracingState,
     pub recording_state: RecordingState,
@@ -581,6 +580,7 @@ pub struct DaemonState {
     pub webmcp_enabled: bool,
     pub screencasting: bool,
     pub policy: Option<ActionPolicy>,
+    event_policy: Arc<RwLock<Option<ActionPolicy>>>,
     pub pending_confirmation: Option<PendingConfirmation>,
     pub har_recording: bool,
     pub har_entries: Vec<HarEntry>,
@@ -700,6 +700,8 @@ impl DaemonState {
                 .filter(|s| !s.trim().is_empty())
                 .map(|s| DomainFilter::new(&s)),
         ));
+        let policy = ActionPolicy::load_if_exists();
+        let event_policy = Arc::new(RwLock::new(policy.clone()));
         Self {
             browser: None,
             appium: None,
@@ -728,10 +730,10 @@ impl DaemonState {
             last_command_finished: None,
             last_autosave_attempt: None,
             session_id: session_id.clone(),
-            #[cfg(feature = "event-prototype")]
             events: Arc::new(super::events::bus::Bus::new(
                 session_id.clone(),
                 domain_filter,
+                event_policy.clone(),
             )),
             tracing_state: TracingState::new(),
             recording_state: RecordingState::new(),
@@ -739,7 +741,8 @@ impl DaemonState {
             webmcp: webmcp::RuntimeState::default(),
             webmcp_enabled: false,
             screencasting: false,
-            policy: ActionPolicy::load_if_exists(),
+            policy,
+            event_policy,
             pending_confirmation: None,
             har_recording: false,
             har_entries: Vec::new(),
@@ -2519,9 +2522,6 @@ async fn close_active_provider_session(state: &mut DaemonState) -> Result<(), St
 }
 
 pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(), String> {
-    #[cfg(feature = "event-prototype")]
-    super::events::stop_all().await;
-    #[cfg(feature = "event-prototype")]
     state.events.end_all("browser_closed").await;
     let browser = state.browser.take();
     state.launch_hash = None;
@@ -2635,6 +2635,8 @@ fn skip_launch_action(action: &str) -> bool {
             | "stream_enable"
             | "stream_disable"
             | "stream_status"
+            | "events_read"
+            | "events_ack"
             | "events_list"
             | "events_stop"
             | "session_info"
@@ -2653,6 +2655,11 @@ fn policy_actions_for_command(
     needs_implicit_launch: bool,
 ) -> Vec<String> {
     let mut actions = vec![action.to_string()];
+    if action == "events_start" {
+        if let Some(policy_action) = super::events::ops::source_policy_action(cmd) {
+            actions.push(policy_action.to_owned());
+        }
+    }
     // `a11y <url>` performs a real browser navigation before the audit. Keep
     // navigation deny and confirmation policies effective for the compound
     // command instead of treating it as a read-only audit.
@@ -2696,6 +2703,130 @@ fn policy_actions_for_command(
     actions
 }
 
+pub(crate) async fn check_command_policy(
+    cmd: &Value,
+    state: &mut DaemonState,
+    policy_actions: &[String],
+) -> Option<Value> {
+    let id = cmd.get("id").and_then(Value::as_str).unwrap_or("");
+    let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
+    let event_action = action.starts_with("events_");
+    if let Some(policy) = state.policy.as_mut() {
+        match policy.reload() {
+            Ok(()) => *state.event_policy.write().await = Some(policy.clone()),
+            Err(error) if event_action => {
+                return Some(error_response(
+                    id,
+                    &format!(
+                        "Action '{}' denied because policy reload failed: {}",
+                        action, error
+                    ),
+                ));
+            }
+            Err(_) => {}
+        }
+        let mut confirmation_required = None;
+        for policy_action in policy_actions {
+            match policy.check(policy_action) {
+                PolicyResult::Allow => {}
+                PolicyResult::Deny(reason) => {
+                    return Some(error_response(
+                        id,
+                        &format!("Action '{}' denied by policy: {}", policy_action, reason),
+                    ));
+                }
+                PolicyResult::RequiresConfirmation => {
+                    if event_action && action != "events_start" {
+                        if policy_action.starts_with("events_")
+                            || !state.confirmed_policy_actions.contains(policy_action)
+                        {
+                            return Some(error_response(
+                                id,
+                                &format!(
+                                    "Action '{}' requires confirmation, which is only supported at events_start",
+                                    policy_action
+                                ),
+                            ));
+                        }
+                    } else if !state.confirmed_policy_actions.contains(policy_action)
+                        && confirmation_required.is_none()
+                    {
+                        confirmation_required = Some(policy_action.to_string());
+                    }
+                }
+            }
+        }
+        if let Some(policy_action) = confirmation_required {
+            state.pending_confirmation = Some(PendingConfirmation {
+                action: policy_action.clone(),
+                cmd: cmd.clone(),
+                approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
+            });
+            return Some(json!({
+                "id": id,
+                "success": true,
+                "data": {
+                    "confirmation_required": true,
+                    "confirmation_id": id,
+                    "action": policy_action
+                },
+            }));
+        }
+    }
+    if action != "confirm" && action != "deny" {
+        if let Some(confirm_actions) = &state.confirm_actions {
+            for policy_action in policy_actions {
+                if state.confirmed_policy_actions.contains(policy_action)
+                    || !confirm_actions.requires_confirmation(policy_action)
+                {
+                    continue;
+                }
+                if event_action && action != "events_start" {
+                    return Some(error_response(
+                        id,
+                        &format!(
+                            "Action '{}' requires confirmation, which is only supported at events_start",
+                            policy_action
+                        ),
+                    ));
+                }
+                state.pending_confirmation = Some(PendingConfirmation {
+                    action: policy_action.to_string(),
+                    cmd: cmd.clone(),
+                    approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
+                });
+                return Some(json!({
+                    "id": id,
+                    "success": true,
+                    "data": {
+                        "confirmation_required": true,
+                        "confirmation_id": id,
+                        "action": policy_action
+                    },
+                }));
+            }
+        }
+    }
+    None
+}
+
+pub(crate) async fn check_event_source_policy(
+    policy: &Arc<RwLock<Option<ActionPolicy>>>,
+    actions: &[String],
+) -> Result<(), String> {
+    let mut policy = policy.write().await;
+    let Some(policy) = policy.as_mut() else {
+        return Ok(());
+    };
+    policy.reload()?;
+    for action in actions {
+        if let PolicyResult::Deny(reason) = policy.check(action) {
+            return Err(format!("Action '{}' denied by policy: {}", action, reason));
+        }
+    }
+    Ok(())
+}
+
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     // Unlike normal auth login, no-navigation mode must never launch a
@@ -2729,6 +2860,12 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     // resolution that can mask it with "element not found".
     if let Err(err) = validate_find_subaction(action, cmd) {
         return error_response(&id, &err);
+    }
+
+    if action == "events_start" {
+        if let Err(error) = super::events::ops::validate_start_request(cmd) {
+            return error_response(&id, &error);
+        }
     }
 
     if action == INTERNAL_DAEMON_SHUTDOWN_ACTION {
@@ -2848,71 +2985,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     let mut lifecycle_relaunched_browser = false;
     let policy_actions = policy_actions_for_command(cmd, action, needs_launch);
 
-    // Hot-reload and check action policy
-    if let Some(ref mut policy) = state.policy {
-        let _ = policy.reload();
-        let mut confirmation_required: Option<String> = None;
-        for policy_action in &policy_actions {
-            match policy.check(policy_action) {
-                PolicyResult::Allow => {}
-                PolicyResult::Deny(reason) => {
-                    return error_response(
-                        &id,
-                        &format!("Action '{}' denied by policy: {}", policy_action, reason),
-                    );
-                }
-                PolicyResult::RequiresConfirmation => {
-                    if !state.confirmed_policy_actions.contains(policy_action)
-                        && confirmation_required.is_none()
-                    {
-                        confirmation_required = Some(policy_action.to_string());
-                    }
-                }
-            }
-        }
-        if let Some(policy_action) = confirmation_required {
-            state.pending_confirmation = Some(PendingConfirmation {
-                action: policy_action.clone(),
-                cmd: cmd.clone(),
-                approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
-            });
-            return json!({
-                "id": id,
-                "success": true,
-                "data": {
-                    "confirmation_required": true,
-                    "confirmation_id": id,
-                    "action": policy_action
-                },
-            });
-        }
-    }
-
-    // Check AGENT_BROWSER_CONFIRM_ACTIONS (category-based, independent of policy file)
-    if action != "confirm" && action != "deny" {
-        if let Some(ref ca) = state.confirm_actions {
-            for policy_action in &policy_actions {
-                if state.confirmed_policy_actions.contains(policy_action) {
-                    continue;
-                }
-                if ca.requires_confirmation(policy_action) {
-                    state.pending_confirmation = Some(PendingConfirmation {
-                        action: policy_action.to_string(),
-                        cmd: cmd.clone(),
-                        approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
-                    });
-                    return json!({
-                        "id": id,
-                        "success": true,
-                        "data": {
-                            "confirmation_required": true,
-                            "confirmation_id": id,
-                            "action": policy_action,
-                        },
-                    });
-                }
-            }
-        }
+    if let Some(response) = check_command_policy(cmd, state, &policy_actions).await {
+        return response;
     }
 
     let restore_transition_closed_browser = match async {
@@ -3005,6 +3079,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                     | "screenshot"
                     | "url"
                     | "title"
+                    | "events_start"
                     | "tab_list"
                     | "tab_new"
                     | "tab_switch"
@@ -3167,12 +3242,11 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "evalhandle" => handle_evalhandle(cmd, state).await,
         "drag" => handle_drag(cmd, state).await,
         "expose" => handle_expose(cmd, state).await,
-        #[cfg(feature = "event-prototype")]
-        "events_start" => super::events::handle_start(cmd, state).await,
-        #[cfg(feature = "event-prototype")]
-        "events_list" => super::events::handle_list(state).await,
-        #[cfg(feature = "event-prototype")]
-        "events_stop" => super::events::handle_stop(cmd, state).await,
+        "events_start" => super::events::ops::start(cmd, state).await,
+        "events_read" => Err("events_read is dispatched outside the state lock".into()),
+        "events_ack" => super::events::ops::ack(cmd, &state.events).await,
+        "events_list" => super::events::ops::list(cmd, &state.events).await,
+        "events_stop" => super::events::ops::stop(cmd, &state.events).await,
         "pause" => handle_pause(state).await,
         "multiselect" => handle_multiselect(cmd, state).await,
         "responsebody" => handle_responsebody(cmd, state).await,
@@ -9371,9 +9445,9 @@ async fn handle_stream_enable(cmd: &Value, state: &mut DaemonState) -> Result<Va
     }
 
     state.stream_client = Some(client_slot);
-    state.stream_server = Some(Arc::new(server));
-    #[cfg(feature = "event-prototype")]
-    super::events::set_stream(state.stream_server.clone());
+    let server = Arc::new(server);
+    state.stream_server = Some(server.clone());
+    state.events.set_stream(Some(server)).await;
     state.request_tracking = true;
     state.refresh_active_iframe_sessions().await;
     if state.screencasting {
@@ -9393,8 +9467,7 @@ async fn handle_stream_disable(state: &mut DaemonState) -> Result<Value, String>
 
     server.shutdown().await;
     state.stream_server = None;
-    #[cfg(feature = "event-prototype")]
-    super::events::set_stream(None);
+    state.events.set_stream(None).await;
     state.stream_client = None;
     remove_stream_file(&state.session_id)?;
     remove_engine_file(&state.session_id);
