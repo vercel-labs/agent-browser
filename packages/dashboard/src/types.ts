@@ -85,6 +85,33 @@ export interface TabsMessage {
   timestamp: number;
 }
 
+export interface EventTab {
+  id: string;
+  label?: string | null;
+  targetId: string;
+}
+
+export type EventRule = string | Record<string, unknown>;
+
+export interface EventSubscription {
+  id: string;
+  status: string;
+  reason: string | null;
+  rule: EventRule;
+  owner: string | null;
+  head: number;
+  consumed: number;
+  dropped: number;
+  tab: EventTab | null;
+  expiresAt: string | null;
+}
+
+export interface EventsNudgeMessage {
+  type: "events_nudge";
+  subscriptionId: string;
+  head: number;
+}
+
 export type StreamMessage =
   | FrameMessage
   | StatusMessage
@@ -94,7 +121,8 @@ export type StreamMessage =
   | PageErrorMessage
   | ErrorMessage
   | UrlMessage
-  | TabsMessage;
+  | TabsMessage
+  | EventsNudgeMessage;
 
 export type ActivityEvent = CommandMessage | ResultMessage | ConsoleMessage;
 export type ConsoleEntry = ConsoleMessage | PageErrorMessage;
