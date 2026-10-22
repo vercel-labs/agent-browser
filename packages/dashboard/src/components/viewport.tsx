@@ -43,7 +43,7 @@ import {
 } from "@/store/stream";
 import { activeSessionNameAtom, activePortAtom } from "@/store/sessions";
 
-const SCREENCAST_ENGINES = new Set(["chrome"]);
+const SCREENCAST_ENGINES = new Set(["chrome", "moli"]);
 
 function cdpModifiers(e: React.MouseEvent | React.WheelEvent): number {
   let m = 0;

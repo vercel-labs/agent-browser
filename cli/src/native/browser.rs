@@ -9,6 +9,7 @@ use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchO
 use super::cdp::client::CdpClient;
 use super::cdp::discovery::discover_cdp_url;
 use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
+use super::cdp::moli::{launch_moli, MoliLaunchOptions, MoliProcess};
 use super::cdp::obscura::{
     launch_obscura, stealth_from_env as obscura_stealth_from_env, ObscuraLaunchOptions,
     ObscuraProcess,
@@ -166,6 +167,25 @@ fn validate_obscura_options(options: &LaunchOptions) -> Result<(), String> {
     }
     if !options.args.is_empty() {
         return Err("Custom Chrome arguments (--args) are not supported with Obscura".to_string());
+    }
+    Ok(())
+}
+
+fn validate_moli_options(options: &LaunchOptions) -> Result<(), String> {
+    if options.extensions.as_ref().is_some_and(|e| !e.is_empty()) {
+        return Err("Extensions are not supported with Moli".into());
+    }
+    if options.allow_file_access {
+        return Err("File access (--allow-file-access) is not supported with Moli".into());
+    }
+    if !options.headless {
+        return Err("Headed mode (--headed) is not supported with Moli (headless only)".into());
+    }
+    if options.webgpu {
+        return Err("WebGPU (--webgpu) is not supported with Moli".into());
+    }
+    if options.ca_cert.is_some() {
+        return Err("--ca-cert is not supported with Moli (Chromium only)".into());
     }
     Ok(())
 }
@@ -407,6 +427,7 @@ pub enum BrowserProcess {
     Chrome(ChromeProcess),
     Lightpanda(LightpandaProcess),
     Obscura(ObscuraProcess),
+    Moli(MoliProcess),
 }
 
 impl BrowserProcess {
@@ -415,6 +436,7 @@ impl BrowserProcess {
             BrowserProcess::Chrome(p) => p.kill(),
             BrowserProcess::Lightpanda(p) => p.kill(),
             BrowserProcess::Obscura(p) => p.kill(),
+            BrowserProcess::Moli(p) => p.kill(),
         }
     }
 
@@ -423,6 +445,7 @@ impl BrowserProcess {
             BrowserProcess::Chrome(p) => p.wait_or_kill(timeout),
             BrowserProcess::Lightpanda(p) => p.kill(),
             BrowserProcess::Obscura(p) => p.kill(),
+            BrowserProcess::Moli(p) => p.kill(),
         }
     }
 
@@ -432,6 +455,7 @@ impl BrowserProcess {
             BrowserProcess::Chrome(p) => p.has_exited(),
             BrowserProcess::Lightpanda(_) => false,
             BrowserProcess::Obscura(p) => p.has_exited(),
+            BrowserProcess::Moli(p) => p.has_exited(),
         }
     }
 }
@@ -494,11 +518,16 @@ const LIGHTPANDA_CDP_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100
 const LIGHTPANDA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 const FAILED_INITIALIZATION_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
-const OBSCURA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const OBSCURA_CDP_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const OBSCURA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
+const OWNED_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const OWNED_CDP_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const OWNED_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl BrowserManager {
+    #[cfg(test)]
+    pub(super) fn owns_moli_process(&self) -> bool {
+        matches!(self.browser_process.as_ref(), Some(BrowserProcess::Moli(_)))
+    }
+
     #[cfg(test)]
     pub(super) fn owns_obscura_process(&self) -> bool {
         matches!(
@@ -544,9 +573,12 @@ impl BrowserManager {
             "obscura" => {
                 validate_obscura_options(&options)?;
             }
+            "moli" => {
+                validate_moli_options(&options)?;
+            }
             _ => {
                 return Err(format!(
-                    "Unknown engine '{}'. Supported engines: chrome, lightpanda, obscura",
+                    "Unknown engine '{}'. Supported engines: chrome, lightpanda, obscura, moli",
                     engine
                 ));
             }
@@ -580,6 +612,24 @@ impl BrowserManager {
                 let url = ob.ws_url.clone();
                 (url, BrowserProcess::Obscura(ob))
             }
+            "moli" => {
+                let moli = launch_moli(&MoliLaunchOptions {
+                    executable_path: options.executable_path.clone(),
+                    args: options.args.clone(),
+                    profile_dir: options.profile.clone(),
+                    proxy: options.proxy.clone(),
+                    proxy_username: options.proxy_username.clone(),
+                    proxy_password: options.proxy_password.clone(),
+                    proxy_bypass: options.proxy_bypass.clone(),
+                    user_agent: options.user_agent.clone(),
+                    ignore_https_errors: options.ignore_https_errors,
+                    show_scrollbars: !options.hide_scrollbars,
+                    port: None,
+                })
+                .await?;
+                let url = moli.ws_url.clone();
+                (url, BrowserProcess::Moli(moli))
+            }
             _ => {
                 let chrome = tokio::task::spawn_blocking(move || launch_chrome(&options))
                     .await
@@ -593,6 +643,8 @@ impl BrowserManager {
             initialize_lightpanda_manager(ws_url, process).await?
         } else if engine == "obscura" {
             initialize_obscura_manager(ws_url, process).await?
+        } else if engine == "moli" {
+            initialize_cdp_engine_manager(ws_url, process, "Moli").await?
         } else {
             let client = Arc::new(CdpClient::connect(&ws_url).await?);
             let mut manager = Self {
@@ -2498,16 +2550,25 @@ async fn initialize_obscura_manager(
     ws_url: String,
     process: BrowserProcess,
 ) -> Result<BrowserManager, String> {
-    let deadline = Instant::now() + OBSCURA_TARGET_INIT_TIMEOUT;
+    initialize_cdp_engine_manager(ws_url, process, "Obscura").await
+}
+
+async fn initialize_cdp_engine_manager(
+    ws_url: String,
+    process: BrowserProcess,
+    engine: &'static str,
+) -> Result<BrowserManager, String> {
+    let deadline = Instant::now() + OWNED_TARGET_INIT_TIMEOUT;
     let mut process = Some(process);
 
     loop {
-        let client = match run_with_obscura_deadline(
+        let client = match run_with_engine_deadline(
+            engine,
             deadline,
             connect_cdp_with_retry(
                 &ws_url,
-                OBSCURA_CDP_CONNECT_TIMEOUT,
-                OBSCURA_CDP_CONNECT_POLL_INTERVAL,
+                OWNED_CDP_CONNECT_TIMEOUT,
+                OWNED_CDP_CONNECT_POLL_INTERVAL,
             ),
             "CDP WebSocket connection exceeded the remaining startup deadline",
         )
@@ -2516,9 +2577,9 @@ async fn initialize_obscura_manager(
             Ok(client) => client,
             Err(err) => {
                 if Instant::now() >= deadline {
-                    return Err(obscura_target_init_timeout(Some(&err)));
+                    return Err(engine_target_init_timeout(engine, Some(&err)));
                 }
-                tokio::time::sleep(OBSCURA_CDP_CONNECT_POLL_INTERVAL).await;
+                tokio::time::sleep(OWNED_CDP_CONNECT_POLL_INTERVAL).await;
                 continue;
             }
         };
@@ -2541,7 +2602,8 @@ async fn initialize_obscura_manager(
             headless: true,
         };
 
-        match run_with_obscura_deadline(
+        match run_with_engine_deadline(
+            engine,
             deadline,
             manager.discover_and_attach_targets(),
             "Target domain initialization attempt exceeded the remaining startup deadline",
@@ -2557,16 +2619,17 @@ async fn initialize_obscura_manager(
                     .close_with_timeout(Some(FAILED_INITIALIZATION_CLOSE_TIMEOUT))
                     .await;
                 if Instant::now() >= deadline {
-                    return Err(obscura_target_init_timeout(Some(&err)));
+                    return Err(engine_target_init_timeout(engine, Some(&err)));
                 }
-                tokio::time::sleep(OBSCURA_CDP_CONNECT_POLL_INTERVAL).await;
+                tokio::time::sleep(OWNED_CDP_CONNECT_POLL_INTERVAL).await;
             }
         }
     }
 }
 
-/// Bounds Obscura connection and target setup; failed managers still need explicit cleanup.
-async fn run_with_obscura_deadline<F, T>(
+/// Applies the startup deadline; callers remain responsible for cleanup.
+async fn run_with_engine_deadline<F, T>(
+    engine: &str,
     deadline: Instant,
     operation: F,
     timeout_context: &'static str,
@@ -2575,17 +2638,18 @@ where
     F: Future<Output = Result<T, String>>,
 {
     let remaining = remaining_until(deadline)
-        .ok_or_else(|| obscura_target_init_timeout(Some("deadline expired before retry")))?;
+        .ok_or_else(|| engine_target_init_timeout(engine, Some("deadline expired before retry")))?;
     match tokio::time::timeout(remaining, operation).await {
         Ok(result) => result,
-        Err(_) => Err(obscura_target_init_timeout(Some(timeout_context))),
+        Err(_) => Err(engine_target_init_timeout(engine, Some(timeout_context))),
     }
 }
 
-fn obscura_target_init_timeout(last_error: Option<&str>) -> String {
+fn engine_target_init_timeout(engine: &str, last_error: Option<&str>) -> String {
     let mut message = format!(
-        "Timed out after {}ms waiting for Obscura Target domain to initialize",
-        OBSCURA_TARGET_INIT_TIMEOUT.as_millis(),
+        "Timed out after {}ms waiting for {} Target domain to initialize",
+        OWNED_TARGET_INIT_TIMEOUT.as_millis(),
+        engine,
     );
     if let Some(last_error) = last_error {
         message.push_str(&format!("\nLast error: {}", last_error));
@@ -2730,6 +2794,77 @@ mod tests {
         }
         assert!(validate_obscura_options(&LaunchOptions {
             proxy: Some("http://localhost:8080".into()),
+            ..Default::default()
+        })
+        .is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_moli_rejects_unsupported_options_before_spawn() {
+        assert!(validate_moli_options(&LaunchOptions::default()).is_ok());
+        assert!(validate_moli_options(&LaunchOptions {
+            profile: Some("moli profile".into()),
+            ..Default::default()
+        })
+        .is_ok());
+        assert!(validate_moli_options(&LaunchOptions {
+            storage_state: Some("state.json".into()),
+            ..Default::default()
+        })
+        .is_ok());
+        let cases = [
+            (
+                LaunchOptions {
+                    extensions: Some(vec!["extension".into()]),
+                    ..Default::default()
+                },
+                "Extensions",
+            ),
+            (
+                LaunchOptions {
+                    allow_file_access: true,
+                    ..Default::default()
+                },
+                "File access",
+            ),
+            (
+                LaunchOptions {
+                    headless: false,
+                    ..Default::default()
+                },
+                "Headed mode",
+            ),
+            (
+                LaunchOptions {
+                    webgpu: true,
+                    ..Default::default()
+                },
+                "WebGPU",
+            ),
+            (
+                LaunchOptions {
+                    ca_cert: Some("root.pem".into()),
+                    ..Default::default()
+                },
+                "--ca-cert",
+            ),
+        ];
+        for (mut options, expected) in cases {
+            options.executable_path = Some("/nonexistent/moli".into());
+            let error = BrowserManager::launch(options, Some("moli"))
+                .await
+                .err()
+                .expect("unsupported option must fail before spawn");
+            assert!(error.contains(expected), "{error}");
+        }
+        assert!(validate_moli_options(&LaunchOptions {
+            args: vec!["--timeout=30".into()],
+            proxy: Some("http://localhost:8080".into()),
+            proxy_username: Some("user".into()),
+            proxy_password: Some("pass".into()),
+            proxy_bypass: Some("localhost".into()),
+            user_agent: Some("probe".into()),
+            ignore_https_errors: true,
             ..Default::default()
         })
         .is_ok());
@@ -3743,7 +3878,7 @@ mod tests {
         let (dir, process) = obscura_initialization_process(&url);
         let started = Instant::now();
         let error = tokio::time::timeout(
-            OBSCURA_TARGET_INIT_TIMEOUT + Duration::from_secs(2),
+            OWNED_TARGET_INIT_TIMEOUT + Duration::from_secs(2),
             initialize_obscura_manager(url, process),
         )
         .await
@@ -3751,7 +3886,7 @@ mod tests {
         .err()
         .expect("stalled handshake must fail");
         assert!(error.contains("CDP WebSocket connection"), "{error}");
-        assert!(started.elapsed() >= OBSCURA_TARGET_INIT_TIMEOUT);
+        assert!(started.elapsed() >= OWNED_TARGET_INIT_TIMEOUT);
         tokio::time::timeout(Duration::from_secs(1), server)
             .await
             .unwrap()
@@ -3788,11 +3923,134 @@ mod tests {
         });
         let (dir, process) = obscura_initialization_process(&url);
         let error = tokio::time::timeout(
-            OBSCURA_TARGET_INIT_TIMEOUT + Duration::from_secs(2),
+            OWNED_TARGET_INIT_TIMEOUT + Duration::from_secs(2),
             initialize_obscura_manager(url, process),
         )
         .await
         .expect("Obscura target setup must obey its startup deadline")
+        .err()
+        .expect("stalled target setup must fail");
+        assert!(
+            error.contains("Target domain initialization attempt"),
+            "{error}"
+        );
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_initialization_process_reaped(dir.path());
+    }
+
+    #[cfg(unix)]
+    fn moli_initialization_process(url: &str) -> (tempfile::TempDir, BrowserProcess) {
+        let dir = tempfile::tempdir().unwrap();
+        let child = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        std::fs::write(dir.path().join("pid"), child.id().to_string()).unwrap();
+        (
+            dir,
+            BrowserProcess::Moli(MoliProcess::for_test(child, url.to_string())),
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_moli_failed_initialization_disconnects_before_retry() {
+        for method in [
+            "Target.setDiscoverTargets",
+            "Target.getTargets",
+            "Target.createTarget",
+            "Target.attachToTarget",
+            "Page.enable",
+            "Runtime.enable",
+            "Network.enable",
+        ] {
+            let (url, server) = initialization_server(method, false, 2, false).await;
+            let (dir, process) = moli_initialization_process(&url);
+            let mut manager = tokio::time::timeout(
+                Duration::from_secs(4),
+                initialize_cdp_engine_manager(url, process, "Moli"),
+            )
+            .await
+            .expect("Moli should disconnect before retrying")
+            .unwrap();
+            assert!(manager.owns_moli_process());
+            assert!(!manager.browser_process.as_mut().unwrap().has_exited());
+            manager.close().await.unwrap();
+            let observed = server.await.unwrap();
+            assert!(!observed[0].iter().any(|method| method == "Browser.close"));
+            assert!(observed[1].iter().any(|method| method == "Browser.close"));
+            assert_initialization_process_reaped(dir.path());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_moli_stalled_websocket_handshake_is_bounded_and_reaps() {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).await.unwrap();
+            assert!(String::from_utf8_lossy(&request).contains("Upgrade: websocket"));
+        });
+        let (dir, process) = moli_initialization_process(&url);
+        let started = Instant::now();
+        let error = tokio::time::timeout(
+            OWNED_TARGET_INIT_TIMEOUT + Duration::from_secs(2),
+            initialize_cdp_engine_manager(url, process, "Moli"),
+        )
+        .await
+        .expect("Moli handshake must obey its startup deadline")
+        .err()
+        .expect("stalled handshake must fail");
+        assert!(error.contains("CDP WebSocket connection"), "{error}");
+        assert!(started.elapsed() >= OWNED_TARGET_INIT_TIMEOUT);
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_initialization_process_reaped(dir.path());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_moli_stalled_target_initialization_disconnects_and_reaps() {
+        use futures_util::StreamExt;
+        use tokio::io::AsyncReadExt;
+        use tokio_tungstenite::tungstenite::Message;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut target_seen = false;
+            while let Some(Ok(message)) = ws.next().await {
+                match message {
+                    Message::Text(text) => {
+                        let command: Value = serde_json::from_str(&text).unwrap();
+                        assert_ne!(command["method"], "Browser.close");
+                        target_seen |= command["method"] == "Target.setDiscoverTargets";
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+            assert!(target_seen);
+            let mut byte = [0u8; 1];
+            assert_eq!(ws.get_mut().read(&mut byte).await.unwrap(), 0);
+        });
+        let (dir, process) = moli_initialization_process(&url);
+        let error = tokio::time::timeout(
+            OWNED_TARGET_INIT_TIMEOUT + Duration::from_secs(2),
+            initialize_cdp_engine_manager(url, process, "Moli"),
+        )
+        .await
+        .expect("Moli target setup must obey its startup deadline")
         .err()
         .expect("stalled target setup must fail");
         assert!(

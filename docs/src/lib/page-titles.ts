@@ -28,6 +28,7 @@ export const PAGE_TITLES: Record<string, string> = {
   "engines/chrome": "Chrome",
   "engines/lightpanda": "Lightpanda",
   "engines/obscura": "Obscura",
+  "engines/moli": "Moli",
   next: "Next.js + Vercel",
   eve: "eve Extension",
   "native-mode": "Native Mode",

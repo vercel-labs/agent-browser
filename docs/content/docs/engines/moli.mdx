@@ -1,0 +1,83 @@
+---
+title: "Moli (experimental)"
+navTitle: "Moli"
+---
+
+[Moli](https://github.com/lexmount/moli) is a headless browser with a CDP server. The experimental adapter launches `moli serve`, connects over CDP, and stops the process when the session closes.
+
+## Installation
+
+Install Moli separately. On Linux or macOS:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/lexmount/moli/releases/latest/download/moli-installer.sh | sh
+moli --version
+```
+
+On Windows, run in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/lexmount/moli/releases/latest/download/moli-installer.ps1 | iex"
+```
+
+Open a new PowerShell window after installation to pick up the updated `PATH`.
+
+For source builds, see the [Moli repository](https://github.com/lexmount/moli). The adapter looks on `PATH`, then in the standard installer locations (`~/.local/bin/moli` on Unix and `%LOCALAPPDATA%\Moli\bin\moli.exe` on Windows), and `~/.cargo/bin`. Use `--executable-path` to select another binary. `agent-browser install` continues to install Chrome.
+
+## Usage
+
+```bash
+agent-browser --engine moli open example.com
+agent-browser --engine moli snapshot -i
+agent-browser --engine moli screenshot page.png
+agent-browser close
+```
+
+Select a custom binary:
+
+```bash
+agent-browser --engine moli --executable-path /path/to/moli open example.com
+```
+
+Set the default engine with `AGENT_BROWSER_ENGINE=moli`, or in `agent-browser.json`:
+
+```json
+{
+  "engine": "moli",
+  "executablePath": "/path/to/moli"
+}
+```
+
+Use `--state /path/to/auth.json` to load saved cookies and storage before opening the requested page. Save the current session with `agent-browser state save /path/to/auth.json` for reuse after closing Moli.
+
+Use `--profile /path/to/profile` to pass a directory to Moli's `--profile-dir`. localStorage persists across restarts; cookie persistence on close is currently unreliable.
+
+Use `--args "--http-timeout=30000"` to pass additional `moli serve` options.
+
+## Compatibility
+
+Local launches enable layout, images and fonts for geometry and screenshots. Supported options include `--proxy` (including `http://user:pass@host:port`), `--proxy-bypass`, `--user-agent` and `--ignore-https-errors`. Scrollbars are hidden by default; use `--hide-scrollbars false` to show them.
+
+The dashboard supports Moli live frames, mouse and keyboard input, tab switching, and URL updates for full-document, History API and fragment navigation.
+
+Moli's CDP and rendering support differs from Chrome. Some commands or pages may not work as expected.
+
+The local adapter rejects extensions, `--headed`, `--webgpu`, `--ca-cert`, and `--allow-file-access`. To manage the Moli server separately, connect with `--cdp`:
+
+```bash
+moli serve --host 127.0.0.1 --port 9222 --layout --image --font
+agent-browser --cdp http://127.0.0.1:9222 open example.com
+```
+
+## MCP
+
+Pass Moli launch options through `extraArgs`:
+
+```json
+{
+  "url": "https://example.com",
+  "extraArgs": ["--engine", "moli", "--executable-path", "/path/to/moli"]
+}
+```
+
+For source-build testing, see the [Moli adapter contributor guide](https://github.com/vercel-labs/agent-browser/blob/main/AGENTS.md#moli-adapter).

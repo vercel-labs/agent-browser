@@ -181,9 +181,8 @@ pub(super) async fn cdp_event_loop(
                 let vh = *viewport_height.lock().await;
 
                 let eng = last_engine.read().await.clone();
-                let is_chrome = eng == "chrome";
-                let supports_screencast = is_chrome;
-                let supports_same_document_navigation = is_chrome;
+                let supports_screencast = matches!(eng.as_str(), "chrome" | "moli");
+                let supports_same_document_navigation = supports_screencast;
 
                 if supports_screencast {
                     let _ = client_arc
@@ -1065,6 +1064,30 @@ mod tests {
             .iter()
             .any(|method| method == "Page.getFrameTree"));
 
+        stop_loop(harness).await;
+    }
+
+    #[tokio::test]
+    async fn test_moli_streams_frames_and_same_document_urls() {
+        let (client, events, methods) = mock_cdp("F-MAIN").await;
+        let mut harness =
+            start_loop_with_client_and_engine(Some("S-ACTIVE"), client, events, methods, "moli")
+                .await;
+        let status = next_message_of_type(&mut harness.messages, "status").await;
+        assert_eq!(status["engine"], "moli");
+        assert_eq!(status["screencasting"], true);
+        wait_for_method(&harness.methods, "Page.startScreencast").await;
+        harness
+            .events
+            .send(json!({
+                "method": "Page.navigatedWithinDocument",
+                "sessionId": "S-ACTIVE",
+                "params": {"frameId": "F-MAIN", "url": "https://active.test/spa"}
+            }))
+            .unwrap();
+        let url = next_message_of_type(&mut harness.messages, "url").await;
+        assert_eq!(url["url"], "https://active.test/spa");
+        assert_eq!(harness.last_tabs.read().await[0]["url"], url["url"]);
         stop_loop(harness).await;
     }
 
