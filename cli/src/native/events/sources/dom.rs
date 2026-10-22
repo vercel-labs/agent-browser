@@ -178,6 +178,12 @@ impl DomObserver {
 
 #[async_trait::async_trait]
 impl EventSource for DomObserver {
+    fn policy_actions(&self) -> Vec<String> {
+        ["isvisible", "gettext", "getattribute"]
+            .map(str::to_owned)
+            .to_vec()
+    }
+
     fn target_id(&self) -> &str {
         &self.target_id
     }
@@ -249,6 +255,14 @@ mod tests {
             .to_string(),
             session_id: Some(session_id.into()),
         }
+    }
+
+    #[test]
+    fn policy_actions_cover_visibility_and_text_reads() {
+        assert_eq!(
+            DomObserver::test_observer().policy_actions(),
+            vec!["isvisible", "gettext", "getattribute"]
+        );
     }
 
     #[test]

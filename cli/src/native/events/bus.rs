@@ -144,7 +144,7 @@ impl Bus {
         }
         self.attach(req.client.clone()).await?;
         let _operation = self.operation.lock().await;
-        self.expire().await;
+        self.expire_stored().await;
         {
             let mut state = self.state.lock().await;
             prune(&mut state);
@@ -163,8 +163,8 @@ impl Bus {
                 shared.url.clone(),
             )
         });
-        let (source, initial, url): (Arc<dyn EventSource>, _, _) = match existing {
-            Some(existing) => existing,
+        let (source, initial, url, installed): (Arc<dyn EventSource>, _, _, _) = match existing {
+            Some(existing) => (existing.0, existing.1, existing.2, false),
             None => {
                 let (observer, initial) = DomObserver::install(
                     &req.client,
@@ -177,6 +177,7 @@ impl Bus {
                     Arc::new(observer),
                     signal_key(&initial).to_owned(),
                     req.current_url.to_owned(),
+                    true,
                 )
             }
         };
@@ -184,6 +185,8 @@ impl Bus {
             return Err("Event observer session changed while subscribing".into());
         }
         let expires = chrono::Utc::now() + chrono::Duration::from_std(req.ttl).unwrap();
+        let probe = installed.then(|| source.clone());
+        let initial_key = initial.clone();
         let start = SourceStart {
             source,
             initial,
@@ -199,10 +202,35 @@ impl Bus {
         let response = register(
             &mut *self.state.lock().await,
             &self.session_id,
-            key,
+            key.clone(),
             start,
             expires,
         );
+        if let Some(probe) = probe {
+            if let Ok(Some(SourceSignal::Match {
+                key: observed,
+                name,
+                data,
+                location,
+                ..
+            })) = probe.observe(&req.client).await
+            {
+                if observed != initial_key {
+                    self.emit_signal(
+                        &key,
+                        SourceSignal::Match {
+                            key: observed,
+                            name,
+                            data,
+                            initial: false,
+                            location,
+                        },
+                        None,
+                    )
+                    .await;
+                }
+            }
+        }
         self.publish().await;
         Ok(response)
     }
@@ -214,7 +242,7 @@ impl Bus {
     ) -> Result<Value, String> {
         self.attach(client).await?;
         let _operation = self.operation.lock().await;
-        self.expire().await;
+        self.expire_stored().await;
         let mut state = self.state.lock().await;
         prune(&mut state);
         if let Some(sub) = idempotent(&state, req.owner.as_deref(), req.idempotency_key.as_deref())
@@ -268,12 +296,15 @@ impl Bus {
     }
 
     async fn cleanup(&self, sources: Vec<Arc<dyn EventSource>>, client: Option<Arc<CdpClient>>) {
-        if let Some(client) = client {
+        self.publish().await;
+        let Some(client) = client else {
+            return;
+        };
+        tokio::spawn(async move {
             for source in sources {
                 source.stop(&client).await;
             }
-        }
-        self.publish().await;
+        });
     }
 
     async fn attach(self: &Arc<Self>, client: Arc<CdpClient>) -> Result<(), String> {
@@ -294,9 +325,12 @@ impl Bus {
                 .await;
         }
         let mut receiver = client.subscribe_raw();
+        let mut closed = client.subscribe_closed();
         let bus = self.clone();
         let receiver_client = client.clone();
         let task = tokio::spawn(async move {
+            let mut expiry = tokio::time::interval(Duration::from_millis(250));
+            expiry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
                     received = receiver.recv() => match received {
@@ -307,7 +341,11 @@ impl Bus {
                             return;
                         }
                     },
-                    _ = tokio::time::sleep(Duration::from_millis(250)) => bus.expire().await,
+                    _ = expiry.tick() => bus.expire().await,
+                    _ = closed.changed() => {
+                        bus.end_all_with_client("browser_closed", Some(receiver_client.clone())).await;
+                        return;
+                    },
                 }
             }
         });
@@ -437,25 +475,6 @@ impl Bus {
                 self.emit_signal(&key, signal, Some("afterNavigation"))
                     .await;
             }
-            let mut state = self.state.lock().await;
-            let Some(shared) = state.sources.get_mut(&key).filter(|shared| shared.pending) else {
-                continue;
-            };
-            shared.pending = false;
-            let ids = shared.subs.clone();
-            let tab = shared.tab.clone();
-            for id in ids {
-                if let Some(sub) = state.subs.get_mut(&id) {
-                    sub.buffer.append(envelope(
-                        "subscription.rearmed",
-                        &self.session_id,
-                        &tab,
-                        json!({}),
-                    ));
-                }
-            }
-            drop(state);
-            self.publish().await;
         }
     }
 
@@ -645,6 +664,11 @@ impl Bus {
     }
 
     async fn expire(&self) {
+        let _operation = self.operation.lock().await;
+        self.expire_stored().await;
+    }
+
+    async fn expire_stored(&self) {
         let client = self.current_client().await;
         let now = chrono::Utc::now();
         let mut state = self.state.lock().await;
@@ -672,8 +696,8 @@ impl Bus {
         wait: Duration,
         limit: usize,
     ) -> Result<ReadResult, String> {
-        self.expire().await;
         let deadline = tokio::time::Instant::now() + wait;
+        self.expire().await;
         loop {
             let notified = self.notify.notified();
             tokio::pin!(notified);
@@ -681,15 +705,17 @@ impl Bus {
             let mut state = self.state.lock().await;
             prune(&mut state);
             let sub = state.subs.get(id).ok_or_else(|| LOST.to_owned())?;
+            let since = since
+                .map(str::to_owned)
+                .unwrap_or_else(|| sub.buffer.consumed_cursor());
             let events = sub
                 .buffer
-                .read(since, limit)
+                .read(Some(&since), limit)
                 .map_err(|_| "Invalid event cursor".to_owned())?;
             let cursor = events
                 .last()
                 .map(|event| event.meta.cursor.clone())
-                .or_else(|| since.map(str::to_owned))
-                .unwrap_or_else(|| sub.buffer.start_cursor());
+                .unwrap_or(since);
             let mut result = ReadResult {
                 id: id.to_owned(),
                 status: sub.status,
@@ -747,7 +773,8 @@ impl Bus {
     }
 
     pub async fn stop(&self, id: &str, owner: Option<&str>) -> Result<bool, String> {
-        self.expire().await;
+        let _operation = self.operation.lock().await;
+        self.expire_stored().await;
         let client = self.current_client().await;
         let mut state = self.state.lock().await;
         check_owner(
@@ -818,6 +845,7 @@ fn register(
         &req.tab,
         json!({"state": current, "alreadySatisfied": already_satisfied}),
     ));
+    buffer.ack(buffer.head());
     let sub = Subscription {
         id: id.clone(),
         session_id: session.to_owned(),
@@ -949,6 +977,9 @@ fn check_owner(sub: &Subscription, owner: Option<&str>) -> Result<(), String> {
 mod tests {
     use super::super::{filter::Matchers, ops::CdpMethodSource, sources::cdp};
     use super::*;
+    use futures_util::SinkExt;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::Message;
 
     fn bus() -> Arc<Bus> {
         Arc::new(Bus::new("session-1".into(), Arc::default(), Arc::default()))
@@ -1008,6 +1039,210 @@ mod tests {
         id
     }
 
+    async fn read_all(bus: &Bus, id: &str) -> ReadResult {
+        let start = bus
+            .state
+            .lock()
+            .await
+            .subs
+            .get(id)
+            .unwrap()
+            .buffer
+            .start_cursor();
+        bus.read(id, Some(&start), Duration::ZERO, 10)
+            .await
+            .unwrap()
+    }
+
+    async fn client_for(
+        server: impl FnOnce(
+                tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+            ) -> tokio::task::JoinHandle<()>
+            + Send
+            + 'static,
+    ) -> Arc<CdpClient> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            server(ws).await.unwrap();
+        });
+        Arc::new(CdpClient::connect(&url).await.unwrap())
+    }
+
+    fn cdp_source() -> Arc<CdpMethodSource> {
+        Arc::new(CdpMethodSource::new(
+            cdp::lookup("Browser.downloadWillBegin").unwrap(),
+            "session-1".into(),
+            "target-1".into(),
+            HashMap::new(),
+            Matchers::parse(&[], &[]).unwrap(),
+        ))
+    }
+
+    struct FailingObserver;
+
+    #[async_trait::async_trait]
+    impl EventSource for FailingObserver {
+        fn target_id(&self) -> &str {
+            "target-fail"
+        }
+
+        fn session_id(&self) -> &str {
+            "session-1"
+        }
+
+        fn classify(&self, _: &RawCdpMessage) -> Option<SourceSignal> {
+            None
+        }
+
+        async fn observe(&self, _: &CdpClient) -> Result<Option<SourceSignal>, String> {
+            Err("observe failed".into())
+        }
+    }
+
+    struct HangingObserver;
+
+    #[async_trait::async_trait]
+    impl EventSource for HangingObserver {
+        fn target_id(&self) -> &str {
+            "target-hang"
+        }
+
+        fn session_id(&self) -> &str {
+            "session-1"
+        }
+
+        fn classify(&self, _: &RawCdpMessage) -> Option<SourceSignal> {
+            None
+        }
+
+        async fn stop(&self, _: &CdpClient) {
+            std::future::pending::<()>().await
+        }
+    }
+
+    #[tokio::test]
+    async fn creation_consumes_the_ready_marker() {
+        let bus = bus();
+        let id = add(
+            &bus,
+            Arc::new(DomObserver::test_observer()),
+            "hidden",
+            false,
+        )
+        .await;
+        let result = bus
+            .read(&id, None, Duration::from_millis(50), 10)
+            .await
+            .unwrap();
+        assert!(result.events.is_empty());
+        assert!(result.waiting);
+        assert_eq!((result.head, result.consumed), (1, 1));
+        assert!(bus.list(None, true).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_navigation_observation_stays_pending() {
+        let client = client_for(|_| tokio::spawn(async {})).await;
+        let bus = bus();
+        let id = add(&bus, Arc::new(FailingObserver), "visible", false).await;
+        bus.state
+            .lock()
+            .await
+            .sources
+            .values_mut()
+            .next()
+            .unwrap()
+            .pending = true;
+        bus.observe_pending("session-1", &client).await;
+        assert!(
+            bus.state
+                .lock()
+                .await
+                .sources
+                .values()
+                .next()
+                .unwrap()
+                .pending
+        );
+        let _ = id;
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn expiry_runs_while_traffic_is_continuous() {
+        let client = client_for(|mut ws| {
+            tokio::spawn(async move {
+                loop {
+                    let message =
+                        Message::Text(json!({"method": "Runtime.consoleAPICalled"}).to_string());
+                    if ws.send(message).await.is_err() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+        })
+        .await;
+        let bus = bus();
+        bus.attach(client.clone()).await.unwrap();
+        let id = add(&bus, cdp_source(), "Browser.downloadWillBegin", false).await;
+        bus.state.lock().await.subs.get_mut(&id).unwrap().expires_at = chrono::Utc::now();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            bus.state.lock().await.subs.get(&id).unwrap().status,
+            "ended"
+        );
+        client.close().await;
+    }
+
+    #[tokio::test]
+    async fn transport_loss_ends_subscriptions() {
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<()>();
+        let client = client_for(|ws| {
+            tokio::spawn(async move {
+                let _ = closed_rx.await;
+                drop(ws);
+            })
+        })
+        .await;
+        let bus = bus();
+        bus.attach(client.clone()).await.unwrap();
+        let id = add(&bus, cdp_source(), "Browser.downloadWillBegin", false).await;
+        closed_tx.send(()).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let state = bus.state.lock().await;
+        let sub = state.subs.get(&id).unwrap();
+        assert_eq!(sub.status, "ended");
+        assert_eq!(sub.reason.as_deref(), Some("browser_closed"));
+    }
+
+    #[tokio::test]
+    async fn stop_notifies_waiting_reads_before_observer_cleanup() {
+        let client = client_for(|_| tokio::spawn(async {})).await;
+        let bus = bus();
+        bus.attach(client.clone()).await.unwrap();
+        add(&bus, Arc::new(HangingObserver), "visible", false).await;
+        let notified = bus.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let cleaning = bus.clone();
+        let cleanup = tokio::spawn(async move {
+            cleaning
+                .cleanup(vec![Arc::new(HangingObserver)], Some(client))
+                .await;
+        });
+        tokio::time::timeout(Duration::from_millis(200), cleanup)
+            .await
+            .expect("cleanup should not await observer shutdown")
+            .unwrap();
+        tokio::time::timeout(Duration::from_millis(200), notified)
+            .await
+            .expect("cleanup should notify readers");
+    }
+
     #[tokio::test]
     async fn rejects_forged_payloads_and_filters_content_at_emit_time() {
         let bus = bus();
@@ -1033,14 +1268,7 @@ mod tests {
             .url = "https://blocked.test".into();
         bus.process_raw(raw("change", "visible", "nonce-1")).await;
         assert_eq!(bus.list(None, false).await[0]["filtered"], 1);
-        assert_eq!(
-            bus.read(&id, None, Duration::ZERO, 10)
-                .await
-                .unwrap()
-                .events
-                .len(),
-            1
-        );
+        assert_eq!(read_all(&bus, &id).await.events.len(), 1);
     }
 
     #[tokio::test]
@@ -1074,7 +1302,7 @@ mod tests {
                 text: json!({"method": "Browser.downloadWillBegin", "params": {"url": "https://allowed.test/file"}}).to_string(),
                 session_id: None,
             }).await;
-            let read = bus.read(&id, None, Duration::ZERO, 10).await.unwrap();
+            let read = read_all(&bus, &id).await;
             assert_eq!(read.status, "ended");
             assert_eq!(read.events.len(), 2);
             assert_eq!(read.events[1].data, json!({"reason": "policy_denied"}));
@@ -1102,7 +1330,7 @@ mod tests {
                     bus.stop(&id, None).await.unwrap();
                 }
             }
-            let read = bus.read(&id, None, Duration::ZERO, 10).await.unwrap();
+            let read = read_all(&bus, &id).await;
             assert_eq!(read.status, "ended");
             assert_eq!(read.events.len(), 2);
             assert_eq!(read.events[1].data, json!({"reason": reason}));

@@ -12,6 +12,7 @@ struct Entry {
     end_seq: u64,
     event: EventEnvelope,
     bytes: usize,
+    gap_prefix: Vec<u64>,
 }
 
 pub struct EventBuffer {
@@ -51,8 +52,10 @@ impl EventBuffer {
         };
         if let Some(last) = existing {
             if name == "subscription.gap" {
-                last.event.data = json!({"missed": gap_missed(&last.event) + gap_missed(&event)});
+                let missed = gap_missed(&last.event) + gap_missed(&event);
+                last.event.data = json!({"missed": missed});
                 last.end_seq = seq;
+                last.gap_prefix.push(missed);
                 last.event.meta.cursor = cursor;
             }
             return last.event.meta.cursor.clone();
@@ -65,6 +68,10 @@ impl EventBuffer {
                 .expect("event envelopes always serialize")
                 .len(),
         };
+        let gap_prefix = match name {
+            "subscription.gap" => vec![gap_missed(&event)],
+            _ => Vec::new(),
+        };
         self.event_count += usize::from(bytes > 0);
         self.event_bytes += bytes;
         entries.push_back(Entry {
@@ -72,6 +79,7 @@ impl EventBuffer {
             end_seq: seq,
             event,
             bytes,
+            gap_prefix,
         });
         self.enforce_bounds();
         cursor
@@ -89,7 +97,15 @@ impl EventBuffer {
             let mut event = entry.event.clone();
             if entry.event.meta.name == "subscription.gap" {
                 let missed = gap_missed(&entry.event);
-                let already_missed = since.saturating_sub(entry.start_seq.saturating_sub(1));
+                let already_missed = if since < entry.start_seq {
+                    0
+                } else {
+                    entry
+                        .gap_prefix
+                        .get((since - entry.start_seq) as usize)
+                        .copied()
+                        .unwrap_or(missed)
+                };
                 event.data = json!({"missed": missed.saturating_sub(already_missed)});
             }
             events.push(event);
@@ -126,6 +142,10 @@ impl EventBuffer {
         self.cursor(self.head())
     }
 
+    pub fn consumed_cursor(&self) -> String {
+        self.cursor(self.consumed)
+    }
+
     fn cursor(&self, seq: u64) -> String {
         format!("{}:{seq}", self.subscription_id)
     }
@@ -149,18 +169,24 @@ impl EventBuffer {
             self.event_count -= 1;
             self.event_bytes -= removed.bytes;
             self.dropped += removed.end_seq - removed.start_seq + 1;
-            let mut missed = 1;
+            let mut missed = 0;
+            let mut gap_prefix = Vec::new();
             if index > 0 && entries[index - 1].event.meta.name == "subscription.gap" {
                 let previous = entries.remove(index - 1).unwrap();
                 index -= 1;
                 removed.start_seq = previous.start_seq;
-                missed += gap_missed(&previous.event);
+                missed = gap_missed(&previous.event);
+                gap_prefix = previous.gap_prefix;
                 removed.event = previous.event;
             }
+            missed += 1;
+            gap_prefix.push(missed);
             if index < entries.len() && entries[index].event.meta.name == "subscription.gap" {
                 let next = entries.remove(index).unwrap();
-                removed.end_seq = next.end_seq;
+                let base = missed;
                 missed += gap_missed(&next.event);
+                gap_prefix.extend(next.gap_prefix.into_iter().map(|count| base + count));
+                removed.end_seq = next.end_seq;
             }
             let meta = &removed.event.meta;
             removed.event = EventEnvelope::new(
@@ -171,6 +197,7 @@ impl EventBuffer {
                 &meta.tab.target_id,
                 json!({"missed": missed}),
             );
+            removed.gap_prefix = gap_prefix;
             removed.event.meta.subscription_id = self.subscription_id.clone();
             removed.event.meta.cursor = format!("{}:{}", self.subscription_id, removed.end_seq);
             removed.bytes = 0;
@@ -268,6 +295,27 @@ mod tests {
     }
 
     #[test]
+    fn merged_gaps_report_only_the_unread_suffix() {
+        let mut buffer = EventBuffer::new();
+        append(&mut buffer, "change", json!({}));
+        append(&mut buffer, "subscription.gap", json!({"missed": 3}));
+        append(&mut buffer, "subscription.gap", json!({"missed": 4}));
+        append(&mut buffer, "subscription.gap", json!({"missed": 5}));
+        assert_eq!(
+            buffer.read(Some(&buffer.cursor(2)), 1).unwrap()[0].data,
+            json!({"missed": 9})
+        );
+        assert_eq!(
+            buffer.read(Some(&buffer.cursor(3)), 1).unwrap()[0].data,
+            json!({"missed": 5})
+        );
+        assert_eq!(
+            buffer.read(Some(&buffer.cursor(1)), 1).unwrap()[0].data,
+            json!({"missed": 12})
+        );
+    }
+
+    #[test]
     fn gap_totals_replay_and_acknowledgement() {
         let mut buffer = EventBuffer::new();
         let first = append(&mut buffer, "change", json!({}));
@@ -285,7 +333,7 @@ mod tests {
         assert_eq!(events[1].data, json!({"missed": 7}));
         assert_eq!(
             buffer.read(Some(&buffer.cursor(2)), 1).unwrap()[0].data,
-            json!({"missed": 6})
+            json!({"missed": 4})
         );
         assert_eq!(buffer.read(None, 1).unwrap(), events[..1]);
         assert!(buffer.read(Some(&last), 1).unwrap().is_empty());
