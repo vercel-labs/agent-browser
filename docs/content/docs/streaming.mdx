@@ -150,6 +150,71 @@ agent-browser events wait ev_1a2b3c4d
 
 The re-arm and `afterNavigation` behavior covers a click that reloads the document before the dialog appears.
 
+### CDP tap recipes
+
+Use `--method` to tap an allowlisted CDP event instead of a selector. `--match <json-pointer>=<value>` and `--match-regex <json-pointer>=<regex>` test the projected `data` fields, and every matcher must hold. These recipes were verified on Chrome only.
+
+A dialog opens:
+
+```bash
+agent-browser events start --method Page.javascriptDialogOpening --match /type=alert --once
+agent-browser eval "setTimeout(() => alert('hello'), 0)"
+agent-browser events wait ev_1a2b3c4d
+agent-browser dialog dismiss
+```
+
+Stores `Page.javascriptDialogOpening` with `data.type`, `data.message` and `data.url`, plus `data.defaultPrompt` on prompts; `/type=alert` narrows it to alerts.
+
+A same-document navigation commits:
+
+```bash
+agent-browser events start --method Page.navigatedWithinDocument --once
+agent-browser eval "history.pushState({}, '', '/step-2')"
+agent-browser events wait ev_1a2b3c4d
+```
+
+Stores `Page.navigatedWithinDocument` with `data.frameId` and `data.url`; a full document load stores `Page.frameNavigated` with `data.frameId` and `data.url`, plus `data.parentId` for child frames.
+
+A console message at a chosen level:
+
+```bash
+agent-browser events start --method Runtime.consoleAPICalled --match /level=warning --once
+agent-browser eval "console.warn('disk space low')"
+agent-browser events wait ev_1a2b3c4d
+```
+
+Stores `Runtime.consoleAPICalled` with `data.level` and `data.text`; the level is the CDP console type, so `console.warn` matches `warning`.
+
+A page error:
+
+```bash
+agent-browser events start --method Runtime.exceptionThrown --once
+agent-browser eval "setTimeout(() => { throw new Error('boom') }, 0)"
+agent-browser events wait ev_1a2b3c4d
+```
+
+Stores `Runtime.exceptionThrown` with `data.text`, `data.url`, `data.lineNumber` and `data.columnNumber`.
+
+A tab opens:
+
+```bash
+agent-browser events start --method Target.targetCreated --match /type=page --once
+agent-browser tab new https://example.com
+agent-browser events wait ev_1a2b3c4d
+```
+
+Stores `Target.targetCreated` with `data.targetId`, `data.type` and `data.url`; `/type=page` skips worker and other non-page targets.
+
+A download starts:
+
+```bash
+agent-browser events start --method Browser.downloadWillBegin --once
+agent-browser click '#download'
+agent-browser events wait ev_1a2b3c4d
+```
+
+Stores `Browser.downloadWillBegin` with `data.guid`, `data.url`, `data.suggestedFilename` and `data.frameId`; start the session with `--download-path` if you also want the file on disk.
+
 ## Harness setup
 
 The bus does not know about any particular harness. These recipes use only the public verbs, return only bus metadata, and tell the agent to run `events read` for the event itself. Never paste page strings from a wake message into a prompt.
