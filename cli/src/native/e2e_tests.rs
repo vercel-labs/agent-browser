@@ -151,8 +151,8 @@ async fn e2e_event_bus_shares_observer_and_rearms_after_navigation() {
         .unwrap();
     let first_id = first["id"].as_str().unwrap().to_owned();
     let second_id = second["id"].as_str().unwrap().to_owned();
-    let first_head = first["head"].as_str().unwrap().to_owned();
-    let second_head = second["head"].as_str().unwrap().to_owned();
+    let first_head = first["cursor"].as_str().unwrap().to_owned();
+    let second_head = second["cursor"].as_str().unwrap().to_owned();
 
     let response = execute_command(
         &json!({"id": "show", "action": "evaluate", "script": "document.querySelector('#go').click()"}),
@@ -1900,7 +1900,7 @@ async fn e2e_events_operations_use_cursor_reads() {
             "id": "3d",
             "action": "events_ack",
             "subscriptionId": already_satisfied["id"],
-            "cursor": already_satisfied["head"],
+            "cursor": already_satisfied["cursor"],
             "owner": "worker-b"
         }),
         &mut *state.lock().await,
@@ -1923,7 +1923,7 @@ async fn e2e_events_operations_use_cursor_reads() {
             "id": "4",
             "action": "events_read",
             "subscriptionId": already_satisfied["id"],
-            "since": already_satisfied["head"],
+            "since": already_satisfied["cursor"],
         }),
         &state,
     )
@@ -1935,7 +1935,7 @@ async fn e2e_events_operations_use_cursor_reads() {
             "id": "4b",
             "action": "events_read",
             "subscriptionId": already_satisfied["id"],
-            "since": already_satisfied["head"],
+            "since": already_satisfied["cursor"],
             "waitMs": 1,
         }),
         &state,
@@ -1963,22 +1963,44 @@ async fn e2e_events_operations_use_cursor_reads() {
     )
     .await;
     assert_success(&response);
-    let read = super::daemon::execute_events_read(
-        &json!({
-            "id": "8",
-            "action": "events_read",
-            "subscriptionId": appeared["id"],
-            "since": appeared["head"],
-            "waitMs": 5_000,
-            "ack": true,
-            "limit": 1,
-        }),
-        &state,
-    )
-    .await;
-    assert_success(&read);
-    assert_eq!(get_data(&read)["events"][0]["name"], "element.visible");
-    assert_eq!(get_data(&read)["consumed"], 2);
+    let mut cursor = appeared["cursor"].clone();
+    let mut saw_visible = false;
+    for _ in 0..4 {
+        let read = super::daemon::execute_events_read(
+            &json!({
+                "id": "8",
+                "action": "events_read",
+                "subscriptionId": appeared["id"],
+                "since": cursor,
+                "waitMs": 5_000,
+                "ack": true,
+                "limit": 1,
+            }),
+            &state,
+        )
+        .await;
+        assert_success(&read);
+        let data = get_data(&read);
+        let seq = data["cursor"]
+            .as_str()
+            .unwrap()
+            .rsplit_once(':')
+            .unwrap()
+            .1
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(data["consumed"], seq);
+        saw_visible |= data["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["meta"]["name"] == "element.visible");
+        cursor = data["cursor"].clone();
+        if saw_visible || data["status"] == "ended" {
+            break;
+        }
+    }
+    assert!(saw_visible);
 
     let response = execute_command(
         &json!({ "id": "9", "action": "events_start", "selector": "#done" }),
@@ -1999,7 +2021,7 @@ async fn e2e_events_operations_use_cursor_reads() {
             "id": "11",
             "action": "events_read",
             "subscriptionId": after_navigation["id"],
-            "since": after_navigation["head"],
+            "since": after_navigation["cursor"],
             "waitMs": 5_000,
         }),
         &state,
@@ -2011,7 +2033,7 @@ async fn e2e_events_operations_use_cursor_reads() {
         .unwrap()
         .iter()
         .any(|event| {
-            event["name"] == "element.visible" && event["data"]["afterNavigation"] == true
+            event["meta"]["name"] == "element.visible" && event["data"]["afterNavigation"] == true
         }));
     let nav_cursor = get_data(&nav_read)["cursor"].clone();
 
@@ -2115,7 +2137,7 @@ async fn e2e_events_do_not_store_data_for_blocked_origin() {
             "id": "5",
             "action": "events_read",
             "subscriptionId": subscription["id"],
-            "since": subscription["head"],
+            "since": subscription["cursor"],
         }),
         &state,
     )

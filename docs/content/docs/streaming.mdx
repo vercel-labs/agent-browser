@@ -56,7 +56,7 @@ agent-browser events start --selector <css> [--state visible|hidden] [--once] [-
   </tbody>
 </table>
 
-The start result contains `id`, `head`, `alreadySatisfied`, `expiresAt`, `owner` and the tab's display id, label and target id. `alreadySatisfied` is true when the requested state already holds at arm time. That initial state is reported in `subscription.ready` and does not create an event; events are stored on later transitions.
+The start result contains `id`, `head`, `cursor`, `alreadySatisfied`, `expiresAt`, `owner` and the tab's display id, label and target id. `head` is the head sequence number and `cursor` is the cursor at that head, which a first read can pass as `--since`. `alreadySatisfied` is true when the requested state already holds at arm time. That initial state is reported in `subscription.ready` and does not create an event; events are stored on later transitions.
 
 At most 20 subscriptions are active at once. Finished subscriptions stay readable for 10 minutes, and `events list` shows at most 50 entries.
 

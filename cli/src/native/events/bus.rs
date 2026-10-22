@@ -81,7 +81,7 @@ pub struct ReadResult {
     pub status: &'static str,
     pub events: Vec<EventEnvelope>,
     pub cursor: String,
-    pub head: String,
+    pub head: u64,
     pub consumed: u64,
     pub waiting: bool,
 }
@@ -557,22 +557,29 @@ impl Bus {
     }
 
     async fn mark_rearmed(&self, source_key: &str) {
-        let mut state = self.state.lock().await;
-        if let Some(source) = state.sources.get_mut(source_key) {
+        if let Some(source) = self.state.lock().await.sources.get_mut(source_key) {
             source.navigation_pending = true;
-            let ids: Vec<String> = source.subscriptions.iter().cloned().collect();
-            let tab = source.tab.clone();
-            for id in ids {
-                if let Some(subscription) = state.subscriptions.get_mut(&id) {
-                    subscription.buffer.append(EventEnvelope::new(
-                        "subscription.rearmed",
-                        &self.session_id,
-                        &tab.id,
-                        &tab.label,
-                        &tab.target_id,
-                        json!({}),
-                    ));
-                }
+        }
+    }
+
+    async fn record_rearmed(&self, source_key: &str) {
+        let mut state = self.state.lock().await;
+        let Some(source) = state.sources.get_mut(source_key) else {
+            return;
+        };
+        source.navigation_pending = false;
+        let ids: Vec<String> = source.subscriptions.iter().cloned().collect();
+        let tab = source.tab.clone();
+        for id in ids {
+            if let Some(subscription) = state.subscriptions.get_mut(&id) {
+                subscription.buffer.append(EventEnvelope::new(
+                    "subscription.rearmed",
+                    &self.session_id,
+                    &tab.id,
+                    &tab.label,
+                    &tab.target_id,
+                    json!({}),
+                ));
             }
         }
         drop(state);
@@ -608,8 +615,19 @@ impl Bus {
                 .collect()
         };
         for (source_key, source) in sources {
-            if let Ok(Some(signal)) = source.observe(client).await {
+            let observed = source.observe(client).await;
+            if let Ok(Some(signal)) = observed {
                 self.emit_signal(&source_key, signal, Some(flag)).await;
+            }
+            let pending = self
+                .state
+                .lock()
+                .await
+                .sources
+                .get(&source_key)
+                .is_some_and(|source| source.navigation_pending);
+            if pending {
+                self.record_rearmed(&source_key).await;
             }
         }
     }
@@ -684,7 +702,7 @@ impl Bus {
             self.end_source(source_key, "policy_denied").await;
             return;
         }
-        let (ids, url, tab, navigation_pending) = {
+        let (ids, url, tab, navigation_pending, rearmed) = {
             let mut state = self.state.lock().await;
             let Some(source) = state.sources.get_mut(source_key) else {
                 return;
@@ -696,7 +714,8 @@ impl Bus {
                 initial,
             });
             let pending = source.navigation_pending;
-            if forced_flag == Some("afterNavigation") || (initial && pending) {
+            let rearmed = pending && (forced_flag == Some("afterNavigation") || initial);
+            if rearmed {
                 source.navigation_pending = false;
             }
             (
@@ -704,6 +723,7 @@ impl Bus {
                 source.url.clone(),
                 source.tab.clone(),
                 pending,
+                rearmed,
             )
         };
         let flag =
@@ -723,7 +743,20 @@ impl Bus {
             let Some(subscription) = state.subscriptions.get_mut(&id) else {
                 continue;
             };
-            if subscription.status != "active" || subscription.filter_key != key {
+            if subscription.status != "active" {
+                continue;
+            }
+            if rearmed {
+                subscription.buffer.append(EventEnvelope::new(
+                    "subscription.rearmed",
+                    &self.session_id,
+                    &tab.id,
+                    &tab.label,
+                    &tab.target_id,
+                    json!({}),
+                ));
+            }
+            if subscription.filter_key != key {
                 continue;
             }
             if !allowed {
@@ -963,7 +996,7 @@ impl Bus {
                     status: subscription.status,
                     events,
                     cursor,
-                    head: subscription.buffer.head_cursor(),
+                    head: subscription.buffer.head(),
                     consumed: subscription.buffer.consumed(),
                     waiting: false,
                 }
@@ -1062,7 +1095,7 @@ impl Bus {
                     "reason": subscription.reason,
                     "rule": subscription.rule,
                     "owner": subscription.owner,
-                    "head": subscription.buffer.head_cursor(),
+                    "head": subscription.buffer.head(),
                     "consumed": subscription.buffer.consumed(),
                     "dropped": subscription.buffer.dropped(),
                     "filtered": subscription.filtered,
@@ -1193,7 +1226,8 @@ fn add_subscription(state: &mut BusState, start: SubscriptionStart<'_>) -> Value
             "alreadySatisfied": already_satisfied
         }),
     ));
-    let head = subscription.buffer.head_cursor();
+    let head = subscription.buffer.head();
+    let cursor = subscription.buffer.head_cursor();
     let expires_at_value = expires_at.to_rfc3339();
     state.subscriptions.insert(id.clone(), subscription);
     if let Some(source) = state.sources.get_mut(&source_key) {
@@ -1202,6 +1236,7 @@ fn add_subscription(state: &mut BusState, start: SubscriptionStart<'_>) -> Value
     json!({
         "id": id,
         "head": head,
+        "cursor": cursor,
         "alreadySatisfied": already_satisfied,
         "expiresAt": expires_at_value,
         "owner": state.subscriptions[&id].owner,
@@ -1312,7 +1347,8 @@ fn idempotent_subscription<'a>(
 fn start_response(subscription: &Subscription) -> Value {
     json!({
         "id": subscription.id,
-        "head": subscription.buffer.head_cursor(),
+        "head": subscription.buffer.head(),
+        "cursor": subscription.buffer.head_cursor(),
         "alreadySatisfied": subscription.already_satisfied,
         "expiresAt": subscription.expires_at.to_rfc3339(),
         "owner": subscription.owner,
@@ -1476,6 +1512,22 @@ mod tests {
         let result = read.await.unwrap();
         assert!(!result.waiting);
         assert_eq!(result.events[0].meta.name, "element.visible");
+    }
+
+    #[tokio::test]
+    async fn head_is_a_sequence_and_start_includes_a_cursor() {
+        let bus = bus();
+        let id = add(&bus, source(), false).await;
+        let response = start_response(&bus.state.lock().await.subscriptions[&id]);
+        assert_eq!(response["head"], 1);
+        assert_eq!(response["cursor"], format!("{id}:1"));
+
+        let result = bus.read(&id, None, Duration::ZERO, 10).await.unwrap();
+        assert_eq!(result.head, 1);
+        assert_eq!(result.cursor, format!("{id}:1"));
+
+        let listed = bus.list(None, false).await;
+        assert_eq!(listed[0]["head"], 1);
     }
 
     #[tokio::test]

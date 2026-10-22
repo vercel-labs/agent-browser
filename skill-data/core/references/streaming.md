@@ -41,7 +41,7 @@ agent-browser events start --selector <css> [--state visible|hidden] [--once] [-
 - `--owner` labels the subscription. `ack` and `stop` with an owner only touch subscriptions that carry it.
 - `--key` is an idempotency key. Starting again with the same key and rule returns the same id.
 
-`alreadySatisfied` is true when the requested state already holds at arm time. That initial state is reported in `subscription.ready` and creates no event; events are stored on later transitions.
+`alreadySatisfied` is true when the requested state already holds at arm time. That initial state is reported in `subscription.ready` and creates no event; events are stored on later transitions. The start result also has `head`, the head sequence number, and `cursor`, the cursor at that head, which a first read can pass as `--since`.
 
 At most 20 subscriptions are active. Finished subscriptions stay readable for 10 minutes, and `events list` shows at most 50 entries.
 
