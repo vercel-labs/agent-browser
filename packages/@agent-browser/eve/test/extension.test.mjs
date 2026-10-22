@@ -94,17 +94,6 @@ test("navigate requires a url for goto", async () => {
   );
 });
 
-test("probes for the binary once per sandbox and skips install when present", async () => {
-  resetConfig();
-  const sandbox = fakeSandbox({ id: "probe-once" });
-  const ctx = fakeCtx(sandbox);
-  await tools.close.execute({}, ctx);
-  await tools.close.execute({}, ctx);
-  const probes = sandbox.commands.filter((command) => command.startsWith("command -v "));
-  assert.equal(probes.length, 1);
-  assert.ok(!sandbox.commands.some((command) => command.includes("npm install")));
-});
-
 test("auto-installs when the binary is missing", async () => {
   resetConfig({ installSystemDependencies: false });
   const commands = [];
@@ -125,7 +114,7 @@ test("auto-installs when the binary is missing", async () => {
 
 test("skips the install probe when autoInstall is false", async () => {
   resetConfig({ autoInstall: false });
-  const sandbox = fakeSandbox({ id: "no-auto" });
+  const sandbox = fakeSandbox();
   await tools.close.execute({}, fakeCtx(sandbox));
   assert.ok(!sandbox.commands.some((command) => command.startsWith("command -v ")));
   resetConfig();
@@ -140,7 +129,7 @@ test("applies config-level safety flags to every command", async () => {
     maxOutputChars: 5000,
     proxy: "http://proxy.example.com:8080",
   });
-  const sandbox = fakeSandbox({ id: "flags" });
+  const sandbox = fakeSandbox();
   await tools.close.execute({}, fakeCtx(sandbox));
   const command = sandbox.commands.at(-1);
   assert.ok(command.includes("--allowed-domains 'example.com,*.example.com'"), command);
@@ -153,7 +142,7 @@ test("applies config-level safety flags to every command", async () => {
 
 test("can explicitly clear retained CA trust", async () => {
   resetConfig({ clearCaCert: true });
-  const sandbox = fakeSandbox({ id: "clear-ca" });
+  const sandbox = fakeSandbox();
   await tools.close.execute({}, fakeCtx(sandbox));
   assert.ok(sandbox.commands.at(-1).includes("--no-ca-cert"));
   resetConfig();
@@ -161,7 +150,7 @@ test("can explicitly clear retained CA trust", async () => {
 
 test("rejects config CA selection with a simultaneous clear", async () => {
   resetConfig({ caCert: "/etc/ssl/certs/proxy-ca.pem", clearCaCert: true });
-  const sandbox = fakeSandbox({ id: "select-ca" });
+  const sandbox = fakeSandbox();
   await assert.rejects(
     tools.close.execute({}, fakeCtx(sandbox)),
     /Cannot use caCert with clearCaCert/,
@@ -169,9 +158,20 @@ test("rejects config CA selection with a simultaneous clear", async () => {
   resetConfig();
 });
 
+test("probes for agent-browser once per sandbox and skips install when present", async () => {
+  resetConfig();
+  const sandbox = fakeSandbox();
+  const ctx = fakeCtx(sandbox);
+  await tools.navigate.execute({ action: "goto", url: "https://example.com" }, ctx);
+  await tools.navigate.execute({ action: "goto", url: "https://example.com" }, ctx);
+  const probes = sandbox.commands.filter((command) => command.startsWith("command -v "));
+  assert.equal(probes.length, 1);
+  assert.ok(!sandbox.commands.some((command) => command.includes("npm install")));
+});
+
 test("uses a fixed session name when configured", async () => {
   resetConfig({ session: "shared" });
-  const sandbox = fakeSandbox({ id: "fixed-session" });
+  const sandbox = fakeSandbox();
   await tools.close.execute({}, fakeCtx(sandbox));
   assert.ok(sandbox.commands.at(-1).startsWith("agent-browser --session shared "));
   resetConfig();
@@ -180,7 +180,6 @@ test("uses a fixed session name when configured", async () => {
 test("surfaces envelope errors even when the exit code is zero", async () => {
   resetConfig();
   const sandbox = fakeSandbox({
-    id: "envelope-error",
     respond: () => ({
       exitCode: 0,
       stdout: JSON.stringify({ success: false, data: null, error: "Element not found" }),
@@ -208,7 +207,7 @@ test("wait_for requires at least one condition", async () => {
 
 test("wait_for runs combined conditions sequentially, load state first", async () => {
   resetConfig();
-  const sandbox = fakeSandbox({ id: "combined-waits" });
+  const sandbox = fakeSandbox();
   await tools.wait_for.execute(
     { loadState: "networkidle", selector: "#app", timeMs: 100 },
     fakeCtx(sandbox),
@@ -222,7 +221,7 @@ test("wait_for runs combined conditions sequentially, load state first", async (
 
 test("wait_for builds each condition variant", async () => {
   resetConfig();
-  const sandbox = fakeSandbox({ id: "waits" });
+  const sandbox = fakeSandbox();
   const ctx = fakeCtx(sandbox);
   await tools.wait_for.execute({ selector: "#spinner" }, ctx);
   await tools.wait_for.execute({ text: "Welcome" }, ctx);
@@ -239,7 +238,7 @@ test("wait_for builds each condition variant", async () => {
 
 test("wait_for caps every condition with a timeout and reports outcomes", async () => {
   resetConfig();
-  const sandbox = fakeSandbox({ id: "capped-waits" });
+  const sandbox = fakeSandbox();
   const outcome = await tools.wait_for.execute({ selector: "#app" }, fakeCtx(sandbox));
   assert.ok(sandbox.commands.at(-1).includes("wait '#app' --timeout 10000"), sandbox.commands.at(-1));
   assert.equal(outcome.satisfied, true);
@@ -249,7 +248,6 @@ test("wait_for caps every condition with a timeout and reports outcomes", async 
 test("wait_for treats a timeout as an outcome, not an error", async () => {
   resetConfig();
   const sandbox = fakeSandbox({
-    id: "timeout-outcome",
     respond: () => ({
       exitCode: 1,
       stdout: JSON.stringify({
@@ -291,7 +289,7 @@ test("find requires a value for fill and type", async () => {
 
 test("tabs builds each action variant", async () => {
   resetConfig();
-  const sandbox = fakeSandbox({ id: "tabs" });
+  const sandbox = fakeSandbox();
   const ctx = fakeCtx(sandbox);
   await tools.tabs.execute({ action: "list" }, ctx);
   await tools.tabs.execute({ action: "new", label: "docs", url: "https://docs.example.com" }, ctx);
@@ -306,7 +304,7 @@ test("tabs builds each action variant", async () => {
 
 test("scroll picks scrollintoview when only a selector is given", async () => {
   resetConfig();
-  const sandbox = fakeSandbox({ id: "scrolls" });
+  const sandbox = fakeSandbox();
   const ctx = fakeCtx(sandbox);
   await tools.scroll.execute({ selector: "#footer" }, ctx);
   await tools.scroll.execute({ direction: "down", pixels: 300 }, ctx);
@@ -319,7 +317,6 @@ test("snapshot retries once on a transient CDP error", async () => {
   resetConfig();
   let attempts = 0;
   const sandbox = fakeSandbox({
-    id: "cdp-flake",
     respond: () => {
       attempts += 1;
       if (attempts === 1) {
@@ -345,7 +342,6 @@ test("snapshot retries once on a transient CDP error", async () => {
 test("snapshot drops ref selectors instead of failing", async () => {
   resetConfig();
   const sandbox = fakeSandbox({
-    id: "ref-selector",
     respond: () => ({ stdout: OK({ origin: "https://example.com/", snapshot: "- page" }) }),
   });
   const ctx = fakeCtx(sandbox);
@@ -365,7 +361,6 @@ test("snapshot drops ref selectors instead of failing", async () => {
 test("snapshot falls back to a whole-page snapshot when the scoped one fails", async () => {
   resetConfig();
   const sandbox = fakeSandbox({
-    id: "selector-fallback",
     respond: (command) =>
       command.includes("--selector")
         ? {
@@ -392,7 +387,6 @@ test("snapshot does not retry non-CDP errors", async () => {
   resetConfig();
   let attempts = 0;
   const sandbox = fakeSandbox({
-    id: "real-error",
     respond: () => {
       attempts += 1;
       return {
@@ -411,7 +405,6 @@ test("snapshot does not retry non-CDP errors", async () => {
 test("screenshot inlines the image and hides it from the model", async () => {
   resetConfig();
   const sandbox = fakeSandbox({
-    id: "shots",
     respond: () => ({ stdout: OK({ path: "/workspace/shot.png" }) }),
   });
   sandbox.readBinaryFile = async ({ path }) => {
@@ -436,7 +429,6 @@ test("screenshot inlines the image and hides it from the model", async () => {
 test("screenshot still works when the sandbox cannot read files back", async () => {
   resetConfig();
   const sandbox = fakeSandbox({
-    id: "no-file-io",
     respond: () => ({ stdout: OK({ path: "/workspace/shot.png" }) }),
   });
   const output = await tools.screenshot.execute(
@@ -454,7 +446,6 @@ test("screenshot still works when the sandbox cannot read files back", async () 
 test("screenshot skips inlining when disabled in config", async () => {
   resetConfig({ inlineScreenshots: false });
   const sandbox = fakeSandbox({
-    id: "inline-off",
     respond: () => ({ stdout: OK({ path: "/workspace/shot.png" }) }),
   });
   sandbox.readBinaryFile = async () => new Uint8Array([1]);
@@ -511,7 +502,7 @@ test("wait_for schema drops empty-string conditions", () => {
 
 test("wait_for runs only the conditions that are actually set", async () => {
   resetConfig();
-  const sandbox = fakeSandbox({ id: "wait-only-set" });
+  const sandbox = fakeSandbox();
   const input = tools.wait_for.inputSchema.parse({ selector: "", text: "Welcome", urlPattern: "" });
   const result = await tools.wait_for.execute(input, fakeCtx(sandbox));
   assert.deepEqual(result, { condition: 'text "Welcome"', satisfied: true, result: {} });
@@ -523,7 +514,6 @@ test("wait_for runs only the conditions that are actually set", async () => {
 test("wait_for reports load-state timeout as unsatisfied instead of throwing", async () => {
   resetConfig();
   const sandbox = fakeSandbox({
-    id: "wait-load-timeout",
     respond: (command) =>
       command.includes("--load")
         ? {
@@ -547,63 +537,38 @@ test("wait_for reports load-state timeout as unsatisfied instead of throwing", a
   });
 });
 
-test("events tools build start, read, ack, list, and stop commands", async () => {
-  resetConfig();
-  const sandbox = fakeSandbox({ id: "events-commands", respond: () => ({ stdout: OK({}) }) });
-  const ctx = fakeCtx(sandbox, "sess-abc");
-  await tools.events_start.execute(
-    { selector: "#dialog", state: "hidden", once: true, ttlSeconds: 30, key: "dialog" },
-    ctx,
-  );
-  await tools.events_start.execute(
-    {
-      method: "Page.frameNavigated",
-      matches: [{ path: "/params/url", value: "https://example.com/" }],
-      matchRegex: [{ path: "/params/url", regex: "^https://" }],
-    },
-    ctx,
-  );
-  await tools.events_read.execute(
-    { id: "ev_1", since: "ev_1:2", waitMs: 5000, limit: 10, ack: true },
-    ctx,
-  );
-  await tools.events_ack.execute({ id: "ev_1", cursor: "ev_1:3" }, ctx);
-  await tools.events_list.execute({ unread: true }, ctx);
-  await tools.events_stop.execute({ id: "ev_1" }, ctx);
-
-  const commands = sandbox.commands.filter((command) => command.includes(" events "));
-  assert.equal(commands.length, 6);
-  assert.ok(
-    commands[0].includes(
-      "events start --selector '#dialog' --state hidden --once --ttl 30 --owner sess-abc --key dialog --content-boundaries",
-    ),
-    commands[0],
-  );
-  assert.ok(
-    commands[1].includes(
-      "events start --method Page.frameNavigated --match /params/url=https://example.com/ --match-regex '/params/url=^https://' --owner sess-abc --content-boundaries",
-    ),
-    commands[1],
-  );
-  assert.ok(
-    commands[2].includes(
-      "events read ev_1 --since ev_1:2 --wait 5000 --limit 10 --ack --content-boundaries",
-    ),
-    commands[2],
-  );
-  assert.ok(
-    commands[3].includes("events ack ev_1 ev_1:3 --owner sess-abc --content-boundaries"),
-    commands[3],
-  );
-  assert.ok(
-    commands[4].includes("events list --unread --owner sess-abc --content-boundaries"),
-    commands[4],
-  );
-  assert.ok(
-    commands[5].includes("events stop ev_1 --owner sess-abc --content-boundaries"),
-    commands[5],
-  );
-});
+for (const contentBoundaries of [false, true]) {
+  test(`events commands enforce ownership and one boundary flag (config: ${contentBoundaries})`, async () => {
+    resetConfig({ contentBoundaries });
+    const waiting = { id: "ev_1", status: "watching", events: [], cursor: "ev_1:0", head: 0, consumed: 0, waiting: true };
+    const sandbox = fakeSandbox({ id: "events", respond: () => ({ stdout: OK(waiting) }) });
+    const ctx = fakeCtx(sandbox, "session-42");
+    const cases = [
+      ["events_start", { selector: "#dialog", state: "hidden", once: true, ttlSeconds: 30, key: "dialog" },
+        "start --selector '#dialog' --state hidden --once --ttl 30 --owner session-42 --key dialog"],
+      ["events_start", {
+        method: "Page.frameNavigated",
+        matches: [{ path: "/params/url", value: "https://example.com/" }],
+        matchRegex: [{ path: "/params/url", regex: "^https://" }],
+      }, "start --method Page.frameNavigated --match /params/url=https://example.com/ --match-regex '/params/url=^https://' --owner session-42"],
+      ["events_read", { id: "ev_1", since: "ev_1:2", waitMs: 5000, limit: 10, ack: true },
+        "read ev_1 --since ev_1:2 --wait 5000 --limit 10 --ack"],
+      ["events_ack", { id: "ev_1", cursor: "ev_1:3" }, "ack ev_1 ev_1:3 --owner session-42"],
+      ["events_list", { unread: true }, "list --unread --owner session-42"],
+      ["events_list", { unread: false }, "list --owner session-42"],
+      ["events_stop", { id: "ev_1" }, "stop ev_1 --owner session-42"],
+    ];
+    for (const [name, input, expected] of cases) {
+      const result = await tools[name].execute({ ...input, owner: "someone-else" }, ctx);
+      const command = sandbox.commands.at(-1);
+      assert.equal(command, `agent-browser --session eve-events events ${expected} --content-boundaries --json`);
+      assert.ok(!command.includes("someone-else"), command);
+      assert.equal(command.match(/--content-boundaries/g)?.length, 1);
+      if (name === "events_read") assert.deepEqual(result, waiting);
+    }
+    resetConfig();
+  });
+}
 
 test("events start requires exactly one source", async () => {
   resetConfig();
@@ -615,65 +580,11 @@ test("events start requires exactly one source", async () => {
   );
 });
 
-test("events owner comes from the eve session, not tool input", async () => {
-  resetConfig();
-  const sandbox = fakeSandbox({ id: "events-owner" });
-  const ctx = fakeCtx(sandbox, "session-42");
-  await tools.events_start.execute({ selector: "#x", owner: "someone-else" }, ctx);
-  await tools.events_ack.execute({ id: "ev_1", cursor: "ev_1:1", owner: "someone-else" }, ctx);
-  await tools.events_list.execute({ unread: false, owner: "someone-else" }, ctx);
-  await tools.events_stop.execute({ id: "ev_1", owner: "someone-else" }, ctx);
-  const commands = sandbox.commands.filter((command) => command.includes(" events "));
-  assert.equal(commands.length, 4);
-  for (const command of commands) {
-    assert.ok(command.includes("--owner session-42"), command);
-    assert.ok(!command.includes("someone-else"), command);
-  }
-});
-
-test("events_read returns a waiting result instead of failing when a wait times out", async () => {
-  resetConfig();
-  const sandbox = fakeSandbox({
-    id: "events-waiting",
-    respond: () => ({
-      stdout: OK({
-        id: "ev_1",
-        status: "watching",
-        events: [],
-        cursor: "ev_1:0",
-        head: 0,
-        consumed: 0,
-        waiting: true,
-      }),
-    }),
-  });
-  const result = await tools.events_read.execute({ id: "ev_1", waitMs: 2000 }, fakeCtx(sandbox));
-  assert.equal(result.waiting, true);
-  assert.deepEqual(result.events, []);
-});
-
 test("events_read clamps waits below the tool deadline", async () => {
   resetConfig();
   const sandbox = fakeSandbox({ id: "events-clamp" });
   await tools.events_read.execute({ id: "ev_1", waitMs: 120_000 }, fakeCtx(sandbox));
   assert.ok(sandbox.commands.at(-1).includes("--wait 50000"), sandbox.commands.at(-1));
-});
-
-test("events commands force content boundaries even when config is off", async () => {
-  resetConfig({ contentBoundaries: false });
-  const sandbox = fakeSandbox({ id: "events-boundaries-off" });
-  await tools.events_read.execute({ id: "ev_1" }, fakeCtx(sandbox));
-  const command = sandbox.commands.at(-1);
-  assert.ok(command.includes("--content-boundaries"), command);
-});
-
-test("events commands do not duplicate content boundaries when config is on", async () => {
-  resetConfig({ contentBoundaries: true });
-  const sandbox = fakeSandbox({ id: "events-boundaries-on" });
-  await tools.events_read.execute({ id: "ev_1" }, fakeCtx(sandbox));
-  const command = sandbox.commands.at(-1);
-  assert.equal(command.match(/--content-boundaries/g)?.length, 1);
-  resetConfig();
 });
 
 test("mount factory validates config", () => {

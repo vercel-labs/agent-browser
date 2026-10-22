@@ -34,27 +34,3 @@ export function buildWakeText(sub: EventSubscription): string {
   const tab = sub.tab ? ` Tab ${sub.tab.id}.` : "";
   return `${EVENT_MESSAGE_PREFIX} Subscription ${sub.id} has ${count} ${events}. Rule: ${oneLine(stripWakePrefix(formatRule(sub.rule)))}.${tab} Run agent-browser events read ${sub.id} to see them.`;
 }
-
-export interface WakeContext {
-  sub: EventSubscription;
-  session: string;
-  chatReady: boolean;
-  chatEnabled: boolean;
-  sent: boolean;
-  lastSentAt: number | undefined;
-  now: number;
-}
-
-/** Decides whether one subscription should wake the agent right now. */
-export function shouldWake(ctx: WakeContext): boolean {
-  if (!ctx.chatEnabled || !ctx.chatReady) return false;
-  if (!ctx.session || ctx.sub.owner !== `chat:${ctx.session}`) return false;
-  if (unreadCount(ctx.sub) <= 0 || ctx.sent) return false;
-  if (
-    ctx.lastSentAt != null &&
-    ctx.now - ctx.lastSentAt < WAKE_MIN_INTERVAL_MS
-  ) {
-    return false;
-  }
-  return true;
-}

@@ -1581,26 +1581,15 @@ Stream the browser viewport via WebSocket for live preview or "pair browsing" wh
 
 ### Event subscriptions
 
-Subscribe to something in the page before the action that causes it, then read the result later. The daemon holds the subscription and its buffer, so an agent can end its turn and a script can collect the outcome without polling. The bus adds no port or listener, and subscriptions go through the normal action policy and output limits.
+Subscribe before acting, then collect the result without polling:
 
 ```bash
-agent-browser events start --selector '#deploy-complete'   # prints an id and whether it is already satisfied
+agent-browser events start --selector '#deploy-complete' --once
 agent-browser click '#deploy'
-agent-browser events read ev_1a2b3c4d --wait 30000 --ack   # envelopes, cursor, head, consumed
-agent-browser events wait ev_1a2b3c4d --timeout 30000      # read that waits and acknowledges
-agent-browser events list --unread                         # subscriptions with unread events
-agent-browser events ack ev_1a2b3c4d ev_1a2b3c4d:4         # advance consumed without reading
-agent-browser events stop ev_1a2b3c4d
-agent-browser events watch ev_1a2b3c4d                     # NDJSON, one envelope per line
+agent-browser events wait ev_1a2b3c4d --timeout 30000
 ```
 
-The full command set is `events start`, `read`, `wait`, `ack`, `list`, `stop` and `watch`. `wait` is a read that waits and acknowledges, and `watch` loops over read; MCP and eve expose start, read, ack, list and stop with the same JSON.
-
-Start flags are `--selector`, `--state visible|hidden`, `--once`, `--ttl <secs>`, `--owner <label>` and `--key <key>`. TTL defaults to 10 minutes and is capped at 30 minutes, at most 20 subscriptions are active, and a subscription is bound to the current Chrome tab. Other engines return an unsupported error.
-
-Every item is an `agent-browser.event.v1` envelope: bus-generated `meta` (event id, name, timestamp, cursor, subscription id, session, tab, target) and page-derived `data`. Markers are `subscription.ready`, `subscription.rearmed`, `subscription.gap` with `data.missed`, and `subscription.ended` with `data.reason`. A cursor is opaque and client-held; `events read --since` returns items after it, and a foreign or future cursor returns `cursor_invalid`. A read advances `consumed` only with `--ack`. Subscriptions do not survive a daemon restart, so reading an old id returns an explicit daemon-restarted error.
-
-Event data is untrusted page content. Treat it like any other page output. See [Streaming](https://agent-browser.dev/streaming) for the envelope, cursor, marker and harness setup details, including Claude Code, Cursor and shell recipes.
+See [Streaming](https://agent-browser.dev/streaming#event-subscriptions) for all event verbs and flags, CLI/MCP/eve parity, envelopes, markers, cursors, safety rules and harness setup recipes.
 
 ### Streaming
 

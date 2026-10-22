@@ -1,504 +1,82 @@
 <!doctype html>
 <html lang="en">
-<head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>Upload deployment - Acme</title>
 <style>
-:root {
-  --bg: #fafafa;
-  --card: #ffffff;
-  --border: #eaeaea;
-  --text: #000000;
-  --muted: #666666;
-  --accent-bg: #000000;
-  --accent-fg: #ffffff;
-  --accent-hover: #333333;
-  --ring: hsl(0 0% 0% / 0.18);
-  --ring-solid: hsl(0 0% 40%);
-  --hover: #f5f5f5;
-  --danger: #e5484d;
-  --success: #0a7d3c;
-  --track: #eaeaea;
-  --font-sans: ui-sans-serif, system-ui, -apple-system, Inter, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #000000;
-    --card: #0a0a0a;
-    --border: #333333;
-    --text: #ededed;
-    --muted: #a1a1a1;
-    --accent-bg: #ededed;
-    --accent-fg: #000000;
-    --accent-hover: #ffffff;
-    --ring: hsl(0 0% 100% / 0.22);
-    --ring-solid: hsl(0 0% 70%);
-    --hover: #111111;
-    --danger: #ff6369;
-    --success: #3ecf6e;
-    --track: #262626;
-  }
-}
-* { box-sizing: border-box; }
-html, body { margin: 0; }
-body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--font-sans);
-  font-size: 14px;
-  line-height: 1.5;
-  min-height: 100vh;
-  -webkit-font-smoothing: antialiased;
-}
-.topbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  height: 56px;
-  padding: 0 24px;
-  background: var(--card);
-  border-bottom: 1px solid var(--border);
-}
-.topbar svg { display: block; }
-.crumbs {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  color: var(--muted);
-}
-.crumbs li + li::before {
-  content: "/";
-  margin-right: 8px;
-  color: var(--border);
-}
-.crumbs li[aria-current="page"] { color: var(--text); font-weight: 500; }
-main {
-  display: flex;
-  justify-content: center;
-  padding: 56px 16px 80px;
-}
-.card {
-  width: 100%;
-  max-width: 560px;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 32px;
-}
-h1 {
-  margin: 0;
-  font-size: 24px;
-  line-height: 32px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-}
-.lede { margin: 4px 0 28px; color: var(--muted); }
-.field { margin-bottom: 20px; }
-label, .label {
-  display: block;
-  margin-bottom: 8px;
-  font-size: 13px;
-  font-weight: 500;
-}
-.req { color: var(--muted); font-weight: 400; }
-input[type="text"], select, textarea {
-  width: 100%;
-  height: 40px;
-  padding: 0 12px;
-  font: inherit;
-  color: var(--text);
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  outline: none;
-  transition: border-color 0.15s, box-shadow 0.15s;
-}
-textarea { height: 96px; padding: 10px 12px; resize: vertical; }
-select {
-  appearance: none;
-  padding-right: 36px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23888' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 12px center;
-}
-input[type="text"]:hover, select:hover, textarea:hover { border-color: var(--ring-solid); }
-input[type="text"]:focus-visible, select:focus-visible, textarea:focus-visible {
-  border-color: var(--ring-solid);
-  box-shadow: 0 0 0 2px var(--ring);
-}
-input[aria-invalid="true"] { border-color: var(--danger); }
-.error {
-  margin: 6px 0 0;
-  font-size: 13px;
-  color: var(--danger);
-}
-.error:empty { display: none; }
-.dropzone {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  min-height: 112px;
-  padding: 16px;
-  text-align: center;
-  color: var(--muted);
-  border: 1px dashed var(--ring-solid);
-  border-radius: 6px;
-  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
-}
-.dropzone:hover, .dropzone.drag { background: var(--hover); }
-.dropzone:focus-within {
-  border-style: solid;
-  box-shadow: 0 0 0 2px var(--ring);
-}
-.dropzone input[type="file"] {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  opacity: 0;
-  cursor: pointer;
-}
-.dropzone svg { color: var(--muted); }
-.dropzone .hint strong { color: var(--text); font-weight: 500; }
-.file-name {
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: 13px;
-  color: var(--text);
-}
-.file-name:empty { display: none; }
-.actions { margin-top: 28px; }
-button {
-  font: inherit;
-  font-weight: 500;
-  height: 40px;
-  padding: 0 16px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
-}
-button:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--ring-solid); }
-.primary {
-  width: 100%;
-  color: var(--accent-fg);
-  background: var(--accent-bg);
-  border: 1px solid var(--accent-bg);
-}
-.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
-.primary:disabled { opacity: 0.5; cursor: not-allowed; }
-.secondary {
-  color: var(--text);
-  background: var(--card);
-  border: 1px solid var(--border);
-}
-.secondary:hover { background: var(--hover); border-color: var(--ring-solid); }
-fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
-fieldset:disabled { opacity: 0.5; }
-.progress-panel { margin-bottom: 28px; padding: 20px; border: 1px solid var(--border); border-radius: 6px; }
-.stages { margin: 0 0 16px; padding: 0; list-style: none; }
-.stages li {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 0;
-  color: var(--muted);
-}
-.stages .dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  border: 1px solid var(--ring-solid);
-  flex: none;
-}
-.stages li[data-state="active"] { color: var(--text); font-weight: 500; }
-.stages li[data-state="active"] .dot { background: var(--text); border-color: var(--text); }
-.stages li[data-state="done"] .dot { background: var(--success); border-color: var(--success); }
-.stages .pct { margin-left: auto; font-family: var(--font-mono); font-size: 13px; }
-.bar {
-  height: 6px;
-  background: var(--track);
-  border-radius: 3px;
-  overflow: hidden;
-}
-.bar > div { height: 100%; width: 0%; background: var(--text); border-radius: 3px; }
-.status-line {
-  margin: 12px 0 0;
-  font-size: 13px;
-  color: var(--muted);
-}
-.complete {
-  margin-bottom: 28px;
-  padding: 20px;
-  border: 1px solid var(--success);
-  border-radius: 6px;
-}
-.complete h2 {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 4px;
-  font-size: 16px;
-  font-weight: 600;
-}
-.complete h2 svg { color: var(--success); }
-.complete .ready { margin: 0; color: var(--muted); }
-.complete .url {
-  display: block;
-  margin: 12px 0 16px;
-  padding: 8px 12px;
-  font-family: var(--font-mono);
-  font-size: 13px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  overflow-wrap: anywhere;
-}
+body { font: 14px/1.5 system-ui; max-width: 560px; margin: 3rem auto; padding: 1rem; }
+label, input, select, textarea, progress { display: block; margin-bottom: 1rem; }
+fieldset { border: 0; padding: 0; }
+fieldset:disabled { opacity: .5; }
+[role="alert"] { color: #d33; }
 [hidden] { display: none !important; }
 </style>
-</head>
-<body>
-<header class="topbar">
-  <svg width="22" height="20" viewBox="0 0 76 65" fill="currentColor" role="img" aria-label="Logo"><path d="M37.5274 0L75.0548 65H0L37.5274 0Z"/></svg>
-  <nav aria-label="Breadcrumb">
-    <ol class="crumbs">
-      <li>Acme</li>
-      <li>Deployments</li>
-      <li aria-current="page">New</li>
-    </ol>
-  </nav>
-</header>
-<main>
-  <section class="card" aria-labelledby="title">
-    <h1 id="title">Upload deployment</h1>
-    <p class="lede">Package your build output and ship it to an environment.</p>
-
-    <div id="progress-panel" class="progress-panel" hidden>
-      <ol class="stages" aria-label="Deployment stages">
-        <li data-stage="validate" data-state="pending"><span class="dot"></span><span>Validating package</span></li>
-        <li data-stage="upload" data-state="pending"><span class="dot"></span><span>Uploading</span><span id="pct" class="pct"></span></li>
-        <li data-stage="build" data-state="pending"><span class="dot"></span><span>Building</span></li>
-      </ol>
-      <div class="bar"><div id="bar-fill" role="progressbar" aria-label="Upload progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div></div>
-      <p id="stage-text" class="status-line" role="status" aria-live="polite"></p>
-    </div>
-
-    <div id="upload-complete" class="complete" role="status" aria-live="polite" hidden>
-      <h2>
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M8 12.5l2.7 2.7L16 9.8"/></svg>
-        Upload complete
-      </h2>
-      <p class="ready">Deployment ready</p>
-      <span class="url" id="deploy-url">acme-dashboard-7k2f.vercel.app</span>
-      <button type="button" id="again" class="secondary">Deploy another</button>
-    </div>
-
-    <form id="deploy-form" novalidate>
-      <fieldset id="fields">
-        <div class="field">
-          <label for="project">Project name <span class="req">(required)</span></label>
-          <input id="project" name="project" type="text" required autocomplete="off" aria-describedby="project-error">
-          <p id="project-error" class="error" role="alert"></p>
-        </div>
-        <div class="field">
-          <label for="environment">Environment</label>
-          <select id="environment" name="environment">
-            <option value="production">Production</option>
-            <option value="preview">Preview</option>
-            <option value="development">Development</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="notes">Release notes</label>
-          <textarea id="notes" name="notes"></textarea>
-        </div>
-        <div class="field">
-          <label for="package">Deployment package</label>
-          <div class="dropzone" id="dropzone">
-            <input id="package" name="package" type="file" aria-describedby="package-hint package-error">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
-            <span id="package-hint" class="hint"><strong>Choose a file</strong> or drag it here</span>
-            <p id="file-name" class="file-name" aria-live="polite"></p>
-          </div>
-          <p id="package-error" class="error" role="alert"></p>
-        </div>
-        <div class="actions">
-          <button type="submit" id="deploy" class="primary">Deploy</button>
-        </div>
-      </fieldset>
-    </form>
-
-  </section>
-</main>
+<h1>Upload deployment</h1>
+<p>Package your build output and ship it to an environment.</p>
+<div id="progress-panel" hidden>
+  <ol aria-label="Deployment stages"><li data-stage>Validating package</li><li data-stage>Uploading <span id="pct"></span></li><li data-stage>Building</li></ol>
+  <progress id="bar-fill" aria-label="Upload progress" max="100" value="0"></progress>
+  <p id="stage-text" role="status" aria-live="polite"></p>
+</div>
+<div id="upload-complete" role="status" aria-live="polite" hidden>
+  <h2>Upload complete</h2><p>Deployment ready</p>
+  <p id="deploy-url">acme-dashboard-7k2f.vercel.app</p>
+  <button type="button" id="again">Deploy another</button>
+</div>
+<form id="deploy-form" novalidate>
+  <fieldset id="fields">
+    <label for="project">Project name (required)</label><input id="project" name="project" required autocomplete="off" aria-describedby="project-error">
+    <p id="project-error" role="alert"></p>
+    <label for="environment">Environment</label><select id="environment" name="environment"><option value="production">Production</option><option value="preview">Preview</option><option value="development">Development</option></select>
+    <label for="notes">Release notes</label><textarea id="notes" name="notes"></textarea>
+    <label for="package">Deployment package</label><input id="package" name="package" type="file" aria-describedby="package-error">
+    <p id="file-name" aria-live="polite"></p><p id="package-error" role="alert"></p>
+    <button id="deploy">Deploy</button>
+  </fieldset>
+</form>
 <script>
-(function () {
-  var params = new URLSearchParams(location.search);
-  var speed = parseFloat(params.get("speed"));
-  if (!(speed > 0)) speed = 1;
-
-  var form = document.getElementById("deploy-form");
-  var fields = document.getElementById("fields");
-  var project = document.getElementById("project");
-  var fileInput = document.getElementById("package");
-  var fileName = document.getElementById("file-name");
-  var dropzone = document.getElementById("dropzone");
-  var projectError = document.getElementById("project-error");
-  var packageError = document.getElementById("package-error");
-  var panel = document.getElementById("progress-panel");
-  var stages = panel.querySelectorAll("[data-stage]");
-  var pct = document.getElementById("pct");
-  var barFill = document.getElementById("bar-fill");
-  var stageText = document.getElementById("stage-text");
-  var complete = document.getElementById("upload-complete");
-  var deployUrl = document.getElementById("deploy-url");
-  var again = document.getElementById("again");
-  var timer = null;
-
-  var plan = [
-    { key: "validate", label: "Validating package", ms: 2000 },
-    { key: "upload", label: "Uploading", ms: 8000 },
-    { key: "build", label: "Building", ms: 4000 }
-  ];
-
-  /** Formats a byte count as a short human readable size. */
-  function formatSize(bytes) {
-    if (bytes < 1024) return bytes + " B";
-    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KB";
-    return (bytes / 1048576).toFixed(1) + " MB";
-  }
-
-  /** Turns a project name into a lowercase hostname-safe slug. */
-  function slugify(name) {
-    var slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-    return slug || "project";
-  }
-
-  function showFile() {
-    var f = fileInput.files && fileInput.files[0];
-    fileName.textContent = f ? f.name + " (" + formatSize(f.size) + ")" : "";
-    if (f) packageError.textContent = "";
-  }
-
-  function setStage(index) {
-    stages.forEach(function (li, i) {
-      li.setAttribute("data-state", i < index ? "done" : i === index ? "active" : "pending");
-    });
-    stageText.textContent = index < plan.length ? plan[index].label + "..." : "";
-  }
-
-  function setProgress(value) {
-    var v = Math.round(value);
-    barFill.style.width = v + "%";
-    barFill.setAttribute("aria-valuenow", String(v));
-    pct.textContent = v > 0 ? v + "%" : "";
-  }
-
-  function validate() {
-    var ok = true;
-    projectError.textContent = "";
-    packageError.textContent = "";
-    project.removeAttribute("aria-invalid");
-    if (!project.value.trim()) {
-      projectError.textContent = "Project name is required.";
-      project.setAttribute("aria-invalid", "true");
-      ok = false;
-    }
-    if (!fileInput.files || !fileInput.files.length) {
-      packageError.textContent = "Choose a deployment package to upload.";
-      ok = false;
-    }
-    if (!ok) {
-      (project.value.trim() ? fileInput : project).focus();
-    }
-    return ok;
-  }
-
-  function run() {
-    var start = performance.now();
-    var total = plan.reduce(function (sum, s) { return sum + s.ms; }, 0) / speed;
-    var bounds = [];
-    var acc = 0;
-    plan.forEach(function (s) { acc += s.ms / speed; bounds.push(acc); });
-    setStage(0);
-    setProgress(0);
-    timer = setInterval(function () {
-      var t = performance.now() - start;
-      if (t >= total) {
-        clearInterval(timer);
-        timer = null;
-        setProgress(100);
-        setStage(plan.length);
-        stages.forEach(function (li) { li.setAttribute("data-state", "done"); });
-        panel.hidden = true;
-        complete.hidden = false;
-        complete.scrollIntoView({ block: "center" });
-        return;
-      }
-      var idx = bounds.findIndex(function (b) { return t < b; });
-      setStage(idx);
-      if (idx === 0) {
-        setProgress(0);
-      } else if (idx === 1) {
-        var from = bounds[0];
-        setProgress(((t - from) / (bounds[1] - from)) * 100);
-      } else {
-        setProgress(100);
-      }
-    }, 100);
-  }
-
-  function reset() {
-    if (timer) clearInterval(timer);
-    timer = null;
-    form.reset();
-    fileName.textContent = "";
-    projectError.textContent = "";
-    packageError.textContent = "";
-    project.removeAttribute("aria-invalid");
-    complete.hidden = true;
-    panel.hidden = true;
-    setProgress(0);
-    stages.forEach(function (li) { li.setAttribute("data-state", "pending"); });
-    stageText.textContent = "";
-    fields.disabled = false;
-    project.focus();
-  }
-
-  fileInput.addEventListener("change", showFile);
-  ["dragenter", "dragover"].forEach(function (n) {
-    dropzone.addEventListener(n, function () { dropzone.classList.add("drag"); });
-  });
-  ["dragleave", "drop"].forEach(function (n) {
-    dropzone.addEventListener(n, function () { dropzone.classList.remove("drag"); });
-  });
-  project.addEventListener("input", function () {
-    if (project.value.trim()) {
-      projectError.textContent = "";
-      project.removeAttribute("aria-invalid");
-    }
-  });
-
-  form.addEventListener("submit", function (event) {
-    event.preventDefault();
-    if (timer || !validate()) return;
-    deployUrl.textContent = slugify(project.value) + "-7k2f.vercel.app";
-    fields.disabled = true;
-    panel.hidden = false;
-    panel.scrollIntoView({ block: "center" });
-    run();
-  });
-
-  again.addEventListener("click", reset);
-})();
+const form = document.getElementById("deploy-form"), fields = document.getElementById("fields");
+const project = document.getElementById("project"), fileInput = document.getElementById("package");
+const fileName = document.getElementById("file-name"), projectError = document.getElementById("project-error"), packageError = document.getElementById("package-error");
+const panel = document.getElementById("progress-panel"), complete = document.getElementById("upload-complete"), progress = document.getElementById("bar-fill");
+const stageText = document.getElementById("stage-text"), pct = document.getElementById("pct"), stages = panel.querySelectorAll("[data-stage]");
+const labels = ["Validating package", "Uploading", "Building"];
+let speed = parseFloat(new URLSearchParams(location.search).get("speed")), timer = null;
+if (!(speed > 0)) speed = 1;
+fileInput.onchange = () => {
+  const file = fileInput.files[0];
+  const size = file && (file.size < 1024 ? file.size + " B" : file.size < 1048576 ? (file.size / 1024).toFixed(1) + " KB" : (file.size / 1048576).toFixed(1) + " MB");
+  fileName.textContent = file ? file.name + " (" + size + ")" : "";
+  if (file) packageError.textContent = "";
+};
+project.oninput = () => { if (project.value.trim()) { projectError.textContent = ""; project.removeAttribute("aria-invalid"); } };
+form.onsubmit = event => {
+  event.preventDefault();
+  if (timer) return;
+  projectError.textContent = project.value.trim() ? "" : "Project name is required.";
+  packageError.textContent = fileInput.files.length ? "" : "Choose a deployment package to upload.";
+  project.removeAttribute("aria-invalid");
+  if (projectError.textContent) project.setAttribute("aria-invalid", "true");
+  if (projectError.textContent || packageError.textContent) { (projectError.textContent ? project : fileInput).focus(); return; }
+  document.getElementById("deploy-url").textContent = (project.value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project") + "-7k2f.vercel.app";
+  fields.disabled = true; panel.hidden = false; panel.scrollIntoView({ block: "center" });
+  const start = performance.now();
+  const update = () => {
+    const elapsed = (performance.now() - start) * speed;
+    const stage = elapsed < 2000 ? 0 : elapsed < 10000 ? 1 : elapsed < 14000 ? 2 : 3;
+    stages.forEach((item, index) => item.dataset.state = index < stage ? "done" : index === stage ? "active" : "pending");
+    progress.value = stage === 0 ? 0 : stage === 1 ? Math.round((elapsed - 2000) / 80) : 100;
+    pct.textContent = progress.value > 0 ? progress.value + "%" : "";
+    stageText.textContent = stage < 3 ? labels[stage] + "..." : "";
+    if (stage === 3) { clearInterval(timer); timer = null; panel.hidden = true; complete.hidden = false; complete.scrollIntoView({ block: "center" }); }
+  };
+  timer = setInterval(update, 100); update();
+};
+document.getElementById("again").onclick = () => {
+  clearInterval(timer); timer = null; form.reset(); fileName.textContent = projectError.textContent = packageError.textContent = stageText.textContent = pct.textContent = "";
+  project.removeAttribute("aria-invalid"); complete.hidden = panel.hidden = true; progress.value = 0;
+  stages.forEach(item => item.dataset.state = "pending"); fields.disabled = false; project.focus();
+};
 </script>
-</body>
 </html>

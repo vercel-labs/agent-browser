@@ -308,22 +308,9 @@ Affected output types: `snapshot`, `get text`, `get html`, `eval`, `console`. Ev
 
 ## Event Subscriptions
 
-Every event bus operation is checked under its own action name: `events_start`, `events_read`, `events_ack`, `events_list` and `events_stop`. An allow list that permits ordinary browser commands still needs these actions before it can create, read, acknowledge, list or stop a subscription.
+The single policy gate checks `events_start`, `events_read`, `events_ack`, `events_list` and `events_stop`, plus the existing action exposing the same data (for example, denying `console` also blocks console subscriptions). Confirmation is allowed only for `events_start`; confirming other event operations is refused rather than prompting during a read.
 
-Starting or reading a subscription also needs the policy of the existing action that exposes the same data. A deny on `console` blocks a console event even when `events_start` is allowed, so event delivery cannot bypass a policy that protects the same information.
-
-```json
-{
-  "default": "allow",
-  "deny": ["console", "download", "events_start", "events_read", "events_ack", "events_list", "events_stop"]
-}
-```
-
-Confirmation applies at `events_start` only. A confirm entry for `events_read`, `events_ack`, `events_list` or `events_stop` is refused with a clear error rather than prompting, because a blocking read must not wait on a confirmation prompt.
-
-A policy reload that fails closes event operations instead of falling back to the previous policy. The daemon also re-checks policy before storing each event, so a reload that newly denies a subscription ends it with reason `policy_denied`.
-
-The domain allowlist is consulted when an event is emitted, so a tab on a blocked origin produces no event content. Payloads are capped when stored. Content boundaries and `--max-output` apply when event data is printed by the CLI or MCP.
+Policy reloads fail closed. Policy and domain allowlists are checked before each emit; a new policy denial ends the subscription with `policy_denied`, and blocked origins emit no content. Stored payloads are capped; printed CLI/MCP data obeys content boundaries and `--max-output`. Envelope `meta` is bus-generated, but `data` and page labels are untrusted. Wake messages must never copy page strings. See [Streaming](/streaming#event-subscriptions) for commands and envelopes.
 
 ## Environment Variables
 

@@ -52,9 +52,8 @@ export const hasConsoleErrorsAtom = atom((get) =>
   ),
 );
 
-export const watchingCountAtom = atom(
-  (get) =>
-    get(eventSubscriptionsAtom).filter((s) => isActiveStatus(s.status)).length,
+export const watchingCountAtom = atom((get) =>
+  get(eventSubscriptionsAtom).filter((s) => isActiveStatus(s.status)).length,
 );
 
 // ---------------------------------------------------------------------------
@@ -275,17 +274,10 @@ export function useEventHydration(session: string) {
       return;
     }
     busyRef.current = true;
-    const request = requestRef.current + 1;
-    requestRef.current = request;
+    const request = ++requestRef.current;
     try {
       const result = await execCommand(
-        sessionArgs(
-          session,
-          "events",
-          "list",
-          "--owner",
-          `chat:${session}`,
-        ),
+        sessionArgs(session, "events", "list", "--owner", `chat:${session}`),
       );
       if (!result.success || requestRef.current !== request) return;
       const subscriptions = parseEventsList(result.stdout);
@@ -311,9 +303,7 @@ export function useEventHydration(session: string) {
 
   useEffect(() => {
     if (!connected) return;
-    const timer = setInterval(() => {
-      void hydrate();
-    }, EVENTS_SYNC_INTERVAL_MS);
+    const timer = setInterval(hydrate, EVENTS_SYNC_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [connected, hydrate]);
 }

@@ -173,10 +173,7 @@ function describeActivity(
     case "events_read":
       return { icon: BellRing, label: pick("Checking for page changes", "Checked for page changes") };
     case "events_ack":
-      return {
-        icon: CircleCheck,
-        label: pick("Acknowledging page changes", "Acknowledged page changes"),
-      };
+      return { icon: CircleCheck, label: pick("Acknowledging page changes", "Acknowledged page changes") };
     case "events_list":
       return { icon: ListChecks, label: pick("Listing page watches", "Listed page watches") };
     case "events_stop":

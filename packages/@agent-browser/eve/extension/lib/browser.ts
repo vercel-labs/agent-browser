@@ -119,7 +119,6 @@ async function ensureInstalled(sandbox: EveSandboxSession, abortSignal?: AbortSi
   if (pending === undefined) {
     pending = installIfMissing(sandbox, abortSignal);
     pendingInstalls.set(sandbox.id, pending);
-    // Let the next tool call retry a failed install instead of replaying the rejection.
     pending.catch(() => pendingInstalls.delete(sandbox.id));
   }
   await pending;

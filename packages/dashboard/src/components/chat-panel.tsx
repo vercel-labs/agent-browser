@@ -199,13 +199,7 @@ function ToolCallBlock({ part, onImageLoad }: { part: ToolInvocationPart; onImag
   );
 }
 
-function EventCard({
-  subscriptionId,
-  count,
-}: {
-  subscriptionId: string;
-  count: number;
-}) {
+function EventCard({ wake: { subscriptionId, count } }: WakeMessageMetadata) {
   const events = count === 1 ? "unread event" : "unread events";
   return (
     <div className="rounded-md border border-success/40 bg-success/5 px-2.5 py-2 text-[11px]">
@@ -616,6 +610,7 @@ export function ChatPanel() {
               );
             }
             if (!hasVisibleContent(message.parts)) return null;
+            const wake = (message.metadata as WakeMessageMetadata | undefined)?.wake;
             return (
               <div key={message.id}>
                 {message.role === "user" ? (
@@ -634,26 +629,14 @@ export function ChatPanel() {
                           ))}
                       </div>
                     )}
-                    {(() => {
-                      const userText = message.parts
-                        .filter((p): p is Extract<typeof p, { type: "text" }> => p.type === "text")
-                        .map((p) => p.text)
-                        .join("");
-                      const wake = (message as { metadata?: WakeMessageMetadata }).metadata?.wake;
-                      if (wake) {
-                        return (
-                          <EventCard
-                            subscriptionId={wake.subscriptionId}
-                            count={wake.count}
-                          />
-                        );
-                      }
-                      return (
-                        <div className="text-xs text-muted-foreground whitespace-pre-wrap leading-relaxed">
-                          {stripWakePrefix(userText)}
-                        </div>
-                      );
-                    })()}
+                    {wake ? <EventCard wake={wake} /> : (
+                      <div className="text-xs text-muted-foreground whitespace-pre-wrap leading-relaxed">
+                        {stripWakePrefix(message.parts
+                          .filter((p): p is Extract<typeof p, { type: "text" }> => p.type === "text")
+                          .map((p) => p.text)
+                          .join(""))}
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="space-y-1.5">

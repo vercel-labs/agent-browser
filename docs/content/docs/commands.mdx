@@ -340,17 +340,7 @@ Streaming is separate from file-based recordings. Use [Video Recording](/recordi
 
 ## Events
 
-```bash
-agent-browser events start --selector <css> [--state visible|hidden] [--once] [--ttl <secs>] [--owner <label>] [--key <key>]
-agent-browser events read <id> [--since <cursor>] [--wait <ms>] [--limit <n>] [--ack]
-agent-browser events wait <id> [--since <cursor>] [--timeout <ms>]   # read --wait, then ack
-agent-browser events ack <id> <cursor> [--owner <label>]
-agent-browser events list [--owner <label>] [--unread]
-agent-browser events stop <id> [--owner <label>]
-agent-browser events watch <id> [--since <cursor>]                    # NDJSON loop over read
-```
-
-`events start` arms a subscription and prints its id. `events read` returns stored envelopes after a cursor, `events ack` advances the `consumed` watermark, and `events list` reports subscriptions, unread state and end reasons. `events wait` and `events watch` are CLI conveniences over read; MCP and eve expose start, read, ack, list and stop with the same JSON. Selector sources support `--state visible|hidden`, `--once`, and a TTL that defaults to 10 minutes and is capped at 30 minutes. Only Chrome is supported. See [Streaming](/streaming) for the envelope, markers, cursors and harness recipes.
+See [Streaming](/streaming#event-subscriptions) for `events start`, `read`, `wait`, `ack`, `list`, `stop` and `watch`, their flags, and CLI/MCP/eve parity.
 
 ## Debug
 

@@ -15,21 +15,15 @@ export function unreadCount(sub: EventSubscription): number {
 /** Renders a subscription rule as one line, whichever form the daemon sends. */
 export function formatRule(rule: EventRule): string {
   if (typeof rule === "string") return rule;
-  const parts = Object.entries(rule).map(([key, value]) => {
-    const rendered = typeof value === "string" ? value : JSON.stringify(value);
-    return `${key}=${rendered}`;
-  });
-  return parts.join(" ") || "unknown rule";
-}
-
-interface EventsListPayload {
-  data?: { subscriptions?: unknown };
+  return Object.entries(rule)
+    .map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`)
+    .join(" ") || "unknown rule";
 }
 
 /** Parses `events list --json` stdout, returning null when it is not a list. */
 export function parseEventsList(stdout: string): EventSubscription[] | null {
   try {
-    const parsed = JSON.parse(stdout) as EventsListPayload;
+    const parsed = JSON.parse(stdout) as { data?: { subscriptions?: unknown } };
     const subscriptions = parsed.data?.subscriptions;
     return Array.isArray(subscriptions)
       ? (subscriptions as EventSubscription[])

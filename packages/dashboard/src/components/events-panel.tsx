@@ -3,11 +3,7 @@
 import { useAtomValue } from "jotai/react";
 import type { EventSubscription } from "@/types";
 import { eventSubscriptionsAtom } from "@/store/stream";
-import {
-  formatRule,
-  isActiveStatus,
-  unreadCount,
-} from "@/lib/event-subscriptions";
+import { formatRule, isActiveStatus, unreadCount } from "@/lib/event-subscriptions";
 import { stripWakePrefix } from "@/lib/event-wake";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -22,13 +18,7 @@ function shortId(id: string): string {
   return id.replace(/^ev_/, "").slice(0, 8);
 }
 
-function StatusIndicator({
-  active,
-  statusText,
-}: {
-  active: boolean;
-  statusText: string;
-}) {
+function StatusIndicator({ active, status }: { active: boolean; status: string }) {
   if (active) {
     return (
       <span className="relative flex size-2 shrink-0">
@@ -37,10 +27,9 @@ function StatusIndicator({
       </span>
     );
   }
-  if (statusText === "matched") {
-    return <Check className="size-3 shrink-0 text-success" strokeWidth={3} />;
-  }
-  return <Minus className="size-3 shrink-0 text-muted-foreground" />;
+  return status === "matched"
+    ? <Check className="size-3 shrink-0 text-success" strokeWidth={3} />
+    : <Minus className="size-3 shrink-0 text-muted-foreground" />;
 }
 
 function SubscriptionRow({ sub }: { sub: EventSubscription }) {
@@ -59,13 +48,11 @@ function SubscriptionRow({ sub }: { sub: EventSubscription }) {
       )}
     >
       <div className="flex items-center gap-2">
-        <StatusIndicator active={active} statusText={sub.status} />
+        <StatusIndicator active={active} status={sub.status} />
         <span className="min-w-0 truncate rounded bg-muted px-1.5 py-0.5 font-mono text-foreground">
           {stripWakePrefix(formatRule(sub.rule))}
         </span>
-        <span className="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground">
-          {shortId(sub.id)}
-        </span>
+        <span className="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground">{shortId(sub.id)}</span>
       </div>
       <div className="mt-1.5 space-y-0.5 pl-4">
         <p className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
@@ -74,9 +61,7 @@ function SubscriptionRow({ sub }: { sub: EventSubscription }) {
           </span>
           {sub.reason && <span>{formatLabel(sub.reason)}</span>}
           {sub.tab && (
-            <span className="font-mono text-muted-foreground">
-              tab {sub.tab.id}
-            </span>
+            <span className="font-mono text-muted-foreground">tab {sub.tab.id}</span>
           )}
         </p>
         <p className="text-muted-foreground">
@@ -96,9 +81,7 @@ export function EventsPanel() {
     <div className="flex h-full flex-col">
       <div className="flex shrink-0 items-center gap-2 px-3 py-2">
         <span className="text-xs text-muted-foreground">Events</span>
-        <Badge variant="secondary" className="ml-auto h-4 px-1.5 text-[10px]">
-          {subscriptions.length}
-        </Badge>
+        <Badge variant="secondary" className="ml-auto h-4 px-1.5 text-[10px]">{subscriptions.length}</Badge>
       </div>
       <Separator />
       <div className="min-h-0 flex-1 overflow-y-auto">
@@ -108,9 +91,7 @@ export function EventsPanel() {
             the page.
           </div>
         ) : (
-          subscriptions.map((sub) => (
-            <SubscriptionRow key={sub.id} sub={sub} />
-          ))
+          subscriptions.map((sub) => <SubscriptionRow key={sub.id} sub={sub} />)
         )}
       </div>
     </div>
