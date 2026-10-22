@@ -17,6 +17,8 @@ pub mod buffer;
 #[allow(dead_code)]
 pub mod envelope;
 #[allow(dead_code)]
+pub mod filter;
+#[allow(dead_code)]
 mod source;
 #[allow(dead_code)]
 mod sources;
