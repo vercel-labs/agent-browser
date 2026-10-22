@@ -22,7 +22,6 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
-#[cfg(unix)]
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{exit, Command};
@@ -80,6 +79,84 @@ fn print_json_error_with_type(message: impl AsRef<str>, error_type: &str) {
         "error": message.as_ref(),
         "type": error_type,
     }));
+}
+
+fn event_ndjson_lines(events: &[serde_json::Value]) -> Result<Vec<String>, String> {
+    events
+        .iter()
+        .map(|event| serde_json::to_string(event).map_err(|error| error.to_string()))
+        .collect()
+}
+
+fn run_event_watch(command: &serde_json::Value, session: &str) -> Result<(), String> {
+    let subscription_id = command
+        .get("subscriptionId")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "Missing event subscription id".to_string())?
+        .to_owned();
+    let mut cursor = command
+        .get("since")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
+    let session = session.to_owned();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    runtime.block_on(async move {
+        let ctrl_c = tokio::signal::ctrl_c();
+        tokio::pin!(ctrl_c);
+        loop {
+            let mut request = json!({
+                "id": gen_id(),
+                "action": "events_read",
+                "subscriptionId": subscription_id,
+                "waitMs": 1_000,
+                "limit": 100,
+            });
+            if let Some(since) = &cursor {
+                request["since"] = json!(since);
+            }
+            let request_session = session.clone();
+            let pending =
+                tokio::task::spawn_blocking(move || send_command(request, &request_session));
+            let response = tokio::select! {
+                signal = &mut ctrl_c => {
+                    return signal.map_err(|error| format!("Failed to listen for Ctrl-C: {error}"));
+                }
+                result = pending => result
+                    .map_err(|error| format!("Event read task failed: {error}"))??,
+            };
+            if !response.success {
+                return Err(response
+                    .error
+                    .unwrap_or_else(|| "Event read failed".to_string()));
+            }
+            let data = response
+                .data
+                .as_ref()
+                .ok_or_else(|| "Event read response had no data".to_string())?;
+            let events = data
+                .get("events")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| "Event read response had no event list".to_string())?;
+            for line in event_ndjson_lines(events)? {
+                let mut stdout = std::io::stdout().lock();
+                writeln!(stdout, "{line}").map_err(|error| error.to_string())?;
+                stdout.flush().map_err(|error| error.to_string())?;
+            }
+            cursor = Some(
+                data.get("cursor")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| "Event read response had no cursor".to_string())?
+                    .to_owned(),
+            );
+            if data.get("status").and_then(|value| value.as_str()) == Some("ended") {
+                return Ok(());
+            }
+        }
+    })
 }
 
 fn should_send_hide_scrollbars_launch_option(
@@ -2166,6 +2243,14 @@ fn main() {
         return;
     }
 
+    if cmd.get("action").and_then(|value| value.as_str()) == Some("events_watch") {
+        if let Err(error) = run_event_watch(&cmd, &flags.session) {
+            eprintln!("{} {}", color::error_indicator(), error);
+            exit(1);
+        }
+        return;
+    }
+
     let output_opts = OutputOptions::from_flags(&flags);
 
     match send_command_with_respawn(cmd.clone(), &flags.session, &daemon_opts) {
@@ -2396,6 +2481,25 @@ fn run_batch(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn watch_serializes_each_event_as_one_ndjson_line() {
+        let events = vec![json!({
+            "version": "agent-browser.event.v1",
+            "meta": { "cursor": "sub-1:1" },
+            "data": { "text": "first\nsecond" }
+        })];
+
+        let lines = super::event_ndjson_lines(&events).unwrap();
+
+        assert_eq!(
+            lines,
+            vec![
+                r#"{"data":{"text":"first\nsecond"},"meta":{"cursor":"sub-1:1"},"version":"agent-browser.event.v1"}"#
+            ]
+        );
+        assert_eq!(lines[0].lines().count(), 1);
+    }
+
     #[test]
     fn input_mode_session_setting_preserves_command_override() {
         let args: Vec<String> = ["--input-mode", "smooth", "click", "#button", "--human"]

@@ -272,6 +272,9 @@ fn minimal_command(action: &str, id: &str) -> Value {
         "events_read" | "events_stop" => {
             obj.insert("subscriptionId".to_string(), json!("missing"));
         }
+        "events_start" => {
+            obj.insert("selector".to_string(), json!("#notice"));
+        }
         "events_ack" => {
             obj.insert("subscriptionId".to_string(), json!("missing"));
             obj.insert("cursor".to_string(), json!("missing:0"));

@@ -24,6 +24,11 @@ const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
 const TOOL_LIST_PAGE_SIZE: usize = 64;
 const TOOL_OPEN: &str = "agent_browser_open";
 const TOOL_READ: &str = "agent_browser_read";
+const TOOL_EVENTS_START: &str = "agent_browser_events_start";
+const TOOL_EVENTS_READ: &str = "agent_browser_events_read";
+const TOOL_EVENTS_ACK: &str = "agent_browser_events_ack";
+const TOOL_EVENTS_LIST: &str = "agent_browser_events_list";
+const TOOL_EVENTS_STOP: &str = "agent_browser_events_stop";
 const TOOL_BACK: &str = "agent_browser_back";
 const TOOL_FORWARD: &str = "agent_browser_forward";
 const TOOL_RELOAD: &str = "agent_browser_reload";
@@ -262,7 +267,7 @@ impl ToolProfile {
 
     fn description(self) -> &'static str {
         match self {
-            Self::Core => "Everyday browser automation with navigation, snapshots, common interaction, waits, screenshots, basic reads, tab basics, JavaScript eval, close, and profile discovery.",
+            Self::Core => "Everyday browser automation with navigation, snapshots, common interaction, waits, screenshots, basic reads, event subscriptions, tab basics, JavaScript eval, close, and profile discovery.",
             Self::Network => "Network interception, request inspection, HAR capture, headers, credentials, and offline mode.",
             Self::State => "Cookies, storage, auth profiles, saved browser state, sessions, Chrome profiles, and bundled skills.",
             Self::Debug => "Console/errors, highlighting, DevTools, tracing, profiling, accessibility audits, PDF, downloads/uploads, recording, clipboard, plugin registry and plugin command.run, doctor, dashboard, install, upgrade, and chat.",
@@ -340,6 +345,11 @@ const CORE_PROFILE_TOOLS: &[&str] = &[
     TOOL_TOOLS_PROFILES,
     TOOL_OPEN,
     TOOL_READ,
+    TOOL_EVENTS_START,
+    TOOL_EVENTS_READ,
+    TOOL_EVENTS_ACK,
+    TOOL_EVENTS_LIST,
+    TOOL_EVENTS_STOP,
     TOOL_SNAPSHOT,
     TOOL_BACK,
     TOOL_FORWARD,
@@ -701,8 +711,7 @@ fn initialize_result(params: Option<&Value>, config: &McpConfig) -> Value {
     })
 }
 
-/// Prototype socket subscriptions and the source-only `events` commands have no tools here.
-/// These tools return one CLI result and the prototype is not part of the released surface.
+/// Filters registered tools by the active startup profiles.
 fn tools_for_config(config: &McpConfig) -> Vec<Value> {
     tools()
         .into_iter()
@@ -834,6 +843,67 @@ fn tools() -> Vec<Value> {
                 "readTimeoutMs": { "type": "integer", "description": "Request timeout in milliseconds." }
             }),
             &[],
+        ),
+        tool(
+            TOOL_EVENTS_START,
+            "Start event subscription",
+            "Subscribe to selector transitions or a CDP method. Specify exactly one of selector and method.",
+            json!({
+                "selector": { "type": "string", "description": "CSS selector to watch for visible or hidden transitions." },
+                "state": { "type": "string", "enum": ["visible", "hidden"], "default": "visible" },
+                "method": { "type": "string", "description": "Supported CDP method to watch." },
+                "match": string_array_schema("Repeated JSON pointer equals filters: /pointer=value."),
+                "matchRegex": string_array_schema("Repeated JSON pointer regular-expression filters: /pointer=regex."),
+                "once": { "type": "boolean", "default": false },
+                "ttl": { "type": "integer", "minimum": 1, "maximum": 1800, "description": "Subscription lifetime in seconds." },
+                "owner": { "type": "string" },
+                "key": { "type": "string", "description": "Idempotency key." }
+            }),
+            &[],
+        ),
+        tool(
+            TOOL_EVENTS_READ,
+            "Read event subscription",
+            "Read events from a subscription. The CLI-only wait and watch conveniences are available as events wait and events watch.",
+            json!({
+                "id": { "type": "string", "description": "Subscription id." },
+                "since": { "type": "string", "description": "Cursor to read after." },
+                "waitMs": { "type": "integer", "minimum": 0, "description": "Wait up to this many milliseconds for an event." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
+                "ack": { "type": "boolean", "default": false, "description": "Acknowledge through the last returned event." }
+            }),
+            &["id"],
+        ),
+        tool(
+            TOOL_EVENTS_ACK,
+            "Acknowledge event subscription",
+            "Acknowledge a subscription through a returned cursor.",
+            json!({
+                "id": { "type": "string", "description": "Subscription id." },
+                "cursor": { "type": "string" },
+                "owner": { "type": "string" }
+            }),
+            &["id", "cursor"],
+        ),
+        tool(
+            TOOL_EVENTS_LIST,
+            "List event subscriptions",
+            "List event subscriptions, optionally filtered by owner or unread events.",
+            json!({
+                "owner": { "type": "string" },
+                "unread": { "type": "boolean", "default": false }
+            }),
+            &[],
+        ),
+        tool(
+            TOOL_EVENTS_STOP,
+            "Stop event subscription",
+            "Stop an event subscription.",
+            json!({
+                "id": { "type": "string", "description": "Subscription id." },
+                "owner": { "type": "string" }
+            }),
+            &["id"],
         ),
         tool(
             TOOL_SNAPSHOT,
@@ -2219,6 +2289,11 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_TOOLS_PROFILES => call_tools_profiles(config),
         TOOL_OPEN => call_open(arguments),
         TOOL_READ => call_read(arguments),
+        TOOL_EVENTS_START => call_events_start(arguments),
+        TOOL_EVENTS_READ => call_events_read(arguments),
+        TOOL_EVENTS_ACK => call_events_ack(arguments),
+        TOOL_EVENTS_LIST => call_events_list(arguments),
+        TOOL_EVENTS_STOP => call_events_stop(arguments),
         TOOL_SNAPSHOT => call_snapshot(arguments),
         TOOL_CLICK => call_click(arguments),
         TOOL_BACK => call_literal(arguments, &["back"]),
@@ -3518,6 +3593,123 @@ fn call_stream_enable(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool(arguments, args, None)
 }
 
+fn call_events_start(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, events_start_args(arguments)?, None)
+}
+
+fn events_start_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec!["events".to_string(), "start".to_string()];
+    for (field, flag) in [
+        ("selector", "--selector"),
+        ("state", "--state"),
+        ("method", "--method"),
+        ("owner", "--owner"),
+        ("key", "--key"),
+    ] {
+        if let Some(value) = optional_string(arguments, field)? {
+            args.push(flag.to_string());
+            args.push(value);
+        }
+    }
+    for (field, flag) in [("match", "--match"), ("matchRegex", "--match-regex")] {
+        if let Some(values) = optional_string_array(arguments, field)? {
+            for value in values {
+                args.push(flag.to_string());
+                args.push(value);
+            }
+        }
+    }
+    if optional_bool(arguments, "once")?.unwrap_or(false) {
+        args.push("--once".to_string());
+    }
+    if let Some(ttl) = optional_u64(arguments, "ttl")? {
+        args.push("--ttl".to_string());
+        args.push(ttl.to_string());
+    }
+    Ok(args)
+}
+
+fn call_events_read(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, events_read_args(arguments)?, None)
+}
+
+fn events_read_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec![
+        "events".to_string(),
+        "read".to_string(),
+        required_string(arguments, "id")?,
+    ];
+    for (field, flag) in [
+        ("since", "--since"),
+        ("waitMs", "--wait"),
+        ("limit", "--limit"),
+    ] {
+        let value = match field {
+            "since" => optional_string(arguments, field)?,
+            _ => optional_u64(arguments, field)?.map(|value| value.to_string()),
+        };
+        if let Some(value) = value {
+            args.push(flag.to_string());
+            args.push(value);
+        }
+    }
+    if optional_bool(arguments, "ack")?.unwrap_or(false) {
+        args.push("--ack".to_string());
+    }
+    Ok(args)
+}
+
+fn call_events_ack(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, events_ack_args(arguments)?, None)
+}
+
+fn events_ack_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec![
+        "events".to_string(),
+        "ack".to_string(),
+        required_string(arguments, "id")?,
+        required_string(arguments, "cursor")?,
+    ];
+    if let Some(owner) = optional_string(arguments, "owner")? {
+        args.push("--owner".to_string());
+        args.push(owner);
+    }
+    Ok(args)
+}
+
+fn call_events_list(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, events_list_args(arguments)?, None)
+}
+
+fn events_list_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec!["events".to_string(), "list".to_string()];
+    if let Some(owner) = optional_string(arguments, "owner")? {
+        args.push("--owner".to_string());
+        args.push(owner);
+    }
+    if optional_bool(arguments, "unread")?.unwrap_or(false) {
+        args.push("--unread".to_string());
+    }
+    Ok(args)
+}
+
+fn call_events_stop(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, events_stop_args(arguments)?, None)
+}
+
+fn events_stop_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec![
+        "events".to_string(),
+        "stop".to_string(),
+        required_string(arguments, "id")?,
+    ];
+    if let Some(owner) = optional_string(arguments, "owner")? {
+        args.push("--owner".to_string());
+        args.push(owner);
+    }
+    Ok(args)
+}
+
 fn call_skills_get(arguments: &Value) -> Result<Value, ProtocolError> {
     let mut args = vec!["skills".to_string(), "get".to_string()];
     if optional_bool(arguments, "all")?.unwrap_or(false) {
@@ -4170,6 +4362,140 @@ fn write_json_line(stdout: &mut io::Stdout, value: &Value) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn events_mcp_tools_are_registered_in_the_core_profile() {
+        let expected = [
+            "agent_browser_events_start",
+            "agent_browser_events_read",
+            "agent_browser_events_ack",
+            "agent_browser_events_list",
+            "agent_browser_events_stop",
+        ];
+        let tools = super::tools();
+        let registered = tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>();
+        let profile = super::McpConfig::default();
+
+        for name in expected {
+            assert!(registered.contains(&name), "missing {name}");
+            assert!(profile.allows(name), "{name} is not in the core profile");
+        }
+    }
+
+    #[test]
+    fn events_mcp_arguments_use_the_cli_parser_fields() {
+        let cases = [
+            (
+                super::events_start_args(&json!({
+                    "selector": "#notice",
+                    "state": "hidden",
+                    "once": true,
+                    "ttl": 30,
+                    "owner": "chat:test",
+                    "key": "k1"
+                }))
+                .unwrap(),
+                json!({
+                    "action": "events_start",
+                    "selector": "#notice",
+                    "state": "hidden",
+                    "once": true,
+                    "ttl": 30,
+                    "owner": "chat:test",
+                    "key": "k1"
+                }),
+            ),
+            (
+                super::events_start_args(&json!({
+                    "method": "Network.responseReceived",
+                    "match": ["/response/url=https://example.com"],
+                    "matchRegex": ["/response/url=example"]
+                }))
+                .unwrap(),
+                json!({
+                    "action": "events_start",
+                    "method": "Network.responseReceived",
+                    "match": ["/response/url=https://example.com"],
+                    "matchRegex": ["/response/url=example"]
+                }),
+            ),
+            (
+                super::events_read_args(&json!({
+                    "id": "sub-1",
+                    "since": "sub-1:4",
+                    "waitMs": 500,
+                    "limit": 12,
+                    "ack": true
+                }))
+                .unwrap(),
+                json!({
+                    "action": "events_read",
+                    "subscriptionId": "sub-1",
+                    "since": "sub-1:4",
+                    "waitMs": 500,
+                    "limit": 12,
+                    "ack": true
+                }),
+            ),
+            (
+                super::events_ack_args(&json!({
+                    "id": "sub-1",
+                    "cursor": "sub-1:6",
+                    "owner": "chat:test"
+                }))
+                .unwrap(),
+                json!({
+                    "action": "events_ack",
+                    "subscriptionId": "sub-1",
+                    "cursor": "sub-1:6",
+                    "owner": "chat:test"
+                }),
+            ),
+            (
+                super::events_list_args(&json!({"owner": "chat:test", "unread": true})).unwrap(),
+                json!({ "action": "events_list", "owner": "chat:test", "unread": true }),
+            ),
+            (
+                super::events_stop_args(&json!({"id": "sub-1", "owner": "chat:test"})).unwrap(),
+                json!({ "action": "events_stop", "subscriptionId": "sub-1", "owner": "chat:test" }),
+            ),
+        ];
+
+        for (args, expected) in cases {
+            let flags = crate::flags::parse_flags(&args);
+            let command =
+                crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+            for (key, value) in expected.as_object().unwrap() {
+                assert_eq!(&command[key], value, "field {key} from {args:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn events_mcp_result_preserves_the_cli_json_response() {
+        let responses = [
+            json!({ "success": true, "data": { "id": "sub-1", "cursor": "sub-1:0" } }),
+            json!({ "success": true, "data": { "id": "sub-1", "events": [] } }),
+            json!({ "success": true, "data": { "id": "sub-1", "cursor": "sub-1:1" } }),
+            json!({ "success": true, "data": { "subscriptions": [] } }),
+            json!({ "success": true, "data": { "id": "sub-1", "stopped": true } }),
+        ];
+
+        for response in responses {
+            let stdout = serde_json::to_string(&response).unwrap();
+            let result = super::tool_result_from_run(super::CliRun {
+                exit_code: Some(0),
+                stdout: stdout.clone(),
+                stderr: String::new(),
+            });
+
+            assert_eq!(result["structuredContent"]["response"], response);
+            assert_eq!(result["structuredContent"]["stdout"], stdout);
+        }
+    }
+
     #[test]
     fn recording_timeline_options_use_cli_parser() {
         for operation in ["start", "restart"] {

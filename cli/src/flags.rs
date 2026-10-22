@@ -692,6 +692,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         cli_input_mode: false,
     };
 
+    let events_start = events_start_position(args);
     let mut i = 0;
     let mut seen_command = false;
     while i < args.len() {
@@ -868,6 +869,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
                     i += 1;
                 }
             }
+            "--state" if events_start.is_some_and(|command_index| i > command_index + 1) => {}
             "--state" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.state = Some(s.clone());
@@ -1151,6 +1153,67 @@ fn looks_like_command(value: &str) -> bool {
     crate::commands::is_top_level_command(value)
 }
 
+const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
+    "--session",
+    "--restore-save",
+    "--restore-check-url",
+    "--restore-check-text",
+    "--restore-check-fn",
+    "--namespace",
+    "--headers",
+    "--executable-path",
+    "--cdp",
+    "--extension",
+    "--init-script",
+    "--enable",
+    "--profile",
+    "--state",
+    "--proxy",
+    "--proxy-bypass",
+    "--args",
+    "--user-agent",
+    "-p",
+    "--provider",
+    "--device",
+    "--session-name",
+    "--color-scheme",
+    "--download-path",
+    "--max-output",
+    "--allowed-domains",
+    "--action-policy",
+    "--confirm-actions",
+    "--config",
+    "--engine",
+    "--input-mode",
+    "--screenshot-dir",
+    "--screenshot-quality",
+    "--screenshot-format",
+    "--idle-timeout",
+    "--ca-cert",
+    "--model",
+];
+
+fn events_start_position(args: &[String]) -> Option<usize> {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if GLOBAL_FLAGS_WITH_VALUE.contains(&arg) {
+            index += 2;
+            continue;
+        }
+        if arg == "--restore" || arg.starts_with("--restore=") {
+            index += 1;
+            continue;
+        }
+        if !arg.starts_with('-') && looks_like_command(arg) {
+            return (arg == "events" && args.get(index + 1).map(String::as_str) == Some("start"))
+                .then_some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
 pub fn clean_args(args: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     let mut skip_next = false;
@@ -1184,46 +1247,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--fix",
     ];
     // Global flags that always take a value (need to skip the next arg too)
-    const GLOBAL_FLAGS_WITH_VALUE: &[&str] = &[
-        "--session",
-        "--restore-save",
-        "--restore-check-url",
-        "--restore-check-text",
-        "--restore-check-fn",
-        "--namespace",
-        "--headers",
-        "--executable-path",
-        "--cdp",
-        "--extension",
-        "--init-script",
-        "--enable",
-        "--profile",
-        "--state",
-        "--proxy",
-        "--proxy-bypass",
-        "--args",
-        "--user-agent",
-        "-p",
-        "--provider",
-        "--device",
-        "--session-name",
-        "--color-scheme",
-        "--download-path",
-        "--max-output",
-        "--allowed-domains",
-        "--action-policy",
-        "--confirm-actions",
-        "--config",
-        "--engine",
-        "--input-mode",
-        "--screenshot-dir",
-        "--screenshot-quality",
-        "--screenshot-format",
-        "--idle-timeout",
-        "--ca-cert",
-        "--model",
-    ];
-
+    let events_start = events_start_position(args);
     let mut i = 0;
     let mut seen_command = false;
     while i < args.len() {
@@ -1237,7 +1261,10 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             i += 1;
             continue;
         }
-        if GLOBAL_FLAGS_WITH_VALUE.contains(&arg.as_str()) {
+        if GLOBAL_FLAGS_WITH_VALUE.contains(&arg.as_str())
+            && !(arg == "--state"
+                && events_start.is_some_and(|command_index| i > command_index + 1))
+        {
             skip_next = true;
             i += 1;
             continue;
@@ -1502,6 +1529,22 @@ mod tests {
         // when global flags are mixed in.
         let cleaned = clean_args(&args("--json record start demo.webm --fps 60"));
         assert_eq!(cleaned, vec!["record", "start", "demo.webm", "--fps", "60"]);
+    }
+
+    #[test]
+    fn test_clean_args_keeps_events_start_state() {
+        let input = args("events start --selector #notice --state hidden");
+        assert_eq!(clean_args(&input), input);
+        let flags = parse_flags(&input);
+        assert!(!flags.cli_state);
+        let command = crate::commands::parse_command(&clean_args(&input), &flags).unwrap();
+        assert_eq!(command["state"], "hidden");
+
+        let input = args("--state /tmp/state.json events list");
+        let flags = parse_flags(&input);
+        assert!(flags.cli_state);
+        assert_eq!(flags.state.as_deref(), Some("/tmp/state.json"));
+        assert_eq!(clean_args(&input), vec!["events", "list"]);
     }
 
     #[test]

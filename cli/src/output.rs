@@ -158,6 +158,83 @@ fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> 
     }
 }
 
+fn format_events_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
+    match action {
+        Some("events_start") => Some(format!(
+            "Event subscription {} started at {}",
+            data.get("id")?.as_str()?,
+            data.get("cursor")?.as_str()?
+        )),
+        Some("events_read") => {
+            let events = data.get("events")?.as_array()?;
+            if events.is_empty() {
+                return Some(
+                    if data.get("waiting").and_then(|value| value.as_bool()) == Some(true) {
+                        "No new events before timeout".to_string()
+                    } else {
+                        "No new events".to_string()
+                    },
+                );
+            }
+            Some(
+                events
+                    .iter()
+                    .map(|event| serde_json::to_string(event).unwrap_or_default())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        }
+        Some("events_ack") => Some(format!(
+            "Acknowledged through {}",
+            data.get("cursor")?.as_str()?
+        )),
+        Some("events_list") => {
+            let subscriptions = data.get("subscriptions")?.as_array()?;
+            if subscriptions.is_empty() {
+                return Some("No event subscriptions".to_string());
+            }
+            Some(
+                subscriptions
+                    .iter()
+                    .map(|subscription| {
+                        format!(
+                            "{} {} head={} consumed={}",
+                            subscription
+                                .get("id")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("?"),
+                            subscription
+                                .get("status")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("?"),
+                            subscription
+                                .get("head")
+                                .map(serde_json::Value::to_string)
+                                .unwrap_or_else(|| "?".to_string()),
+                            subscription
+                                .get("consumed")
+                                .map(serde_json::Value::to_string)
+                                .unwrap_or_else(|| "?".to_string())
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        }
+        Some("events_stop") => Some(
+            if data.get("stopped").and_then(|value| value.as_bool()) == Some(true) {
+                format!("Stopped event subscription {}", data.get("id")?.as_str()?)
+            } else {
+                format!(
+                    "Event subscription {} was not active",
+                    data.get("id")?.as_str()?
+                )
+            },
+        ),
+        _ => None,
+    }
+}
+
 fn format_webmcp_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
     match action {
         Some("webmcp_list") => {
@@ -576,6 +653,14 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         }
         if let Some(output) = format_stream_status_text(action, data) {
             println!("{}", output);
+            return;
+        }
+        if let Some(output) = format_events_text(action, data) {
+            if opts.content_boundaries {
+                print_with_boundaries(&output, None, opts);
+            } else {
+                println!("{}", output);
+            }
             return;
         }
         if action == Some("webmcp_list") {
@@ -3323,6 +3408,41 @@ Examples:
 "##
         }
 
+        "events" => {
+            r##"
+agent-browser events - Subscribe to browser events
+
+Usage:
+  agent-browser events start --selector <css> [--state visible|hidden] [--once] [--ttl <secs>] [--owner <label>] [--key <key>]
+  agent-browser events start --method <CDP method> [--match <pointer>=<value>]... [--match-regex <pointer>=<regex>]... [--once] [--ttl <secs>] [--owner <label>] [--key <key>]
+  agent-browser events read <id> [--since <cursor>] [--wait <ms>] [--limit <n>] [--ack]
+  agent-browser events wait <id> [--since <cursor>] [--timeout <ms>]
+  agent-browser events ack <id> <cursor> [--owner <label>]
+  agent-browser events list [--owner <label>] [--unread]
+  agent-browser events stop <id> [--owner <label>]
+  agent-browser events watch <id> [--since <cursor>]
+
+Selector subscriptions store visible or hidden transitions. CDP subscriptions
+accept repeated JSON pointer matchers. Read returns subscription metadata and
+event envelopes; --ack advances through the last returned event. wait is a
+read that waits and acknowledges, defaulting to 50000 ms. watch prints one
+JSON envelope per line and stops when the subscription ends or Ctrl-C is
+pressed.
+
+Global Options:
+  --json               Output as JSON
+  --session <name>     Use specific session
+
+Examples:
+  agent-browser events start --selector '#notice' --once
+  agent-browser events start --method Network.responseReceived --match /response/url=https://example.com
+  agent-browser events read sub-1 --since sub-1:0 --ack
+  agent-browser events wait sub-1 --timeout 5000
+  agent-browser events list --owner chat:session --unread
+  agent-browser events watch sub-1
+"##
+        }
+
         // === Runtime streaming ===
         "stream" => {
             r##"
@@ -3903,6 +4023,14 @@ Streaming:
   stream disable             Stop runtime WebSocket streaming
   stream status              Show streaming status and active port
 
+Events:
+  events start --selector <css>  Subscribe to selector visibility changes
+  events start --method <CDP>    Subscribe to a CDP method
+  events read <id>               Read events after a cursor
+  events wait <id>               Wait for and acknowledge an event
+  events watch <id>              Stream event envelopes as NDJSON
+  events ack/list/stop           Manage subscriptions
+
 WebMCP (experimental):
   webmcp list [tool]         Full metadata; optional --frame <frame-id>
   webmcp invoke <tool>       Invoke a page tool; accepts --params <json|@file>,
@@ -4336,6 +4464,47 @@ mod tests {
         format_with_boundaries, OutputOptions,
     };
     use serde_json::json;
+
+    #[test]
+    fn events_text_covers_all_shared_verbs() {
+        assert_eq!(
+            super::format_events_text(
+                Some("events_start"),
+                &json!({ "id": "sub-1", "cursor": "sub-1:0" })
+            )
+            .as_deref(),
+            Some("Event subscription sub-1 started at sub-1:0")
+        );
+        assert_eq!(
+            super::format_events_text(
+                Some("events_read"),
+                &json!({ "events": [{"meta":{"cursor":"sub-1:1"},"data":{"ok":true}}] })
+            )
+            .as_deref(),
+            Some(r#"{"data":{"ok":true},"meta":{"cursor":"sub-1:1"}}"#)
+        );
+        assert_eq!(
+            super::format_events_text(Some("events_ack"), &json!({ "cursor": "sub-1:1" }))
+                .as_deref(),
+            Some("Acknowledged through sub-1:1")
+        );
+        assert_eq!(
+            super::format_events_text(
+                Some("events_list"),
+                &json!({ "subscriptions": [{"id":"sub-1","status":"active","head":1,"consumed":0}] })
+            )
+            .as_deref(),
+            Some("sub-1 active head=1 consumed=0")
+        );
+        assert_eq!(
+            super::format_events_text(
+                Some("events_stop"),
+                &json!({ "id": "sub-1", "stopped": true })
+            )
+            .as_deref(),
+            Some("Stopped event subscription sub-1")
+        );
+    }
 
     #[test]
     fn test_format_stream_status_text_for_enabled_stream() {
