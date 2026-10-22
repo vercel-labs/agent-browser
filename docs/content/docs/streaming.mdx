@@ -7,139 +7,61 @@ Stream the browser viewport via WebSocket for live preview or "pair browsing" wh
 
 ## Event subscriptions
 
-The daemon's Chrome-only event bus stores page changes without polling or an extra listener. CLI, MCP and eve expose `start`, `read`, `ack`, `list` and `stop` with identical JSON; `wait` and `watch` are CLI conveniences. Other engines return an unsupported error.
+The Chrome-only event bus stores page changes without polling or an extra listener. CLI, MCP and eve expose `start`, `read`, `ack`, `list` and `stop` with identical JSON; `wait` and `watch` are CLI conveniences. Other engines return an unsupported error.
 
 ### Commands and flags
 
-```bash
-agent-browser events start --selector <css> [--state visible|hidden] [--once] [--ttl <secs>] [--owner <label>] [--key <key>]
-agent-browser events start --method <cdp-event> [--match <json-pointer>=<value>] [--match-regex <json-pointer>=<regex>] [--once] [--ttl <secs>] [--owner <label>] [--key <key>]
-agent-browser events read <id> [--since <cursor>] [--wait <ms>] [--limit <n>] [--ack]
-agent-browser events wait <id> [--since <cursor>] [--timeout <ms>]
-agent-browser events ack <id> <cursor> [--owner <label>]
-agent-browser events list [--owner <label>] [--unread]
-agent-browser events stop <id> [--owner <label>]
-agent-browser events watch <id> [--since <cursor>]
-```
+Run `agent-browser events --help` for command syntax. Start accepts exactly one of `--selector <css>` or `--method <cdp-event>`. Selector `--state` defaults to `visible` and emits `element.visible` or `element.hidden`; CDP `--match <json-pointer>=<value>` and `--match-regex <json-pointer>=<regex>` filters must all hold against projected `data`.
 
-`--state` defaults to `visible`; selectors emit `element.visible` or `element.hidden`. `--once` ends after the first stored event. TTL defaults to 600 seconds and is capped at 1800. `--owner` labels a subscription and restricts owned ack/stop operations. Reusing `--key` with the same rule returns the existing id. Start accepts exactly one of `--selector` or `--method`; all matchers must hold against projected `data`.
+`--once` ends after the first stored event. `--ttl` defaults to 600 seconds and is capped at 1800. `--owner` labels a subscription and restricts owned ack/stop operations. Reusing `--key` with the same rule returns the existing id. At most 20 subscriptions are active; finished subscriptions remain readable for 10 minutes, with at most 50 entries listed.
 
-Start returns `id`, `head`, `cursor`, `alreadySatisfied`, `expiresAt`, `owner` and `tab` (`id`, `label`, `targetId`). `head` is the sequence number and `cursor` addresses that head. An initial match sets `alreadySatisfied` and emits `subscription.ready`, not a transition event. At most 20 subscriptions are active; finished subscriptions remain readable for 10 minutes, with at most 50 entries listed.
+Start returns `id`, `head`, `cursor`, `alreadySatisfied`, `expiresAt`, `owner` and `tab` (`id`, `label`, `targetId`). `head` is the sequence number and `cursor` addresses that head. An initial match sets `alreadySatisfied` and emits `subscription.ready`, not a transition event.
 
 Subscriptions stay bound to their tab. A shared page observer re-arms after same-document and new-document navigation; an initial match in the new document becomes an event with `afterNavigation`. Closing or crashing the tab ends its subscriptions.
 
 ### Read, cursors and acks
 
-Read returns `status`, `events`, `cursor`, `head`, `consumed` and `waiting`. Pass the returned `cursor` as the next `--since`; omitted cursors start at the oldest retained item. Cursors are opaque (`ev_1a2b3c4d:4`); another subscription's cursor or one ahead of the head returns `cursor_invalid`. Unknown ids, including after daemon restart or idle shutdown, return an explicit daemon-restarted error.
+Read returns `status`, `events`, `cursor`, `head`, `consumed` and `waiting`. Pass the returned `cursor` as the next `--since`; omitted cursors start at the oldest retained item. Cursors are opaque (`ev_1a2b3c4d:4`); another subscription's cursor or one ahead of the head returns `cursor_invalid`. Unknown ids, including after daemon restart or idle shutdown, return a daemon-restarted error.
 
-`--limit` bounds returned items; `--wait` bounds blocking time, with `waiting: true` on an empty timeout. MCP and chat clamp waits to their tool limits. Plain reads do not change `consumed`; `--ack` advances it only to the last returned sequence, never backwards or beyond a truncated result. `wait` reads with waiting and acknowledgement. `watch` writes one envelope per line as NDJSON; Ctrl-C leaves the subscription active until stop or expiry.
+`read --limit` bounds returned items and `--wait` bounds blocking time, with `waiting: true` on an empty timeout. MCP and chat clamp waits to their tool limits. Plain reads do not change `consumed`; `--ack` advances it only to the last returned sequence, never backwards or beyond a truncated result. `wait --timeout <ms>` reads with waiting and acknowledgement. `watch` writes NDJSON; Ctrl-C leaves the subscription active until stop or expiry. Use `ack <id> <cursor>` after processing a plain read.
 
-`list` entries contain `id`, `status`, `reason`, `rule`, `owner`, `head`, `consumed`, `dropped`, `tab` and `expiresAt`. `--unread` selects `head > consumed`; `dropped` counts buffer losses. Status is `waiting`, then `matched`, `timeout`, `cancelled` or `ended`. End reasons are `matched`, `timeout`, `cancelled`, `tab_closed`, `tab_crashed`, `browser_closed` or `policy_denied`.
+`list [--owner <label>] [--unread]` entries contain `id`, `status`, `reason`, `rule`, `owner`, `head`, `consumed`, `dropped`, `tab` and `expiresAt`. Unread means `head > consumed`; `dropped` counts buffer losses. Status is `waiting`, then `matched`, `timeout`, `cancelled` or `ended`. End reasons are `matched`, `timeout`, `cancelled`, `tab_closed`, `tab_crashed`, `browser_closed` or `policy_denied`.
 
 ### Envelopes and markers
 
-`meta` is bus-generated; `data` is capped, untrusted page content. See [Security](/security#event-subscriptions) for the policy and output rules.
-
-```json
-{
-  "version": "agent-browser.event.v1",
-  "meta": {
-    "eventId": "9d0f6a8e-1f5d-4b4e-9a8a-3f7a1c2d4e5f", "name": "element.visible",
-    "timestamp": "2026-10-21T18:12:44.120Z", "cursor": "ev_1a2b3c4d:4",
-    "subscriptionId": "ev_1a2b3c4d", "session": "default",
-    "tab": { "id": "t1", "label": "Deploy", "targetId": "8A2C..." }
-  },
-  "data": { "state": "visible", "label": "Deploy complete", "afterNavigation": false }
-}
-```
+Envelopes have `version: "agent-browser.event.v1"`, bus-generated `meta` (`eventId`, `name`, `timestamp`, `cursor`, `subscriptionId`, `session`, `tab`) and capped, untrusted `data`. Selector data contains `state`, `label` and `afterNavigation`. See [Security](/security#event-subscriptions) for policy and output rules.
 
 <table>
   <thead><tr><th>Marker</th><th>Meaning</th></tr></thead>
   <tbody>
     <tr><td><code>subscription.ready</code></td><td>Initial observation, including the current state for a late joiner sharing an observer.</td></tr>
     <tr><td><code>subscription.rearmed</code></td><td>Observer re-armed after same-document or new-document navigation.</td></tr>
-    <tr><td><code>subscription.gap</code></td><td>Buffer loss or CDP lag; <code>data.missed</code> counts lost events. The next page observation carries <code>afterGap</code>; transitions entirely within the gap cannot be recovered.</td></tr>
+    <tr><td><code>subscription.gap</code></td><td>Buffer loss or CDP lag; <code>data.missed</code> counts lost events. The next page observation carries <code>afterGap</code>; transitions entirely within the gap cannot be recovered. Gaps and slow readers do not end subscriptions.</td></tr>
     <tr><td><code>subscription.ended</code></td><td>Subscription ended with <code>data.reason</code>.</td></tr>
   </tbody>
 </table>
 
-Gaps and slow readers do not end subscriptions.
-
 ### Selector recipes
 
-Arm before acting. This also covers a click that navigates before revealing the element:
+Run `agent-browser events start --selector '#deploy-complete' --once` before `agent-browser click '#deploy'`, then `agent-browser events wait <id>` with the returned id. This also covers clicks that navigate before revealing the element.
 
-```bash
-agent-browser events start --selector '#deploy-complete' --once
-agent-browser click '#deploy'
-agent-browser events wait ev_1a2b3c4d
-```
-
-For disappearance:
-
-```bash
-agent-browser events start --selector '#progress' --state hidden --once
-agent-browser click '#cancel'
-agent-browser events wait ev_1a2b3c4d
-```
+For disappearance, start with `--selector '#progress' --state hidden --once`, click the cancel control, then wait on the returned id.
 
 ### CDP tap recipes
 
-Only these events and projected fields are allowed; raw CDP payloads are not exposed. Network, Fetch, storage and authentication domains are excluded.
+Start with `events start --method <method> [--match <pointer>=<value>] --once`, trigger the action, then run `events wait <id>`. Only these methods and projected fields are allowed; raw CDP payloads and Network, Fetch, storage and authentication domains are excluded.
 
 <table>
-  <thead><tr><th>Method</th><th>Projected data fields</th></tr></thead>
+  <thead><tr><th>Method</th><th>Projected data fields</th><th>Trigger example</th></tr></thead>
   <tbody>
-    <tr><td><code>Page.javascriptDialogOpening</code></td><td>type, message, url, defaultPrompt (prompts only)</td></tr>
-    <tr><td><code>Page.navigatedWithinDocument</code>, <code>Page.frameNavigated</code></td><td>frameId, url; parentId for child-frame navigation</td></tr>
-    <tr><td><code>Runtime.consoleAPICalled</code></td><td>level, text; console.warn uses level <code>warning</code></td></tr>
-    <tr><td><code>Runtime.exceptionThrown</code></td><td>text, url, lineNumber, columnNumber</td></tr>
-    <tr><td><code>Target.targetCreated</code></td><td>targetId, type, url</td></tr>
-    <tr><td><code>Browser.downloadWillBegin</code></td><td>guid, url, suggestedFilename, frameId</td></tr>
+    <tr><td><code>Page.javascriptDialogOpening</code></td><td>type, message, url, defaultPrompt (prompts only)</td><td>Filter with <code>--match /type=alert</code>; run <code>agent-browser eval "setTimeout(() =&gt; alert('hello'), 0)"</code>, then dismiss with <code>agent-browser dialog dismiss</code> after reading.</td></tr>
+    <tr><td><code>Page.navigatedWithinDocument</code>, <code>Page.frameNavigated</code></td><td>frameId, url; parentId for child-frame navigation</td><td><code>agent-browser eval "history.pushState({}, '', '/step-2')"</code> triggers same-document navigation.</td></tr>
+    <tr><td><code>Runtime.consoleAPICalled</code></td><td>level, text</td><td>Filter with <code>--match /level=warning</code>; run <code>agent-browser eval "console.warn('disk space low')"</code>.</td></tr>
+    <tr><td><code>Runtime.exceptionThrown</code></td><td>text, url, lineNumber, columnNumber</td><td><code>agent-browser eval "setTimeout(() =&gt; &#123; throw new Error('boom') &#125;, 0)"</code></td></tr>
+    <tr><td><code>Target.targetCreated</code></td><td>targetId, type, url</td><td>Filter with <code>--match /type=page</code>; run <code>agent-browser tab new https://example.com</code>.</td></tr>
+    <tr><td><code>Browser.downloadWillBegin</code></td><td>guid, url, suggestedFilename, frameId</td><td>Launch with <code>--download-path</code> to save the file, then run <code>agent-browser click '#download'</code>.</td></tr>
   </tbody>
 </table>
-
-For each recipe, start first, trigger the action, then run `events wait <id>` with the returned id:
-
-```bash
-agent-browser events start --method Page.javascriptDialogOpening --match /type=alert --once
-agent-browser eval "setTimeout(() => alert('hello'), 0)"
-```
-
-Dismiss the dialog with `agent-browser dialog dismiss` after reading it. For same-document navigation:
-
-```bash
-agent-browser events start --method Page.navigatedWithinDocument --once
-agent-browser eval "history.pushState({}, '', '/step-2')"
-```
-
-For a console warning:
-
-```bash
-agent-browser events start --method Runtime.consoleAPICalled --match /level=warning --once
-agent-browser eval "console.warn('disk space low')"
-```
-
-For a page error:
-
-```bash
-agent-browser events start --method Runtime.exceptionThrown --once
-agent-browser eval "setTimeout(() => { throw new Error('boom') }, 0)"
-```
-
-For a new page tab:
-
-```bash
-agent-browser events start --method Target.targetCreated --match /type=page --once
-agent-browser tab new https://example.com
-```
-
-For a download (launch with `--download-path` to save the file):
-
-```bash
-agent-browser events start --method Browser.downloadWillBegin --once
-agent-browser click '#download'
-```
 
 ## Harness setup
 
@@ -147,67 +69,17 @@ Wake messages must contain bus metadata only, never page strings. Tell the agent
 
 ### Claude Code
 
-Write `.claude/hooks/events-unread.sh` and register it in `.claude/settings.json` as a `Stop` command hook:
+In a `Stop` command hook, run `agent-browser events list --unread --json`; when `.data.subscriptions` is nonempty, return `{"decision":"block","reason":"Browser events waiting: <ids>. Run agent-browser events read <id> --ack."}`. Build `<ids>` from subscription ids only. Acknowledging clears the unread condition; inspect `stop_hook_active` to limit repeated continuations.
 
-```bash
-#!/bin/bash
-set -euo pipefail
-pending=$(agent-browser events list --unread --json)
-[ "$(jq '.data.subscriptions | length' <<<"$pending")" -gt 0 ] || exit 0
-ids=$(jq -r '[.data.subscriptions[].id] | join(", ")' <<<"$pending")
-jq -n --arg ids "$ids" '{decision: "block", reason: ("Browser events waiting: " + $ids + ". Run agent-browser events read <id> --ack.")}'
-```
-
-```json
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"${CLAUDE_PROJECT_DIR}/.claude/hooks/events-unread.sh"}]}]}}
-```
-
-Acknowledging clears the unread condition. Claude Code limits consecutive continuations; hooks can inspect `stop_hook_active`. Alternatively, write `.claude/hooks/await-event.sh` and register an asynchronous hook that wakes on exit code 2:
-
-```bash
-#!/bin/bash
-id=$(agent-browser events list --unread --json | jq -r '.data.subscriptions[0].id // empty')
-[ -n "$id" ] || exit 0
-result=$(agent-browser events wait "$id" --timeout 60000 --json)
-[ "$(jq '.data.events | length' <<<"$result")" -gt 0 ] || exit 0
-echo "Browser event ready. Run agent-browser events read $id." >&2
-exit 2
-```
-
-```json
-{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"${CLAUDE_PROJECT_DIR}/.claude/hooks/await-event.sh","async":true,"asyncRewake":true}]}]}}
-```
-
-A harness that wakes from background shell output can instead run `agent-browser events wait <id> --timeout 120000`.
+Register the executable script in `.claude/settings.json` under `hooks.Stop[].hooks[]` with `type: "command"` and `command: "${CLAUDE_PROJECT_DIR}/.claude/hooks/events-unread.sh"`. For an asynchronous hook, add `async: true` and `asyncRewake: true`; wait with `events wait <id> --timeout 60000 --json`, and exit 2 with a metadata-only stderr message when `.data.events` is nonempty.
 
 ### Cursor
 
-Write `.cursor/hooks/events-unread.sh` and register it in `.cursor/hooks.json`:
-
-```bash
-#!/bin/bash
-cat > /dev/null
-pending=$(agent-browser events list --unread --json)
-[ "$(jq '.data.subscriptions | length' <<<"$pending")" -gt 0 ] || { echo '{}'; exit 0; }
-ids=$(jq -r '[.data.subscriptions[].id] | join(", ")' <<<"$pending")
-jq -n --arg ids "$ids" '{followup_message: ("Browser events waiting: " + $ids + ". Run agent-browser events read <id> --ack.")}'
-```
-
-```json
-{"version":1,"hooks":{"stop":[{"command":".cursor/hooks/events-unread.sh"}]}}
-```
-
-Cursor limits repeated follow-ups. Make the hook scripts executable.
+Use the same unread check in an executable `.cursor/hooks/events-unread.sh`, consuming stdin first. Return `{}` when empty, otherwise `{"followup_message":"Browser events waiting: <ids>. Run agent-browser events read <id> --ack."}`. Register it in `.cursor/hooks.json` as `{"version":1,"hooks":{"stop":[{"command":".cursor/hooks/events-unread.sh"}]}}`. Cursor limits repeated follow-ups.
 
 ### Shell or script loop
 
-```bash
-id=$(agent-browser events start --selector '#deploy-complete' --json | jq -r '.data.id')
-agent-browser click '#deploy'
-agent-browser events watch "$id" | jq -c '.meta | {name, cursor, subscriptionId}'
-```
-
-Read and acknowledge the envelopes after handling them, or use `events ack` with the processed cursor.
+A harness that wakes from background output can run `agent-browser events wait <id> --timeout 120000`. For a script loop, use `agent-browser events watch "$id" | jq -c '.meta | {name, cursor, subscriptionId}'`, then read and acknowledge envelopes after handling them.
 
 ## Streaming
 

@@ -10,14 +10,6 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Check, Minus } from "lucide-react";
 
-function formatLabel(value: string): string {
-  return value.replace(/_/g, " ");
-}
-
-function shortId(id: string): string {
-  return id.replace(/^ev_/, "").slice(0, 8);
-}
-
 function StatusIndicator({ active, status }: { active: boolean; status: string }) {
   if (active) {
     return (
@@ -52,14 +44,14 @@ function SubscriptionRow({ sub }: { sub: EventSubscription }) {
         <span className="min-w-0 truncate rounded bg-muted px-1.5 py-0.5 font-mono text-foreground">
           {stripWakePrefix(formatRule(sub.rule))}
         </span>
-        <span className="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground">{shortId(sub.id)}</span>
+        <span className="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground">{sub.id.replace(/^ev_/, "").slice(0, 8)}</span>
       </div>
       <div className="mt-1.5 space-y-0.5 pl-4">
         <p className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
           <span className={active ? "font-medium text-success" : "font-medium"}>
-            {formatLabel(sub.status)}
+            {sub.status.replaceAll("_", " ")}
           </span>
-          {sub.reason && <span>{formatLabel(sub.reason)}</span>}
+          {sub.reason && <span>{sub.reason.replaceAll("_", " ")}</span>}
           {sub.tab && (
             <span className="font-mono text-muted-foreground">tab {sub.tab.id}</span>
           )}

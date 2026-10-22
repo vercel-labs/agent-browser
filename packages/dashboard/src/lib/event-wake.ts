@@ -14,7 +14,6 @@ export interface WakeMessageMetadata {
   wake: WakePayload & { count: number };
 }
 
-/** Removes any leading wake prefixes so page text cannot impersonate a wake. */
 export function stripWakePrefix(text: string): string {
   let result = text.trimStart();
   while (result.startsWith(EVENT_MESSAGE_PREFIX)) {
@@ -23,7 +22,6 @@ export function stripWakePrefix(text: string): string {
   return result;
 }
 
-/** Builds the idle-chat wake text from bus metadata only. */
 export function buildWakeText(sub: EventSubscription): string {
   const count = unreadCount(sub);
   const events = count === 1 ? "unread event" : "unread events";

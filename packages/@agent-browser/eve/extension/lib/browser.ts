@@ -1,8 +1,8 @@
 import {
-  AgentBrowserCommandError,
   createAgentBrowserCommandResult,
   defaultSessionName,
   quoteShellArg,
+  throwIfCommandFailed,
 } from "@agent-browser/sandbox";
 import { buildAgentBrowserCommand, installAgentBrowser, type EveSandboxSession } from "./sandbox";
 
@@ -113,10 +113,7 @@ async function runCommand<TData>(
   if (envelope !== null && envelope.success === false) {
     throw new Error(`agent-browser ${args[0] ?? ""} failed: ${envelope.error ?? "unknown error"}`);
   }
-  if (result.exitCode !== 0) {
-    throw new AgentBrowserCommandError(result);
-  }
-  return envelope;
+  return throwIfCommandFailed(result).json;
 }
 
 async function requireSandbox(ctx: BrowserToolContext): Promise<EveSandboxSession> {

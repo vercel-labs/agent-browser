@@ -1581,15 +1581,7 @@ Stream the browser viewport via WebSocket for live preview or "pair browsing" wh
 
 ### Event subscriptions
 
-Subscribe before acting, then collect the result without polling:
-
-```bash
-agent-browser events start --selector '#deploy-complete' --once
-agent-browser click '#deploy'
-agent-browser events wait ev_1a2b3c4d --timeout 30000
-```
-
-See [Streaming](https://agent-browser.dev/streaming#event-subscriptions) for all event verbs and flags, CLI/MCP/eve parity, envelopes, markers, cursors, safety rules and harness setup recipes.
+Subscribe with `events start` before acting, then collect the result with `events wait` instead of polling. See [Streaming](https://agent-browser.dev/streaming#event-subscriptions) for verbs, flags, CLI/MCP/eve parity, envelopes, markers, cursors, safety rules and harness recipes.
 
 ### Streaming
 

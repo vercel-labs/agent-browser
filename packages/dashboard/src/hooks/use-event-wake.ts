@@ -25,15 +25,9 @@ function readWakeTimes(): Map<string, number> {
 function writeWakeTimes(times: Map<string, number>): void {
   try {
     sessionStorage.setItem(WAKE_TIMES_KEY, JSON.stringify(Object.fromEntries(times)));
-  } catch {
-    return;
-  }
+  } catch {}
 }
 
-/**
- * Wakens the agent when an owned subscription has unread events and the chat is
- * idle, at most once per subscription every ten seconds.
- */
 export function useEventWake({ session, status, sendMessage }: UseEventWakeOptions) {
   const subscriptions = useAtomValue(eventSubscriptionsAtom);
   const chatEnabled = useAtomValue(chatEnabledAtom);

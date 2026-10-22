@@ -15,7 +15,6 @@ pub enum PolicyResult {
     RequiresConfirmation,
 }
 
-/// Policy configuration loaded from a JSON file and reloaded for event actions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionPolicy {
     #[serde(skip)]

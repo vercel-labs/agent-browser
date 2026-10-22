@@ -112,9 +112,7 @@ Cookie, storage, and saved-auth-state commands are intentionally not exposed as 
 
 ## Events
 
-`events_start` subscribes to something happening in the browser: an element becoming visible or hidden, or a CDP event matching JSON-pointer filters. Start the subscription before the action that should cause the change, then use `events_read` with `waitMs` instead of polling. Reads return the cursor to pass next, `events_ack` marks events consumed, `events_list` with `unread` shows subscriptions with new events, and `events_stop` cancels one.
-
-The owner of a subscription is the eve session id, injected by the tool, so the model cannot choose it. Event data is page content and untrusted, so these commands always run with content boundaries enabled even when `contentBoundaries` is off for other tools. Waits are capped at 50 seconds to stay under the tool deadline.
+Follow the [event subscription workflow](https://agent-browser.dev/streaming#event-subscriptions): start before acting, then use `events_read` with `waitMs` instead of polling. Tools inject the eve session id as owner, force content boundaries even when `contentBoundaries` is off, and cap waits at 50 seconds. See the tool table above for read, ack, list and stop.
 
 ## Overrides
 

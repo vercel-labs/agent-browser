@@ -254,10 +254,6 @@ export function useStreamSync(port: number) {
 
 const EVENTS_SYNC_INTERVAL_MS = 30_000;
 
-/**
- * Rebuilds the subscription list from `events list` on connect, on nudges and
- * on a slow timer, so the dashboard never depends on pushed event payloads.
- */
 export function useEventHydration(session: string) {
   const connected = useAtomValue(streamConnectedAtom);
   const nudges = useAtomValue(eventsNudgeAtom);
