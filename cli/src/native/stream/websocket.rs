@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -129,6 +130,7 @@ pub(super) async fn accept_loop(
     listener: TcpListener,
     frame_tx: broadcast::Sender<String>,
     frame_watch: watch::Receiver<Option<Arc<StreamFrame>>>,
+    event_nudges: watch::Receiver<HashMap<String, u64>>,
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
     client_notify: Arc<Notify>,
@@ -164,6 +166,7 @@ pub(super) async fn accept_loop(
                 };
                 let frame_tx = frame_tx.clone();
                 let frame_watch = frame_watch.clone();
+                let event_nudges = event_nudges.clone();
                 let client_count = client_count.clone();
                 let client_slot = client_slot.clone();
                 let client_notify = client_notify.clone();
@@ -184,6 +187,7 @@ pub(super) async fn accept_loop(
                         addr,
                         frame_tx,
                         frame_watch,
+                        event_nudges,
                         client_count,
                         client_slot,
                         client_notify,
@@ -224,6 +228,7 @@ async fn handle_connection(
     addr: SocketAddr,
     frame_tx: broadcast::Sender<String>,
     frame_watch: watch::Receiver<Option<Arc<StreamFrame>>>,
+    event_nudges: watch::Receiver<HashMap<String, u64>>,
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
     client_notify: Arc<Notify>,
@@ -248,12 +253,14 @@ async fn handle_connection(
     if is_websocket_upgrade(&request) {
         let frame_rx = frame_tx.subscribe();
         let initial_config = config_from_upgrade(&request);
+        let event_nudges = event_nudges.clone();
         handle_ws_client(
             stream,
             addr,
             initial_config,
             frame_rx,
             frame_watch,
+            event_nudges,
             client_count,
             client_slot,
             client_notify,
@@ -284,6 +291,7 @@ async fn handle_ws_client(
     initial_config: ClientConfig,
     mut broadcast_rx: broadcast::Receiver<String>,
     mut frame_watch: watch::Receiver<Option<Arc<StreamFrame>>>,
+    mut event_nudges: watch::Receiver<HashMap<String, u64>>,
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
     client_notify: Arc<Notify>,
@@ -327,6 +335,7 @@ async fn handle_ws_client(
     }
 
     let (mut ws_tx, ws_rx) = ws_stream.split();
+    let mut sent_event_nudges = event_nudges.borrow_and_update().clone();
 
     // Watch channels, not atomics, so a mid-stream change wakes the writer's
     // select! below instead of leaving it asleep on a stale deadline.
@@ -420,6 +429,34 @@ async fn handle_ws_client(
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            changed = event_nudges.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let latest = event_nudges.borrow_and_update().clone();
+                let mut send_failed = false;
+                for (subscription_id, head) in latest {
+                    if sent_event_nudges
+                        .get(&subscription_id)
+                        .is_some_and(|sent| *sent >= head)
+                    {
+                        continue;
+                    }
+                    let nudge = json!({
+                        "type": "events_nudge",
+                        "subscriptionId": subscription_id,
+                        "head": head,
+                    });
+                    if ws_tx.send(Message::Text(nudge.to_string())).await.is_err() {
+                        send_failed = true;
+                        break;
+                    }
+                    sent_event_nudges.insert(subscription_id, head);
+                }
+                if send_failed {
+                    break;
                 }
             }
             changed = frame_watch.changed(), if !pending_frame => {

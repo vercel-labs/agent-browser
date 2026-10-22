@@ -11,6 +11,7 @@ pub use dashboard::{
 };
 
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -187,6 +188,7 @@ pub struct StreamServer {
     /// Latest-value channel for screencast frames. Slow clients skip straight
     /// to the newest frame instead of draining a stale ordered backlog.
     frame_watch: watch::Sender<Option<Arc<StreamFrame>>>,
+    event_nudges: watch::Sender<HashMap<String, u64>>,
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
     /// The active CDP page session ID (from Target.attachToTarget).
@@ -330,6 +332,7 @@ impl StreamServer {
 
         let (frame_tx, _) = broadcast::channel::<String>(64);
         let (frame_watch_tx, frame_watch_rx) = watch::channel::<Option<Arc<StreamFrame>>>(None);
+        let (event_nudges_tx, event_nudges_rx) = watch::channel(HashMap::new());
         let screencast_config = Arc::new(ScreencastConfig::from_env());
         let client_count = Arc::new(Mutex::new(0usize));
         let client_notify = Arc::new(Notify::new());
@@ -358,11 +361,13 @@ impl StreamServer {
         let accept_shutdown_rx = shutdown_rx.clone();
         let session_name_clone = session_id.clone();
         let frame_watch_accept = frame_watch_rx.clone();
+        let event_nudges_accept = event_nudges_rx.clone();
         let accept_task = tokio::spawn(async move {
             websocket::accept_loop(
                 listener,
                 frame_tx_clone,
                 frame_watch_accept,
+                event_nudges_accept,
                 client_count_clone,
                 client_slot_clone,
                 notify_clone,
@@ -419,6 +424,7 @@ impl StreamServer {
                 session_name: session_id,
                 frame_tx,
                 frame_watch: frame_watch_tx,
+                event_nudges: event_nudges_tx,
                 screencast_config,
                 client_count,
                 client_slot: client_slot.clone(),
@@ -511,6 +517,13 @@ impl StreamServer {
         let _ = self.frame_tx.send(msg.to_string());
     }
 
+    /// Publish the latest event head for a subscription to stream clients.
+    pub fn nudge_event(&self, subscription_id: &str, head: u64) {
+        self.event_nudges.send_modify(|nudges| {
+            nudges.insert(subscription_id.to_string(), head);
+        });
+    }
+
     /// Broadcast a command event when a command begins executing.
     pub fn broadcast_command(&self, action: &str, id: &str, params: &Value) {
         let msg = json!({
@@ -560,20 +573,8 @@ impl StreamServer {
         let _ = self.frame_tx.send(msg.to_string());
     }
 
-    /// Broadcast an event subscription transition to connected dashboard clients.
-    /// `event` carries `subscriptionId`, `selector`, `name`, `eventId`, and `data`.
-    pub fn broadcast_event(&self, event: &Value) {
-        let mut msg = json!({
-            "type": "event",
-            "timestamp": timestamp_ms(),
-        });
-        if let (Some(target), Some(fields)) = (msg.as_object_mut(), event.as_object()) {
-            for (key, value) in fields {
-                target.insert(key.clone(), value.clone());
-            }
-        }
-        let _ = self.frame_tx.send(msg.to_string());
-    }
+    /// Keep prototype callers compiling without forwarding event payloads.
+    pub fn broadcast_event(&self, _event: &Value) {}
 
     /// Broadcast a page error (uncaught exception) from the browser.
     pub fn broadcast_page_error(&self, text: &str, line: Option<i64>, column: Option<i64>) {
@@ -810,6 +811,47 @@ mod tests {
         let mut ws = connect_client(server.port()).await;
         let frame = next_frame(&mut ws).await;
         assert_eq!(frame.get("data").and_then(|v| v.as_str()), Some("fresh"));
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_event_nudge_survives_broadcast_and_screencast_bursts() {
+        let (server, _slot) = StreamServer::start_without_client(
+            0,
+            "events-nudge".to_string(),
+            true,
+            Arc::new(IdleActivity::new()),
+        )
+        .await
+        .expect("server start");
+        let mut ws = connect_client(server.port()).await;
+
+        for index in 0..100 {
+            server.broadcast_error(&format!("error-{index}"));
+            server.broadcast_screencast_frame("frame", &FrameMetadata::default());
+        }
+        server.nudge_event("sub-1", 1);
+        server.nudge_event("sub-1", 3);
+
+        loop {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+                .await
+                .expect("timed out waiting for event nudge")
+                .expect("stream ended")
+                .expect("ws error");
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let parsed: Value = serde_json::from_str(&text).expect("valid json");
+            if parsed.get("type").and_then(|value| value.as_str()) == Some("events_nudge") {
+                assert_eq!(parsed["subscriptionId"], "sub-1");
+                assert!(parsed["head"].as_u64().unwrap() <= 3);
+                if parsed["head"] == 3 {
+                    break;
+                }
+            }
+        }
 
         server.shutdown().await;
     }
