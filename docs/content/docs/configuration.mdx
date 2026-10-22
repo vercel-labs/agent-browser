@@ -107,7 +107,7 @@ Global launch, output, provider, and chat options can be set in the config file 
     <tr><td><code>engine</code></td><td><code>--engine</code></td><td>string (<code>chrome</code>, <code>lightpanda</code>, <code>obscura</code>)</td></tr>
     <tr><td><code>screenshotDir</code></td><td><code>--screenshot-dir</code></td><td>string</td></tr>
     <tr><td><code>screenshotQuality</code></td><td><code>--screenshot-quality</code></td><td>number (0-100)</td></tr>
-    <tr><td><code>screenshotFormat</code></td><td><code>--screenshot-format</code></td><td>string (<code>png</code>, <code>jpeg</code>)</td></tr>
+    <tr><td><code>screenshotFormat</code></td><td><code>--screenshot-format</code></td><td>string (<code>png</code>, <code>jpeg</code>, <code>webp</code>)</td></tr>
     <tr><td><code>idleTimeout</code></td><td><code>--idle-timeout</code></td><td>string (<code>10s</code>, <code>3m</code>, <code>1h</code>, or raw ms); defaults to <code>1h</code>, while <code>0</code> disables idle shutdown</td></tr>
     <tr><td><code>noAutoDialog</code></td><td><code>--no-auto-dialog</code></td><td>boolean</td></tr>
     <tr><td><code>model</code></td><td><code>--model</code></td><td>string</td></tr>
@@ -319,8 +319,8 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_NO_AUTO_DIALOG</code></td><td>Disable automatic dismissal of <code>alert</code>/<code>beforeunload</code> dialogs.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_PLUGINS</code></td><td>JSON plugin registry override.</td><td>(config discovery)</td></tr>
     <tr><td><code>AGENT_BROWSER_SCREENSHOT_DIR</code></td><td>Default screenshot output directory.</td><td>(temp directory)</td></tr>
-    <tr><td><code>AGENT_BROWSER_SCREENSHOT_QUALITY</code></td><td>JPEG screenshot quality from 0 to 100.</td><td>(format default)</td></tr>
-    <tr><td><code>AGENT_BROWSER_SCREENSHOT_FORMAT</code></td><td>Screenshot format: <code>png</code> or <code>jpeg</code>.</td><td><code>png</code></td></tr>
+    <tr><td><code>AGENT_BROWSER_SCREENSHOT_QUALITY</code></td><td>JPEG or WebP screenshot quality from 0 to 100.</td><td>(format default)</td></tr>
+    <tr><td><code>AGENT_BROWSER_SCREENSHOT_FORMAT</code></td><td>Screenshot format: <code>png</code>, <code>jpeg</code>, or <code>webp</code>.</td><td><code>png</code></td></tr>
     <tr><td><code>AGENT_BROWSER_SOCKET_DIR</code></td><td>Advanced override for daemon socket files.</td><td>runtime dir or <code>~/.agent-browser</code></td></tr>
     <tr><td><code>AGENT_BROWSER_SKILLS_DIR</code></td><td>Override the directory used by <code>agent-browser skills</code>.</td><td>bundled skills</td></tr>
     <tr><td><code>AGENT_BROWSER_COLOR</code></td><td>Enable colored CLI output when truthy.</td><td>(disabled)</td></tr>

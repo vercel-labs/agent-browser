@@ -40,6 +40,7 @@ agent-browser screenshot --full ./page-full.png
 agent-browser screenshot --if-changed
 agent-browser screenshot --threshold 0.01
 agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80 ./page.jpg
+agent-browser screenshot --screenshot-format webp --screenshot-quality 80 ./page.webp
 agent-browser pdf ./page.pdf
 ```
 
@@ -53,8 +54,8 @@ Screenshot defaults can also be configured with:
   </thead>
   <tbody>
     <tr><td><code>--screenshot-dir</code> / <code>AGENT_BROWSER_SCREENSHOT_DIR</code></td><td>Default screenshot output directory</td></tr>
-    <tr><td><code>--screenshot-format</code> / <code>AGENT_BROWSER_SCREENSHOT_FORMAT</code></td><td><code>png</code> or <code>jpeg</code></td></tr>
-    <tr><td><code>--screenshot-quality</code> / <code>AGENT_BROWSER_SCREENSHOT_QUALITY</code></td><td>JPEG quality from 0 to 100</td></tr>
+    <tr><td><code>--screenshot-format</code> / <code>AGENT_BROWSER_SCREENSHOT_FORMAT</code></td><td><code>png</code>, <code>jpeg</code>, or <code>webp</code></td></tr>
+    <tr><td><code>--screenshot-quality</code> / <code>AGENT_BROWSER_SCREENSHOT_QUALITY</code></td><td>JPEG or WebP quality from 0 to 100</td></tr>
   </tbody>
 </table>
 

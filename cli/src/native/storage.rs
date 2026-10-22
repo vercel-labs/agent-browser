@@ -1,7 +1,6 @@
 use serde_json::{json, Value};
 
 use super::cdp::client::CdpClient;
-use super::cdp::types::EvaluateParams;
 
 pub async fn storage_get(
     client: &CdpClient,
@@ -74,21 +73,8 @@ fn storage_js_name(storage_type: &str) -> &str {
 }
 
 async fn eval_simple(client: &CdpClient, session_id: &str, js: &str) -> Result<Value, String> {
-    let result: super::cdp::types::EvaluateResult = client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: js.to_string(),
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(session_id),
-        )
-        .await?;
-
-    if let Some(ref details) = result.exception_details {
-        return Err(format!("Storage error: {}", details.text));
-    }
-
-    Ok(result.result.value.unwrap_or(Value::Null))
+    client
+        .evaluate_value(js, Some(session_id))
+        .await
+        .map_err(|e| format!("Storage error: {}", e))
 }

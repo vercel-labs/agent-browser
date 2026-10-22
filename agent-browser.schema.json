@@ -207,11 +207,11 @@
       "type": "integer",
       "minimum": 0,
       "maximum": 100,
-      "description": "JPEG quality for screenshots (0-100)."
+      "description": "JPEG or WebP quality for screenshots (0-100)."
     },
     "screenshotFormat": {
       "type": "string",
-      "enum": ["png", "jpeg"],
+      "enum": ["png", "jpeg", "webp"],
       "description": "Screenshot format."
     },
     "idleTimeout": {

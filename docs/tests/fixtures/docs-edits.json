@@ -8,12 +8,40 @@
       {
         "from": "# Clear CA trust retained by the running session",
         "to": "# Clear CA trust retained by the running session\n--use-system-ca          # Use the OS trust store for CLI requests (read, install, upgrade, doctor)"
+      },
+      {
+        "from": "# JPEG quality 0-100 (or AGENT_BROWSER_SCREENSHOT_QUALITY)",
+        "to": "# JPEG or WebP quality 0-100 (or AGENT_BROWSER_SCREENSHOT_QUALITY)"
+      },
+      {
+        "from": "# Format: png (default), jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)",
+        "to": "# Format: png (default), jpeg, webp (or AGENT_BROWSER_SCREENSHOT_FORMAT)"
       }
     ],
     "/configuration": [
       {
         "from": "This initial implementation does not support",
         "to": "Browser trust does not support"
+      },
+      {
+        "from": "string (<code>png</code>, <code>jpeg</code>)",
+        "to": "string (<code>png</code>, <code>jpeg</code>, <code>webp</code>)"
+      },
+      {
+        "from": "string (png, jpeg)",
+        "to": "string (png, jpeg, webp)"
+      },
+      {
+        "from": "JPEG screenshot quality from 0 to 100.",
+        "to": "JPEG or WebP screenshot quality from 0 to 100."
+      },
+      {
+        "from": "Screenshot format: <code>png</code> or <code>jpeg</code>.",
+        "to": "Screenshot format: <code>png</code>, <code>jpeg</code>, or <code>webp</code>."
+      },
+      {
+        "from": "Screenshot format: png or jpeg.",
+        "to": "Screenshot format: png, jpeg, or webp."
       }
     ],
     "/proxy": [
@@ -37,9 +65,27 @@
         "from": "It is not supported on macOS or Windows.",
         "to": "Browser trust is not supported on macOS or Windows, where Chromium already uses the operating system trust store."
       }
+    ],
+    "/files": [
+      {
+        "from": "--screenshot-quality 80 ./page.jpg",
+        "to": "--screenshot-quality 80 ./page.jpg\nagent-browser screenshot --screenshot-format webp --screenshot-quality 80 ./page.webp"
+      },
+      {
+        "from": "<td><code>png</code> or <code>jpeg</code></td>",
+        "to": "<td><code>png</code>, <code>jpeg</code>, or <code>webp</code></td>"
+      },
+      {
+        "from": "png or jpeg",
+        "to": "png, jpeg, or webp"
+      },
+      {
+        "from": "JPEG quality from 0 to 100",
+        "to": "JPEG or WebP quality from 0 to 100"
+      }
     ]
   },
   "resources": {
-    "/schema.json": { "size": 9427, "sha256": "eecb6f5aa3f6c7f0a4f0fb1176923c5b7d005065fea101ff90394c2845b97468" }
+    "/schema.json": { "size": 9443, "sha256": "b4c4ca63fa134e096000c6aa601fee5ace823d5c479f192774da19d903e75a6b" }
   }
 }

@@ -615,6 +615,28 @@ impl CdpClient {
             .map_err(|e| format!("Failed to deserialize CDP response for {}: {}", method, e))
     }
 
+    /// Evaluates `expression` in the page and returns its value, or the exception text if it threw.
+    pub async fn evaluate_value(
+        &self,
+        expression: &str,
+        session_id: Option<&str>,
+    ) -> Result<Value, String> {
+        let result = self
+            .send_command(
+                "Runtime.evaluate",
+                Some(serde_json::json!({ "expression": expression, "returnByValue": true })),
+                session_id,
+            )
+            .await?;
+        if let Some(details) = result.get("exceptionDetails") {
+            return Err(details["text"]
+                .as_str()
+                .unwrap_or("evaluation failed")
+                .to_string());
+        }
+        Ok(result["result"]["value"].clone())
+    }
+
     pub async fn send_command_no_params(
         &self,
         method: &str,

@@ -271,6 +271,11 @@ fn env_var_bool(name: &str) -> Option<bool> {
         .map(|val| !matches!(val.to_lowercase().as_str(), "0" | "false" | "no" | ""))
 }
 
+/// Screenshot formats Chrome's `Page.captureScreenshot` can encode.
+fn is_screenshot_format(value: &str) -> bool {
+    matches!(value, "png" | "jpeg" | "webp")
+}
+
 fn resolve_ca_cert(
     config_ca_cert: Option<String>,
     config_clear_ca_cert: Option<bool>,
@@ -686,7 +691,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         screenshot_format: env::var("AGENT_BROWSER_SCREENSHOT_FORMAT")
             .ok()
             .or(config.screenshot_format)
-            .filter(|s| s == "png" || s == "jpeg"),
+            .filter(|s| is_screenshot_format(s)),
         idle_timeout: parse_idle_timeout_value(
             env::var("AGENT_BROWSER_IDLE_TIMEOUT_MS").ok(),
             "AGENT_BROWSER_IDLE_TIMEOUT_MS",
@@ -1139,11 +1144,11 @@ pub fn parse_flags(args: &[String]) -> Flags {
             }
             "--screenshot-format" => {
                 if let Some(s) = args.get(i + 1) {
-                    if s == "png" || s == "jpeg" {
+                    if is_screenshot_format(s) {
                         flags.screenshot_format = Some(s.clone());
                     } else {
                         eprintln!(
-                            "{} --screenshot-format must be png or jpeg, got '{}'",
+                            "{} --screenshot-format must be png, jpeg, or webp, got '{}'",
                             color::warning_indicator(),
                             s
                         );
@@ -1965,6 +1970,24 @@ mod tests {
     fn test_headed_bare_defaults_true() {
         let flags = parse_flags(&args("--headed open example.com"));
         assert!(flags.headed);
+    }
+
+    #[test]
+    fn test_screenshot_format_accepts_webp() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SCREENSHOT_FORMAT"]);
+        guard.remove("AGENT_BROWSER_SCREENSHOT_FORMAT");
+        let flags = parse_flags(&args("--screenshot-format webp screenshot"));
+        assert_eq!(flags.screenshot_format.as_deref(), Some("webp"));
+        let flags = parse_flags(&args("--screenshot-format gif screenshot"));
+        assert!(flags.screenshot_format.is_none());
+    }
+
+    #[test]
+    fn test_screenshot_format_env_accepts_webp() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SCREENSHOT_FORMAT"]);
+        guard.set("AGENT_BROWSER_SCREENSHOT_FORMAT", "webp");
+        let flags = parse_flags(&args("screenshot"));
+        assert_eq!(flags.screenshot_format.as_deref(), Some("webp"));
     }
 
     #[test]

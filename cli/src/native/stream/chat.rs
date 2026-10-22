@@ -306,7 +306,10 @@ fn compress_image_to_jpeg(raw_bytes: &[u8]) -> Option<Vec<u8>> {
 
 fn has_image_extension(s: &str) -> bool {
     let lower = s.to_lowercase();
-    lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg")
+    lower.ends_with(".png")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".webp")
 }
 
 fn extract_image_path(text: &str) -> Option<String> {
@@ -316,7 +319,7 @@ fn extract_image_path(text: &str) -> Option<String> {
         if has_image_extension(trimmed) && std::path::Path::new(trimmed).exists() {
             return Some(trimmed.to_string());
         }
-        for suffix in [".png", ".jpg", ".jpeg"] {
+        for suffix in [".png", ".jpg", ".jpeg", ".webp"] {
             if let Some(pos) = trimmed.to_lowercase().rfind(suffix) {
                 let end = pos + suffix.len();
                 let candidate = &trimmed[..end];
@@ -351,6 +354,8 @@ fn enrich_tool_output(result: &str) -> String {
                 raw_bytes,
                 if lower.ends_with(".png") {
                     "image/png"
+                } else if lower.ends_with(".webp") {
+                    "image/webp"
                 } else {
                     "image/jpeg"
                 },

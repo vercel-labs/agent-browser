@@ -930,14 +930,14 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_SCREENSHOT,
             "Take screenshot",
-            "Capture a screenshot and return the saved path. Small PNG/JPEG screenshots are also returned as image content.",
+            "Capture a screenshot and return the saved path. Small PNG/JPEG/WebP screenshots are also returned as image content.",
             json!({
                 "path": { "type": "string", "description": "Optional output path." },
                 "selector": { "type": "string", "description": "Optional @ref or CSS selector to capture." },
                 "fullPage": { "type": "boolean", "default": false },
-                "annotate": { "type": "boolean", "default": false, "description": "Number visible elements in the screenshot." },
-                "format": { "type": "string", "enum": ["png", "jpeg"], "description": "Screenshot format." },
-                "quality": { "type": "integer", "minimum": 0, "maximum": 100, "description": "JPEG quality." },
+                "annotate": { "type": "boolean", "default": false, "description": "Number the interactive elements visible in the screenshot. With fullPage, numbers every element on the page." },
+                "format": { "type": "string", "enum": ["png", "jpeg", "webp"], "description": "Screenshot format." },
+                "quality": { "type": "integer", "minimum": 0, "maximum": 100, "description": "JPEG or WebP quality." },
                 "screenshotDir": { "type": "string", "description": "Default output directory when path is omitted." },
                 "ifChanged": { "type": "boolean", "default": false, "description": "Recommended for repeated captures to save tokens: return image content only when pixels changed." },
                 "threshold": { "type": "number", "minimum": 0, "maximum": 1, "description": "Maximum changed-pixel ratio to treat as unchanged. Implies ifChanged." }
@@ -4192,6 +4192,8 @@ fn image_mime_type(path: &str) -> Option<&'static str> {
         Some("image/png")
     } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
         Some("image/jpeg")
+    } else if lower.ends_with(".webp") {
+        Some("image/webp")
     } else {
         None
     }
@@ -4304,6 +4306,19 @@ mod tests {
                 scope["fullPage"].as_bool().unwrap_or(false)
             );
         }
+    }
+
+    #[test]
+    fn webp_screenshot_matches_cli_parser() {
+        let arguments = json!({"format": "webp", "quality": 60, "path": "./page.webp"});
+        let args = screenshot_command_args(&arguments).unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        let command =
+            crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+        assert_eq!(command["format"], "webp");
+        assert_eq!(command["quality"], 60);
+        assert_eq!(command["path"], "./page.webp");
+        assert_eq!(image_mime_type("./page.webp"), Some("image/webp"));
     }
 
     use super::*;

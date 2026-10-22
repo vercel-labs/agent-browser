@@ -115,6 +115,7 @@ agent-browser screenshot path.png # Save to specific path
 agent-browser screenshot --full   # Full page
 agent-browser screenshot --if-changed # Recommended: skip unchanged images to save tokens
 agent-browser screenshot --threshold 0.01 # Ignore changes affecting at most 1% of pixels
+agent-browser screenshot --screenshot-format webp --screenshot-quality 80 page.webp # WebP or JPEG output
 agent-browser pdf output.pdf      # Save as PDF
 ```
 

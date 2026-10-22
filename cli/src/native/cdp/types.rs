@@ -515,6 +515,8 @@ pub struct CaptureScreenshotParams {
     pub from_surface: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capture_beyond_viewport: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub optimize_for_speed: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]

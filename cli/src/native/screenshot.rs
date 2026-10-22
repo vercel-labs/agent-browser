@@ -9,6 +9,7 @@ use super::cdp::types::*;
 use super::element::RefMap;
 
 const ANNOTATION_OVERLAY_ID: &str = "__agent_browser_annotations__";
+const ANNOTATE_OBJECT_GROUP: &str = "agent-browser-annotate";
 
 #[derive(Debug, Clone)]
 struct Rect {
@@ -101,6 +102,7 @@ pub async fn take_screenshot(
     ref_map: &RefMap,
     options: &ScreenshotOptions,
     iframe_sessions: &HashMap<String, String>,
+    viewport_refs: Option<Vec<super::snapshot::ViewportRef>>,
 ) -> Result<ScreenshotResult, String> {
     let target_rect = if options.annotate {
         match options.selector.as_deref() {
@@ -114,10 +116,28 @@ pub async fn take_screenshot(
         None
     };
 
-    let raw_annotations = if options.annotate {
-        collect_annotations(client, session_id, ref_map).await?
-    } else {
-        Vec::new()
+    let raw_annotations = match viewport_refs {
+        Some(refs) => refs
+            .into_iter()
+            .map(|r| RawAnnotation {
+                number: r
+                    .ref_id
+                    .strip_prefix('e')
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .unwrap_or(0),
+                ref_id: r.ref_id,
+                role: r.role,
+                name: (!r.name.is_empty()).then_some(r.name),
+                rect: Rect {
+                    x: r.x,
+                    y: r.y,
+                    width: r.width,
+                    height: r.height,
+                },
+            })
+            .collect(),
+        None if options.annotate => collect_annotations(client, session_id, ref_map).await?,
+        None => Vec::new(),
     };
 
     let overlay_items = filter_annotations(raw_annotations, target_rect.as_ref());
@@ -162,7 +182,7 @@ async fn capture_screenshot_base64(
 ) -> Result<String, String> {
     let mut params = CaptureScreenshotParams {
         format: Some(options.format.clone()),
-        quality: if options.format == "jpeg" {
+        quality: if matches!(options.format.as_str(), "jpeg" | "webp") {
             options.quality.or(Some(80))
         } else {
             None
@@ -170,6 +190,7 @@ async fn capture_screenshot_base64(
         clip: None,
         from_surface: Some(true),
         capture_beyond_viewport: if options.full_page { Some(true) } else { None },
+        optimize_for_speed: None,
     };
 
     if options.full_page {
@@ -191,6 +212,9 @@ async fn capture_screenshot_base64(
                 height,
                 scale: 1.0,
             });
+            if options.format == "png" && width * height > FAST_PNG_MIN_PIXELS {
+                params.optimize_for_speed = Some(true);
+            }
         }
     } else if let Some(ref selector) = options.selector {
         if let Some(rect) =
@@ -237,6 +261,24 @@ async fn collect_annotations(
         return Ok(Vec::new());
     }
 
+    let bounds = layout_bounds(client, session_id, with_backend_ids.len()).await;
+    let mut annotations = Vec::new();
+    let mut with_backend_ids = with_backend_ids;
+    with_backend_ids.retain(|(ref_id, entry, bid)| {
+        match bounds.get(bid).filter(|_| entry.frame_id.is_none()) {
+            Some(rect) => {
+                if rect.width > 0.0 && rect.height > 0.0 {
+                    annotations.push(raw_annotation(ref_id, entry, rect.clone()));
+                }
+                false
+            }
+            None => true,
+        }
+    });
+    if with_backend_ids.is_empty() {
+        return Ok(annotations);
+    }
+
     // Batch-resolve all backend_node_ids to object IDs using concurrent CDP calls.
     let resolve_futures: Vec<_> = with_backend_ids
         .iter()
@@ -245,7 +287,7 @@ async fn collect_annotations(
                 "DOM.resolveNode",
                 Some(serde_json::json!({
                     "backendNodeId": backend_node_id,
-                    "objectGroup": "agent-browser-annotate"
+                    "objectGroup": ANNOTATE_OBJECT_GROUP
                 })),
                 Some(session_id),
             )
@@ -269,10 +311,6 @@ async fn collect_annotations(
         }
     }
 
-    if resolved.is_empty() {
-        return Ok(Vec::new());
-    }
-
     // Batch-get bounding rects for all resolved elements using concurrent CDP calls.
     let rect_futures: Vec<_> = resolved
         .iter()
@@ -280,8 +318,14 @@ async fn collect_annotations(
         .collect();
 
     let rect_results = futures_util::future::join_all(rect_futures).await;
+    let _ = client
+        .send_command(
+            "Runtime.releaseObjectGroup",
+            Some(serde_json::json!({ "objectGroup": ANNOTATE_OBJECT_GROUP })),
+            Some(session_id),
+        )
+        .await;
 
-    let mut annotations = Vec::new();
     for (i, rect_result) in rect_results.into_iter().enumerate() {
         let rect = match rect_result {
             Ok(Some(r)) if r.width > 0.0 && r.height > 0.0 => r,
@@ -289,21 +333,141 @@ async fn collect_annotations(
         };
 
         let (ref_id, entry, _) = &resolved[i];
-        let number = ref_id
-            .strip_prefix('e')
-            .and_then(|n| n.parse::<u64>().ok())
-            .unwrap_or(0);
-
-        annotations.push(RawAnnotation {
-            ref_id: ref_id.clone(),
-            number,
-            role: entry.role.clone(),
-            name: (!entry.name.is_empty()).then_some(entry.name.clone()),
-            rect,
-        });
+        annotations.push(raw_annotation(ref_id, entry, rect));
     }
 
     Ok(annotations)
+}
+
+fn raw_annotation(ref_id: &str, entry: &super::element::RefEntry, rect: Rect) -> RawAnnotation {
+    RawAnnotation {
+        ref_id: ref_id.to_string(),
+        number: ref_id
+            .strip_prefix('e')
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(0),
+        role: entry.role.clone(),
+        name: (!entry.name.is_empty()).then_some(entry.name.clone()),
+        rect,
+    }
+}
+
+/// Reads every main-document layout box in one `DOMSnapshot` call, keyed by backend node id, when that is cheaper
+/// than per-ref calls. Only boxes that match `getBoundingClientRect` exactly are returned; nodes under a transform,
+/// inside SVG or skipped content, or with more than one layout object are left to the per-ref path.
+async fn layout_bounds(client: &CdpClient, session_id: &str, refs: usize) -> HashMap<i64, Rect> {
+    if refs < LAYOUT_BOUNDS_MIN_REFS {
+        return HashMap::new();
+    }
+    let elements = client
+        .evaluate_value(
+            "document.getElementsByTagName('*').length",
+            Some(session_id),
+        )
+        .await
+        .ok()
+        .and_then(|v| v.as_f64());
+    if elements.is_none_or(|n| (refs as f64) * 4.0 < n) {
+        return HashMap::new();
+    }
+    let Ok(snap) = client
+        .send_command(
+            "DOMSnapshot.captureSnapshot",
+            Some(serde_json::json!({
+                "computedStyles": ["transform", "translate", "rotate", "scale", "offset-path", "content-visibility"]
+            })),
+            Some(session_id),
+        )
+        .await
+    else {
+        return HashMap::new();
+    };
+    let strings = snap["strings"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let text = |v: &Value| {
+        v.as_u64()
+            .and_then(|i| strings.get(i as usize))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    };
+    let doc = &snap["documents"][0];
+    let ints = |v: &Value| -> Vec<i64> {
+        v.as_array()
+            .map(|a| a.iter().map(|x| x.as_i64().unwrap_or(-1)).collect())
+            .unwrap_or_default()
+    };
+    let parents = ints(&doc["nodes"]["parentIndex"]);
+    let backend = ints(&doc["nodes"]["backendNodeId"]);
+    let names = doc["nodes"]["nodeName"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let layout_nodes = ints(&doc["layout"]["nodeIndex"]);
+    let bounds = doc["layout"]["bounds"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let styles = doc["layout"]["styles"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    let mut layout_of: Vec<Option<usize>> = vec![None; backend.len()];
+    let mut unsafe_node: Vec<bool> = names
+        .iter()
+        .map(|n| text(n).eq_ignore_ascii_case("svg"))
+        .collect();
+    unsafe_node.resize(backend.len(), true);
+    for (li, &ni) in layout_nodes.iter().enumerate() {
+        let Some(ni) = usize::try_from(ni).ok().filter(|&i| i < backend.len()) else {
+            continue;
+        };
+        let style: Vec<&str> = styles
+            .get(li)
+            .and_then(Value::as_array)
+            .map(|s| s.iter().map(text).collect())
+            .unwrap_or_default();
+        let transformed = !style.is_empty()
+            && (style.len() != 6
+                || style[..5].iter().any(|v| *v != "none")
+                || !matches!(style[5], "visible" | ""));
+        if layout_of[ni].is_some() || transformed {
+            unsafe_node[ni] = true;
+        }
+        layout_of[ni] = Some(li);
+    }
+    for i in 0..backend.len() {
+        match parents.get(i) {
+            Some(&p) if p < 0 => {}
+            Some(&p) if (p as usize) < i => unsafe_node[i] |= unsafe_node[p as usize],
+            _ => unsafe_node[i] = true,
+        }
+    }
+
+    let (Some(scroll_x), Some(scroll_y)) =
+        (doc["scrollOffsetX"].as_f64(), doc["scrollOffsetY"].as_f64())
+    else {
+        return HashMap::new();
+    };
+    let mut map = HashMap::new();
+    for (i, li) in layout_of.into_iter().enumerate() {
+        let (Some(b), false) = (li.and_then(|li| bounds.get(li)), unsafe_node[i]) else {
+            continue;
+        };
+        if let (Some(x), Some(y), Some(width), Some(height)) =
+            (b[0].as_f64(), b[1].as_f64(), b[2].as_f64(), b[3].as_f64())
+        {
+            map.insert(
+                backend[i],
+                Rect {
+                    x: x - scroll_x,
+                    y: y - scroll_y,
+                    width,
+                    height,
+                },
+            );
+        }
+    }
+    map
 }
 
 async fn get_rect_for_selector(
@@ -374,6 +538,12 @@ fn filter_annotations(
     items.sort_by_key(|annotation| annotation.number);
     items
 }
+
+/// Pages with fewer refs than this read boxes with per-ref calls, which are cheaper than a full layout snapshot.
+const LAYOUT_BOUNDS_MIN_REFS: usize = 256;
+
+/// Full-page PNGs larger than this many CSS pixels use Chrome's faster lossless encoder; smaller ones keep the compact default.
+const FAST_PNG_MIN_PIXELS: f64 = 16_000_000.0;
 
 fn overlaps(left: &Rect, right: &Rect) -> bool {
     let left_x2 = left.x + left.width;
@@ -476,19 +646,12 @@ async fn remove_annotation_overlay(client: &CdpClient, session_id: &str) -> Resu
 }
 
 async fn get_scroll_offsets(client: &CdpClient, session_id: &str) -> Result<(f64, f64), String> {
-    let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: "({x: window.scrollX || 0, y: window.scrollY || 0})".to_string(),
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
+    let value = client
+        .evaluate_value(
+            "({x: window.scrollX || 0, y: window.scrollY || 0})",
             Some(session_id),
         )
         .await?;
-
-    let value = result.result.value.unwrap_or(Value::Null);
     let x = value.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let y = value.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
     Ok((x, y))
@@ -538,10 +701,10 @@ fn project_annotations(
 
 /// Writes a captured image only after the caller decides it is needed.
 pub fn save_screenshot(base64_data: &str, options: &ScreenshotOptions) -> Result<String, String> {
-    let ext = if options.format == "jpeg" {
-        "jpg"
-    } else {
-        "png"
+    let ext = match options.format.as_str() {
+        "jpeg" => "jpg",
+        "webp" => "webp",
+        _ => "png",
     };
     let explicit_path = options.path.as_deref();
     let output_dir = options.output_dir.as_deref();
@@ -588,6 +751,19 @@ fn get_screenshot_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_screenshot_names_webp_files() {
+        let dir = std::env::temp_dir().join(format!("ab-webp-name-{}", std::process::id()));
+        let options = ScreenshotOptions {
+            format: "webp".to_string(),
+            output_dir: Some(dir.to_string_lossy().to_string()),
+            ..ScreenshotOptions::default()
+        };
+        let path = save_screenshot("UklGRg==", &options).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(path.ends_with(".webp"), "got {path}");
+    }
 
     #[test]
     fn filters_annotations_to_target_overlap() {

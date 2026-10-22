@@ -2186,13 +2186,15 @@ Options:
   --annotate           Overlay numbered labels on interactive elements.
                        Each label [N] corresponds to ref @eN from snapshot.
                        Prints a legend mapping labels to element roles/names.
+                       Labels only elements visible in the image; with --full,
+                       every element on the page is labeled.
                        With --json, annotations are included in the response.
                        Supported on Chromium and Lightpanda.
   --screenshot-dir <path>  Default output directory for screenshots
                        (or AGENT_BROWSER_SCREENSHOT_DIR env)
-  --screenshot-quality <0-100>  JPEG quality (0-100, only applies to jpeg format)
+  --screenshot-quality <0-100>  JPEG or WebP quality (0-100, ignored for png)
                        (or AGENT_BROWSER_SCREENSHOT_QUALITY env)
-  --screenshot-format <fmt>  Image format: png (default) or jpeg
+  --screenshot-format <fmt>  Image format: png (default), jpeg, or webp
                        (or AGENT_BROWSER_SCREENSHOT_FORMAT env)
 
 Global Options:
@@ -2210,6 +2212,7 @@ Examples:
   agent-browser screenshot --annotate --json       # JSON output with annotations
   agent-browser screenshot --screenshot-dir ./shots # Save to custom directory
   agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
+  agent-browser screenshot --screenshot-format webp ./page.webp
 "##
         }
         "pdf" => {
@@ -4059,8 +4062,8 @@ Options:
   --json                     JSON output
   --annotate                 Annotated screenshot with numbered labels and legend
   --screenshot-dir <path>    Default screenshot output directory (or AGENT_BROWSER_SCREENSHOT_DIR)
-  --screenshot-quality <n>   JPEG quality 0-100; ignored for PNG (or AGENT_BROWSER_SCREENSHOT_QUALITY)
-  --screenshot-format <fmt>  Screenshot format: png, jpeg (or AGENT_BROWSER_SCREENSHOT_FORMAT)
+  --screenshot-quality <n>   JPEG or WebP quality 0-100; ignored for PNG (or AGENT_BROWSER_SCREENSHOT_QUALITY)
+  --screenshot-format <fmt>  Screenshot format: png, jpeg, webp (or AGENT_BROWSER_SCREENSHOT_FORMAT)
   --input-mode <mode>        Session pointer movement: instant (default), smooth, human
   --headed                   Show browser window (not headless) (or AGENT_BROWSER_HEADED env)
   --webgpu                   Enable WebGPU; uses SwiftShader software Vulkan on Linux, no GPU required (or AGENT_BROWSER_WEBGPU env)
@@ -4202,8 +4205,8 @@ Environment:
   ALL_PROXY                      SOCKS proxy (fallback for proxy)
   NO_PROXY                       Bypass proxy for hosts (fallback for proxy-bypass)
   AGENT_BROWSER_SCREENSHOT_DIR   Default screenshot output directory
-  AGENT_BROWSER_SCREENSHOT_QUALITY JPEG quality 0-100
-  AGENT_BROWSER_SCREENSHOT_FORMAT Screenshot format: png, jpeg
+  AGENT_BROWSER_SCREENSHOT_QUALITY JPEG or WebP quality 0-100
+  AGENT_BROWSER_SCREENSHOT_FORMAT Screenshot format: png, jpeg, webp
   AI_GATEWAY_URL                 Vercel AI Gateway base URL (default: https://ai-gateway.vercel.sh)
   AI_GATEWAY_API_KEY             API key for the AI Gateway (enables chat command and dashboard AI chat)
   AI_GATEWAY_MODEL               Default AI model (default: anthropic/claude-sonnet-4.6, or --model flag)

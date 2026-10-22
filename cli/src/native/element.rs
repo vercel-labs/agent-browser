@@ -181,6 +181,34 @@ impl RefMap {
         true
     }
 
+    /// Whether the page/frame pair still points at the document whose refs are tracked.
+    pub fn is_current_document(
+        &self,
+        page_session: &str,
+        frame: Option<&str>,
+        session: &str,
+        loader: Option<&str>,
+    ) -> bool {
+        let key = (page_session.to_string(), frame.map(str::to_string));
+        loader.filter(|id| !id.is_empty()).is_some_and(|loader| {
+            self.documents
+                .get(&key)
+                .is_some_and(|document| document.session == session && document.loader == loader)
+        })
+    }
+
+    /// Puts back an entry recorded by an earlier snapshot.
+    pub fn restore(&mut self, ref_id: String, entry: RefEntry) {
+        self.map.insert(ref_id, entry);
+    }
+
+    /// Keeps a ref pinned to its backend node so a replaced node never falls back to a role/name match.
+    pub fn restrict_to_backend_node(&mut self, ref_id: &str) {
+        if let Some(entry) = self.map.get_mut(ref_id) {
+            entry.allow_role_fallback = false;
+        }
+    }
+
     fn invalidate_frame(&mut self, page_session: &str, frame: Option<&str>) {
         if frame.is_none() {
             self.documents

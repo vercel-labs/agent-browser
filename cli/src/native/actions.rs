@@ -6270,7 +6270,18 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     } else {
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
         let session_id = mgr.active_session_id()?.to_string();
-        if annotate {
+        let viewport_only = annotate
+            && !options.full_page
+            && options.selector.is_none()
+            && state.active_frame_id.is_none();
+        let viewport_refs = if viewport_only {
+            snapshot::take_viewport_refs(&mgr.client, &session_id, &mut state.ref_map)
+                .await
+                .ok()
+        } else {
+            None
+        };
+        if annotate && viewport_refs.is_none() {
             state.ref_map.begin_snapshot();
             let _ = snapshot::take_snapshot(
                 &mgr.client,
@@ -6292,6 +6303,7 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
             &state.ref_map,
             &options,
             &state.iframe_sessions,
+            viewport_refs,
         )
         .await?;
 
@@ -11353,6 +11365,7 @@ async fn handle_diff_screenshot(cmd: &Value, state: &DaemonState) -> Result<Valu
         &state.ref_map,
         &options,
         &state.iframe_sessions,
+        None,
     )
     .await?;
 

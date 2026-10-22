@@ -6,7 +6,7 @@ use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AXNode, AXProperty, AXValue, EvaluateParams, EvaluateResult, GetFullAXTreeResult,
 };
-use super::element::{resolve_ax_session, RefMap};
+use super::element::{resolve_ax_session, RefEntry, RefMap};
 
 #[cfg(test)]
 mod document_identity_regressions {
@@ -289,23 +289,20 @@ struct CursorElementInfo {
 
 struct RoleNameTracker {
     counts: HashMap<String, usize>,
-    entries: Vec<(usize, String)>,
 }
 
 impl RoleNameTracker {
     fn new() -> Self {
         Self {
             counts: HashMap::new(),
-            entries: Vec::new(),
         }
     }
 
-    fn track(&mut self, role: &str, name: &str, node_idx: usize) -> usize {
+    fn track(&mut self, role: &str, name: &str) -> usize {
         let key = format!("{}:{}", role, name);
-        let count = self.counts.entry(key.clone()).or_insert(0);
+        let count = self.counts.entry(key).or_insert(0);
         let nth = *count;
         *count += 1;
-        self.entries.push((node_idx, key));
         nth
     }
 
@@ -475,11 +472,6 @@ pub async fn take_snapshot(
         root_indices
     };
 
-    let mut tracker = RoleNameTracker::new();
-    let mut next_ref: usize = ref_map.next_ref_num();
-
-    let mut nodes_with_refs: Vec<(usize, usize)> = Vec::new();
-
     // Pre-collect cursor-interactive elements so we can mark them with refs during tree building
     let cursor_elements: HashMap<i64, CursorElementInfo> =
         find_cursor_interactive_elements(client, session_id)
@@ -488,82 +480,14 @@ pub async fn take_snapshot(
 
     promote_hidden_inputs(&mut tree_nodes, &cursor_elements);
 
-    for (idx, node) in tree_nodes.iter().enumerate() {
-        let role = node.role.as_str();
-        let mut should_ref = if INTERACTIVE_ROLES.contains(&role) {
-            true
-        } else if CONTENT_ROLES.contains(&role) {
-            !node.name.is_empty()
-        } else {
-            false
-        };
-
-        if node
-            .backend_node_id
-            .is_some_and(|bid| cursor_elements.contains_key(&bid))
-        {
-            // ref elements that are cursor-interactive
-            should_ref = true;
-        }
-
-        if should_ref {
-            let nth = tracker.track(role, &node.name, idx);
-            nodes_with_refs.push((idx, nth));
-        }
-    }
-
-    let duplicates = tracker.get_duplicates();
-
-    for (idx, nth) in &nodes_with_refs {
-        let node = &tree_nodes[*idx];
-        let key = format!("{}:{}", node.role, node.name);
-        let actual_nth = if duplicates.contains_key(&key) {
-            Some(*nth)
-        } else {
-            None
-        };
-
-        let ref_id = if let Some(backend_node_id) = tree_nodes[*idx]
-            .backend_node_id
-            .filter(|_| document_is_known)
-        {
-            if let Some(existing) = ref_map.durable_ref(session_id, frame_id, backend_node_id) {
-                existing.to_string()
-            } else {
-                let allocated = format!("e{}", next_ref);
-                next_ref += 1;
-                ref_map.remember_durable_ref(session_id, frame_id, backend_node_id, &allocated);
-                allocated
-            }
-        } else {
-            let allocated = format!("e{}", next_ref);
-            next_ref += 1;
-            allocated
-        };
-
-        ref_map.add_with_frame(
-            ref_id.clone(),
-            tree_nodes[*idx].backend_node_id,
-            &tree_nodes[*idx].role,
-            &tree_nodes[*idx].name,
-            actual_nth,
-            frame_id,
-        );
-
-        tree_nodes[*idx].has_ref = true;
-        tree_nodes[*idx].ref_id = Some(ref_id);
-    }
-
-    // Populate cursor_info for ref-bearing nodes
-    for (idx, _) in &nodes_with_refs {
-        if let Some(bid) = tree_nodes[*idx].backend_node_id {
-            if let Some(cursor_info) = cursor_elements.get(&bid) {
-                tree_nodes[*idx].cursor_info = Some((*cursor_info).clone());
-            }
-        }
-    }
-
-    ref_map.set_next_ref_num(next_ref);
+    assign_refs(
+        &mut tree_nodes,
+        &cursor_elements,
+        ref_map,
+        session_id,
+        frame_id,
+        document_is_known,
+    );
 
     if options.urls {
         let link_nodes: Vec<(usize, i64)> = tree_nodes
@@ -724,6 +648,428 @@ pub async fn take_snapshot(
     Ok(trimmed)
 }
 
+/// Gives refs to interactive, named content, and cursor-interactive nodes, reusing durable refs for known documents.
+fn assign_refs(
+    tree_nodes: &mut [TreeNode],
+    cursor_elements: &HashMap<i64, CursorElementInfo>,
+    ref_map: &mut RefMap,
+    session_id: &str,
+    frame_id: Option<&str>,
+    document_is_known: bool,
+) -> Vec<usize> {
+    let mut tracker = RoleNameTracker::new();
+    let mut next_ref: usize = ref_map.next_ref_num();
+
+    let mut nodes_with_refs: Vec<(usize, usize)> = Vec::new();
+
+    for (idx, node) in tree_nodes.iter().enumerate() {
+        let role = node.role.as_str();
+        let should_ref = INTERACTIVE_ROLES.contains(&role)
+            || (CONTENT_ROLES.contains(&role) && !node.name.is_empty())
+            || node
+                .backend_node_id
+                .is_some_and(|bid| cursor_elements.contains_key(&bid));
+
+        if should_ref {
+            let nth = tracker.track(role, &node.name);
+            nodes_with_refs.push((idx, nth));
+        }
+    }
+
+    let duplicates = tracker.get_duplicates();
+
+    for (idx, nth) in &nodes_with_refs {
+        let node = &tree_nodes[*idx];
+        let backend_node_id = node.backend_node_id;
+        let key = format!("{}:{}", node.role, node.name);
+        let actual_nth = if duplicates.contains_key(&key) {
+            Some(*nth)
+        } else {
+            None
+        };
+
+        let ref_id = if let Some(backend_node_id) = backend_node_id.filter(|_| document_is_known) {
+            if let Some(existing) = ref_map.durable_ref(session_id, frame_id, backend_node_id) {
+                existing.to_string()
+            } else {
+                let allocated = format!("e{}", next_ref);
+                next_ref += 1;
+                ref_map.remember_durable_ref(session_id, frame_id, backend_node_id, &allocated);
+                allocated
+            }
+        } else {
+            let allocated = format!("e{}", next_ref);
+            next_ref += 1;
+            allocated
+        };
+
+        ref_map.add_with_frame(
+            ref_id.clone(),
+            backend_node_id,
+            &node.role,
+            &node.name,
+            actual_nth,
+            frame_id,
+        );
+
+        let cursor_info = backend_node_id
+            .and_then(|bid| cursor_elements.get(&bid))
+            .cloned();
+        let node = &mut tree_nodes[*idx];
+        node.has_ref = true;
+        node.ref_id = Some(ref_id);
+        node.cursor_info = cursor_info;
+    }
+
+    ref_map.set_next_ref_num(next_ref);
+    nodes_with_refs.into_iter().map(|(idx, _)| idx).collect()
+}
+
+/// A ref that intersects the viewport, with its `getBoundingClientRect` box in CSS pixels.
+pub struct ViewportRef {
+    pub ref_id: String,
+    pub role: String,
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+const VIEWPORT_OBJECT_GROUP: &str = "agent-browser-viewport";
+
+/// Upper bounds on what one viewport scan reads back, so a page cannot make the daemon allocate without limit.
+const VIEWPORT_MAX_ELEMENTS: usize = 10_000;
+const VIEWPORT_MAX_HOSTS: usize = 500;
+
+/// Elements that can carry a ref without cursor-interactive styling: the implicit and explicit roles in
+/// `INTERACTIVE_ROLES` and `CONTENT_ROLES`.
+const VIEWPORT_CANDIDATES: &str = "a,area,button,input,select,textarea,option,iframe,h1,h2,h3,h4,h5,h6,td,th,li,article,section,main,nav,[role],[tabindex],[contenteditable]";
+
+/// Assigns refs to the elements that intersect the viewport, asking Chrome for accessibility data on those
+/// elements only, so the cost tracks what is on screen rather than the size of the page.
+/// Refs from an earlier snapshot of the same document are kept. Errors on an empty viewport or missing accessibility
+/// data so the caller can fall back to the full snapshot.
+pub async fn take_viewport_refs(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &mut RefMap,
+) -> Result<Vec<ViewportRef>, String> {
+    client
+        .send_command_no_params("DOM.enable", Some(session_id))
+        .await?;
+    client
+        .send_command_no_params("Accessibility.enable", Some(session_id))
+        .await?;
+    let frame_tree = client
+        .send_command_no_params("Page.getFrameTree", Some(session_id))
+        .await
+        .ok();
+    let loader = frame_tree
+        .as_ref()
+        .and_then(|tree| frame_loader(&tree["frameTree"], None));
+    let same_document = ref_map.is_current_document(session_id, None, session_id, loader);
+    let document_is_known = ref_map.observe_document(session_id, None, session_id, loader);
+    if !same_document {
+        ref_map.begin_snapshot();
+    }
+
+    let scanned = collect_viewport_nodes(client, session_id).await;
+    let _ = client
+        .send_command(
+            "Runtime.releaseObjectGroup",
+            Some(serde_json::json!({ "objectGroup": VIEWPORT_OBJECT_GROUP })),
+            Some(session_id),
+        )
+        .await;
+    let (nodes, rects, cursor_elements) = scanned?;
+
+    let prior: HashMap<String, RefEntry> = nodes
+        .iter()
+        .filter_map(|n| ref_map.durable_ref(session_id, None, n.backend_d_o_m_node_id?))
+        .filter_map(|id| Some((id.to_string(), ref_map.get(id)?.clone())))
+        .collect();
+    let (mut tree_nodes, _) = build_tree(&nodes);
+    promote_hidden_inputs(&mut tree_nodes, &cursor_elements);
+    let ref_indices = assign_refs(
+        &mut tree_nodes,
+        &cursor_elements,
+        ref_map,
+        session_id,
+        None,
+        document_is_known,
+    );
+
+    let mut refs = Vec::with_capacity(ref_indices.len());
+    for idx in ref_indices {
+        let node = &tree_nodes[idx];
+        let Some(ref_id) = node.ref_id.clone() else {
+            continue;
+        };
+        match prior.get(&ref_id) {
+            Some(entry) if entry.role == node.role && entry.name == node.name => {
+                ref_map.restore(ref_id.clone(), entry.clone())
+            }
+            _ => ref_map.restrict_to_backend_node(&ref_id),
+        }
+        let [x, y, width, height] = rects[idx];
+        refs.push(ViewportRef {
+            ref_id,
+            role: node.role.clone(),
+            name: node.name.clone(),
+            x,
+            y,
+            width,
+            height,
+        });
+    }
+    Ok(refs)
+}
+
+type ViewportNodes = (Vec<AXNode>, Vec<[f64; 4]>, HashMap<i64, CursorElementInfo>);
+
+/// Finds candidate elements that intersect the viewport in one script and fetches each one's accessibility node.
+async fn collect_viewport_nodes(
+    client: &CdpClient,
+    session_id: &str,
+) -> Result<ViewportNodes, String> {
+    let scan = format!(
+        r#"
+function(sel, inShadowRoot, everyElement) {{
+    {CURSOR_INFO_JS}
+    var W = window.innerWidth || 0, H = window.innerHeight || 0;
+    if (!W || !H) return null;
+    var els = Object.create(null), info = Object.create(null), hosts = Object.create(null), count = 0, hostCount = 0;
+    function visit(root, inShadow) {{
+        var all = root.querySelectorAll('*');
+        for (var i = 0; i < all.length; i++) {{
+            var el = all[i];
+            if (el.shadowRoot) visit(el.shadowRoot, true);
+            var r = el.getBoundingClientRect();
+            var visible = r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 && r.left < W && r.top < H;
+            var custom = el.localName.indexOf('-') > 0 && (visible || (!r.width && !r.height));
+            var builtIn = visible && (/^(date|time|datetime-local|month|week)$/.test(el.type) && el.localName === 'input' || (el.localName === 'video' || el.localName === 'audio') && el.controls);
+            if (!el.shadowRoot && hostCount < 500 && (custom || builtIn)) hosts[hostCount++] = el;
+            if (!visible) continue;
+            var cursor = !inShadow && el !== document.body && document.body && document.body.contains(el) ? __abCursorInfo(el) : null;
+            if (!cursor && !everyElement && !el.matches(sel)) continue;
+            els[count] = el;
+            info[count++] = {{ rect: [r.x, r.y, r.width, r.height], cursor: cursor }};
+        }}
+    }}
+    visit(this, inShadowRoot || everyElement);
+    els.info = info;
+    els.count = count;
+    els.hosts = hosts;
+    return els;
+}}
+"#
+    );
+    let call = |object_id: String, function: &str, args: Value, by_value: bool| {
+        client.send_command(
+            "Runtime.callFunctionOn",
+            Some(serde_json::json!({
+                "objectId": object_id,
+                "functionDeclaration": function,
+                "arguments": args,
+                "returnByValue": by_value,
+                "objectGroup": VIEWPORT_OBJECT_GROUP,
+            })),
+            Some(session_id),
+        )
+    };
+    let document = client
+        .send_command(
+            "Runtime.evaluate",
+            Some(serde_json::json!({ "expression": "document", "objectGroup": VIEWPORT_OBJECT_GROUP })),
+            Some(session_id),
+        )
+        .await?;
+    let mut roots = vec![(
+        object_id(&document["result"]).ok_or("No document handle")?,
+        false,
+        false,
+    )];
+    let mut info = Vec::new();
+    let mut element_ids: Vec<Option<String>> = Vec::new();
+    for depth in 0..4 {
+        let mut closed_roots = Vec::new();
+        for (root, in_shadow, every_element) in roots {
+            let args = serde_json::json!([
+                { "value": VIEWPORT_CANDIDATES },
+                { "value": in_shadow },
+                { "value": every_element },
+            ]);
+            let array = call(root, &scan, args, false).await?;
+            if let Some(exception) = array.get("exceptionDetails") {
+                return Err(format!("Viewport scan failed: {}", exception["text"]));
+            }
+            let Some(array_id) = object_id(&array["result"]) else {
+                if depth == 0 {
+                    return Err("Viewport scan returned no element list".to_string());
+                }
+                continue;
+            };
+            let limit = VIEWPORT_MAX_ELEMENTS.saturating_sub(info.len());
+            let found = call(
+                array_id.clone(),
+                "function(n) { var out = Object.create(null), c = 0; for (; c < n && c < this.count; c++) out[c] = this.info[c]; out.count = c; return out; }",
+                serde_json::json!([{ "value": limit }]),
+                true,
+            )
+            .await?;
+            let found = indexed_values(&found["result"]["value"], limit);
+            element_ids.extend(array_object_ids(client, session_id, &array_id, found.len()).await?);
+            info.extend(found);
+            let hosts = call(
+                array_id,
+                "function() { return this.hosts; }",
+                serde_json::json!([]),
+                false,
+            )
+            .await?;
+            let Some(hosts_id) = object_id(&hosts["result"]) else {
+                continue;
+            };
+            for host in array_object_ids(client, session_id, &hosts_id, VIEWPORT_MAX_HOSTS)
+                .await?
+                .into_iter()
+                .flatten()
+            {
+                closed_roots.extend(closed_shadow_roots(client, session_id, &host).await);
+            }
+        }
+        if closed_roots.is_empty() {
+            break;
+        }
+        roots = closed_roots
+            .into_iter()
+            .map(|(root, user_agent)| (root, true, user_agent))
+            .collect();
+    }
+
+    let ax_nodes = futures_util::future::join_all(element_ids.iter().map(|id| async move {
+        let result: GetFullAXTreeResult = client
+            .send_command_typed(
+                "Accessibility.getPartialAXTree",
+                &serde_json::json!({ "objectId": id.as_deref()?, "fetchRelatives": false }),
+                Some(session_id),
+            )
+            .await
+            .ok()?;
+        result.nodes.into_iter().next()
+    }))
+    .await;
+
+    let mut nodes = Vec::new();
+    let mut rects = Vec::new();
+    let mut cursor_elements = HashMap::new();
+    let mut seen = std::collections::HashSet::new();
+    for (mut node, item) in ax_nodes
+        .into_iter()
+        .zip(&info)
+        .filter_map(|(n, i)| Some((n?, i)))
+    {
+        let Some(bid) = node.backend_d_o_m_node_id.filter(|bid| seen.insert(*bid)) else {
+            continue;
+        };
+        if item["cursor"].is_object() {
+            cursor_elements.insert(bid, cursor_info_from_json(&item["cursor"]));
+        }
+        let rect = |k: usize| item["rect"][k].as_f64().unwrap_or(0.0);
+        rects.push([rect(0), rect(1), rect(2), rect(3)]);
+        node.child_ids = None;
+        nodes.push(node);
+    }
+    if nodes.is_empty() && !info.is_empty() {
+        return Err("Accessibility data is unavailable for the viewport elements".to_string());
+    }
+    Ok((nodes, rects, cursor_elements))
+}
+
+/// Reads `count` entries keyed "0", "1", ... from an object returned by a page script, at most `limit`.
+fn indexed_values(value: &Value, limit: usize) -> Vec<Value> {
+    let count = value["count"].as_u64().unwrap_or(0) as usize;
+    (0..count.min(limit))
+        .map_while(|i| value.get(i.to_string()).cloned())
+        .collect()
+}
+
+fn object_id(remote: &Value) -> Option<String> {
+    remote["objectId"].as_str().map(str::to_string)
+}
+
+/// Returns the element handles of a remote array at positions below `len`; the page cannot grow the result.
+async fn array_object_ids(
+    client: &CdpClient,
+    session_id: &str,
+    array_id: &str,
+    len: usize,
+) -> Result<Vec<Option<String>>, String> {
+    let props = client
+        .send_command(
+            "Runtime.getProperties",
+            Some(serde_json::json!({ "objectId": array_id, "ownProperties": true })),
+            Some(session_id),
+        )
+        .await?;
+    let mut ids = vec![None; len];
+    for prop in props["result"].as_array().into_iter().flatten() {
+        if let Some(slot) = prop["name"]
+            .as_str()
+            .and_then(|n| n.parse::<usize>().ok())
+            .and_then(|i| ids.get_mut(i))
+        {
+            *slot = object_id(&prop["value"]);
+        }
+    }
+    Ok(ids)
+}
+
+/// Resolves the closed and browser-internal shadow roots of one host, which page scripts cannot reach.
+/// Each root comes with whether it is a user-agent root, whose controls get their roles from the browser.
+async fn closed_shadow_roots(
+    client: &CdpClient,
+    session_id: &str,
+    host: &str,
+) -> Vec<(String, bool)> {
+    let Ok(described) = client
+        .send_command(
+            "DOM.describeNode",
+            Some(serde_json::json!({ "objectId": host, "depth": 1, "pierce": true })),
+            Some(session_id),
+        )
+        .await
+    else {
+        return Vec::new();
+    };
+    let mut roots = Vec::new();
+    for root in described["node"]["shadowRoots"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let user_agent = root["shadowRootType"] == "user-agent";
+        if root["shadowRootType"] != "closed" && !user_agent {
+            continue;
+        }
+        if let Ok(resolved) = client
+            .send_command(
+                "DOM.resolveNode",
+                Some(serde_json::json!({
+                    "backendNodeId": root["backendNodeId"],
+                    "objectGroup": VIEWPORT_OBJECT_GROUP,
+                })),
+                Some(session_id),
+            )
+            .await
+        {
+            roots.extend(object_id(&resolved["object"]).map(|id| (id, user_agent)));
+        }
+    }
+    roots
+}
+
 /// Resolve the child frame ID for an iframe element given its backendNodeId.
 fn frame_loader<'a>(tree: &'a Value, frame_id: Option<&str>) -> Option<&'a str> {
     let frame = &tree["frame"];
@@ -769,6 +1115,72 @@ async fn resolve_iframe_frame_id(
         .ok_or_else(|| "Could not resolve iframe frame ID".to_string())
 }
 
+/// Defines `__abCursorInfo(el)`, which returns the cursor-interactive details of one element or null.
+/// Shared by the full-page scan and the viewport scan so both apply the same rules.
+const CURSOR_INFO_JS: &str = r#"
+    var __abInteractiveRoles = {
+        'button':1, 'link':1, 'textbox':1, 'checkbox':1, 'radio':1, 'combobox':1, 'listbox':1,
+        'menuitem':1, 'menuitemcheckbox':1, 'menuitemradio':1, 'option':1, 'searchbox':1,
+        'slider':1, 'spinbutton':1, 'switch':1, 'tab':1, 'treeitem':1
+    };
+    var __abInteractiveTags = {
+        'a':1, 'button':1, 'input':1, 'select':1, 'textarea':1, 'details':1, 'summary':1
+    };
+    function __abCursorInfo(el) {
+        if (el.closest && el.closest('[hidden], [aria-hidden="true"]')) return null;
+
+        var tagName = el.tagName.toLowerCase();
+        if (__abInteractiveTags[tagName]) return null;
+
+        var role = el.getAttribute('role');
+        if (role && __abInteractiveRoles[role.toLowerCase()]) return null;
+
+        var computedStyle = getComputedStyle(el);
+        var hasCursorPointer = computedStyle.cursor === 'pointer';
+        var hasOnClick = el.hasAttribute('onclick') || el.onclick !== null;
+        var tabIndex = el.getAttribute('tabindex');
+        var hasTabIndex = tabIndex !== null && tabIndex !== '-1';
+        var ce = el.getAttribute('contenteditable');
+        var isEditable = ce === '' || ce === 'true';
+
+        if (!hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) return null;
+
+        if (hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) {
+            var parent = el.parentElement;
+            if (parent && getComputedStyle(parent).cursor === 'pointer') return null;
+        }
+
+        var text = (el.textContent || '').trim().slice(0, 100);
+
+        var rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return null;
+
+        var hiddenInputType = null;
+        var hiddenInputChecked = null;
+        var hiddenInput = el.querySelector('input[type="radio"], input[type="checkbox"]');
+        if (hiddenInput) {
+            var hiddenInputStyle = getComputedStyle(hiddenInput);
+            var isInputHidden = hiddenInputStyle.display === 'none' || hiddenInputStyle.visibility === 'hidden' || hiddenInput.hidden;
+            if (isInputHidden) {
+                hiddenInputType = hiddenInput.type;
+                hiddenInputChecked = hiddenInput.indeterminate ? 'mixed' : String(hiddenInput.checked);
+            }
+        }
+
+        var kind = hasCursorPointer || hasOnClick ? 'clickable' : isEditable ? 'editable' : 'focusable';
+        var hints = (hasCursorPointer ? ',cursor:pointer' : '') + (hasOnClick ? ',onclick' : '') +
+            (hasTabIndex ? ',tabindex' : '') + (isEditable ? ',contenteditable' : '');
+
+        return {
+            text: text,
+            kind: kind,
+            hints: hints,
+            hiddenInputType: hiddenInputType,
+            hiddenInputChecked: hiddenInputChecked
+        };
+    }
+"#;
+
 async fn find_cursor_interactive_elements(
     client: &CdpClient,
     session_id: &str,
@@ -782,91 +1194,32 @@ async fn find_cursor_interactive_elements(
     // - Deduplicates inherited cursor:pointer from parent
     // - Skips empty text and zero-size elements
     // - Tags each matched element with data-__ab-ci for batch backendNodeId resolution
-    let js = r#"
-(function() {
-    var results = [];
+    let js = format!(
+        r#"
+(function() {{
+    var results = Object.create(null), count = 0;
+    results.count = 0;
     if (!document.body) return results;
-
-    var interactiveRoles = {
-        'button':1, 'link':1, 'textbox':1, 'checkbox':1, 'radio':1, 'combobox':1, 'listbox':1,
-        'menuitem':1, 'menuitemcheckbox':1, 'menuitemradio':1, 'option':1, 'searchbox':1,
-        'slider':1, 'spinbutton':1, 'switch':1, 'tab':1, 'treeitem':1
-    };
-    var interactiveTags = {
-        'a':1, 'button':1, 'input':1, 'select':1, 'textarea':1, 'details':1, 'summary':1
-    };
-
+    {CURSOR_INFO_JS}
     var allElements = document.body.querySelectorAll('*');
-    for (var i = 0; i < allElements.length; i++) {
+    for (var i = 0; i < allElements.length; i++) {{
         var el = allElements[i];
-
-        if (el.closest && el.closest('[hidden], [aria-hidden="true"]')) continue;
-
-        var tagName = el.tagName.toLowerCase();
-        if (interactiveTags[tagName]) continue;
-
-        var role = el.getAttribute('role');
-        if (role && interactiveRoles[role.toLowerCase()]) continue;
-
-        var computedStyle = getComputedStyle(el);
-        var hasCursorPointer = computedStyle.cursor === 'pointer';
-        var hasOnClick = el.hasAttribute('onclick') || el.onclick !== null;
-        var tabIndex = el.getAttribute('tabindex');
-        var hasTabIndex = tabIndex !== null && tabIndex !== '-1';
-        var ce = el.getAttribute('contenteditable');
-        var isEditable = ce === '' || ce === 'true';
-
-        if (!hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) continue;
-
-        // Skip elements that only inherit cursor:pointer from an ancestor
-        if (hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) {
-            var parent = el.parentElement;
-            if (parent && getComputedStyle(parent).cursor === 'pointer') continue;
-        }
-
-        var text = (el.textContent || '').trim().slice(0, 100);
-
-        var rect = el.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) continue;
-
-        // Detect hidden radio/checkbox inputs inside this element (common pattern:
-        // <label> wrapping a display:none <input type="radio"> styled as a card).
-        // Note: we only check display/visibility/hidden, NOT opacity:0 or sr-only,
-        // because those inputs remain in Chrome's AX tree and already appear as
-        // role="radio" without promotion.
-        var hiddenInputType = null;
-        var hiddenInputChecked = null;
-        var hiddenInput = el.querySelector('input[type="radio"], input[type="checkbox"]');
-        if (hiddenInput) {
-            var hiddenInputStyle = getComputedStyle(hiddenInput);
-            var isInputHidden = hiddenInputStyle.display === 'none' || hiddenInputStyle.visibility === 'hidden' || hiddenInput.hidden;
-            if (isInputHidden) {
-                hiddenInputType = hiddenInput.type;
-                hiddenInputChecked = hiddenInput.indeterminate ? 'mixed' : String(hiddenInput.checked);
-            }
-        }
-
-        el.setAttribute('data-__ab-ci', String(results.length));
-        results.push({
-            text: text,
-            tagName: tagName,
-            hasOnClick: hasOnClick,
-            hasCursorPointer: hasCursorPointer,
-            hasTabIndex: hasTabIndex,
-            isEditable: isEditable,
-            hiddenInputType: hiddenInputType,
-            hiddenInputChecked: hiddenInputChecked
-        });
-    }
+        var info = __abCursorInfo(el);
+        if (!info) continue;
+        el.setAttribute('data-__ab-ci', String(count));
+        results[count++] = info;
+    }}
+    results.count = count;
     return results;
-})()
-"#;
+}})()
+"#
+    );
 
     let result: EvaluateResult = client
         .send_command_typed(
             "Runtime.evaluate",
             &EvaluateParams {
-                expression: js.to_string(),
+                expression: js,
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
@@ -874,11 +1227,7 @@ async fn find_cursor_interactive_elements(
         )
         .await?;
 
-    let elements: Vec<Value> = result
-        .result
-        .value
-        .and_then(|v| serde_json::from_value::<Vec<Value>>(v).ok())
-        .unwrap_or_default();
+    let elements = indexed_values(&result.result.value.unwrap_or(Value::Null), usize::MAX);
 
     if elements.is_empty() {
         return Ok(HashMap::new());
@@ -978,80 +1327,43 @@ async fn find_cursor_interactive_elements(
     // Build the map
     let mut map: HashMap<i64, CursorElementInfo> = HashMap::new();
     for (i, elem) in elements.iter().enumerate() {
-        let backend_node_id = idx_to_backend.get(&i).copied();
-
-        // Role differentiation: v0.19.0 uses 'clickable' for cursor:pointer or onclick,
-        // 'focusable' for tabindex-only elements.
-        let has_cursor_pointer = elem
-            .get("hasCursorPointer")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let has_on_click = elem
-            .get("hasOnClick")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let has_tab_index = elem
-            .get("hasTabIndex")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let is_editable = elem
-            .get("isEditable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let kind = if has_cursor_pointer || has_on_click {
-            "clickable"
-        } else if is_editable {
-            "editable"
-        } else {
-            "focusable"
-        };
-
-        let mut hints: Vec<String> = Vec::new();
-        if has_cursor_pointer {
-            hints.push("cursor:pointer".to_string());
-        }
-        if has_on_click {
-            hints.push("onclick".to_string());
-        }
-        if has_tab_index {
-            hints.push("tabindex".to_string());
-        }
-        if is_editable {
-            hints.push("contenteditable".to_string());
-        }
-
-        let text = elem
-            .get("text")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-
-        let hidden_input_kind = elem
-            .get("hiddenInputType")
-            .and_then(|v| v.as_str())
-            .and_then(HiddenInputKind::parse);
-        let hidden_input_checked = elem
-            .get("hiddenInputChecked")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        if let Some(bid) = backend_node_id {
-            map.insert(
-                bid,
-                CursorElementInfo {
-                    kind: kind.to_string(),
-                    hints,
-                    text,
-                    hidden_input_kind,
-                    hidden_input_checked,
-                },
-            );
+        if let Some(bid) = idx_to_backend.get(&i).copied() {
+            map.insert(bid, cursor_info_from_json(elem));
         }
     }
 
     Ok(map)
+}
+
+/// The JSON shape returned by `__abCursorInfo`.
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct CursorInfoJson {
+    text: String,
+    kind: String,
+    hints: String,
+    hidden_input_type: Option<String>,
+    hidden_input_checked: Option<String>,
+}
+
+/// Converts one `__abCursorInfo` result into the snapshot's cursor-interactive record.
+fn cursor_info_from_json(elem: &Value) -> CursorElementInfo {
+    let info: CursorInfoJson = serde_json::from_value(elem.clone()).unwrap_or_default();
+    CursorElementInfo {
+        kind: info.kind,
+        hints: info
+            .hints
+            .split(',')
+            .filter(|hint| !hint.is_empty())
+            .map(str::to_string)
+            .collect(),
+        text: info.text.trim().to_string(),
+        hidden_input_kind: info
+            .hidden_input_type
+            .as_deref()
+            .and_then(HiddenInputKind::parse),
+        hidden_input_checked: info.hidden_input_checked,
+    }
 }
 
 /// Promote LabelText/generic nodes that wrap a hidden radio/checkbox input.
@@ -1510,6 +1822,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn indexed_values_ignores_page_supplied_counts_and_extra_keys() {
+        let value =
+            serde_json::json!({ "count": 4294967295u64, "0": "a", "1": "b", "4294967290": "x" });
+        assert_eq!(indexed_values(&value, usize::MAX), vec!["a", "b"]);
+        assert_eq!(indexed_values(&value, 1), vec!["a"]);
+        assert!(indexed_values(&serde_json::json!({ "0": "a" }), 10).is_empty());
+        assert!(indexed_values(&Value::Null, 10).is_empty());
+    }
+
+    #[test]
+    fn cursor_info_hints_keep_order_and_skip_empty() {
+        let info = cursor_info_from_json(&serde_json::json!({
+            "text": "  Card  ",
+            "kind": "clickable",
+            "hints": ",cursor:pointer,onclick,tabindex",
+        }));
+        assert_eq!(info.hints, vec!["cursor:pointer", "onclick", "tabindex"]);
+        assert_eq!(info.text, "Card");
+        assert!(cursor_info_from_json(&serde_json::json!({ "hints": "" }))
+            .hints
+            .is_empty());
+    }
+
+    #[test]
     fn test_normalize_snapshot_name_preserves_word_boundaries() {
         assert_eq!(
             normalize_snapshot_name("Capital\u{00A0}Federal"),
@@ -1576,9 +1912,9 @@ mod tests {
     #[test]
     fn test_role_name_tracker() {
         let mut tracker = RoleNameTracker::new();
-        assert_eq!(tracker.track("button", "Submit", 0), 0);
-        assert_eq!(tracker.track("button", "Submit", 1), 1);
-        assert_eq!(tracker.track("button", "Cancel", 2), 0);
+        assert_eq!(tracker.track("button", "Submit"), 0);
+        assert_eq!(tracker.track("button", "Submit"), 1);
+        assert_eq!(tracker.track("button", "Cancel"), 0);
 
         let dups = tracker.get_duplicates();
         assert!(dups.contains_key("button:Submit"));
