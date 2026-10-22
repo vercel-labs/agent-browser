@@ -897,14 +897,14 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_SELECT,
             "Select options",
-            "Select one or more options in a select element.",
+            "Select one or more options in a select element. Each value matches an exact option value or visible label; a value matching several options fails and lists them.",
             json!({
                 "selector": selector_schema(),
                 "values": {
                     "type": "array",
                     "items": { "type": "string" },
                     "minItems": 1,
-                    "description": "Option values or labels to select."
+                    "description": "Option values or labels to select. Matched on the exact value or visible label, then on the label with whitespace normalized. A value that matches several options is an error; pass the exact option value instead."
                 }
             }),
             &["selector", "values"],
