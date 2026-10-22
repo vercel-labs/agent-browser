@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Late element</title>
+    <style>
+      #late {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <p id="status">waiting</p>
+    <div id="late">late</div>
+    <script>
+      const delay = Number(
+        new URLSearchParams(location.search).get("delay") || 1500,
+      );
+      setTimeout(() => {
+        window.__signalAt = Date.now();
+        document.getElementById("late").style.display = "block";
+        document.getElementById("status").textContent = "ready";
+      }, delay);
+    </script>
+  </body>
+</html>
