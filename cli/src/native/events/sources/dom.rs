@@ -343,6 +343,7 @@ impl EventSource for DomObserver {
                         "truncated": observation.truncated
                     }),
                     initial: observation.initial,
+                    location: None,
                 })
             }
             DomSignal::SameDocumentNavigation => Some(SourceSignal::Rearmed),
@@ -365,6 +366,7 @@ impl EventSource for DomObserver {
                 "truncated": observation.truncated
             }),
             initial: observation.initial,
+            location: None,
         }))
     }
 

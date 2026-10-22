@@ -70,6 +70,7 @@ fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
         "event_navigation_probe" => include_str!("test_fixtures/event_navigation_probe.html"),
+        "event_tap_probe" => include_str!("test_fixtures/event_tap_probe.html"),
         "events_probe" => include_str!("test_fixtures/events_probe.html"),
         "html5_drag_probe" => include_str!("test_fixtures/html5_drag_probe.html"),
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
@@ -81,6 +82,271 @@ fn native_test_fixture_html(name: &str) -> &'static str {
         "webmcp_context_probe" => include_str!("test_fixtures/webmcp_context_probe.html"),
         _ => panic!("Unknown native test fixture: {}", name),
     }
+}
+
+async fn start_event_tap_fixture_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let mut request = vec![0u8; 4096];
+            let length = stream.read(&mut request).await.unwrap_or(0);
+            let request = String::from_utf8_lossy(&request[..length]);
+            let (content_type, extra_header, body) = if request.starts_with("GET /download ") {
+                (
+                    "application/octet-stream",
+                    "Content-Disposition: attachment; filename=event-tap.txt\r\n",
+                    "event tap download",
+                )
+            } else {
+                (
+                    "text/html; charset=utf-8",
+                    "",
+                    native_test_fixture_html("event_tap_probe"),
+                )
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{extra_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+    (format!("http://{address}/events"), handle)
+}
+
+async fn start_cdp_tap(
+    state: &mut DaemonState,
+    id: &str,
+    method: &str,
+    once: bool,
+    matcher: Option<&str>,
+) -> Value {
+    let mut command = json!({
+        "id": id,
+        "action": "events_start",
+        "method": method,
+        "once": once
+    });
+    if let Some(matcher) = matcher {
+        command["match"] = json!([matcher]);
+    }
+    let response = execute_command(&command, state).await;
+    assert_success(&response);
+    get_data(&response).clone()
+}
+
+async fn read_cdp_tap_event(state: &DaemonState, subscription: &Value, method: &str) -> Value {
+    let id = subscription["id"].as_str().unwrap();
+    let cursor = subscription["cursor"].as_str().unwrap();
+    let read = state
+        .events
+        .read(id, Some(cursor), std::time::Duration::from_secs(5), 20)
+        .await
+        .unwrap();
+    let events: Vec<_> = read
+        .events
+        .into_iter()
+        .filter(|event| event.meta.name == method)
+        .collect();
+    assert_eq!(events.len(), 1, "expected one {method} event");
+    serde_json::to_value(&events[0]).unwrap()
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_cdp_event_tap_recipes() {
+    let environment = EnvGuard::new(&[
+        "AGENT_BROWSER_ACTION_POLICY",
+        "AGENT_BROWSER_POLICY",
+        "AGENT_BROWSER_CONFIRM_ACTIONS",
+        "AGENT_BROWSER_ALLOWED_DOMAINS",
+    ]);
+    environment.remove("AGENT_BROWSER_ACTION_POLICY");
+    environment.remove("AGENT_BROWSER_POLICY");
+    environment.remove("AGENT_BROWSER_CONFIRM_ACTIONS");
+    environment.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+    let (url, server) = start_event_tap_fixture_server().await;
+    let download_directory = tempfile::tempdir().unwrap();
+    let mut state = DaemonState::new();
+    let response = execute_command(
+        &json!({
+            "id": "launch",
+            "action": "launch",
+            "headless": true,
+            "downloadPath": download_directory.path().to_string_lossy()
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+    let response = execute_command(
+        &json!({"id": "navigate", "action": "navigate", "url": url}),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+
+    let dialog = start_cdp_tap(
+        &mut state,
+        "dialog-start",
+        "Page.javascriptDialogOpening",
+        true,
+        Some("/type=alert"),
+    )
+    .await;
+    let response = execute_command(
+        &json!({
+            "id": "dialog-trigger",
+            "action": "evaluate",
+            "script": "setTimeout(() => alert('fixture dialog'), 0)"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+    let event = read_cdp_tap_event(&state, &dialog, "Page.javascriptDialogOpening").await;
+    assert_eq!(event["data"]["type"], "alert");
+    let response = execute_command(
+        &json!({"id": "dialog-dismiss", "action": "dialog", "response": "dismiss"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+
+    let navigation = start_cdp_tap(
+        &mut state,
+        "navigation-start",
+        "Page.navigatedWithinDocument",
+        true,
+        None,
+    )
+    .await;
+    let response = execute_command(
+        &json!({
+            "id": "navigation-trigger",
+            "action": "evaluate",
+            "script": "history.pushState({}, '', '/events#changed')"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+    let event = read_cdp_tap_event(&state, &navigation, "Page.navigatedWithinDocument").await;
+    assert!(event["data"]["url"].as_str().unwrap().ends_with("#changed"));
+
+    let response = execute_command(
+        &json!({"id": "background-tab", "action": "tab_new", "url": url}),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+    let (background_session, background_tab) = {
+        let browser = state.browser.as_ref().unwrap();
+        let active_target = browser.active_target_id().unwrap();
+        let page = browser
+            .pages_list()
+            .into_iter()
+            .find(|page| page.target_id != active_target)
+            .unwrap();
+        (
+            page.session_id,
+            crate::native::browser::format_tab_id(page.tab_id),
+        )
+    };
+    let response = execute_command(
+        &json!({"id": "foreground-tab", "action": "tab_switch", "tabId": "t1"}),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+    let console = start_cdp_tap(
+        &mut state,
+        "console-start",
+        "Runtime.consoleAPICalled",
+        true,
+        None,
+    )
+    .await;
+    let client = state.browser.as_ref().unwrap().client.clone();
+    client
+        .send_command(
+            "Runtime.evaluate",
+            Some(json!({"expression": "console.log('fixture background console')"})),
+            Some(&background_session),
+        )
+        .await
+        .unwrap();
+    let event = read_cdp_tap_event(&state, &console, "Runtime.consoleAPICalled").await;
+    assert_eq!(event["meta"]["tab"]["id"], background_tab);
+    assert_eq!(event["data"]["text"], "fixture background console");
+
+    let exception = start_cdp_tap(
+        &mut state,
+        "exception-start",
+        "Runtime.exceptionThrown",
+        true,
+        None,
+    )
+    .await;
+    let response = execute_command(
+        &json!({
+            "id": "exception-trigger",
+            "action": "evaluate",
+            "script": "setTimeout(() => { throw new Error('fixture page error') }, 0)"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+    let event = read_cdp_tap_event(&state, &exception, "Runtime.exceptionThrown").await;
+    assert!(event["data"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("fixture page error"));
+
+    let download = start_cdp_tap(
+        &mut state,
+        "download-start",
+        "Browser.downloadWillBegin",
+        true,
+        None,
+    )
+    .await;
+    let response = execute_command(
+        &json!({
+            "id": "download-trigger",
+            "action": "click",
+            "selector": "#download"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&response);
+    let event = read_cdp_tap_event(&state, &download, "Browser.downloadWillBegin").await;
+    assert_eq!(event["data"]["suggestedFilename"], "event-tap.txt");
+    assert!(download_directory.path().join("event-tap.txt").exists());
+
+    let target = start_cdp_tap(
+        &mut state,
+        "target-start",
+        "Target.targetCreated",
+        true,
+        None,
+    )
+    .await;
+    let client = state.browser.as_ref().unwrap().client.clone();
+    client
+        .send_command_typed::<_, Value>("Target.createTarget", &json!({"url": "about:blank"}), None)
+        .await
+        .unwrap();
+    let event = read_cdp_tap_event(&state, &target, "Target.targetCreated").await;
+    assert_eq!(event["data"]["type"], "page");
+    assert!(!event["data"]["targetId"].as_str().unwrap().is_empty());
+
+    let response = execute_command(&json!({"id": "close", "action": "close"}), &mut state).await;
+    assert_success(&response);
+    server.abort();
 }
 
 #[tokio::test]

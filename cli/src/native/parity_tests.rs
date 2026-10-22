@@ -496,6 +496,45 @@ async fn events_read_policy_denial_blocks_without_a_browser() {
 }
 
 #[tokio::test]
+async fn events_start_checks_the_source_policy_without_a_browser() {
+    use crate::native::policy::ActionPolicy;
+    use crate::test_utils::EnvGuard;
+
+    let environment = EnvGuard::new(&[
+        "AGENT_BROWSER_ACTION_POLICY",
+        "AGENT_BROWSER_POLICY",
+        "AGENT_BROWSER_CONFIRM_ACTIONS",
+    ]);
+    environment.remove("AGENT_BROWSER_ACTION_POLICY");
+    environment.remove("AGENT_BROWSER_POLICY");
+    environment.remove("AGENT_BROWSER_CONFIRM_ACTIONS");
+    let directory = tempfile::tempdir().unwrap();
+    let policy_path = directory.path().join("policy.json");
+    std::fs::write(&policy_path, r#"{"deny":["dialog"]}"#).unwrap();
+    let mut daemon = DaemonState::new();
+    daemon.policy = Some(ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
+    for (action, method) in [
+        ("dialog", "Page.javascriptDialogOpening"),
+        ("download", "Browser.downloadWillBegin"),
+    ] {
+        std::fs::write(&policy_path, format!(r#"{{"deny":["{action}"]}}"#)).unwrap();
+        let response = execute_command(
+            &json!({
+                "id": format!("policy-start-{action}"),
+                "action": "events_start",
+                "method": method
+            }),
+            &mut daemon,
+        )
+        .await;
+
+        assert_eq!(response["success"], false);
+        assert!(response["error"].as_str().unwrap().contains(action));
+    }
+    assert!(daemon.browser.is_none());
+}
+
+#[tokio::test]
 async fn event_policy_reload_fails_closed_but_other_commands_keep_old_policy() {
     use crate::native::policy::ActionPolicy;
     use crate::test_utils::EnvGuard;

@@ -476,6 +476,7 @@ impl Bus {
             .or_else(|| event.get("sessionId").and_then(Value::as_str));
         match method {
             "Target.targetDestroyed" | "Target.targetCrashed" => {
+                self.process_raw(raw.clone()).await;
                 if let Some(target_id) = event.pointer("/params/targetId").and_then(Value::as_str) {
                     self.end_target(
                         target_id,
@@ -553,6 +554,7 @@ impl Bus {
             if source.source.session_id() == session_id {
                 source.url = url.to_owned();
             }
+            source.source.update_url(session_id, url);
         }
     }
 
@@ -676,6 +678,7 @@ impl Bus {
             name,
             mut data,
             initial,
+            location,
         } = signal
         else {
             return;
@@ -702,7 +705,7 @@ impl Bus {
             self.end_source(source_key, "policy_denied").await;
             return;
         }
-        let (ids, url, tab, navigation_pending, rearmed) = {
+        let (ids, source_url, source_tab, navigation_pending, rearmed) = {
             let mut state = self.state.lock().await;
             let Some(source) = state.sources.get_mut(source_key) else {
                 return;
@@ -712,6 +715,7 @@ impl Bus {
                 name: name.clone(),
                 data: data.clone(),
                 initial,
+                location: location.clone(),
             });
             let pending = source.navigation_pending;
             let rearmed = pending && (forced_flag == Some("afterNavigation") || initial);
@@ -726,6 +730,14 @@ impl Bus {
                 rearmed,
             )
         };
+        let (url, tab) = location
+            .map(|location| {
+                (
+                    location.url,
+                    location.tab.unwrap_or_else(|| source_tab.clone()),
+                )
+            })
+            .unwrap_or((source_url, source_tab));
         let flag =
             forced_flag.or_else(|| (initial && navigation_pending).then_some("afterNavigation"));
         if initial && flag.is_none() {
@@ -1274,6 +1286,7 @@ fn observation_signal(observation: super::sources::dom::Observation) -> SourceSi
             "truncated": observation.truncated
         }),
         initial: observation.initial,
+        location: None,
     }
 }
 
@@ -1389,6 +1402,7 @@ mod tests {
             name: format!("element.{key}"),
             data: json!({"state": key, "label": "Ready", "truncated": false}),
             initial,
+            location: None,
         }
     }
 
