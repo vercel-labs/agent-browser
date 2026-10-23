@@ -963,7 +963,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_CLOSE,
             "Close browser",
-            "Close the current browser session.",
+            "Close the current browser session. Provider selection does not allocate a new provider browser before closing.",
             json!({
                 "all": { "type": "boolean", "default": false, "description": "Close all active sessions." }
             }),

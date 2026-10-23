@@ -2307,6 +2307,7 @@ agent-browser close - Close the browser
 Usage: agent-browser close [options]
 
 Closes the browser instance for the current session.
+Selecting a provider does not launch a new provider browser before closing.
 
 Aliases: quit, exit
 

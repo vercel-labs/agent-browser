@@ -28,6 +28,8 @@ agent-browser close           # Close browser (aliases: quit, exit)
 agent-browser connect 9222    # Connect to browser via CDP port
 ```
 
+Selecting a provider with `--provider` or `AGENT_BROWSER_PROVIDER` does not launch a new provider browser for `close`; an existing session still follows its normal close and cleanup path.
+
 After `connect`, the session stays attached until `agent-browser close`. Later commands without a connection flag run against the same browser, as if you passed `--cdp` again. If that browser goes away, commands fail instead of launching a local one.
 
 If the debugging port is not open yet, `connect` and `--cdp` wait up to 2 seconds for it before failing.

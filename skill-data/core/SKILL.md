@@ -68,6 +68,8 @@ agent-browser click @e5                        # click a result
 agent-browser screenshot result.png
 ```
 
+Selecting a provider with `--provider` or `AGENT_BROWSER_PROVIDER` does not launch a new provider browser for `close`; an existing session still follows its normal close and cleanup path.
+
 The browser stays running across commands so these feel like a single session. By default, an inactive daemon saves configured restore state, closes its headless browser, and exits after one hour; the next command starts it again. Without `--restore` or another restore key, shutdown discards transient browser state and open tabs. Dashboard mouse, keyboard, and touch input count as activity. Headed browsers, Safari and iOS WebDriver sessions, and user-attached browsers are exempt from the default; provider-owned cloud browsers are not. Use `--idle-timeout <time>` or `AGENT_BROWSER_IDLE_TIMEOUT_MS` to tune the timeout, and use `0` to disable it. Still run `agent-browser close` (or `close --all`) when you're done.
 
 ## MCP integration
