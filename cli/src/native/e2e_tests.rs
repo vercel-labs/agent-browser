@@ -4352,6 +4352,153 @@ async fn e2e_domain_filter_blocks_page_created_popup_before_first_request() {
     server.abort();
 }
 
+/// Regression: a real `target="_blank"` click attaches the popup paused
+/// (`url: ""`, no execution context) because browser-level auto-attach uses
+/// `waitForDebuggerOnStart`. The old ordering ran `Page.enable` before
+/// `Runtime.runIfWaitingForDebugger`, so the command rode the 30s CDP timeout
+/// and `close_after_network_control_failure` tore the whole browser down. The
+/// paused popup must be resumed before the first renderer-bound command, and a
+/// popup to a disallowed host must still be blocked fail-closed.
+#[tokio::test]
+#[ignore]
+async fn e2e_domain_filter_target_blank_popup_click_resumes_first() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+    let requests_for_server = requests.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..20 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let requests = requests_for_server.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let request_line = request.lines().next().unwrap_or("").to_string();
+                if let Ok(mut logged) = requests.lock() {
+                    logged.push(request_line.clone());
+                }
+                let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+                let body = if path == "/popup" {
+                    "<!doctype html><title>popup</title>".to_string()
+                } else if path == "/blocked" {
+                    format!(
+                        "<!doctype html><title>blocked</title><a id=\"blocked-link\" href=\"http://127.0.0.1:{}/leak\" target=\"_blank\">leak</a>",
+                        port
+                    )
+                } else {
+                    "<!doctype html><title>landing</title><a id=\"popup-link\" href=\"/popup\" target=\"_blank\">open popup</a>"
+                        .to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    {
+        let mut df = state.domain_filter.write().await;
+        *df = Some(super::network::DomainFilter::new("localhost"));
+    }
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": format!("http://localhost:{}/", port),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // A real mouse click on a target=_blank anchor opens a renderer-initiated
+    // popup, which auto-attach pauses before its first navigation.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "click", "selector": "#popup-link" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // The next command drains the paused popup. With the old
+    // enable-before-resume order this is where Page.enable hung for 30s and
+    // the browser was closed.
+    let started = std::time::Instant::now();
+    let resp = execute_command(&json!({ "id": "4", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "popup setup took {:?}; the 30s Page.enable timeout means the paused \
+         target was not resumed before the renderer-bound commands",
+        started.elapsed()
+    );
+    let tabs = get_data(&resp)["tabs"].as_array().expect("tabs array");
+    assert_eq!(tabs.len(), 2, "popup tab was not registered: {}", resp);
+
+    // The popup commits its navigation once resumed; a later drain picks up the
+    // targetInfoChanged event carrying the final URL.
+    let resp = execute_command(&json!({ "id": "5", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+    let tabs = get_data(&resp)["tabs"].as_array().expect("tabs array");
+    assert!(
+        tabs.iter()
+            .any(|tab| tab["url"].as_str().unwrap_or("").ends_with("/popup")),
+        "popup never navigated: {}",
+        resp
+    );
+
+    // Fail-closed: a target=_blank popup to a disallowed host is still blocked
+    // and must not take the browser down.
+    let resp = execute_command(
+        &json!({
+            "id": "6",
+            "action": "navigate",
+            "url": format!("http://localhost:{}/blocked", port),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "click", "selector": "#blocked-link" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "8", "action": "tab_list" }), &mut state).await;
+    assert_success(&resp);
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    let logged = requests.lock().unwrap().clone();
+    assert!(
+        !logged.iter().any(|line| line.contains(" /leak ")),
+        "Blocked popup made a server request: {:?}",
+        logged
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    server.abort();
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_domain_filter_blocks_service_worker_requests() {
