@@ -1313,12 +1313,7 @@ impl BrowserManager {
             .await?;
 
         if let Some(ref details) = result.exception_details {
-            let msg = details
-                .exception
-                .as_ref()
-                .and_then(|e| e.description.as_deref())
-                .unwrap_or(&details.text);
-            return Err(format!("Evaluation error: {}", msg));
+            return Err(format!("Evaluation error: {}", details.message()));
         }
 
         Ok(result.result.value.unwrap_or(Value::Null))
