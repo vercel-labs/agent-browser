@@ -1154,7 +1154,23 @@ fn has_os_error(error: &str, code: u32) -> bool {
 /// instead of 30s. Only commands that actually carry a `timeout` field get
 /// the extended budget, and that field is set client-side per invocation,
 /// avoiding the daemon's spawn-time env snapshot drifting from the client.
+///
+/// A batch runs its children sequentially in one request, so its budget is
+/// the sum of the child budgets.
 pub(crate) fn read_timeout_for(cmd: &Value) -> Duration {
+    if cmd.get("action").and_then(Value::as_str) == Some("batch") {
+        let batch_ms = cmd
+            .get("entries")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.get("request"))
+            .map(|request| read_timeout_for(request).as_millis() as u64)
+            .fold(0_u64, u64::saturating_add)
+            .max(30_000);
+        return Duration::from_millis(batch_ms);
+    }
+
     let mut op_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(0);
     if cmd.get("action").and_then(Value::as_str) == Some("mousemove") {
         op_ms = op_ms.max(cmd.get("duration").and_then(Value::as_u64).unwrap_or(0));
@@ -1411,6 +1427,27 @@ mod tests {
             read_timeout_for(&json!({"action":"mousemove", "duration": 35_000})),
             Duration::from_secs(45)
         );
+    }
+
+    #[test]
+    fn test_batch_read_timeout_sums_child_budgets() {
+        let command = json!({
+            "action": "batch",
+            "entries": [
+                { "request": { "action": "url" } },
+                { "parseError": "bad command" },
+                { "request": { "action": "wait", "timeout": 45_000 } }
+            ]
+        });
+
+        assert_eq!(read_timeout_for(&command), Duration::from_secs(85));
+    }
+
+    #[test]
+    fn test_empty_batch_read_timeout_keeps_normal_floor() {
+        let command = json!({ "action": "batch", "entries": [] });
+
+        assert_eq!(read_timeout_for(&command), Duration::from_secs(30));
     }
 
     #[test]

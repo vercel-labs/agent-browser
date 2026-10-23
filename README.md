@@ -283,7 +283,7 @@ After a page change, prefer a selector, text, URL, or JavaScript condition that 
 
 ### Batch Execution
 
-Execute multiple commands in a single invocation. Commands can be passed as quoted arguments or piped as JSON via stdin. This avoids per-command process startup overhead when running multi-step workflows.
+Execute multiple commands in a single invocation. Commands can be passed as quoted arguments or piped as JSON via stdin. The batch is sent to the daemon as a single request, which avoids per-command process startup and connection overhead in multi-step workflows. A `close`, or a command that needs confirmation, stops the rest of the batch.
 
 ```bash
 # Argument mode: each quoted argument is a full command

@@ -2264,128 +2264,106 @@ fn run_batch(
         return;
     }
 
-    let output_opts = OutputOptions::from_flags(flags);
-
-    let mut results: Vec<serde_json::Value> = Vec::new();
-    let mut had_error = false;
-
-    for (i, cmd_args) in commands.iter().enumerate() {
-        if cmd_args.is_empty() {
-            continue;
-        }
-
-        let mut parsed = match parse_command(cmd_args, flags) {
-            Ok(c) => c,
-            Err(e) => {
-                had_error = true;
-                if flags.json {
-                    results.push(json!({
-                        "command": cmd_args,
-                        "success": false,
-                        "error": e.format(),
-                    }));
-                    if bail {
-                        break;
-                    }
-                } else {
-                    eprintln!(
-                        "{} Command {}: {}",
-                        color::error_indicator(),
-                        i + 1,
-                        e.format()
-                    );
-                    if bail {
-                        exit(1);
-                    }
-                }
-                continue;
+    let entries = batch_entries(&commands, flags);
+    let request = json!({
+        "id": gen_id(),
+        "action": "batch",
+        "bail": bail,
+        "entries": entries,
+    });
+    let response = match send_command_with_respawn(request, &flags.session, daemon_opts) {
+        Ok(response) => response,
+        Err(e) => {
+            if flags.json {
+                print_json_error(e);
+            } else {
+                eprintln!("{} {}", color::error_indicator(), e);
             }
-        };
-        attach_input_mode(&mut parsed, flags);
-        match parsed.get("action").and_then(|v| v.as_str()) {
-            Some("read") => parsed["tls"] = json!(tls::session_options(flags, &flags.session)),
-            Some("close") => tls::clear_session(&flags.session),
-            _ => {}
+            exit(1);
         }
+    };
 
-        let action = parsed
-            .get("action")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        attach_plugins_to_command(&mut parsed, &flags.plugins);
-        attach_restore_config_to_command(&mut parsed, flags);
-
-        attach_pin_tab_to_command(&mut parsed, flags);
-
-        match send_command_with_respawn(parsed, &flags.session, daemon_opts) {
-            Ok(resp) => {
-                if flags.json {
-                    let mut result = json!({
-                        "command": cmd_args,
-                        "success": resp.success,
-                        "result": resp.data,
-                        "error": resp.error,
-                    });
-                    // Match the single-command `Response` serialization,
-                    // which only emits `code` when set (e.g. `tab_gone`).
-                    // Without this, machine-readable error codes are
-                    // silently dropped in batch mode.
-                    if let Some(ref code) = resp.code {
-                        result["code"] = json!(code);
-                    }
-                    // Mirror the single-command serialization: emit `warning`
-                    // too, not just `code`.
-                    if let Some(ref warning) = resp.warning {
-                        result["warning"] = json!(warning);
-                    }
-                    results.push(result);
-                } else {
-                    if i > 0 {
-                        println!();
-                    }
-                    print_response_with_opts(&resp, action.as_deref(), &output_opts);
-                }
-                if !resp.success {
-                    had_error = true;
-                    if bail {
-                        if !flags.json {
-                            exit(1);
-                        }
-                        break;
-                    }
-                }
-            }
-            Err(e) => {
-                had_error = true;
-                if flags.json {
-                    results.push(json!({
-                        "command": cmd_args,
-                        "success": false,
-                        "error": e.to_string(),
-                    }));
-                    if bail {
-                        break;
-                    }
-                } else {
-                    eprintln!("{} Command {}: {}", color::error_indicator(), i + 1, e);
-                    if bail {
-                        exit(1);
-                    }
-                }
-            }
+    let Some(results) = response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("results"))
+        .and_then(|results| results.as_array())
+    else {
+        let error = response
+            .error
+            .unwrap_or_else(|| "Invalid batch response: missing results".to_string());
+        if flags.json {
+            print_json_error_with_code(error, response.code.as_deref());
+        } else {
+            eprintln!("{} {}", color::error_indicator(), error);
         }
+        exit(1);
+    };
+
+    if response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("closed"))
+        .and_then(|closed| closed.as_bool())
+        == Some(true)
+    {
+        tls::clear_session(&flags.session);
     }
 
     if flags.json {
         println!(
             "{}",
-            serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string())
+            serde_json::to_string(results).unwrap_or_else(|_| "[]".to_string())
         );
+    } else {
+        let output_opts = OutputOptions::from_flags(flags);
+        // The daemon returns one result per entry, in order.
+        for (i, (entry, result)) in entries.iter().zip(results).enumerate() {
+            let as_str = |key: &str| result.get(key).and_then(|v| v.as_str()).map(String::from);
+            let Some(action) = entry["request"]["action"].as_str() else {
+                let error = as_str("error").unwrap_or_default();
+                eprintln!("{} Command {}: {}", color::error_indicator(), i + 1, error);
+                continue;
+            };
+            if i > 0 {
+                println!();
+            }
+            let resp = Response {
+                success: result["success"].as_bool().unwrap_or(false),
+                data: result.get("result").filter(|v| !v.is_null()).cloned(),
+                error: as_str("error"),
+                code: as_str("code"),
+                warning: as_str("warning"),
+            };
+            print_response_with_opts(&resp, Some(action), &output_opts);
+        }
     }
 
-    if had_error {
+    if !response.success {
         exit(1);
     }
+}
+
+/// Parse each batch command up front. Parse errors are kept as entries so the
+/// daemon reports them in order and `--bail` stops on them.
+fn batch_entries(commands: &[Vec<String>], flags: &Flags) -> Vec<serde_json::Value> {
+    commands
+        .iter()
+        .filter(|cmd_args| !cmd_args.is_empty())
+        .map(|cmd_args| match parse_command(cmd_args, flags) {
+            Ok(mut parsed) => {
+                attach_input_mode(&mut parsed, flags);
+                if parsed.get("action").and_then(|v| v.as_str()) == Some("read") {
+                    parsed["tls"] = json!(tls::session_options(flags, &flags.session));
+                }
+                attach_plugins_to_command(&mut parsed, &flags.plugins);
+                attach_restore_config_to_command(&mut parsed, flags);
+                attach_pin_tab_to_command(&mut parsed, flags);
+                json!({ "command": cmd_args, "request": parsed })
+            }
+            Err(e) => json!({ "command": cmd_args, "parseError": e.format() }),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2806,6 +2784,57 @@ mod tests {
         attach_plugins_to_command(&mut cmd, &[]);
 
         assert_eq!(cmd["plugins"], json!([]));
+    }
+
+    #[test]
+    fn test_batch_entries_keep_parse_errors_in_order() {
+        let flags = neutral_launch_config_flags();
+        let commands = vec![
+            vec!["get".to_string(), "url".to_string()],
+            vec!["definitely-not-a-command".to_string()],
+            Vec::new(),
+        ];
+
+        let entries = batch_entries(&commands, &flags);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["command"], json!(["get", "url"]));
+        assert_eq!(entries[0]["request"]["action"], "url");
+        assert!(entries[1]["parseError"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown command"));
+    }
+
+    #[test]
+    fn test_preparing_batch_close_preserves_saved_trust() {
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_SOCKET_DIR",
+            "AGENT_BROWSER_NAMESPACE",
+        ]);
+        let directory = tempfile::tempdir().unwrap();
+        guard.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            directory.path().to_str().unwrap(),
+        );
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        let mut flags = neutral_launch_config_flags();
+        flags.session = "batch-trust-regression".to_string();
+        let trust_path = directory.path().join("batch-trust-regression.trust.json");
+        std::fs::write(&trust_path, r#"{"useSystemCa":true}"#).unwrap();
+        // With --bail, the close below may never execute. Preparing it also
+        // must not change the trust attached to a later read request.
+        let entries = batch_entries(
+            &[
+                vec!["definitely-not-a-command".to_string()],
+                vec!["close".to_string()],
+                vec!["read".to_string(), "https://example.com".to_string()],
+            ],
+            &flags,
+        );
+        assert!(entries[0]["parseError"].is_string());
+        assert!(trust_path.exists(), "the session has not actually closed");
+        assert_eq!(entries[2]["request"]["tls"]["useSystemCa"], true);
     }
 
     #[test]

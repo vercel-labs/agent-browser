@@ -655,7 +655,7 @@ See [Configuration](/configuration) for config files and environment variables. 
 
 ## Batch execution
 
-Execute multiple commands in a single invocation. Commands can be passed as quoted arguments or piped as JSON via stdin.
+Execute multiple commands in a single invocation. Commands can be passed as quoted arguments or piped as JSON via stdin. The batch is sent to the daemon as a single request. A `close`, or a command that needs confirmation, stops the rest of the batch.
 
 ```bash
 # Argument mode: each quoted argument is a full command
