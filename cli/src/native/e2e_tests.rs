@@ -3499,6 +3499,79 @@ async fn e2e_hover_scroll_press() {
     assert_success(&resp);
 }
 
+/// One `press` must produce exactly one keydown/keyup pair whose `code`
+/// matches the key. Sending the Windows VK code as `nativeVirtualKeyCode`
+/// made macOS Chrome resolve a different physical key and repeat keydown
+/// thousands of times per second until navigation.
+#[tokio::test]
+#[ignore]
+async fn e2e_press_dispatches_single_keystroke() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = concat!(
+        "data:text/html,<html><body><script>",
+        "window.__events=[];",
+        "addEventListener('keydown',e=>__events.push('down:'+e.key+'/'+e.code));",
+        "addEventListener('keyup',e=>__events.push('up:'+e.key+'/'+e.code));",
+        "</script></body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    for (i, (key, expected)) in [
+        ("a", "a/KeyA"),
+        ("Escape", "Escape/Escape"),
+        ("End", "End/End"),
+        ("Enter", "Enter/Enter"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let resp = execute_command(
+            &json!({ "id": format!("reset-{i}"), "action": "evaluate", "script": "window.__events=[]" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": format!("press-{i}"), "action": "press", "key": key }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        // Give a stuck key time to auto-repeat before counting.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let resp = execute_command(
+            &json!({ "id": format!("read-{i}"), "action": "evaluate", "script": "window.__events" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(
+            get_data(&resp)["result"],
+            json!([format!("down:{expected}"), format!("up:{expected}")]),
+            "press {key}"
+        );
+    }
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Raw mouse regressions
 // ---------------------------------------------------------------------------
