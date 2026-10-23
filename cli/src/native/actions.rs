@@ -13420,13 +13420,7 @@ async fn handle_keydown(cmd: &Value, state: &DaemonState) -> Result<Value, Strin
         .and_then(|v| v.as_str())
         .ok_or("Missing 'key' parameter")?;
 
-    mgr.client
-        .send_command(
-            "Input.dispatchKeyEvent",
-            Some(json!({ "type": "keyDown", "key": key })),
-            Some(&session_id),
-        )
-        .await?;
+    interaction::key_down(&mgr.client, &session_id, key).await?;
     Ok(json!({ "keydown": key }))
 }
 
@@ -13438,13 +13432,7 @@ async fn handle_keyup(cmd: &Value, state: &DaemonState) -> Result<Value, String>
         .and_then(|v| v.as_str())
         .ok_or("Missing 'key' parameter")?;
 
-    mgr.client
-        .send_command(
-            "Input.dispatchKeyEvent",
-            Some(json!({ "type": "keyUp", "key": key })),
-            Some(&session_id),
-        )
-        .await?;
+    interaction::key_up(&mgr.client, &session_id, key).await?;
     Ok(json!({ "keyup": key }))
 }
 

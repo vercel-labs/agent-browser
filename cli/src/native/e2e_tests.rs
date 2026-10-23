@@ -3499,6 +3499,92 @@ async fn e2e_hover_scroll_press() {
     assert_success(&resp);
 }
 
+/// Regression: `keydown`/`keyup` sent only `key`, so pages reading `event.code`
+/// (games, canvas apps) saw `code == ""` and `keyCode == 0` for held keys.
+#[tokio::test]
+#[ignore]
+async fn e2e_keydown_keyup_send_code_and_key_code() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = concat!(
+        "data:text/html,<input id='i'><script>",
+        "window.__k=[];",
+        "for(const t of ['keydown','keypress','keyup'])",
+        "addEventListener(t,e=>__k.push(t+' '+e.key+' '+e.code+' '+e.keyCode+' '",
+        "+e.location+' '+e.shiftKey),true);",
+        "</script>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "focus", "selector": "#i" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let steps = [
+        ("keydown", "w"),
+        ("keyup", "w"),
+        ("keydown", "Shift"),
+        ("keyup", "Shift"),
+        ("keydown", "KeyD"),
+        ("keyup", "KeyD"),
+        // ArrowUp goes last: moving the caret earlier would turn "wd" into "dw".
+        ("keydown", "ArrowUp"),
+        ("keyup", "ArrowUp"),
+        ("press", "Shift"),
+    ];
+    for (i, (action, key)) in steps.iter().enumerate() {
+        let resp = execute_command(
+            &json!({ "id": format!("k{}", i), "action": action, "key": key }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+    }
+
+    assert_evaluate(
+        &mut state,
+        "4",
+        "({ events: __k, value: document.getElementById('i').value })",
+        json!({
+            "events": [
+                "keydown w KeyW 87 0 false",
+                "keypress w KeyW 119 0 false",
+                "keyup w KeyW 87 0 false",
+                "keydown Shift ShiftLeft 16 1 true",
+                "keyup Shift ShiftLeft 16 1 false",
+                "keydown d KeyD 68 0 false",
+                "keypress d KeyD 100 0 false",
+                "keyup d KeyD 68 0 false",
+                "keydown ArrowUp ArrowUp 38 0 false",
+                "keyup ArrowUp ArrowUp 38 0 false",
+                "keydown Shift ShiftLeft 16 1 true",
+                "keyup Shift ShiftLeft 16 1 false",
+            ],
+            // A held printable key types into the focused field, like a real keyboard.
+            "value": "wd",
+        }),
+    )
+    .await;
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Raw mouse regressions
 // ---------------------------------------------------------------------------

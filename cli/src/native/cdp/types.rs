@@ -490,6 +490,9 @@ pub struct DispatchKeyEventParams {
     pub native_virtual_key_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modifiers: Option<i32>,
+    /// `KeyboardEvent.location`: 1 = left, 2 = right (modifier keys).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
