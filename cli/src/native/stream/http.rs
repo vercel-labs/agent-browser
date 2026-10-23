@@ -441,14 +441,23 @@ pub(super) async fn relay_command_to_daemon(
 }
 
 pub(super) fn serve_embedded_file(url_path: &str) -> (&'static str, &'static str, Vec<u8>) {
-    let clean = url_path.trim_start_matches('/');
+    // The request target may carry a query (`/?port=35511`), which is not part of the asset name.
+    let clean = url_path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_start_matches('/');
     let key = if clean.is_empty() {
         "index.html"
     } else {
         clean
     };
 
-    let file = DashboardAssets::get(key).or_else(|| DashboardAssets::get("index.html"));
+    // Unknown paths get index.html, so take the MIME type from the file actually served.
+    let (key, file) = match DashboardAssets::get(key) {
+        Some(file) => (key, Some(file)),
+        None => ("index.html", DashboardAssets::get("index.html")),
+    };
 
     match file {
         Some(content) => {
@@ -711,5 +720,21 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(relayed.contains(r#""action":"tabs""#), "{relayed}");
+    }
+
+    #[test]
+    fn test_serve_embedded_file_ignores_query() {
+        let (status, content_type, body) = serve_embedded_file("/?port=35511");
+        assert_eq!(status, "200 OK");
+        assert_eq!(content_type, "text/html; charset=utf-8");
+        assert_eq!(body, serve_embedded_file("/").2);
+    }
+
+    #[test]
+    fn test_serve_embedded_file_fallback_is_html() {
+        let (status, content_type, body) = serve_embedded_file("/missing-route.js");
+        assert_eq!(status, "200 OK");
+        assert_eq!(content_type, "text/html; charset=utf-8");
+        assert_eq!(body, serve_embedded_file("/").2);
     }
 }
