@@ -3101,7 +3101,8 @@ Operations:
   list                               List saved state files
   show <filename>                    Show state summary
   rename <old-name> <new-name>       Rename state file
-  clear [session-name] [--all]       Clear saved states
+  clear <session-name>               Clear saved states for one session name
+  clear --all                        Clear all saved states
   clean --older-than <days>          Delete expired state files
 
 Automatic State Persistence:
@@ -3121,8 +3122,9 @@ Examples:
   agent-browser state save ./auth-state.json
   agent-browser state load ./auth-state.json
   agent-browser state list
-  agent-browser state show myapp-default.json
+  agent-browser state show myapp.default.json
   agent-browser state rename old-name new-name
+  agent-browser state clear myapp
   agent-browser state clear --all
   agent-browser state clean --older-than 7
 "##
