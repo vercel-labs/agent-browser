@@ -8,6 +8,10 @@
       {
         "from": "# Clear CA trust retained by the running session",
         "to": "# Clear CA trust retained by the running session\n--use-system-ca          # Use the OS trust store for CLI requests (read, install, upgrade, doctor)"
+      },
+      {
+        "from": "Viewport/device/geolocation/media, touch, swipe, mouse, keyboard",
+        "to": "Viewport/device/geolocation/media, CPU throttling, touch, swipe, mouse, keyboard"
       }
     ],
     "/configuration": [

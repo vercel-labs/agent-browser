@@ -376,6 +376,19 @@ agent-browser network har stop /tmp/trace.har
 # `--content all` to include binary bodies or `--content none` to disable.
 ```
 
+### Emulate a slow network or CPU
+
+```bash
+agent-browser network throttle slow-3g                               # whole page on slow 3G
+agent-browser network throttle --match "**/api/*" --latency-ms 1500  # only delay API calls
+agent-browser set cpu-throttle 4                                     # 4x slower CPU
+# ... observe loading states, record a video, or profile ...
+agent-browser network throttle off
+agent-browser set cpu-throttle 1
+```
+
+Use this when loading states or spinners are too fast to see, or to check behavior on slow devices. Settings apply to the current tab and tabs opened later. Presets match Chrome DevTools (`slow-3g`, `fast-3g`, `slow-4g`, `fast-4g`); see [references/commands.md](references/commands.md#network) for custom values and `--match` rules.
+
 ### Record a video of the workflow
 
 ```bash

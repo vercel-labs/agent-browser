@@ -77,6 +77,21 @@ agent-browser wait 2000
 agent-browser profiler stop ./interaction-profile.json
 ```
 
+### Profiling Under Slow Network or CPU
+
+Throttle before profiling to see how the page behaves on slower devices. Presets match Chrome DevTools.
+
+```bash
+agent-browser network throttle slow-4g
+agent-browser set cpu-throttle 4
+agent-browser profiler start
+agent-browser navigate https://app.example.com
+agent-browser wait --load load
+agent-browser profiler stop ./slow-device-profile.json
+agent-browser network throttle off
+agent-browser set cpu-throttle 1
+```
+
 ### CI Performance Regression Checks
 
 ```bash

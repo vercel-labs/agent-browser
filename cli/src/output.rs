@@ -2506,6 +2506,8 @@ Settings:
   device <name>              Emulate device (e.g., "iPhone 12")
   geo <lat> <lng>            Set geolocation
   offline [on|off]           Toggle offline mode; off restores the new-tab default
+                             and keeps any network throttle in place
+  cpu-throttle <rate>        Slow down page CPU by <rate>x (1 = off), like DevTools
   headers <json>             Set extra HTTP headers; use {} to clear them for new tabs
   credentials <user> <pass>  Set HTTP authentication for current and future tabs
   media [dark|light]         Set color scheme preference
@@ -2521,6 +2523,8 @@ Examples:
   agent-browser set device "iPhone 12"
   agent-browser set geo 37.7749 -122.4194
   agent-browser set offline on
+  agent-browser set cpu-throttle 4          # 4x slower CPU
+  agent-browser set cpu-throttle 1          # back to full speed
   agent-browser set headers '{"X-Custom": "value"}'
   agent-browser set credentials admin secret123
   agent-browser set media dark
@@ -2551,6 +2555,18 @@ Subcommands:
   request <requestId>        View full request/response detail (including body)
   har <start|stop> [path]    Record and export a HAR file
     --content <mode>         Response bodies to embed on start: text (default), all, none
+  throttle <preset> [options] Emulate a slow or offline network (current and new tabs)
+    Presets: slow-3g, fast-3g, slow-4g, fast-4g (Chrome DevTools values;
+    fast-3g is DevTools' former name for slow-4g), offline, off
+    --latency-ms <ms>        Minimum delay before response headers arrive
+    --download-kbps <kbps>   Download limit in kilobits per second
+    --upload-kbps <kbps>     Upload limit in kilobits per second
+    --match <pattern>        Only throttle matching URLs. Globs like "**/api/*" match
+                             any scheme, host, and port; values with :// are URLPatterns.
+                             Rules stack and the first match wins.
+    Without --match a preset or custom values replace the global profile and go
+    back online. offline equals `set offline on`. off clears everything, or only
+    the --match rule when one is given.
 
 Global Options:
   --json               Output as JSON
@@ -2569,6 +2585,11 @@ Examples:
   agent-browser network har start
   agent-browser network har start --content all
   agent-browser network har stop ./capture.har
+  agent-browser network throttle slow-3g
+  agent-browser network throttle --download-kbps 750 --upload-kbps 250 --latency-ms 100
+  agent-browser network throttle --match "**/api/*" --latency-ms 1200
+  agent-browser network throttle off --match "**/api/*"
+  agent-browser network throttle off
 "##
         }
 
@@ -3646,14 +3667,16 @@ combine profiles with commas, such as --tools core,network,react.
 Tool profiles:
   core       Default. Navigation, snapshots, interaction, waits, reads,
              screenshots, JavaScript eval, close, tab basics, and profile discovery
-  network    Network routes, request inspection, HAR, headers, credentials, offline
+  network    Network routes, request inspection, HAR, headers, credentials, offline,
+             throttling
   state      Cookies, storage, auth, saved state, sessions, profiles, skills
   debug      Console/errors, tracing, profiling, recording, accessibility audits,
              clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff,
              batch, confirm/deny
   tabs       Back/forward/reload, tabs, windows, frames, dialogs
   react      React tree/inspect/renders/suspense, vitals, pushstate
-  mobile     Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
+  mobile     Viewport/device/geolocation/media, CPU throttling, touch, swipe,
+             mouse, keyboard
   all        Every MCP tool, including the full typed CLI parity surface
 
 Common tools include:
@@ -3873,7 +3896,7 @@ Mouse:  agent-browser mouse <action> [args]
 
 Browser Settings:  agent-browser set <setting> [value]
   viewport <w> <h>, device <name>, geo <lat> <lng>
-  offline [on|off], headers <json>, credentials <user> <pass>
+  offline [on|off], cpu-throttle <rate>, headers <json>, credentials <user> <pass>
   media [dark|light] [reduced-motion]
 
 Network:  agent-browser network <action>
@@ -3881,6 +3904,8 @@ Network:  agent-browser network <action>
   unroute [url]
   requests [--clear] [--filter <pattern>]
   har <start|stop> [path]
+  throttle <slow-3g|fast-3g|slow-4g|fast-4g|offline|off> [--match <pattern>]
+           [--latency-ms <ms>] [--download-kbps <kbps>] [--upload-kbps <kbps>]
 
 Storage:
   cookies [get|set|clear]    Manage cookies (set supports --url, --domain, --path, --httpOnly, --secure, --sameSite, --expires)

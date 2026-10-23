@@ -78,6 +78,7 @@ const TOOL_SET_VIEWPORT: &str = "agent_browser_set_viewport";
 const TOOL_SET_DEVICE: &str = "agent_browser_set_device";
 const TOOL_SET_GEO: &str = "agent_browser_set_geo";
 const TOOL_SET_OFFLINE: &str = "agent_browser_set_offline";
+const TOOL_SET_CPU_THROTTLE: &str = "agent_browser_set_cpu_throttle";
 const TOOL_SET_HEADERS: &str = "agent_browser_set_headers";
 const TOOL_SET_CREDENTIALS: &str = "agent_browser_set_credentials";
 const TOOL_SET_MEDIA: &str = "agent_browser_set_media";
@@ -87,6 +88,7 @@ const TOOL_NETWORK_REQUESTS: &str = "agent_browser_network_requests";
 const TOOL_NETWORK_REQUEST: &str = "agent_browser_network_request";
 const TOOL_NETWORK_HAR_START: &str = "agent_browser_network_har_start";
 const TOOL_NETWORK_HAR_STOP: &str = "agent_browser_network_har_stop";
+const TOOL_NETWORK_THROTTLE: &str = "agent_browser_network_throttle";
 const TOOL_STORAGE_GET: &str = "agent_browser_storage_get";
 const TOOL_STORAGE_SET: &str = "agent_browser_storage_set";
 const TOOL_STORAGE_CLEAR: &str = "agent_browser_storage_clear";
@@ -385,6 +387,7 @@ const NETWORK_PROFILE_TOOLS: &[&str] = &[
     TOOL_NETWORK_REQUEST,
     TOOL_NETWORK_HAR_START,
     TOOL_NETWORK_HAR_STOP,
+    TOOL_NETWORK_THROTTLE,
 ];
 
 const STATE_PROFILE_TOOLS: &[&str] = &[
@@ -500,6 +503,7 @@ const MOBILE_PROFILE_TOOLS: &[&str] = &[
     TOOL_SET_DEVICE,
     TOOL_SET_GEO,
     TOOL_SET_MEDIA,
+    TOOL_SET_CPU_THROTTLE,
     TOOL_TAP,
     TOOL_SWIPE,
     TOOL_DEVICE,
@@ -1176,6 +1180,13 @@ fn parity_tools() -> Vec<Value> {
             &["enabled"],
         ),
         tool(
+            TOOL_SET_CPU_THROTTLE,
+            "Set CPU throttle",
+            "Slow down the page's CPU by a factor, e.g. 4 for a 4x slowdown. 1 turns throttling off. Applies to the current tab and tabs opened later.",
+            json!({ "rate": { "type": "number", "minimum": 1 } }),
+            &["rate"],
+        ),
+        tool(
             TOOL_SET_HEADERS,
             "Set headers",
             "Set extra HTTP headers from a JSON object.",
@@ -1236,6 +1247,19 @@ fn parity_tools() -> Vec<Value> {
             "HAR stop",
             "Stop HAR capture.",
             json!({ "path": { "type": "string" } }),
+            &[],
+        ),
+        tool(
+            TOOL_NETWORK_THROTTLE,
+            "Network throttle",
+            "Emulate a slow or offline network for the current tab and tabs opened later. A preset or custom values without match set the global profile and go back online; with match they only apply to matching URLs and stack with other match rules. offline is the same as set offline on; off clears all throttling and offline mode, or only the match rule when match is given.",
+            json!({
+                "preset": { "type": "string", "enum": ["slow-3g", "fast-3g", "slow-4g", "fast-4g", "offline", "off"], "description": "DevTools throttling preset; custom values override its fields." },
+                "match": { "type": "string", "description": "Only throttle matching URLs. A route-style glob such as **/api/* matches any scheme, host, and port; a value containing :// is used as a URLPattern." },
+                "latencyMs": { "type": "number", "minimum": 0, "description": "Minimum time before response headers arrive." },
+                "downloadKbps": { "type": "number", "minimum": 0 },
+                "uploadKbps": { "type": "number", "minimum": 0 }
+            }),
             &[],
         ),
         tool(
@@ -2328,10 +2352,12 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_SET_DEVICE => call_one_string(arguments, "set device", "device"),
         TOOL_SET_GEO => call_set_geo(arguments),
         TOOL_SET_OFFLINE => call_set_bool(arguments, "offline", "enabled"),
+        TOOL_SET_CPU_THROTTLE => call_cli_tool(arguments, set_cpu_throttle_args(arguments)?, None),
         TOOL_SET_HEADERS => call_set_headers(arguments),
         TOOL_SET_CREDENTIALS => call_set_credentials(arguments),
         TOOL_SET_MEDIA => call_set_media(arguments),
         TOOL_NETWORK_ROUTE => call_network_route(arguments),
+        TOOL_NETWORK_THROTTLE => call_cli_tool(arguments, network_throttle_args(arguments)?, None),
         TOOL_NETWORK_UNROUTE => call_optional_one(arguments, &["network", "unroute"], "url"),
         TOOL_NETWORK_REQUESTS => call_network_requests(arguments),
         TOOL_NETWORK_REQUEST => call_one_string(arguments, "network request", "requestId"),
@@ -3097,6 +3123,34 @@ fn call_network_route(arguments: &Value) -> Result<Value, ProtocolError> {
         args.push(resource_type);
     }
     call_cli_tool(arguments, args, None)
+}
+
+fn network_throttle_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec!["network".to_string(), "throttle".to_string()];
+    if let Some(preset) = optional_string(arguments, "preset")? {
+        args.push(preset);
+    }
+    if let Some(pattern) = optional_string(arguments, "match")? {
+        args.push("--match".to_string());
+        args.push(pattern);
+    }
+    for (key, flag) in [
+        ("latencyMs", "--latency-ms"),
+        ("downloadKbps", "--download-kbps"),
+        ("uploadKbps", "--upload-kbps"),
+    ] {
+        if let Some(value) = optional_number_string(arguments, key)? {
+            args.push(flag.to_string());
+            args.push(value);
+        }
+    }
+    Ok(args)
+}
+
+fn set_cpu_throttle_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let rate = optional_number_string(arguments, "rate")?
+        .ok_or_else(|| ProtocolError::invalid_params("rate is required"))?;
+    Ok(vec!["set".to_string(), "cpu-throttle".to_string(), rate])
 }
 
 fn call_network_requests(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4750,6 +4804,83 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["set", "media", "dark", "reduced-motion"]);
+    }
+
+    fn parse_cli(args: &[String]) -> Value {
+        let flags = crate::flags::parse_flags(args);
+        crate::commands::parse_command(args, &flags).unwrap()
+    }
+
+    fn parse_cli_str(cli: &str) -> Value {
+        parse_cli(&cli.split_whitespace().map(String::from).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn network_throttle_args_match_cli_parser() {
+        let cases = [
+            (json!({"preset": "slow-3g"}), "network throttle slow-3g"),
+            (json!({"preset": "off"}), "network throttle off"),
+            (json!({"preset": "offline"}), "network throttle offline"),
+            (
+                json!({"downloadKbps": 750, "uploadKbps": 250.5, "latencyMs": 100}),
+                "network throttle --latency-ms 100 --download-kbps 750 --upload-kbps 250.5",
+            ),
+            (
+                json!({"preset": "fast-4g", "match": "**/api/*", "latencyMs": 1200}),
+                "network throttle fast-4g --match **/api/* --latency-ms 1200",
+            ),
+            (
+                json!({"preset": "off", "match": "**/api/*"}),
+                "network throttle off --match **/api/*",
+            ),
+        ];
+        for (arguments, cli) in cases {
+            let mut mcp = parse_cli(&network_throttle_args(&arguments).unwrap());
+            let mut expected = parse_cli_str(cli);
+            assert_eq!(mcp["action"], "network_throttle");
+            mcp["id"] = Value::Null;
+            expected["id"] = Value::Null;
+            assert_eq!(mcp, expected, "{arguments}");
+        }
+    }
+
+    #[test]
+    fn network_throttle_preset_enum_matches_cli_presets() {
+        let tools = tools();
+        let throttle = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some(TOOL_NETWORK_THROTTLE))
+            .unwrap();
+        let presets: Vec<&str> = throttle["inputSchema"]["properties"]["preset"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        let mut expected = crate::native::network::THROTTLE_PRESETS.to_vec();
+        expected.extend(["offline", "off"]);
+        assert_eq!(presets, expected);
+        for preset in presets {
+            let args = network_throttle_args(&json!({ "preset": preset })).unwrap();
+            assert_eq!(parse_cli(&args)["preset"], preset);
+        }
+    }
+
+    #[test]
+    fn set_cpu_throttle_args_match_cli_parser() {
+        for (rate, cli) in [
+            (json!(4), "set cpu-throttle 4"),
+            (json!(2.5), "set cpu-throttle 2.5"),
+            (json!(1), "set cpu-throttle 1"),
+        ] {
+            let mut mcp = parse_cli(&set_cpu_throttle_args(&json!({ "rate": rate })).unwrap());
+            let mut expected = parse_cli_str(cli);
+            assert_eq!(mcp["action"], "cpu_throttle");
+            mcp["id"] = Value::Null;
+            expected["id"] = Value::Null;
+            assert_eq!(mcp, expected);
+        }
+        assert!(set_cpu_throttle_args(&json!({})).is_err());
     }
 
     #[test]

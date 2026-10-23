@@ -565,7 +565,10 @@ pub struct SessionSetup {
     /// (`Network.setExtraHTTPHeaders`). Origin-scoped `--headers` live in
     /// `DaemonState::origin_headers`.
     pub extra_headers: Option<HashMap<String, String>>,
-    pub offline: Option<bool>,
+    /// Offline flag and throttling rules from `set offline` and `network throttle`.
+    pub network: network::NetworkConditions,
+    /// `Emulation.setCPUThrottlingRate` from `set cpu-throttle`; `None` means 1x.
+    pub cpu_throttle_rate: Option<f64>,
     /// Init scripts registered with `Page.addScriptToEvaluateOnNewDocument`:
     /// `--enable`, `--init-script`, plugin init scripts, and `addinitscript`.
     pub init_scripts: Vec<InitScriptSetup>,
@@ -595,7 +598,8 @@ impl SessionSetup {
             && self.locale.is_none()
             && self.geolocation.is_none()
             && self.extra_headers.as_ref().is_none_or(HashMap::is_empty)
-            && !self.offline.unwrap_or(false)
+            && self.network.is_default()
+            && self.cpu_throttle_rate.is_none()
             && self.init_scripts.is_empty()
     }
 
@@ -3172,6 +3176,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "setcontent" => handle_setcontent(cmd, state).await,
         "headers" => handle_headers(cmd, state).await,
         "offline" => handle_offline(cmd, state).await,
+        "network_throttle" => handle_network_throttle(cmd, state).await,
+        "cpu_throttle" => handle_cpu_throttle(cmd, state).await,
         "console" => handle_console(cmd, state).await,
         "errors" => handle_errors(state).await,
         "session_info" => handle_session_info(state).await,
@@ -4117,8 +4123,12 @@ async fn apply_session_setup(state: &mut DaemonState, session_id: &str) -> Resul
         network::set_extra_headers(&client, session_id, headers).await?;
     }
 
-    if let Some(offline) = setup.offline {
-        network::set_offline(&client, session_id, offline).await?;
+    if !setup.network.is_default() {
+        network::apply_network_conditions(&client, session_id, &setup.network).await?;
+    }
+
+    if let Some(rate) = setup.cpu_throttle_rate {
+        set_cpu_throttle(&client, session_id, rate).await?;
     }
 
     for (index, script) in setup.init_scripts.iter().enumerate() {
@@ -7333,10 +7343,125 @@ async fn handle_offline(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
     let offline = cmd.get("offline").and_then(|v| v.as_bool()).unwrap_or(true);
-    network::set_offline(&mgr.client, &session_id, offline).await?;
-    // Online is the default for a fresh target and needs no replay.
-    state.session_setup.offline = offline.then_some(true);
+    // Toggling offline keeps any `network throttle` rules in place.
+    let mut conditions = state.session_setup.network.clone();
+    conditions.offline = offline;
+    network::apply_network_conditions(&mgr.client, &session_id, &conditions).await?;
+    state.session_setup.network = conditions;
     Ok(json!({ "offline": offline }))
+}
+
+/// `network throttle`. A preset or custom values without `match` set the
+/// global profile and go back online, like picking a profile in the DevTools
+/// throttling menu. With `match` the rule only applies to matching URLs and
+/// stacks with the others. `offline` is `set offline on`; `off` clears
+/// everything, or only the `match` rule when one is given.
+async fn handle_network_throttle(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+    let preset = cmd.get("preset").and_then(|v| v.as_str());
+    let pattern = cmd
+        .get("match")
+        .and_then(|v| v.as_str())
+        .map(network::normalize_throttle_pattern)
+        .unwrap_or_default();
+    let number = |key: &str| -> Result<Option<f64>, String> {
+        match cmd.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => match v.as_f64() {
+                Some(n) if n >= 0.0 => Ok(Some(n)),
+                _ => Err(format!("'{}' must be a non-negative number", key)),
+            },
+        }
+    };
+    let latency_ms = number("latencyMs")?;
+    let download_kbps = number("downloadKbps")?;
+    let upload_kbps = number("uploadKbps")?;
+    let has_custom = latency_ms.is_some() || download_kbps.is_some() || upload_kbps.is_some();
+
+    let mut conditions = state.session_setup.network.clone();
+    match preset {
+        Some("off") | Some("offline") if has_custom => {
+            return Err(format!(
+                "'{}' does not take --latency-ms, --download-kbps, or --upload-kbps",
+                preset.unwrap_or_default()
+            ));
+        }
+        Some("off") if pattern.is_empty() => conditions = network::NetworkConditions::default(),
+        Some("off") => {
+            if !conditions.remove_rule(&pattern) {
+                return Err(format!("No throttle rule matches '{}'", pattern));
+            }
+        }
+        Some("offline") if !pattern.is_empty() => {
+            return Err(
+                "Offline applies to every request; use `network route <url> --abort` to fail matching URLs".to_string(),
+            );
+        }
+        Some("offline") => conditions.offline = true,
+        _ => {
+            let mut profile = match preset {
+                Some(name) => network::ThrottleProfile::preset(name).ok_or_else(|| {
+                    format!(
+                        "Unknown throttle preset '{}'. Use one of: {}, offline, off",
+                        name,
+                        network::THROTTLE_PRESETS.join(", ")
+                    )
+                })?,
+                None if has_custom => network::ThrottleProfile::NONE,
+                None => {
+                    return Err(
+                        "Missing throttle preset or --latency-ms/--download-kbps/--upload-kbps"
+                            .to_string(),
+                    )
+                }
+            };
+            if let Some(ms) = latency_ms {
+                profile.latency_ms = ms;
+            }
+            if let Some(kbps) = download_kbps {
+                profile.download_bytes_per_sec = network::kbps_to_bytes_per_sec(kbps);
+            }
+            if let Some(kbps) = upload_kbps {
+                profile.upload_bytes_per_sec = network::kbps_to_bytes_per_sec(kbps);
+            }
+            if pattern.is_empty() {
+                conditions.offline = false;
+            }
+            conditions.set_rule(pattern, profile);
+        }
+    }
+
+    network::apply_network_conditions(&mgr.client, &session_id, &conditions).await?;
+    let result = conditions.to_json();
+    state.session_setup.network = conditions;
+    Ok(result)
+}
+
+/// Slow down JavaScript execution by `rate` (1 = no throttling).
+async fn set_cpu_throttle(client: &CdpClient, session_id: &str, rate: f64) -> Result<(), String> {
+    client
+        .send_command(
+            "Emulation.setCPUThrottlingRate",
+            Some(json!({ "rate": rate })),
+            Some(session_id),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn handle_cpu_throttle(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let session_id = mgr.active_session_id()?.to_string();
+    let rate = cmd
+        .get("rate")
+        .and_then(|v| v.as_f64())
+        .filter(|r| *r >= 1.0)
+        .ok_or("'rate' must be a number >= 1 (1 disables CPU throttling)")?;
+    set_cpu_throttle(&mgr.client, &session_id, rate).await?;
+    // 1x is the default for a fresh target and needs no replay.
+    state.session_setup.cpu_throttle_rate = (rate != 1.0).then_some(rate);
+    Ok(json!({ "rate": rate }))
 }
 
 async fn handle_console(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -16609,15 +16734,23 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     fn test_session_setup_treats_cleared_values_as_empty() {
         let mut setup = SessionSetup {
             extra_headers: Some(HashMap::new()),
-            offline: Some(false),
             ..SessionSetup::default()
         };
         assert!(setup.is_empty());
 
-        setup.offline = Some(true);
+        setup.network.offline = true;
         assert!(!setup.is_empty());
+        setup.network.offline = false;
 
-        setup.offline = None;
+        setup
+            .network
+            .set_rule(String::new(), network::ThrottleProfile::NONE);
+        assert!(!setup.is_empty());
+        setup.network = network::NetworkConditions::default();
+
+        setup.cpu_throttle_rate = Some(4.0);
+        assert!(!setup.is_empty());
+        setup.cpu_throttle_rate = None;
         setup
             .extra_headers
             .as_mut()

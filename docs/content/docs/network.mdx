@@ -84,6 +84,56 @@ Text response bodies (JSON, HTML, JavaScript, form data) are embedded in the HAR
 
 HAR files include request headers, response headers, cookies, POST data, and response bodies. Treat them as sensitive when pages use cookies, bearer tokens, or API keys.
 
+## Throttling
+
+`network throttle` emulates slow or offline connections, which makes loading states visible when testing or recording a demo against a fast local server. Settings apply to the current tab and tabs opened later.
+
+```bash
+agent-browser network throttle slow-3g
+agent-browser network throttle --download-kbps 750 --upload-kbps 250 --latency-ms 100
+agent-browser network throttle --match "**/api/*" --latency-ms 1200
+agent-browser network throttle off --match "**/api/*"
+agent-browser network throttle offline
+agent-browser network throttle off
+```
+
+Presets use the same values as Chrome DevTools. DevTools renamed Fast 3G to Slow 4G in 2024 without changing its values, so `fast-3g` and `slow-4g` are the same profile.
+
+<table>
+  <thead>
+    <tr><th>Preset</th><th>Latency</th><th>Download</th><th>Upload</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>slow-3g</code></td><td>2000 ms</td><td>400 kbps</td><td>400 kbps</td></tr>
+    <tr><td><code>fast-3g</code></td><td>562.5 ms</td><td>1440 kbps</td><td>675 kbps</td></tr>
+    <tr><td><code>slow-4g</code></td><td>562.5 ms</td><td>1440 kbps</td><td>675 kbps</td></tr>
+    <tr><td><code>fast-4g</code></td><td>165 ms</td><td>8100 kbps</td><td>1350 kbps</td></tr>
+  </tbody>
+</table>
+
+<table>
+  <thead>
+    <tr><th>Option</th><th>Behavior</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>{"--latency-ms <ms>"}</code></td><td>Minimum delay before response headers arrive.</td></tr>
+    <tr><td><code>{"--download-kbps <kbps>"}</code></td><td>Download limit in kilobits per second.</td></tr>
+    <tr><td><code>{"--upload-kbps <kbps>"}</code></td><td>Upload limit in kilobits per second.</td></tr>
+    <tr><td><code>{"--match <pattern>"}</code></td><td>Only throttle matching URLs. Globs such as <code>{"**/api/*"}</code> or <code>{"*.png"}</code> match any scheme, host, and port. Values containing <code>://</code> are used as <a href="https://developer.mozilla.org/docs/Web/API/URL_Pattern_API">URLPattern</a> strings.</td></tr>
+  </tbody>
+</table>
+
+The value flags override individual preset values, or define a custom profile on their own. Without `--match`, a call replaces the global profile and turns offline mode off, like picking a profile in the DevTools throttling menu. With `--match`, the profile applies only to matching URLs and stacks with other `--match` rules; the first matching rule wins. `network throttle off --match <pattern>` removes one rule and `network throttle off` clears everything, including offline mode.
+
+`network throttle offline` is the same as `set offline on`. `set offline off` keeps throttling in place, so the page returns to the throttled network rather than full speed.
+
+To slow down JavaScript execution as well, use `set cpu-throttle`:
+
+```bash
+agent-browser set cpu-throttle 4   # 4x slower CPU
+agent-browser set cpu-throttle 1   # Back to full speed
+```
+
 ## SSR and no-JavaScript debugging
 
 ```bash

@@ -190,6 +190,7 @@ agent-browser set offline [on|off]    # Toggle offline mode
 agent-browser set headers <json>      # Extra HTTP headers
 agent-browser set credentials <u> <p> # HTTP basic auth for current and future tabs
 agent-browser set media [dark|light]  # Emulate color scheme (persists for session)
+agent-browser set cpu-throttle <rate> # Slow down the CPU (4 = 4x slower, 1 = off)
 ```
 
 Use `--color-scheme` for persistent dark/light mode across all commands:
@@ -232,6 +233,11 @@ agent-browser network har start                # Start HAR recording (embeds tex
 agent-browser network har start --content all  # Embed all response bodies (binary as base64)
 agent-browser network har start --content none # Metadata only, no bodies
 agent-browser network har stop [output.har]    # Stop and save HAR (temp path if omitted)
+agent-browser network throttle slow-3g         # Emulate a slow network (slow-3g, fast-3g, slow-4g, fast-4g)
+agent-browser network throttle --download-kbps 750 --upload-kbps 250 --latency-ms 100  # Custom profile
+agent-browser network throttle --match "**/api/*" --latency-ms 1200  # Delay only matching URLs
+agent-browser network throttle offline         # Same as set offline on
+agent-browser network throttle off             # Clear all throttling and offline mode
 ```
 
 See [Network](/network) for pre-navigation routing, request filters, HAR export, and SSR/no-JavaScript debugging.
@@ -267,6 +273,8 @@ agent-browser tab close docs    # close by label
 Labels are never auto-generated and never rewritten on navigation — an agent that names a tab `docs` keeps that name until the tab is closed. Labels are unique within a session; creating a second tab with an existing label errors.
 
 Tabs opened through `tab new` or `click --new-tab` inherit the session's setup before their first document loads: user agent, `set headers`, `set credentials`, origin-scoped `--headers`, init scripts, `route` rules, and emulation overrides (color scheme, timezone, locale, geolocation, offline). Turning offline mode off or setting headers to `{}` restores the default setup for future tabs.
+
+Network throttling and CPU throttling carry over the same way; `network throttle off` and `set cpu-throttle 1` restore the defaults.
 
 `tab list --json` also reports each tab's CDP `targetId`, and target ids are accepted anywhere a tab ref is accepted (`tab <targetId>`, `tab close <targetId>`). Unlike `t<N>` ids, which are per-daemon counters, target ids stay stable across daemon restarts. Each session is bound to its active tab by target id and returns to it after a daemon restart; with `--pin-tab` the binding is strict and a closed bound tab produces a `tab_gone` error instead of a silent fallback. JSON errors include <code>code: "tab_gone"</code>, <code>data.targetId</code>, and optional sanitized <code>data.lastUrl</code>. Batch output carries the recovery object under <code>result</code>. See [CDP Mode](/cdp-mode) for the multi-session workflow.
 
@@ -698,12 +706,12 @@ The default tools profile is `core`, which keeps MCP context small for everyday 
 Profiles:
 
 - `core` - Default. Navigation, snapshots, interaction, waits, reads, screenshots, JavaScript eval, close, tab basics, and profile discovery
-- `network` - Network routes, request inspection, HAR, headers, credentials, offline
+- `network` - Network routes, request inspection, HAR, headers, credentials, offline, throttling
 - `state` - Cookies, storage, auth, saved state, sessions, profiles, skills
 - `debug` - Console/errors, tracing, profiling, recording, accessibility audits, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
 - `tabs` - Back/forward/reload, tabs, windows, frames, dialogs
 - `react` - React tree/inspect/renders/suspense, vitals, pushstate
-- `mobile` - Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
+- `mobile` - Viewport/device/geolocation/media, CPU throttling, touch, swipe, mouse, keyboard
 - `all` - Every MCP tool, including the full typed CLI parity surface
 
 Example MCP client config:

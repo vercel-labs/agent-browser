@@ -3246,6 +3246,7 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         "geo",
         "geolocation",
         "offline",
+        "cpu-throttle",
         "headers",
         "credentials",
         "auth",
@@ -3323,6 +3324,22 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 .unwrap_or(true);
             Ok(json!({ "id": id, "action": "offline", "offline": off }))
         }
+        Some("cpu-throttle") => {
+            const USAGE: &str = "set cpu-throttle <rate> (1 = off, 4 = 4x slowdown)";
+            let rate_str = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "set cpu-throttle".to_string(),
+                usage: USAGE,
+            })?;
+            let rate = rate_str
+                .parse::<f64>()
+                .ok()
+                .filter(|r| r.is_finite() && *r >= 1.0)
+                .ok_or_else(|| ParseError::InvalidValue {
+                    message: format!("Invalid CPU throttle rate '{}'", rate_str),
+                    usage: USAGE,
+                })?;
+            Ok(json!({ "id": id, "action": "cpu_throttle", "rate": rate }))
+        }
         Some("headers") => {
             let headers_json = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "set headers".to_string(),
@@ -3370,14 +3387,15 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }),
         None => Err(ParseError::MissingArguments {
             context: "set".to_string(),
-            usage: "set <viewport|device|geo|offline|headers|credentials|media> [args...]",
+            usage:
+                "set <viewport|device|geo|offline|cpu-throttle|headers|credentials|media> [args...]",
         }),
     }
 }
 
 /// Parse network interception, request inspection, and HAR recording commands.
 fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["route", "unroute", "requests", "request", "har"];
+    const VALID: &[&str] = &["route", "unroute", "requests", "request", "har", "throttle"];
 
     match rest.first().copied() {
         Some("route") => {
@@ -3440,6 +3458,7 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             })?;
             Ok(json!({ "id": id, "action": "request_detail", "requestId": request_id }))
         }
+        Some("throttle") => parse_network_throttle(&rest[1..], id),
         Some("har") => {
             const HAR_VALID: &[&str] = &["start", "stop"];
             match rest.get(1).copied() {
@@ -3485,8 +3504,92 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }),
         None => Err(ParseError::MissingArguments {
             context: "network".to_string(),
-            usage: "network <route|unroute|requests|request|har> [args...]",
+            usage: "network <route|unroute|requests|request|har|throttle> [args...]",
         }),
+    }
+}
+
+/// Parse `network throttle <preset|offline|off> [--match <pattern>]
+/// [--latency-ms <ms>] [--download-kbps <kbps>] [--upload-kbps <kbps>]`.
+fn parse_network_throttle(rest: &[&str], id: &str) -> Result<Value, ParseError> {
+    const USAGE: &str = "network throttle <slow-3g|fast-3g|slow-4g|fast-4g|offline|off> [--match <pattern>] [--latency-ms <ms>] [--download-kbps <kbps>] [--upload-kbps <kbps>]";
+    let mut cmd = json!({ "id": id, "action": "network_throttle" });
+    let mut has_custom = false;
+    let mut i = 0;
+    while i < rest.len() {
+        let arg = rest[i];
+        let key = match arg {
+            "--match" => "match",
+            "--latency-ms" => "latencyMs",
+            "--download-kbps" => "downloadKbps",
+            "--upload-kbps" => "uploadKbps",
+            _ if arg.starts_with("--") => {
+                return Err(ParseError::InvalidValue {
+                    message: format!("Unknown flag '{}'", arg),
+                    usage: USAGE,
+                })
+            }
+            _ => {
+                if cmd.get("preset").is_some() {
+                    return Err(ParseError::InvalidValue {
+                        message: format!("Unexpected argument '{}'", arg),
+                        usage: USAGE,
+                    });
+                }
+                let known = arg == "offline"
+                    || arg == "off"
+                    || crate::native::network::THROTTLE_PRESETS.contains(&arg);
+                if !known {
+                    return Err(ParseError::InvalidValue {
+                        message: format!("Unknown throttle preset '{}'", arg),
+                        usage: USAGE,
+                    });
+                }
+                cmd["preset"] = json!(arg);
+                i += 1;
+                continue;
+            }
+        };
+        let value = rest
+            .get(i + 1)
+            .ok_or_else(|| ParseError::MissingArguments {
+                context: format!("network throttle {}", arg),
+                usage: USAGE,
+            })?;
+        if key == "match" {
+            cmd[key] = json!(value);
+        } else {
+            let n = value
+                .parse::<f64>()
+                .ok()
+                .filter(|n| n.is_finite() && *n >= 0.0)
+                .ok_or_else(|| ParseError::InvalidValue {
+                    message: format!("{} must be a non-negative number, got '{}'", arg, value),
+                    usage: USAGE,
+                })?;
+            cmd[key] = json!(n);
+            has_custom = true;
+        }
+        i += 2;
+    }
+    match cmd.get("preset").and_then(|v| v.as_str()) {
+        None if !has_custom => Err(ParseError::MissingArguments {
+            context: "network throttle".to_string(),
+            usage: USAGE,
+        }),
+        Some(mode @ ("off" | "offline")) if has_custom => Err(ParseError::InvalidValue {
+            message: format!(
+                "'{}' does not take --latency-ms, --download-kbps, or --upload-kbps",
+                mode
+            ),
+            usage: USAGE,
+        }),
+        Some("offline") if cmd.get("match").is_some() => Err(ParseError::InvalidValue {
+            message: "offline cannot be scoped with --match; use `network route <url> --abort`"
+                .to_string(),
+            usage: USAGE,
+        }),
+        _ => Ok(cmd),
     }
 }
 
@@ -5577,6 +5680,91 @@ mod tests {
         assert_eq!(cmd["action"], "emulatemedia");
         assert_eq!(cmd["colorScheme"], "light");
         assert_eq!(cmd["reducedMotion"], "reduce");
+    }
+
+    #[test]
+    fn test_set_cpu_throttle() {
+        let cmd = parse_command(&args("set cpu-throttle 4"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "cpu_throttle");
+        assert_eq!(cmd["rate"], 4.0);
+
+        let cmd = parse_command(&args("set cpu-throttle 1"), &default_flags()).unwrap();
+        assert_eq!(cmd["rate"], 1.0);
+
+        for bad in [
+            "set cpu-throttle 0.5",
+            "set cpu-throttle fast",
+            "set cpu-throttle",
+        ] {
+            assert!(
+                parse_command(&args(bad), &default_flags()).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_network_throttle_presets() {
+        for preset in ["slow-3g", "fast-3g", "slow-4g", "fast-4g", "offline", "off"] {
+            let cmd = parse_command(
+                &args(&format!("network throttle {preset}")),
+                &default_flags(),
+            )
+            .unwrap();
+            assert_eq!(cmd["action"], "network_throttle");
+            assert_eq!(cmd["preset"], preset);
+            assert!(cmd.get("match").is_none());
+        }
+    }
+
+    #[test]
+    fn test_network_throttle_custom_and_match() {
+        let cmd = parse_command(
+            &args("network throttle --download-kbps 750 --upload-kbps 250 --latency-ms 100"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert!(cmd.get("preset").is_none());
+        assert_eq!(cmd["downloadKbps"], 750.0);
+        assert_eq!(cmd["uploadKbps"], 250.0);
+        assert_eq!(cmd["latencyMs"], 100.0);
+
+        let cmd = parse_command(
+            &args("network throttle slow-3g --match **/api/* --latency-ms 1200"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["preset"], "slow-3g");
+        assert_eq!(cmd["match"], "**/api/*");
+        assert_eq!(cmd["latencyMs"], 1200.0);
+
+        let cmd = parse_command(
+            &args("network throttle off --match **/api/*"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["preset"], "off");
+        assert_eq!(cmd["match"], "**/api/*");
+    }
+
+    #[test]
+    fn test_network_throttle_rejects_invalid_input() {
+        for bad in [
+            "network throttle",
+            "network throttle 3g",
+            "network throttle slow-3g fast-4g",
+            "network throttle --latency-ms",
+            "network throttle --latency-ms -5",
+            "network throttle --download-kbps fast",
+            "network throttle --delay-ms 100",
+            "network throttle off --latency-ms 100",
+            "network throttle offline --match **/api/*",
+        ] {
+            assert!(
+                parse_command(&args(bad), &default_flags()).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

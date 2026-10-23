@@ -330,12 +330,13 @@ agent-browser set viewport <w> <h> [scale]  # Set viewport size (scale for retin
 agent-browser set device <name>       # Emulate device ("iPhone 14")
 agent-browser set geo <lat> <lng>     # Set geolocation
 agent-browser set offline [on|off]    # Toggle offline mode
+agent-browser set cpu-throttle <rate> # Slow down the CPU (4 = 4x slower, 1 = off)
 agent-browser set headers <json>      # Extra HTTP headers
 agent-browser set credentials <u> <p> # HTTP basic auth for current and future tabs
 agent-browser set media [dark|light]  # Emulate color scheme
 ```
 
-`set credentials` applies HTTP Basic Authentication to the current tab and tabs opened later. `set offline off` and `set headers '{}'` restore the default setup for future tabs.
+`set credentials` applies HTTP Basic Authentication to the current tab and tabs opened later. `set offline off`, `set cpu-throttle 1`, and `set headers '{}'` restore the default setup for future tabs. `set offline` keeps any `network throttle` settings, so turning offline mode off returns to the throttled network rather than full speed.
 
 ### Cookies & Storage
 
@@ -372,7 +373,27 @@ agent-browser network har start                # Start HAR recording (embeds tex
 agent-browser network har start --content all  # Embed all response bodies (binary as base64)
 agent-browser network har start --content none # Metadata only, no bodies
 agent-browser network har stop [output.har]    # Stop and save HAR (temp path if omitted)
+agent-browser network throttle slow-3g         # Emulate a slow network (slow-3g, fast-3g, slow-4g, fast-4g)
+agent-browser network throttle --download-kbps 750 --upload-kbps 250 --latency-ms 100  # Custom profile
+agent-browser network throttle --match "**/api/*" --latency-ms 1200  # Delay only matching URLs
+agent-browser network throttle offline         # Same as set offline on
+agent-browser network throttle off             # Clear all throttling and offline mode
 ```
+
+#### Network throttling
+
+`network throttle` emulates slow connections for the current tab and tabs opened later, which is useful for testing loading states or recording a demo where they would otherwise flash by. The presets use the same values as Chrome DevTools:
+
+| Preset    | Latency  | Download    | Upload      |
+| --------- | -------- | ----------- | ----------- |
+| `slow-3g` | 2000 ms  | 400 kbps    | 400 kbps    |
+| `fast-3g` | 562.5 ms | 1440 kbps   | 675 kbps    |
+| `slow-4g` | 562.5 ms | 1440 kbps   | 675 kbps    |
+| `fast-4g` | 165 ms   | 8100 kbps   | 1350 kbps   |
+
+DevTools renamed Fast 3G to Slow 4G in 2024 without changing its values, so `fast-3g` and `slow-4g` are the same profile. `--latency-ms`, `--download-kbps`, and `--upload-kbps` override individual values of a preset, or define a custom profile on their own.
+
+Without `--match`, a preset or custom values replace the global profile and turn offline mode off, like picking a profile in the DevTools throttling menu. With `--match`, the profile applies only to matching URLs and stacks with other `--match` rules; the first matching rule wins. Glob patterns such as `**/api/*` or `*.png` match any scheme, host, and port. Values containing `://` are passed through as [URLPattern](https://developer.mozilla.org/docs/Web/API/URL_Pattern_API) strings. `network throttle off --match <pattern>` removes a single rule. CPU throttling is separate: use `set cpu-throttle`.
 
 ### Tabs & Windows
 
@@ -597,12 +618,12 @@ The default tools profile is `core`, which keeps MCP context small for everyday 
 Profiles:
 
 - `core` — Default. Navigation, snapshots, interaction, waits, reads, screenshots, JavaScript eval, close, tab basics, and profile discovery
-- `network` — Network routes, request inspection, HAR, headers, credentials, offline
+- `network` — Network routes, request inspection, HAR, headers, credentials, offline, throttling
 - `state` — Cookies, storage, auth, saved state, sessions, profiles, skills
 - `debug` — Console/errors, tracing, profiling, recording, a11y audit, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
 - `tabs` — Back/forward/reload, tabs, windows, frames, dialogs
 - `react` — React tree/inspect/renders/suspense, vitals, pushstate
-- `mobile` — Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
+- `mobile` — Viewport/device/geolocation/media, CPU throttling, touch, swipe, mouse, keyboard
 - `all` — Every MCP tool, including the full typed CLI parity surface
 
 Common tools include:

@@ -10712,8 +10712,252 @@ async fn e2e_cleared_session_setup_is_not_pending() {
     .await;
     assert_success(&resp);
 
-    assert!(state.session_setup.offline.is_none());
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "network_throttle", "preset": "off" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "cpu_throttle", "rate": 1 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    assert!(state.session_setup.network.is_default());
+    assert!(state.session_setup.cpu_throttle_rate.is_none());
     assert!(state.session_setup.extra_headers.is_none());
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// Serves a small HTML page at `/` and `ok` for any other path, without a
+/// request cap, so throttling tests can issue as many fetches as they need.
+async fn start_throttle_fixture_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+
+    let handle = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let (content_type, body) = if request.starts_with("GET / ") {
+                    ("text/html", "<!doctype html><title>Throttle</title>")
+                } else {
+                    ("text/plain", "ok")
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nCache-Control: no-store\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    content_type,
+                    body.len(),
+                    body,
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+
+    (base_url, handle)
+}
+
+/// Run a command with its future boxed. These tests issue many commands, and
+/// inlining every command future overflows the test thread's stack in debug
+/// builds.
+async fn run_boxed(state: &mut DaemonState, cmd: Value) -> Value {
+    Box::pin(execute_command(&cmd, state)).await
+}
+
+/// Time an in-page `fetch(path)` in milliseconds, or `None` if it failed.
+async fn timed_fetch(state: &mut DaemonState, path: &str) -> Option<f64> {
+    let script = format!(
+        "(async () => {{ const t = performance.now(); \
+         try {{ await (await fetch('{path}?' + Math.random())).text(); }} \
+         catch (e) {{ return null; }} \
+         return performance.now() - t; }})()"
+    );
+    let resp = run_boxed(
+        state,
+        json!({ "id": "fetch", "action": "evaluate", "script": script }),
+    )
+    .await;
+    assert_success(&resp);
+    get_data(&resp)["result"].as_f64()
+}
+
+async fn throttle(state: &mut DaemonState, cmd: Value) -> Value {
+    let mut cmd = cmd;
+    cmd["id"] = json!("throttle");
+    cmd["action"] = json!("network_throttle");
+    let resp = run_boxed(state, cmd).await;
+    assert_success(&resp);
+    get_data(&resp).clone()
+}
+
+/// `network throttle` delays real requests: per-URL rules only slow matching
+/// URLs (on a non-default port, which a URLPattern without `:*` would miss),
+/// presets slow everything, offline composes with throttling, settings carry
+/// over to new tabs, and `off` restores full speed.
+#[tokio::test]
+#[ignore]
+async fn e2e_network_throttle_delays_requests() {
+    let (base_url, _server) = start_throttle_fixture_server().await;
+    let mut state = DaemonState::new();
+
+    let resp = run_boxed(
+        &mut state,
+        json!({ "id": "1", "action": "launch", "headless": true }),
+    )
+    .await;
+    assert_success(&resp);
+    let resp = run_boxed(
+        &mut state,
+        json!({ "id": "2", "action": "navigate", "url": format!("{}/", base_url) }),
+    )
+    .await;
+    assert_success(&resp);
+
+    let baseline = timed_fetch(&mut state, "/api/items").await.unwrap();
+    assert!(baseline < 500.0, "unthrottled fetch took {baseline}ms");
+
+    // Per-URL rule: only /api/* is delayed.
+    let data = throttle(
+        &mut state,
+        json!({ "match": "**/api/*", "latencyMs": 1200 }),
+    )
+    .await;
+    assert_eq!(data["rules"][0]["match"], "*://*:*/api/*");
+    let api = timed_fetch(&mut state, "/api/items").await.unwrap();
+    let other = timed_fetch(&mut state, "/static/app.js").await.unwrap();
+    assert!(api >= 1100.0, "matched fetch took only {api}ms");
+    assert!(other < 500.0, "unmatched fetch took {other}ms");
+
+    // The rule is replayed onto tabs opened later.
+    let resp = run_boxed(
+        &mut state,
+        json!({ "id": "3", "action": "tab_new", "url": format!("{}/", base_url) }),
+    )
+    .await;
+    assert_success(&resp);
+    let api = timed_fetch(&mut state, "/api/items").await.unwrap();
+    assert!(api >= 1100.0, "matched fetch in new tab took only {api}ms");
+
+    // Removing the scoped rule restores full speed for it.
+    let data = throttle(&mut state, json!({ "preset": "off", "match": "**/api/*" })).await;
+    assert_eq!(data["rules"], json!([]));
+    let api = timed_fetch(&mut state, "/api/items").await.unwrap();
+    assert!(api < 500.0, "fetch after removing rule took {api}ms");
+
+    // A global preset slows every request (slow-3g has 2000ms latency).
+    throttle(&mut state, json!({ "preset": "slow-3g" })).await;
+    let other = timed_fetch(&mut state, "/static/app.js").await.unwrap();
+    assert!(other >= 1800.0, "slow-3g fetch took only {other}ms");
+
+    // `set offline` composes with throttling instead of resetting it.
+    let resp = run_boxed(
+        &mut state,
+        json!({ "id": "4", "action": "offline", "offline": true }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(timed_fetch(&mut state, "/static/app.js").await, None);
+    let resp = run_boxed(
+        &mut state,
+        json!({ "id": "5", "action": "evaluate", "script": "navigator.onLine" }),
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], false);
+    let resp = run_boxed(
+        &mut state,
+        json!({ "id": "6", "action": "offline", "offline": false }),
+    )
+    .await;
+    assert_success(&resp);
+    let other = timed_fetch(&mut state, "/static/app.js").await.unwrap();
+    assert!(
+        other >= 1800.0,
+        "throttle lost after going back online: {other}ms"
+    );
+
+    // `off` clears everything.
+    let data = throttle(&mut state, json!({ "preset": "off" })).await;
+    assert_eq!(data["offline"], false);
+    assert_eq!(data["rules"], json!([]));
+    let other = timed_fetch(&mut state, "/static/app.js").await.unwrap();
+    assert!(other < 500.0, "fetch after throttle off took {other}ms");
+    let resp = run_boxed(
+        &mut state,
+        json!({ "id": "7", "action": "evaluate", "script": "navigator.onLine" }),
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"], true);
+    assert!(state.session_setup.network.is_default());
+
+    let resp = run_boxed(&mut state, json!({ "id": "99", "action": "close" })).await;
+    assert_success(&resp);
+}
+
+/// Time a fixed CPU-bound loop in the page, best of three runs to keep
+/// scheduler noise out of the comparison.
+async fn busy_loop_ms(state: &mut DaemonState) -> f64 {
+    let script = "(() => { let best = Infinity; for (let r = 0; r < 3; r++) { \
+                  const t = performance.now(); let x = 0; \
+                  for (let i = 0; i < 2e7; i++) { x += Math.sqrt(i); } \
+                  best = Math.min(best, performance.now() - t); } return best; })()";
+    let resp = run_boxed(
+        state,
+        json!({ "id": "loop", "action": "evaluate", "script": script }),
+    )
+    .await;
+    assert_success(&resp);
+    get_data(&resp)["result"].as_f64().unwrap()
+}
+
+/// `set cpu-throttle` slows down page JavaScript and 1 turns it back off.
+#[tokio::test]
+#[ignore]
+async fn e2e_cpu_throttle_slows_javascript() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let baseline = busy_loop_ms(&mut state).await;
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "cpu_throttle", "rate": 6 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(state.session_setup.cpu_throttle_rate, Some(6.0));
+    let throttled = busy_loop_ms(&mut state).await;
+    assert!(
+        throttled > baseline * 2.5,
+        "6x CPU throttle: baseline {baseline}ms, throttled {throttled}ms"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "cpu_throttle", "rate": 1 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(state.session_setup.cpu_throttle_rate, None);
+    let restored = busy_loop_ms(&mut state).await;
+    assert!(
+        restored < throttled / 2.0,
+        "after reset: throttled {throttled}ms, restored {restored}ms"
+    );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);

@@ -25,23 +25,228 @@ pub async fn set_extra_headers(
     Ok(())
 }
 
-pub async fn set_offline(
+// ---------------------------------------------------------------------------
+// Network conditions (offline and throttling)
+// ---------------------------------------------------------------------------
+
+/// Throttling presets matching Chrome DevTools (`front_end/core/sdk/NetworkManager.ts`).
+/// DevTools renamed "Fast 3G" to "Slow 4G" in 2024 without changing the
+/// numbers, so `fast-3g` and `slow-4g` are the same profile.
+pub const THROTTLE_PRESETS: &[&str] = &["slow-3g", "fast-3g", "slow-4g", "fast-4g"];
+
+/// Throughput in bytes per second; `-1` disables throttling in that direction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThrottleProfile {
+    pub latency_ms: f64,
+    pub download_bytes_per_sec: f64,
+    pub upload_bytes_per_sec: f64,
+}
+
+impl ThrottleProfile {
+    pub const NONE: Self = Self {
+        latency_ms: 0.0,
+        download_bytes_per_sec: -1.0,
+        upload_bytes_per_sec: -1.0,
+    };
+
+    pub fn preset(name: &str) -> Option<Self> {
+        match name {
+            "slow-3g" => Some(Self {
+                latency_ms: 400.0 * 5.0,
+                download_bytes_per_sec: 500.0 * 1000.0 / 8.0 * 0.8,
+                upload_bytes_per_sec: 500.0 * 1000.0 / 8.0 * 0.8,
+            }),
+            "fast-3g" | "slow-4g" => Some(Self {
+                latency_ms: 150.0 * 3.75,
+                download_bytes_per_sec: 1.6 * 1000.0 * 1000.0 / 8.0 * 0.9,
+                upload_bytes_per_sec: 750.0 * 1000.0 / 8.0 * 0.9,
+            }),
+            "fast-4g" => Some(Self {
+                latency_ms: 60.0 * 2.75,
+                download_bytes_per_sec: 9.0 * 1000.0 * 1000.0 / 8.0 * 0.9,
+                upload_bytes_per_sec: 1.5 * 1000.0 * 1000.0 / 8.0 * 0.9,
+            }),
+            _ => None,
+        }
+    }
+}
+
+pub fn kbps_to_bytes_per_sec(kbps: f64) -> f64 {
+    kbps * 1000.0 / 8.0
+}
+
+fn bytes_per_sec_to_kbps(bytes: f64) -> Value {
+    if bytes < 0.0 {
+        Value::Null
+    } else {
+        json!(bytes * 8.0 / 1000.0)
+    }
+}
+
+/// Turn a `--match` value into an absolute URLPattern for
+/// `Network.emulateNetworkConditionsByRule`. Values containing `://` are
+/// passed through as URLPattern strings. Anything else is treated like a
+/// `network route` glob (`**/api/*`, `*.png`) and anchored to any scheme,
+/// host, and port. The explicit `:*` matters: a URLPattern that omits the
+/// port only matches the default port, so `*://*/api/*` would silently miss
+/// `localhost:3000`.
+pub fn normalize_throttle_pattern(pattern: &str) -> String {
+    if pattern.contains("://") {
+        return pattern.to_string();
+    }
+    let path = pattern.trim_start_matches('*');
+    let mut out = String::from("*://*:*");
+    if !path.starts_with('/') {
+        out.push_str("/*");
+    }
+    let mut last_was_star = out.ends_with('*');
+    for ch in path.chars() {
+        if ch == '*' && last_was_star {
+            continue;
+        }
+        last_was_star = ch == '*';
+        out.push(ch);
+    }
+    out
+}
+
+/// Network conditions for a tab: the offline flag plus throttling rules.
+/// URL-scoped rules come first in the order they were added, followed by the
+/// global rule (empty pattern), because Chrome applies the first rule that
+/// matches a request.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NetworkConditions {
+    pub offline: bool,
+    rules: Vec<(String, ThrottleProfile)>,
+}
+
+impl NetworkConditions {
+    /// True when nothing is emulated, which is how a fresh target starts.
+    pub fn is_default(&self) -> bool {
+        !self.offline && self.rules.is_empty()
+    }
+
+    /// Add or replace the rule for `pattern`; an empty pattern is the global rule.
+    pub fn set_rule(&mut self, pattern: String, profile: ThrottleProfile) {
+        if let Some(existing) = self.rules.iter_mut().find(|(p, _)| *p == pattern) {
+            existing.1 = profile;
+        } else if pattern.is_empty() {
+            self.rules.push((pattern, profile));
+        } else {
+            let at = self
+                .rules
+                .iter()
+                .position(|(p, _)| p.is_empty())
+                .unwrap_or(self.rules.len());
+            self.rules.insert(at, (pattern, profile));
+        }
+    }
+
+    /// Remove the rule for `pattern`, returning whether one existed.
+    pub fn remove_rule(&mut self, pattern: &str) -> bool {
+        let before = self.rules.len();
+        self.rules.retain(|(p, _)| p != pattern);
+        self.rules.len() != before
+    }
+
+    fn global(&self) -> ThrottleProfile {
+        self.rules
+            .iter()
+            .find(|(p, _)| p.is_empty())
+            .map(|(_, profile)| *profile)
+            .unwrap_or(ThrottleProfile::NONE)
+    }
+
+    fn has_scoped_rules(&self) -> bool {
+        self.rules.iter().any(|(p, _)| !p.is_empty())
+    }
+
+    /// The `{ offline, rules }` shape returned by `network throttle`.
+    pub fn to_json(&self) -> Value {
+        let rules: Vec<Value> = self
+            .rules
+            .iter()
+            .map(|(pattern, profile)| {
+                json!({
+                    "match": (!pattern.is_empty()).then_some(pattern),
+                    "latencyMs": profile.latency_ms,
+                    "downloadKbps": bytes_per_sec_to_kbps(profile.download_bytes_per_sec),
+                    "uploadKbps": bytes_per_sec_to_kbps(profile.upload_bytes_per_sec),
+                })
+            })
+            .collect();
+        json!({ "offline": self.offline, "rules": rules })
+    }
+
+    fn by_rule_params(&self) -> Value {
+        let rules: Vec<Value> = self
+            .rules
+            .iter()
+            .map(|(pattern, profile)| {
+                json!({
+                    "urlPattern": pattern,
+                    "latency": profile.latency_ms,
+                    "downloadThroughput": profile.download_bytes_per_sec,
+                    "uploadThroughput": profile.upload_bytes_per_sec,
+                })
+            })
+            .collect();
+        json!({ "offline": self.offline, "matchedNetworkConditions": rules })
+    }
+
+    /// Params for `Network.overrideNetworkState` or the deprecated
+    /// `Network.emulateNetworkConditions`, which share this shape.
+    fn global_params(&self) -> Value {
+        let global = self.global();
+        json!({
+            "offline": self.offline,
+            "latency": global.latency_ms,
+            "downloadThroughput": global.download_bytes_per_sec,
+            "uploadThroughput": global.upload_bytes_per_sec,
+        })
+    }
+}
+
+/// Apply `conditions` to one target, replacing whatever it had before.
+/// Browsers without `Network.emulateNetworkConditionsByRule` fall back to the
+/// deprecated `Network.emulateNetworkConditions`, which can express offline
+/// and global throttling but not per-URL rules.
+pub async fn apply_network_conditions(
     client: &CdpClient,
     session_id: &str,
-    offline: bool,
+    conditions: &NetworkConditions,
 ) -> Result<(), String> {
-    client
-        .send_command(
-            "Network.emulateNetworkConditions",
-            Some(json!({
-                "offline": offline,
-                "latency": 0,
-                "downloadThroughput": -1,
-                "uploadThroughput": -1,
-            })),
-            Some(session_id),
-        )
-        .await?;
+    const BY_RULE: &str = "Network.emulateNetworkConditionsByRule";
+    match client
+        .send_command(BY_RULE, Some(conditions.by_rule_params()), Some(session_id))
+        .await
+    {
+        Ok(_) => {
+            client
+                .send_command(
+                    "Network.overrideNetworkState",
+                    Some(conditions.global_params()),
+                    Some(session_id),
+                )
+                .await?;
+        }
+        Err(e) if super::webmcp::method_is_unsupported(&e, BY_RULE) => {
+            if conditions.has_scoped_rules() {
+                return Err(format!(
+                    "Per-URL throttling (--match) is not supported by this browser: {}",
+                    e
+                ));
+            }
+            client
+                .send_command(
+                    "Network.emulateNetworkConditions",
+                    Some(conditions.global_params()),
+                    Some(session_id),
+                )
+                .await?;
+        }
+        Err(e) => return Err(e),
+    }
     Ok(())
 }
 
@@ -662,6 +867,104 @@ impl EventTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_throttle_presets_match_devtools() {
+        let slow_3g = ThrottleProfile::preset("slow-3g").unwrap();
+        assert_eq!(slow_3g.latency_ms, 2000.0);
+        assert_eq!(slow_3g.download_bytes_per_sec, 50_000.0);
+        assert_eq!(slow_3g.upload_bytes_per_sec, 50_000.0);
+
+        let slow_4g = ThrottleProfile::preset("slow-4g").unwrap();
+        assert_eq!(slow_4g.latency_ms, 562.5);
+        assert_eq!(slow_4g.download_bytes_per_sec, 180_000.0);
+        assert_eq!(slow_4g.upload_bytes_per_sec, 84_375.0);
+        assert_eq!(ThrottleProfile::preset("fast-3g"), Some(slow_4g));
+
+        let fast_4g = ThrottleProfile::preset("fast-4g").unwrap();
+        assert_eq!(fast_4g.latency_ms, 165.0);
+        assert_eq!(fast_4g.download_bytes_per_sec, 1_012_500.0);
+        assert_eq!(fast_4g.upload_bytes_per_sec, 168_750.0);
+
+        for name in THROTTLE_PRESETS {
+            assert!(ThrottleProfile::preset(name).is_some(), "{name}");
+        }
+        assert!(ThrottleProfile::preset("3g").is_none());
+    }
+
+    #[test]
+    fn test_normalize_throttle_pattern() {
+        assert_eq!(normalize_throttle_pattern("**/api/*"), "*://*:*/api/*");
+        assert_eq!(normalize_throttle_pattern("/api/*"), "*://*:*/api/*");
+        assert_eq!(normalize_throttle_pattern("*/api/**"), "*://*:*/api/*");
+        assert_eq!(normalize_throttle_pattern("*.png"), "*://*:*/*.png");
+        assert_eq!(
+            normalize_throttle_pattern("**/api/appearances*"),
+            "*://*:*/api/appearances*"
+        );
+        assert_eq!(
+            normalize_throttle_pattern("http://localhost:3000/api/*"),
+            "http://localhost:3000/api/*"
+        );
+    }
+
+    #[test]
+    fn test_network_conditions_rule_order_and_replacement() {
+        let slow = ThrottleProfile::preset("slow-3g").unwrap();
+        let fast = ThrottleProfile::preset("fast-4g").unwrap();
+        let mut conditions = NetworkConditions::default();
+        assert!(conditions.is_default());
+
+        conditions.set_rule(String::new(), slow);
+        conditions.set_rule("*://*:*/api/*".to_string(), fast);
+        conditions.set_rule("*://*:*/img/*".to_string(), fast);
+        conditions.set_rule("*://*:*/api/*".to_string(), slow);
+
+        let params = conditions.by_rule_params();
+        let patterns: Vec<&str> = params["matchedNetworkConditions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["urlPattern"].as_str().unwrap())
+            .collect();
+        // Scoped rules keep insertion order and stay ahead of the global rule.
+        assert_eq!(patterns, vec!["*://*:*/api/*", "*://*:*/img/*", ""]);
+        assert_eq!(params["matchedNetworkConditions"][0]["latency"], 2000.0);
+        assert_eq!(conditions.global_params()["latency"], 2000.0);
+
+        assert!(conditions.remove_rule(""));
+        assert!(!conditions.remove_rule(""));
+        assert_eq!(conditions.global_params()["downloadThroughput"], -1.0);
+        assert!(conditions.has_scoped_rules());
+    }
+
+    #[test]
+    fn test_network_conditions_json_reports_kbps() {
+        let mut conditions = NetworkConditions {
+            offline: true,
+            ..NetworkConditions::default()
+        };
+        conditions.set_rule(
+            String::new(),
+            ThrottleProfile {
+                latency_ms: 100.0,
+                download_bytes_per_sec: kbps_to_bytes_per_sec(750.0),
+                upload_bytes_per_sec: -1.0,
+            },
+        );
+        assert_eq!(
+            conditions.to_json(),
+            json!({
+                "offline": true,
+                "rules": [{
+                    "match": null,
+                    "latencyMs": 100.0,
+                    "downloadKbps": 750.0,
+                    "uploadKbps": null,
+                }],
+            })
+        );
+    }
 
     #[test]
     fn test_domain_filter_exact() {

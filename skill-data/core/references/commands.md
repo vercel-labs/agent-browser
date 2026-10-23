@@ -192,7 +192,8 @@ agent-browser set viewport 1920 1080          # Set viewport size
 agent-browser set viewport 1920 1080 2        # 2x retina (same CSS size, higher res screenshots)
 agent-browser set device "iPhone 14"          # Emulate device
 agent-browser set geo 37.7749 -122.4194       # Set geolocation (alias: geolocation)
-agent-browser set offline on                  # Toggle offline mode
+agent-browser set offline on                  # Toggle offline mode (keeps network throttle)
+agent-browser set cpu-throttle 4              # 4x slower CPU; 1 turns it off
 agent-browser set headers '{"X-Key":"v"}'     # Extra HTTP headers
 agent-browser set credentials user pass       # HTTP basic auth for current and future tabs (alias: auth)
 agent-browser set media dark                  # Emulate color scheme
@@ -225,7 +226,15 @@ agent-browser network har start                # Record traffic (embeds text res
 agent-browser network har start --content all  # Embed all bodies (binary as base64)
 agent-browser network har start --content none # Sizes and headers only
 agent-browser network har stop [output.har]    # Stop and save HAR
+agent-browser network throttle slow-3g         # Slow network: slow-3g, fast-3g, slow-4g, fast-4g
+agent-browser network throttle --download-kbps 750 --upload-kbps 250 --latency-ms 100
+agent-browser network throttle --match "**/api/*" --latency-ms 1200  # Delay matching URLs only
+agent-browser network throttle off --match "**/api/*"  # Remove one rule
+agent-browser network throttle offline         # Same as set offline on
+agent-browser network throttle off             # Clear all throttling and offline mode
 ```
+
+Presets use Chrome DevTools values (`slow-3g`: 2000 ms latency, 400 kbps both ways; `fast-3g` and `slow-4g`: 562.5 ms, 1440 kbps down, 675 kbps up; `fast-4g`: 165 ms, 8100 kbps down, 1350 kbps up). Custom flags override preset values or stand alone. Without `--match` the call replaces the global profile and turns offline mode off. With `--match` the rule only applies to matching URLs and stacks with other rules (first match wins). Globs like `**/api/*` match any scheme, host, and port; values containing `://` are URLPattern strings. Throttling and CPU throttling carry over to tabs opened later.
 
 ## Tabs and Windows
 
@@ -257,7 +266,7 @@ agent-browser tab close docs             # close by label
 
 Labels are never auto-generated, never rewritten on navigation, and must be unique within a session. To interact with another tab, switch to it first: the daemon maintains a single active tab, so refs (`@eN`) belong to the tab that was active when the snapshot ran.
 
-Tabs opened through `tab new` or `click --new-tab` inherit the session's setup before their first document loads: user agent, `set headers`, `set credentials`, origin-scoped `--headers`, init scripts, `route` rules, and emulation overrides (color scheme, timezone, locale, geolocation, offline). Turning offline mode off or setting headers to `{}` restores the default setup for future tabs.
+Tabs opened through `tab new` or `click --new-tab` inherit the session's setup before their first document loads: user agent, `set headers`, `set credentials`, origin-scoped `--headers`, init scripts, `route` rules, and emulation overrides (color scheme, timezone, locale, geolocation, offline, network throttle, CPU throttle). Turning offline mode off, `network throttle off`, `set cpu-throttle 1`, or setting headers to `{}` restores the default setup for future tabs.
 
 `tab list --json` also reports each tab's CDP `targetId`, accepted anywhere a tab ref is accepted (`tab <targetId>`, `tab close <targetId>`). Target ids stay stable across daemon restarts, unlike `t<N>` ids, which are per-daemon counters. With `--pin-tab` the session is pinned to its bound tab: if that tab is closed, commands fail with a `tab_gone` error instead of falling back to another tab, and `tab new` or `tab list` recover. JSON errors include `code: "tab_gone"` and a recovery object with `data.targetId` plus optional sanitized `data.lastUrl`; batch uses `result` for the same object.
 
@@ -413,12 +422,12 @@ The default tools profile is `core`, which keeps MCP context small for everyday 
 Profiles:
 
 - `core` - Default. Navigation, snapshots, interaction, waits, reads, screenshots, JavaScript eval, close, tab basics, and profile discovery
-- `network` - Network routes, request inspection, HAR, headers, credentials, offline
+- `network` - Network routes, request inspection, HAR, headers, credentials, offline, throttling
 - `state` - Cookies, storage, auth, saved state, sessions, profiles, skills
 - `debug` - Console/errors, tracing, profiling, recording, a11y audit, clipboard, plugins, doctor, dashboard, install, upgrade, chat, diff, batch, confirm/deny
 - `tabs` - Back/forward/reload, tabs, windows, frames, dialogs
 - `react` - React tree/inspect/renders/suspense, vitals, pushstate
-- `mobile` - Viewport/device/geolocation/media, touch, swipe, mouse, keyboard
+- `mobile` - Viewport/device/geolocation/media, CPU throttling, touch, swipe, mouse, keyboard
 - `all` - Every MCP tool, including the full typed CLI parity surface
 
 Common tools include:

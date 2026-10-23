@@ -637,7 +637,7 @@ pub fn cancel_error(error: &str) -> String {
     }
 }
 
-fn method_is_unsupported(error: &str, method: &str) -> bool {
+pub(crate) fn method_is_unsupported(error: &str, method: &str) -> bool {
     error.contains(method)
         && (error.contains("wasn't found")
             || error.contains("Method not found")
