@@ -1623,9 +1623,9 @@ Examples:
 
   # Pre-navigation setup in one turn:
   agent-browser batch \
-    '["open"]' \
-    '["network","route","*","--abort","--resource-type","script"]' \
-    '["navigate","http://localhost:3000/target"]'
+    "open" \
+    "network route * --abort --resource-type script" \
+    "navigate http://localhost:3000/target"
 "##
         }
         "back" => {

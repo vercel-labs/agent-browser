@@ -34,10 +34,10 @@ After `connect`, the session stays attached until `agent-browser close`. Later c
 
 ```bash
 agent-browser batch \
-  '["open"]' \
-  '["network","route","*","--abort","--resource-type","script"]' \
-  '["cookies","set","--curl","cookies.curl","--domain","localhost"]' \
-  '["navigate","http://localhost:3000/target"]'
+  "open" \
+  "network route * --abort --resource-type script" \
+  "cookies set --curl cookies.curl --domain localhost" \
+  "navigate http://localhost:3000/target"
 ```
 
 `open` with no URL gives you a clean launch so any interception, cookies, or init scripts you register take effect on the *first* real navigation. Use for SSR-only debug (`--resource-type script`), protected-origin auth, or capturing fresh `react suspense`/`vitals` state without noise from a prior page.
