@@ -1,6 +1,7 @@
-//! WebDriver BiDi client over a WebSocket.
-
+use super::types::{LocalValue, RemoteValue};
 use futures_util::{SinkExt, StreamExt};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,7 +19,7 @@ type WsSink = futures_util::stream::SplitSink<
     Message,
 >;
 
-/** A connected BiDi session socket; the reader task stops when the client is dropped. */
+/// A connected BiDi session socket; the reader task stops when the client is dropped.
 pub struct BidiClient {
     sink: tokio::sync::Mutex<WsSink>,
     pending: Pending,
@@ -128,6 +129,18 @@ impl BidiClient {
         }
     }
 
+    /// Sends a command with serializable params and deserializes its `result`.
+    pub async fn send_typed<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: &P,
+    ) -> Result<R, String> {
+        let params =
+            serde_json::to_value(params).map_err(|e| format!("Failed to serialize params: {e}"))?;
+        serde_json::from_value(self.send(method, params).await?)
+            .map_err(|e| format!("Failed to deserialize BiDi response for {method}: {e}"))
+    }
+
     /// Runs `script.callFunction` in a browsing context and returns the decoded result.
     pub async fn call_function(
         &self,
@@ -167,7 +180,7 @@ impl BidiClient {
         let mut params = json!({
             "functionDeclaration": js,
             "target": target,
-            "arguments": args.iter().map(to_local).collect::<Vec<_>>(),
+            "arguments": args.iter().map(LocalValue::from).collect::<Vec<_>>(),
             "awaitPromise": true,
             "resultOwnership": "none",
         });
@@ -185,51 +198,11 @@ impl BidiClient {
     }
 }
 
-/// Wraps plain JSON as a BiDi LocalValue; values that already carry `type` or `sharedId` pass through.
-pub fn to_local(v: &Value) -> Value {
-    match v {
-        Value::Object(o) if o.contains_key("type") || o.contains_key("sharedId") => v.clone(),
-        Value::String(_) => json!({"type": "string", "value": v}),
-        Value::Number(_) => json!({"type": "number", "value": v}),
-        Value::Bool(_) => json!({"type": "boolean", "value": v}),
-        Value::Null => json!({"type": "null"}),
-        Value::Array(a) => {
-            json!({"type": "array", "value": a.iter().map(to_local).collect::<Vec<_>>()})
-        }
-        Value::Object(o) => json!({
-            "type": "object",
-            "value": o.iter().map(|(k, x)| json!([k, to_local(x)])).collect::<Vec<_>>(),
-        }),
-    }
-}
-
-/// Converts a BiDi RemoteValue to JSON: nodes become `{sharedId}`, windows their context id.
+/// Decodes a BiDi RemoteValue to plain JSON; undecodable values become null.
 pub fn remote_to_json(v: &Value) -> Value {
-    let val = &v["value"];
-    match v["type"].as_str() {
-        Some("node") => json!({"sharedId": v["sharedId"]}),
-        Some("window") => val["context"].clone(),
-        Some("array" | "set") => Value::Array(
-            val.as_array()
-                .map(|a| a.iter().map(remote_to_json).collect())
-                .unwrap_or_default(),
-        ),
-        Some("object" | "map") => Value::Object(
-            val.as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|p| {
-                    let k = match &p[0] {
-                        Value::String(s) => s.clone(),
-                        other => remote_to_json(other).as_str()?.to_string(),
-                    };
-                    Some((k, remote_to_json(&p[1])))
-                })
-                .collect(),
-        ),
-        Some("string" | "number" | "boolean" | "bigint" | "date") => val.clone(),
-        _ => Value::Null,
-    }
+    serde_json::from_value::<RemoteValue>(v.clone())
+        .map(Value::from)
+        .unwrap_or(Value::Null)
 }
 
 #[cfg(test)]
@@ -320,6 +293,7 @@ mod tests {
 
     #[test]
     fn plain_json_becomes_local_values() {
+        let to_local = |v: &Value| serde_json::to_value(LocalValue::from(v)).unwrap();
         assert_eq!(to_local(&json!(3)), json!({"type": "number", "value": 3}));
         assert_eq!(
             to_local(&json!(["a"])),

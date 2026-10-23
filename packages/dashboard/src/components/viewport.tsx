@@ -43,7 +43,7 @@ import {
 } from "@/store/stream";
 import { activeSessionNameAtom, activePortAtom } from "@/store/sessions";
 
-const SCREENCAST_ENGINES = new Set(["chrome"]);
+const LIVE_VIEW_ENGINES = new Set(["chrome", "firefox"]);
 
 function cdpModifiers(e: React.MouseEvent | React.WheelEvent): number {
   let m = 0;
@@ -526,7 +526,7 @@ export function Viewport() {
         ) : (
           <div className="text-center text-sm text-muted-foreground">
             {browserConnected
-              ? SCREENCAST_ENGINES.has(engine)
+              ? LIVE_VIEW_ENGINES.has(engine)
                 ? "Waiting for frames..."
                 : `Screencast not available for ${engine}`
               : "No browser connected"}

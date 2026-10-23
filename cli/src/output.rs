@@ -4094,8 +4094,9 @@ Options:
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
   --idle-timeout <time>      Shut down daemon after inactivity: 10s, 3m, 1h, or raw ms
                              (default: 1h; 0 disables; dashboard input resets the timer)
-  --engine <name>            Browser engine: chrome (default), lightpanda, obscura (experimental)
-                             (or AGENT_BROWSER_ENGINE); Obscura rejects --proxy-bypass,
+  --engine <name>            Browser engine: chrome (default), lightpanda, firefox, obscura (experimental)
+                             (or AGENT_BROWSER_ENGINE); firefox requires Firefox 150 or newer;
+                             Obscura rejects --proxy-bypass,
                              proxyBypass config, AGENT_BROWSER_PROXY_BYPASS, NO_PROXY/no_proxy,
                              --webgpu, --ca-cert, --args, profiles, state, extensions,
                              headed mode, and file access. Discovery and CDP initialization
@@ -4204,7 +4205,7 @@ Environment:
   AGENT_BROWSER_CONFIRM_INTERACTIVE Enable interactive confirmation prompts
   AGENT_BROWSER_NO_AUTO_DIALOG   Disable automatic dismissal of alert/beforeunload dialogs
   AGENT_BROWSER_PLUGINS          JSON plugin registry override
-  AGENT_BROWSER_ENGINE           Browser engine: chrome (default), lightpanda, obscura (experimental)
+  AGENT_BROWSER_ENGINE           Browser engine: chrome (default), lightpanda, firefox, obscura (experimental)
   OBSCURA_BIN                   Source E2E tests only: required executable path when explicitly
                                 running cargo test e2e_obscura -- --ignored --test-threads=1
                                 Tests clear AGENT_BROWSER_CDP, AGENT_BROWSER_AUTO_CONNECT,
@@ -4229,6 +4230,7 @@ Install:
 
 Examples:
   agent-browser open example.com
+  agent-browser --engine firefox open example.com
   agent-browser --engine obscura --executable-path /path/to/obscura open example.com
   agent-browser snapshot -i              # Interactive elements only
   agent-browser click @e2                # Click by ref from snapshot

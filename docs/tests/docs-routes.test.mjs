@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   currentPages as pages,
   currentResources,
+  addedPages,
   origin,
   hash,
   canonical,
@@ -641,7 +642,7 @@ test("native search empty and unmatched queries return arrays, not legacy object
   }
 });
 
-test("sitemap contains exactly the 39 canonical production URLs", async () => {
+test("sitemap contains exactly the canonical production URLs", async () => {
   const response = await get("/sitemap.xml", { headers: agent });
   responseType(response, "application/xml");
   indexing(response);
@@ -652,7 +653,7 @@ test("sitemap contains exactly the 39 canonical production URLs", async () => {
   );
   assert.deepEqual(
     locations.sort(),
-    pages.map((page) => canonical(page.path)).sort(),
+    [...pages, ...addedPages].map((page) => canonical(page.path)).sort(),
   );
   assert.ok(
     !xml.includes("/en/") &&
@@ -662,7 +663,7 @@ test("sitemap contains exactly the 39 canonical production URLs", async () => {
 });
 
 for (const path of ["/llms.txt", "/sitemap.md"]) {
-  test(`${path}: agent index exposes all 39 public pages and Markdown alternatives exactly once`, async () => {
+  test(`${path}: agent index exposes all public pages and Markdown alternatives exactly once`, async () => {
     const response = await get(path, { headers: agent });
     responseType(
       response,
@@ -675,7 +676,7 @@ for (const path of ["/llms.txt", "/sitemap.md"]) {
     );
     assert.deepEqual(
       links.sort((a, b) => a[1].localeCompare(b[1])),
-      pages
+      [...pages, ...addedPages]
         .map((page) => [page.markdownTitle, canonical(page.path)])
         .sort((a, b) => a[1].localeCompare(b[1])),
     );
@@ -684,7 +685,7 @@ for (const path of ["/llms.txt", "/sitemap.md"]) {
     );
     assert.deepEqual(
       markdownLinks.sort(),
-      pages.map((page) => `${origin}${markdownPath(page.path)}`).sort(),
+      [...pages, ...addedPages].map((page) => `${origin}${markdownPath(page.path)}`).sort(),
     );
     assert.ok(
       !body.includes("/en/") &&

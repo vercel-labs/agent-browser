@@ -1,11 +1,13 @@
-//! Resolves refs and selectors to BiDi node handles for Firefox element commands.
-
 use serde_json::json;
 
 use super::actions::session;
 use super::session::FirefoxSession;
 use crate::native::actions::DaemonState;
-use crate::native::element::{build_find_element_js, parse_ref, RefEntry, IS_CONNECTED_JS};
+use crate::native::element::{build_find_element_js, parse_ref, RefEntry};
+
+/// A node is live only while it is attached to the context's current document, not a replaced one.
+const IS_LIVE_JS: &str =
+    "function() { return this.isConnected && this.ownerDocument === document; }";
 
 /// A node handle: the BiDi browsing context that owns it and its `sharedId`.
 #[derive(Debug, Clone, PartialEq)]
@@ -29,7 +31,7 @@ async fn is_connected(ff: &FirefoxSession, target: &Target) -> bool {
     let this = json!({"sharedId": target.shared_id});
     let r = ff
         .bidi
-        .call_function(&target.context, IS_CONNECTED_JS, Some(this), vec![])
+        .call_function(&target.context, IS_LIVE_JS, Some(this), vec![])
         .await;
     r.is_ok_and(|v| v == true)
 }
@@ -87,6 +89,15 @@ async fn recover(
         return Err(format!("Stale ref for role={role} name={name} cannot be recovered: the snapshot had several matching elements. Run snapshot again and use a fresh ref."));
     }
     let context = context.unwrap_or_else(|| ff.context.clone());
+    let document = ff
+        .bidi
+        .call_function(&context, "() => document", None, vec![])
+        .await
+        .ok()
+        .and_then(|d| d["sharedId"].as_str().map(String::from));
+    if document.is_none() || document.as_deref() != ff.documents.get(&context).map(String::as_str) {
+        return Err(format!("Stale ref for role={role} name={name}: the page changed since the snapshot. Run snapshot again and use a fresh ref."));
+    }
     let found = ff
         .bidi
         .send(
@@ -119,11 +130,24 @@ async fn recover(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::{fake_session, Calls};
+    use crate::native::bidi::session::tests::{fake_session_with_script, Calls};
+    use serde_json::Value;
+
+    fn document_responder(document: &'static str) -> impl Fn(&Value) -> Value + Send + 'static {
+        move |_: &Value| json!({"type": "success", "result": {"type": "node", "sharedId": document}})
+    }
 
     async fn state_with_ref(nth: Option<usize>) -> (DaemonState, Calls) {
+        state_with_document(nth, "doc1").await
+    }
+
+    async fn state_with_document(
+        nth: Option<usize>,
+        document: &'static str,
+    ) -> (DaemonState, Calls) {
         let mut state = DaemonState::new();
-        let (mut ff, _tx, calls) = fake_session().await;
+        let (mut ff, _tx, calls) = fake_session_with_script(document_responder(document)).await;
+        ff.documents.insert("ctx-active".into(), "doc1".into());
         ff.refs.insert(("ctx-active".into(), "sid".into()), 7);
         state.firefox = Some(ff);
         state
@@ -133,24 +157,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disconnected_ref_with_no_match_is_stale() {
-        let (mut state, calls) = state_with_ref(None).await;
+    async fn ref_from_an_earlier_document_is_never_recovered() {
+        let (mut state, calls) = state_with_document(None, "doc2").await;
         let e = resolve_target(&mut state, "@e1").await.unwrap_err();
-        assert!(e.contains("the ref is stale"), "{e}");
-        assert_eq!(
-            *calls.lock().unwrap(),
-            ["script.callFunction", "browsingContext.locateNodes"]
-        );
-    }
-
-    #[tokio::test]
-    async fn recovery_is_refused_for_refs_with_nth() {
-        let (mut state, calls) = state_with_ref(Some(1)).await;
-        let e = resolve_target(&mut state, "@e1").await.unwrap_err();
-        assert!(
-            e.contains("the snapshot had several matching elements"),
-            "{e}"
-        );
+        assert!(e.contains("the page changed since the snapshot"), "{e}");
         assert!(!calls
             .lock()
             .unwrap()

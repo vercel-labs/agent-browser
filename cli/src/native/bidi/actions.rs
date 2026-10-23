@@ -1,5 +1,3 @@
-//! Command dispatch for `--engine firefox`.
-
 use serde_json::Value;
 
 use super::session::FirefoxSession;
@@ -320,8 +318,7 @@ pub async fn execute(action: &str, cmd: &Value, state: &mut DaemonState) -> Resu
 mod tests {
     use super::*;
     use crate::native::actions::PendingDialog;
-    use crate::native::firefox::session::tests::fake_session;
-    use serde_json::json;
+    use crate::native::bidi::session::tests::fake_session;
 
     fn dialog(context: &str) -> PendingDialog {
         PendingDialog {
@@ -330,79 +327,6 @@ mod tests {
             session_id: Some(context.into()),
             ..Default::default()
         }
-    }
-
-    #[tokio::test]
-    async fn chrome_only_and_unknown_actions_fail_without_touching_the_browser() {
-        let mut state = DaemonState::new();
-        for action in CHROME_ONLY_ACTIONS {
-            let e = execute(action, &json!({}), &mut state).await.unwrap_err();
-            assert!(e.contains(action) && e.contains("Chrome-only"), "{e}");
-        }
-        let e = execute("vitals", &json!({}), &mut state).await.unwrap_err();
-        assert_eq!(e, "`vitals` is not supported on Firefox");
-        assert!(state.firefox.is_none());
-    }
-
-    #[tokio::test]
-    async fn query_actions_are_routed_to_the_query_handlers() {
-        let mut state = DaemonState::new();
-        for action in [
-            "gettext",
-            "getattribute",
-            "innertext",
-            "innerhtml",
-            "inputvalue",
-            "count",
-            "boundingbox",
-            "styles",
-            "isvisible",
-            "isenabled",
-            "ischecked",
-            "find",
-            "frame",
-            "nth",
-            "getbyrole",
-            "getbytext",
-            "getbylabel",
-            "getbyplaceholder",
-            "getbyalttext",
-            "getbytitle",
-            "getbytestid",
-        ] {
-            assert!(handles(action), "{action}");
-            let error = execute(action, &json!({}), &mut state).await.unwrap_err();
-            assert!(
-                error.starts_with("Missing '"),
-                "{action} did not reach its query handler: {error}"
-            );
-        }
-        let error = execute("mainframe", &json!({}), &mut state)
-            .await
-            .unwrap_err();
-        assert_eq!(error, "Browser not launched");
-        let error = execute("evalhandle", &json!({}), &mut state)
-            .await
-            .unwrap_err();
-        assert_eq!(error, "Missing 'script' parameter");
-    }
-
-    #[tokio::test]
-    async fn wait_variants_are_routed_to_the_page_handlers() {
-        for action in ["waitforurl", "waitforloadstate", "waitforfunction"] {
-            assert!(handles(action), "{action}");
-        }
-        let mut state = DaemonState::new();
-        let (ff, _tx, _) = fake_session().await;
-        state.firefox = Some(ff);
-        let result = execute(
-            "waitforloadstate",
-            &json!({"state": "none", "timeout": 50}),
-            &mut state,
-        )
-        .await
-        .unwrap();
-        assert_eq!(result, json!({ "state": "none" }));
     }
 
     #[tokio::test]

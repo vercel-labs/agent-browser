@@ -11,10 +11,11 @@ use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
+use crate::native::bidi::stream::{self as firefox_stream, FirefoxLive};
 use crate::native::cdp::client::CdpClient;
 
 use super::http::handle_http_request;
-use super::{is_allowed_origin, timestamp_ms, IdleActivity, StreamFrame};
+use super::{timestamp_ms, IdleActivity, StreamFrame};
 
 /// Highest per-client frame rate a client may request via the `config` message.
 const MAX_CONFIGURABLE_FPS: u32 = 120;
@@ -131,6 +132,7 @@ pub(super) async fn accept_loop(
     frame_watch: watch::Receiver<Option<Arc<StreamFrame>>>,
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
+    firefox_live: Arc<RwLock<Option<FirefoxLive>>>,
     client_notify: Arc<Notify>,
     idle_activity: Arc<IdleActivity>,
     screencasting: Arc<Mutex<bool>>,
@@ -166,6 +168,7 @@ pub(super) async fn accept_loop(
                 let frame_watch = frame_watch.clone();
                 let client_count = client_count.clone();
                 let client_slot = client_slot.clone();
+                let firefox_live = firefox_live.clone();
                 let client_notify = client_notify.clone();
                 let idle_activity = idle_activity.clone();
                 let screencasting = screencasting.clone();
@@ -186,6 +189,7 @@ pub(super) async fn accept_loop(
                         frame_watch,
                         client_count,
                         client_slot,
+                        firefox_live,
                         client_notify,
                         idle_activity,
                         screencasting,
@@ -217,6 +221,19 @@ fn is_websocket_upgrade(request: &str) -> bool {
     })
 }
 
+/// A browser Origin may open the stream socket only when it is the socket's own loopback host and port.
+fn is_allowed_websocket_origin(origin: Option<&str>, host: Option<&str>) -> bool {
+    let Some(origin) = origin else {
+        return true;
+    };
+    let (Ok(url), Some(host)) = (url::Url::parse(origin), host) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https")
+        && origin.trim_end_matches('/') == format!("{}://{host}", url.scheme())
+        && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+}
+
 /// Peek at the TCP stream to dispatch between WebSocket upgrade and plain HTTP.
 #[allow(clippy::too_many_arguments)]
 async fn handle_connection(
@@ -226,6 +243,7 @@ async fn handle_connection(
     frame_watch: watch::Receiver<Option<Arc<StreamFrame>>>,
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
+    firefox_live: Arc<RwLock<Option<FirefoxLive>>>,
     client_notify: Arc<Notify>,
     idle_activity: Arc<IdleActivity>,
     screencasting: Arc<Mutex<bool>>,
@@ -256,6 +274,7 @@ async fn handle_connection(
             frame_watch,
             client_count,
             client_slot,
+            firefox_live,
             client_notify,
             idle_activity,
             screencasting,
@@ -286,6 +305,7 @@ async fn handle_ws_client(
     mut frame_watch: watch::Receiver<Option<Arc<StreamFrame>>>,
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
+    firefox_live: Arc<RwLock<Option<FirefoxLive>>>,
     client_notify: Arc<Notify>,
     idle_activity: Arc<IdleActivity>,
     screencasting: Arc<Mutex<bool>>,
@@ -300,12 +320,8 @@ async fn handle_ws_client(
     let callback =
         |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
          resp: tokio_tungstenite::tungstenite::handshake::server::Response| {
-            let origin = req
-                .headers()
-                .get("origin")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-            if !is_allowed_origin(origin.as_deref()) {
+            let header = |name| req.headers().get(name).map(|v| v.to_str().unwrap_or("\0"));
+            if !is_allowed_websocket_origin(header("origin"), header("host")) {
                 let mut reject =
                     tokio_tungstenite::tungstenite::handshake::server::ErrorResponse::new(Some(
                         "Origin not allowed".to_string(),
@@ -338,6 +354,7 @@ async fn handle_ws_client(
     let mut reader_task = AbortOnDrop(tokio::spawn(reader_loop(
         ws_rx,
         client_slot.clone(),
+        firefox_live.clone(),
         cdp_session_id.clone(),
         config_tx,
         ack_tx,
@@ -346,7 +363,7 @@ async fn handle_ws_client(
 
     {
         let guard = client_slot.read().await;
-        let connected = guard.is_some();
+        let connected = guard.is_some() || firefox_live.read().await.is_some();
         let sc = *screencasting.lock().await;
         let vw = *viewport_width.lock().await;
         let vh = *viewport_height.lock().await;
@@ -498,6 +515,7 @@ async fn handle_ws_client(
 async fn reader_loop(
     mut ws_rx: SplitStream<WebSocketStream<TcpStream>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
+    firefox_live: Arc<RwLock<Option<FirefoxLive>>>,
     cdp_session_id: Arc<RwLock<Option<String>>>,
     config: watch::Sender<ClientConfig>,
     ack: watch::Sender<u64>,
@@ -538,6 +556,14 @@ async fn reader_loop(
                         });
                     }
                     continue;
+                }
+                if is_user_input_message_type(msg_type) {
+                    let live = firefox_live.read().await.clone();
+                    if let Some(live) = live {
+                        idle_activity.mark();
+                        firefox_stream::dispatch_input(&live, msg_type, &parsed).await;
+                        continue;
+                    }
                 }
                 let guard = client_slot.read().await;
                 if let Some(ref client) = *guard {
@@ -672,6 +698,33 @@ fn is_user_input_message_type(msg_type: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn websocket_origin_requires_matching_loopback_authority() {
+        let host = Some("localhost:8080");
+        assert!(is_allowed_websocket_origin(
+            Some("http://localhost:8080"),
+            host
+        ));
+        for origin in [
+            "http://localhost:8081",
+            "http://example.com:8080",
+            "null",
+            "file:///tmp/page.html",
+            "not an origin",
+            "http://localhost:8080/path",
+        ] {
+            assert!(
+                !is_allowed_websocket_origin(Some(origin), host),
+                "accepted {origin}"
+            );
+        }
+        assert!(!is_allowed_websocket_origin(
+            Some("http://localhost:8080"),
+            Some("example.com:8080")
+        ));
+        assert!(is_allowed_websocket_origin(None, host));
+    }
 
     #[test]
     fn dashboard_input_messages_count_as_user_activity() {

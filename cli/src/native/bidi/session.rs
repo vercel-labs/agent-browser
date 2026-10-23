@@ -1,5 +1,3 @@
-//! A running Firefox: the owned process, both protocol clients and per-session state.
-
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
@@ -8,11 +6,12 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::sync::broadcast::{self, error::TryRecvError};
 
-use super::bidi::{remote_to_json, BidiClient};
+use super::client::{remote_to_json, BidiClient};
 use super::emulation::{self, Settings as EmulationSettings};
+use super::firefox::{check_firefox_version, find_firefox, DevtoolsEndpoint, FirefoxProcess};
+use super::firefox_devtools::RdpClient;
 use super::network::{AbortOnDrop, NetContext, NETWORK_EVENTS};
-use super::process::{check_firefox_version, find_firefox, DevtoolsEndpoint, FirefoxProcess};
-use super::rdp::RdpClient;
+use super::types::UserPromptOpened;
 use crate::native::actions::{EmulatedMedia, PendingDialog};
 use crate::native::cdp::chrome::LaunchOptions;
 
@@ -24,7 +23,7 @@ const PROMPT_EVENTS: [&str; 2] = [
     "browsingContext.userPromptClosed",
 ];
 
-/** One launched Firefox. Dropping it kills the process tree and deletes the profile. */
+/// One launched Firefox. Dropping it kills the process tree and deletes the profile.
 pub struct FirefoxSession {
     process: Option<FirefoxProcess>,
     pub bidi: Arc<BidiClient>,
@@ -56,6 +55,8 @@ pub struct FirefoxSession {
     pub intercepting: bool,
     /// Ids of requests that have started and not yet finished or failed.
     pub inflight: HashSet<String>,
+    /// Origins of pages this session navigated to, kept so state saves still cover them after the tab moves on.
+    pub visited_origins: HashSet<String>,
     pub(crate) dispatcher: Option<AbortOnDrop>,
 }
 
@@ -185,6 +186,7 @@ impl FirefoxSession {
             .to_string();
         let dispatcher = Some(super::network::spawn_dispatcher(bidi.clone(), net.clone()));
         let emulation = EmulationSettings {
+            user_agent: options.user_agent.clone(),
             media: options.color_scheme.as_ref().map(|scheme| EmulatedMedia {
                 media: None,
                 features: vec![("prefers-color-scheme".to_string(), scheme.clone())],
@@ -212,10 +214,21 @@ impl FirefoxSession {
             net,
             intercepting: false,
             inflight: HashSet::new(),
+            visited_origins: HashSet::new(),
             dispatcher,
         };
         let _ = emulation::apply_to_context(&session, &session.context).await;
         Ok(session)
+    }
+
+    /// Records the origin of a URL the session navigated to.
+    pub fn note_visit(&mut self, url: &str) {
+        if let Ok(parsed) = url::Url::parse(url) {
+            let origin = parsed.origin().ascii_serialization();
+            if origin != "null" {
+                self.visited_origins.insert(origin);
+            }
+        }
     }
 
     /// Returns the stable `t<N>` id for `context`, assigning the next id the first time it is seen.
@@ -337,12 +350,13 @@ fn apply_event(e: &Value, dialog: &mut Option<PendingDialog>) {
     let p = &e["params"];
     match e["method"].as_str() {
         Some("browsingContext.userPromptOpened") if p["handler"] != "accept" => {
+            let prompt: UserPromptOpened = serde_json::from_value(p.clone()).unwrap_or_default();
             *dialog = Some(PendingDialog {
-                dialog_type: p["type"].as_str().unwrap_or("alert").to_string(),
-                message: p["message"].as_str().unwrap_or("").to_string(),
+                dialog_type: prompt.kind.unwrap_or_else(|| "alert".to_string()),
+                message: prompt.message,
                 url: String::new(),
-                default_prompt: p["defaultValue"].as_str().map(String::from),
-                session_id: p["context"].as_str().map(String::from),
+                default_prompt: prompt.default_value,
+                session_id: prompt.context,
             });
         }
         Some("browsingContext.userPromptClosed")
@@ -458,6 +472,7 @@ pub(crate) mod tests {
             net: NetContext::default(),
             intercepting: false,
             inflight: HashSet::new(),
+            visited_origins: HashSet::new(),
             dispatcher: None,
         };
         (session, tx, calls)
@@ -584,6 +599,7 @@ pub(crate) mod tests {
             net: NetContext::default(),
             intercepting: false,
             inflight: HashSet::new(),
+            visited_origins: HashSet::new(),
             dispatcher: None,
         };
         (session, tx, calls, bidi_messages, rdp_messages)

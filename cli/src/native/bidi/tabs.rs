@@ -1,10 +1,8 @@
-//! Firefox tab and window commands. Tab ids are stable `t<N>` ids over BiDi browsing contexts.
-
 use serde_json::{json, Value};
 
 use super::actions::session;
 use super::emulation;
-use crate::native::actions::DaemonState;
+use crate::native::actions::{check_url_allowed_by_filter, DaemonState};
 use crate::native::browser::{format_tab_id, is_valid_label, TabRef};
 
 /// Opens a tab and makes it active. Must return what Chrome's `handle_tab_new` returns,
@@ -12,6 +10,9 @@ use crate::native::browser::{format_tab_id, is_valid_label, TabRef};
 pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let url = cmd.get("url").and_then(Value::as_str);
     let label = cmd.get("label").and_then(Value::as_str);
+    if let Some(url) = url {
+        check_url_allowed_by_filter(state.domain_filter.read().await.as_ref(), url)?;
+    }
     if let Some(label) = label {
         if !is_valid_label(label) {
             return Err(format!(
@@ -62,7 +63,9 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
                         json!({"context": context, "url": url, "wait": "complete"}),
                     )
                     .await?;
-                nav["url"].as_str().unwrap_or(url).to_string()
+                let landed = nav["url"].as_str().unwrap_or(url).to_string();
+                ff.note_visit(&landed);
+                landed
             }
             None => "about:blank".to_string(),
         }

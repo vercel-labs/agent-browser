@@ -1593,6 +1593,21 @@ pub(crate) const ELEMENT_STYLES_ALL_JS: &str = r#"function() {
                     return result;
                 }"#;
 
+/// Builds a function that returns the computed values of the given CSS properties.
+pub(crate) fn styles_js(properties: &[String]) -> String {
+    let props_json = serde_json::to_string(properties).unwrap_or("[]".to_string());
+    format!(
+        r#"function() {{
+                    const s = window.getComputedStyle(this);
+                    const props = {};
+                    const result = {{}};
+                    for (const p of props) result[p] = s.getPropertyValue(p);
+                    return result;
+                }}"#,
+        props_json
+    )
+}
+
 pub async fn get_element_styles(
     client: &CdpClient,
     session_id: &str,
@@ -1611,19 +1626,7 @@ pub async fn get_element_styles(
     .await?;
 
     let js = match properties {
-        Some(props) => {
-            let props_json = serde_json::to_string(&props).unwrap_or("[]".to_string());
-            format!(
-                r#"function() {{
-                    const s = window.getComputedStyle(this);
-                    const props = {};
-                    const result = {{}};
-                    for (const p of props) result[p] = s.getPropertyValue(p);
-                    return result;
-                }}"#,
-                props_json
-            )
-        }
+        Some(props) => styles_js(&props),
         None => ELEMENT_STYLES_ALL_JS.to_string(),
     };
 

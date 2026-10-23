@@ -285,6 +285,24 @@ async fn collect_storage_in_target(
     Ok(results)
 }
 
+/// Page function that collects the current origin's localStorage and sessionStorage.
+pub(crate) const ORIGIN_STORAGE_JS: &str = r#"() => {
+    const result = { origin: location.origin, localStorage: [], sessionStorage: [] };
+    try {
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            result.localStorage.push({ name: key, value: localStorage.getItem(key) });
+        }
+    } catch(e) {}
+    try {
+        for (let i = 0; i < sessionStorage.length; i++) {
+            const key = sessionStorage.key(i);
+            result.sessionStorage.push({ name: key, value: sessionStorage.getItem(key) });
+        }
+    } catch(e) {}
+    return result;
+}"#;
+
 pub async fn save_state(
     client: &CdpClient,
     session_id: &str,
@@ -295,22 +313,7 @@ pub async fn save_state(
 ) -> Result<String, String> {
     let cookies = cookies::get_all_cookies(client, session_id).await?;
 
-    let origin_js = r#"(() => {
-        const result = { origin: location.origin, localStorage: [], sessionStorage: [] };
-        try {
-            for (let i = 0; i < localStorage.length; i++) {
-                const key = localStorage.key(i);
-                result.localStorage.push({ name: key, value: localStorage.getItem(key) });
-            }
-        } catch(e) {}
-        try {
-            for (let i = 0; i < sessionStorage.length; i++) {
-                const key = sessionStorage.key(i);
-                result.sessionStorage.push({ name: key, value: sessionStorage.getItem(key) });
-            }
-        } catch(e) {}
-        return result;
-    })()"#;
+    let origin_js = format!("({ORIGIN_STORAGE_JS})()");
 
     // Merge visited origins with current frame tree origins
     let mut all_origins = visited_origins.clone();
@@ -327,7 +330,7 @@ pub async fn save_state(
     let mut origins = Vec::new();
     let mut current_origin = String::new();
 
-    if let Some(storage) = eval_origin_storage(client, session_id, origin_js).await {
+    if let Some(storage) = eval_origin_storage(client, session_id, &origin_js).await {
         current_origin = storage.origin.clone();
         if !storage.local_storage.is_empty() || !storage.session_storage.is_empty() {
             origins.push(storage);
@@ -339,7 +342,7 @@ pub async fn save_state(
     if !all_origins.is_empty() {
         let remaining: Vec<String> = all_origins.into_iter().collect();
         if let Ok(temp_origins) =
-            collect_storage_via_temp_target(client, &remaining, origin_js).await
+            collect_storage_via_temp_target(client, &remaining, &origin_js).await
         {
             origins.extend(temp_origins);
         }
@@ -384,6 +387,27 @@ pub async fn save_auto_state_transactional(
     session_id_str: &str,
     visited_origins: &HashSet<String>,
 ) -> Result<String, String> {
+    let (final_path, candidate_json_path) = auto_state_paths(session_name, session_id_str)?;
+    let candidate_arg = candidate_json_path.to_string_lossy().to_string();
+
+    let candidate_path = save_state(
+        client,
+        session_id,
+        Some(&candidate_arg),
+        Some(session_name),
+        session_id_str,
+        visited_origins,
+    )
+    .await?;
+
+    promote_auto_state_candidate(&candidate_path, &final_path)
+}
+
+/// Returns the final auto-state path for a session and the candidate path it is written to first.
+pub(crate) fn auto_state_paths(
+    session_name: &str,
+    session_id_str: &str,
+) -> Result<(PathBuf, PathBuf), String> {
     if !is_valid_session_name(session_name) {
         return Err(session_name_error(session_name));
     }
@@ -413,27 +437,23 @@ pub async fn save_auto_state_transactional(
         base_name,
         std::process::id()
     ));
-    let candidate_arg = candidate_json_path.to_string_lossy().to_string();
+    Ok((final_path, candidate_json_path))
+}
 
-    let candidate_path = save_state(
-        client,
-        session_id,
-        Some(&candidate_arg),
-        Some(session_name),
-        session_id_str,
-        visited_origins,
-    )
-    .await?;
-
-    if let Err(err) = validate_state_file(&candidate_path) {
-        let _ = fs::remove_file(&candidate_path);
+/// Validates a fully written candidate state file, then swaps it in for the last good file, rolling back on failure.
+pub(crate) fn promote_auto_state_candidate(
+    candidate_path: &str,
+    final_path: &std::path::Path,
+) -> Result<String, String> {
+    if let Err(err) = validate_state_file(candidate_path) {
+        let _ = fs::remove_file(candidate_path);
         return Err(err);
     }
 
     let previous_path = PathBuf::from(format!("{}.previous", final_path.to_string_lossy()));
     if final_path.exists() {
         let _ = fs::remove_file(&previous_path);
-        fs::rename(&final_path, &previous_path).map_err(|e| {
+        fs::rename(final_path, &previous_path).map_err(|e| {
             format!(
                 "Failed to rotate previous state {} to {}: {}",
                 final_path.display(),
@@ -443,10 +463,10 @@ pub async fn save_auto_state_transactional(
         })?;
     }
 
-    let candidate = PathBuf::from(&candidate_path);
-    if let Err(err) = fs::rename(&candidate, &final_path) {
+    let candidate = PathBuf::from(candidate_path);
+    if let Err(err) = fs::rename(&candidate, final_path) {
         if previous_path.exists() && !final_path.exists() {
-            let _ = fs::rename(&previous_path, &final_path);
+            let _ = fs::rename(&previous_path, final_path);
         }
         return Err(format!(
             "Failed to promote state {} to {}: {}",
@@ -462,7 +482,7 @@ pub async fn save_auto_state_transactional(
     Ok(final_path.to_string_lossy().to_string())
 }
 
-fn read_state_json(path: &str) -> Result<String, String> {
+pub(crate) fn read_state_json(path: &str) -> Result<String, String> {
     if is_encrypted_state(std::path::Path::new(path)) {
         let key = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY").map_err(|_| {
             "Encrypted state file requires AGENT_BROWSER_ENCRYPTION_KEY".to_string()
@@ -754,7 +774,7 @@ pub fn state_rename(old_path: &str, new_name: &str) -> Result<Value, String> {
     }))
 }
 
-fn encrypt_data(data: &[u8], key_str: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn encrypt_data(data: &[u8], key_str: &str) -> Result<Vec<u8>, String> {
     let mut hasher = Sha256::new();
     hasher.update(key_str.as_bytes());
     let key_bytes = hasher.finalize();

@@ -5,6 +5,8 @@ mod discovery;
 mod http;
 mod websocket;
 
+use crate::native::bidi::stream::FirefoxLive;
+
 pub use cdp_loop::{ack_screencast_frame, start_screencast, stop_screencast};
 pub use dashboard::{
     is_valid_dashboard_access_token, normalize_dashboard_allowed_origins, run_dashboard_server,
@@ -189,6 +191,7 @@ pub struct StreamServer {
     frame_watch: watch::Sender<Option<Arc<StreamFrame>>>,
     client_count: Arc<Mutex<usize>>,
     client_slot: Arc<RwLock<Option<Arc<CdpClient>>>>,
+    firefox_live: Arc<RwLock<Option<FirefoxLive>>>,
     /// The active CDP page session ID (from Target.attachToTarget).
     cdp_session_id: Arc<RwLock<Option<String>>>,
     client_notify: Arc<Notify>,
@@ -245,6 +248,30 @@ impl StreamServer {
     /// Notify the background CDP listener that the client has changed (browser launched/closed).
     pub fn notify_client_changed(&self) {
         self.client_notify.notify_one();
+    }
+
+    /// Point dashboard input at a Firefox tab, or clear it with `None`.
+    pub async fn set_firefox_live(&self, live: Option<FirefoxLive>) {
+        *self.firefox_live.write().await = live;
+    }
+
+    /// Context id the dashboard frames and input are currently pointed at.
+    pub async fn firefox_live_context(&self) -> Option<String> {
+        self.firefox_live
+            .read()
+            .await
+            .as_ref()
+            .map(|live| live.context.clone())
+    }
+
+    /// True while at least one dashboard client is connected.
+    pub async fn has_clients(&self) -> bool {
+        *self.client_count.lock().await > 0
+    }
+
+    /// JPEG quality (1-100) the stream is configured to use.
+    pub fn screencast_quality(&self) -> i32 {
+        self.screencast_config.quality
     }
 
     /// Check whether the server currently has active screencast running.
@@ -340,6 +367,7 @@ impl StreamServer {
         let last_tabs = Arc::new(RwLock::new(Vec::<Value>::new()));
         let last_engine = Arc::new(RwLock::new("chrome".to_string()));
         let recording = Arc::new(Mutex::new(false));
+        let firefox_live = Arc::new(RwLock::new(None::<FirefoxLive>));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let frame_tx_clone = frame_tx.clone();
@@ -358,6 +386,7 @@ impl StreamServer {
         let accept_shutdown_rx = shutdown_rx.clone();
         let session_name_clone = session_id.clone();
         let frame_watch_accept = frame_watch_rx.clone();
+        let firefox_live_accept = firefox_live.clone();
         let accept_task = tokio::spawn(async move {
             websocket::accept_loop(
                 listener,
@@ -365,6 +394,7 @@ impl StreamServer {
                 frame_watch_accept,
                 client_count_clone,
                 client_slot_clone,
+                firefox_live_accept,
                 notify_clone,
                 idle_activity_clone,
                 screencasting_clone,
@@ -422,6 +452,7 @@ impl StreamServer {
                 screencast_config,
                 client_count,
                 client_slot: client_slot.clone(),
+                firefox_live,
                 cdp_session_id,
                 client_notify,
                 idle_activity,
