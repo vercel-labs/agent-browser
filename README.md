@@ -845,6 +845,8 @@ agent-browser --session "$SESSION" --restore --restore-check-text Dashboard open
 
 State is saved when the browser closes (explicit `close`, idle timeout, or daemon shutdown) and also periodically while the browser is open, so a browser window you close by hand still leaves a recent save behind. Periodic autosave waits for commands to settle, then saves at most once per `AGENT_BROWSER_AUTOSAVE_INTERVAL_MS` (default 30000; set to `0` to save only on close). Idle sessions keep saving on the same interval, so changes the page makes on its own (token refreshes, background requests) are captured too. It respects the `--restore-save` policy.
 
+Several sessions can share one restore key, such as `--restore shared`. Each save then applies only what that session changed since it last loaded or saved on top of the newest saved state for the key, so a session that saves later does not erase sign-ins another session saved first. Each restore key also keeps an empty `<key>.lock` file in the sessions directory, which serializes these saves.
+
 ### State Encryption
 
 Encrypt saved session data at rest with AES-256-GCM:

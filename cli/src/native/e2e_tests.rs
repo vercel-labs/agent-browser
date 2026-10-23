@@ -883,6 +883,18 @@ fn cleanup_restore_state_files(restore_key: &str) {
             }
         }
     }
+    let _ = std::fs::remove_file(sessions_dir.join(format!("{}.lock", restore_key)));
+}
+
+/// The value of cookie `name` in the newest saved state for `restore_key`.
+fn newest_saved_cookie(restore_key: &str, name: &str) -> Option<String> {
+    let path = super::state::find_auto_state_file(restore_key)?;
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    saved["cookies"]
+        .as_array()?
+        .iter()
+        .find(|c| c["name"] == name)
+        .and_then(|c| c["value"].as_str().map(str::to_string))
 }
 
 async fn send_raw_http_request(port: u64, request: &str) -> String {
@@ -6851,6 +6863,59 @@ async fn start_cookie_login_server() -> (String, tokio::task::JoinHandle<()>) {
     (base_url, handle)
 }
 
+/// Starts a tiny HTTP server whose `/` sets a new `rot=<n>` cookie on every
+/// request, like a rotating refresh token, and stores a localStorage key so a
+/// restore navigates back to it. Every other path sets nothing.
+async fn start_rotating_cookie_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{}", port);
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    let handle = tokio::spawn(async move {
+        for _ in 0..100 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let counter = counter.clone();
+
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+
+                let mut headers = vec!["Content-Type: text/html".to_string()];
+                let body = if path == "/" {
+                    let rot = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    headers.push(format!(
+                        "Set-Cookie: rot={}; Path=/; Max-Age=3600; SameSite=Lax",
+                        rot
+                    ));
+                    "<!doctype html><script>localStorage.setItem('k', 'v')</script>".to_string()
+                } else {
+                    "<!doctype html><main>Other</main>".to_string()
+                };
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\n{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    headers.join("\r\n"),
+                    body.len(),
+                    body,
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    (base_url, handle)
+}
+
 /// Starts a tiny HTTP server that serves a delayed-render login form.
 ///
 /// The page continuously fetches `/ping` so `networkidle` is hard to reach,
@@ -11700,6 +11765,207 @@ async fn e2e_restore_preserves_cookie_login_after_close_and_reopen() {
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(format!("{}.previous", path));
+    cleanup_restore_state_files(&restore_key);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_restore_shared_key_keeps_sign_in_from_session_that_closed_first() {
+    let restore_key = format!(
+        "e2e-shared-restore-{}",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
+    let env = EnvGuard::new(&[
+        "AGENT_BROWSER_SESSION_NAME",
+        "AGENT_BROWSER_RESTORE_SAVE",
+        "AGENT_BROWSER_STATE",
+        "AGENT_BROWSER_ENCRYPTION_KEY",
+    ]);
+    env.remove("AGENT_BROWSER_SESSION_NAME");
+    env.remove("AGENT_BROWSER_RESTORE_SAVE");
+    env.remove("AGENT_BROWSER_STATE");
+    env.remove("AGENT_BROWSER_ENCRYPTION_KEY");
+
+    let (base_url, _server) = start_cookie_login_server().await;
+    let open = |id: &str, url: String| json!({ "id": id, "action": "navigate", "url": url, "restoreKey": restore_key });
+
+    // Sessions A and B both launch on one restore key with nothing saved.
+    let mut a = DaemonState::new();
+    a.session_id = "e2e-a".to_string();
+    let resp = execute_command(&open("1", base_url.clone()), &mut a).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["lifecycle"]["restoreStatus"], "missing");
+
+    let mut b = DaemonState::new();
+    b.session_id = "e2e-b".to_string();
+    let resp = execute_command(&open("2", base_url.clone()), &mut b).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["lifecycle"]["restoreStatus"], "missing");
+
+    // B signs in and closes, then A closes and becomes the newest file.
+    let resp = execute_command(&open("3", format!("{}/login", base_url)), &mut b).await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "4", "action": "close" }), &mut b).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["saveStatus"], "saved");
+
+    let resp = execute_command(&json!({ "id": "5", "action": "close" }), &mut a).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["saveStatus"], "saved");
+    let newest = super::state::find_auto_state_file(&restore_key).expect("A should have saved");
+    assert!(
+        newest.ends_with("-e2e-a.json"),
+        "A's file is newest: {}",
+        newest
+    );
+
+    // A third session restores A's file and is signed in as B was.
+    let mut c = DaemonState::new();
+    c.session_id = "e2e-c".to_string();
+    let resp = execute_command(&open("6", base_url.clone()), &mut c).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["lifecycle"]["restoreStatus"], "loaded");
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "evaluate", "script": "document.body.innerText" }),
+        &mut c,
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        get_data(&resp)["result"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Welcome back"),
+        "C should keep B's sign-in: {}",
+        resp
+    );
+    let resp = execute_command(&json!({ "id": "8", "action": "close" }), &mut c).await;
+    assert_success(&resp);
+
+    cleanup_restore_state_files(&restore_key);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_restore_saves_cookie_rotated_while_restoring_storage() {
+    let restore_key = format!("e2e-rotate-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let env = EnvGuard::new(&[
+        "AGENT_BROWSER_SESSION_NAME",
+        "AGENT_BROWSER_RESTORE_SAVE",
+        "AGENT_BROWSER_STATE",
+        "AGENT_BROWSER_ENCRYPTION_KEY",
+    ]);
+    env.remove("AGENT_BROWSER_SESSION_NAME");
+    env.remove("AGENT_BROWSER_RESTORE_SAVE");
+    env.remove("AGENT_BROWSER_STATE");
+    env.remove("AGENT_BROWSER_ENCRYPTION_KEY");
+
+    let (base_url, _server) = start_rotating_cookie_server().await;
+    let open = |id: &str, url: String| json!({ "id": id, "action": "navigate", "url": url, "restoreKey": restore_key });
+
+    let mut a = DaemonState::new();
+    a.session_id = "e2e-a".to_string();
+    assert_success(&execute_command(&open("1", format!("{}/", base_url)), &mut a).await);
+    let resp = execute_command(&json!({ "id": "2", "action": "close" }), &mut a).await;
+    assert_eq!(get_data(&resp)["saveStatus"], "saved");
+    assert_eq!(
+        newest_saved_cookie(&restore_key, "rot").as_deref(),
+        Some("1")
+    );
+
+    // Restoring the saved localStorage navigates B back to `/`, which rotates
+    // the cookie before B ever opens `/other`.
+    let mut b = DaemonState::new();
+    b.session_id = "e2e-b".to_string();
+    let resp = execute_command(&open("3", format!("{}/other", base_url)), &mut b).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["lifecycle"]["restoreStatus"], "loaded");
+    // Chrome may request `/` more than once while restoring, so read the
+    // value B holds instead of assuming one rotation.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "document.cookie" }),
+        &mut b,
+    )
+    .await;
+    assert_success(&resp);
+    let rotated = get_data(&resp)["result"]
+        .as_str()
+        .and_then(|c| c.strip_prefix("rot="))
+        .map(str::to_string);
+    assert!(
+        rotated.as_deref().is_some_and(|v| v != "1"),
+        "restore should rotate the cookie: {:?}",
+        rotated
+    );
+    let resp = execute_command(&json!({ "id": "5", "action": "close" }), &mut b).await;
+    assert_eq!(get_data(&resp)["saveStatus"], "saved");
+
+    assert_eq!(newest_saved_cookie(&restore_key, "rot"), rotated);
+    cleanup_restore_state_files(&restore_key);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_restore_keeps_saved_cookie_the_browser_refused() {
+    let restore_key = format!("e2e-refused-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let env = EnvGuard::new(&[
+        "AGENT_BROWSER_SESSION_NAME",
+        "AGENT_BROWSER_RESTORE_SAVE",
+        "AGENT_BROWSER_STATE",
+        "AGENT_BROWSER_ENCRYPTION_KEY",
+    ]);
+    env.remove("AGENT_BROWSER_SESSION_NAME");
+    env.remove("AGENT_BROWSER_RESTORE_SAVE");
+    env.remove("AGENT_BROWSER_STATE");
+    env.remove("AGENT_BROWSER_ENCRYPTION_KEY");
+
+    let (base_url, _server) = start_cookie_login_server().await;
+    let expires = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600) as f64;
+    let cookie = |name: &str, same_site: &str| {
+        json!({
+            "name": name, "value": "1", "domain": "127.0.0.1", "path": "/",
+            "expires": expires, "size": 0, "httpOnly": false, "secure": false,
+            "session": false, "sameSite": same_site,
+        })
+    };
+    // Chrome refuses SameSite=None without Secure, though it has not expired.
+    let sessions = super::state::get_sessions_dir();
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::write(
+        sessions.join(format!("{}-seed.json", restore_key)),
+        json!({ "cookies": [cookie("kept", "Lax"), cookie("refused", "None")], "origins": [] })
+            .to_string(),
+    )
+    .unwrap();
+
+    let mut state = DaemonState::new();
+    state.session_id = "e2e-refused".to_string();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "navigate", "url": base_url, "restoreKey": restore_key }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["lifecycle"]["restoreStatus"], "loaded");
+    assert_evaluate(&mut state, "2", "document.cookie", json!("kept=1")).await;
+    let resp = execute_command(&json!({ "id": "3", "action": "close" }), &mut state).await;
+    assert_eq!(get_data(&resp)["saveStatus"], "saved");
+
+    // This session never held the refused cookie, so it did not delete it.
+    let newest = super::state::find_auto_state_file(&restore_key).unwrap();
+    assert!(newest.ends_with("-e2e-refused.json"), "{}", newest);
+    assert_eq!(
+        newest_saved_cookie(&restore_key, "kept").as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        newest_saved_cookie(&restore_key, "refused").as_deref(),
+        Some("1")
+    );
     cleanup_restore_state_files(&restore_key);
 }
 

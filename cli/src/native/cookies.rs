@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 
 use super::cdp::client::CdpClient;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Cookie {
     pub name: String,

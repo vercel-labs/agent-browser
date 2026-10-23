@@ -3,7 +3,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -15,14 +15,14 @@ use super::cdp::types::{
 use super::cookies::{self, Cookie};
 use crate::validation::{is_valid_session_name, sanitize_session_component, session_name_error};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageState {
     pub cookies: Vec<Cookie>,
     pub origins: Vec<OriginStorage>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OriginStorage {
     pub origin: String,
@@ -31,7 +31,7 @@ pub struct OriginStorage {
     pub session_storage: Vec<StorageEntry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageEntry {
     pub name: String,
@@ -236,9 +236,7 @@ async fn collect_storage_in_target(
         }
 
         if let Some(storage) = eval_origin_storage(client, temp_session, origin_js).await {
-            if !storage.local_storage.is_empty() || !storage.session_storage.is_empty() {
-                results.push(storage);
-            }
+            results.push(storage);
         }
     }
 
@@ -253,6 +251,36 @@ pub async fn save_state(
     session_id_str: &str,
     visited_origins: &HashSet<String>,
 ) -> Result<String, String> {
+    let state = collect_state(client, session_id, visited_origins).await?;
+
+    let save_path = match path {
+        Some(p) => p.to_string(),
+        None => {
+            let dir = get_sessions_dir();
+            let _ = fs::create_dir_all(&dir);
+            let name = session_name.unwrap_or("default");
+            if !is_valid_session_name(name) {
+                return Err(session_name_error(name));
+            }
+            dir.join(format!("{}-{}.json", name, session_id_str))
+                .to_string_lossy()
+                .to_string()
+        }
+    };
+
+    write_state_file(state, save_path)
+}
+
+/// Read the browser's cookies and the storage of every origin it can reach.
+///
+/// Every origin whose storage was read is listed, even when it holds nothing,
+/// so a merge can tell an emptied origin from one this save never read.
+/// `write_state_file` drops the empty ones.
+async fn collect_state(
+    client: &CdpClient,
+    session_id: &str,
+    visited_origins: &HashSet<String>,
+) -> Result<StorageState, String> {
     let cookies = cookies::get_all_cookies(client, session_id).await?;
 
     let origin_js = r#"(() => {
@@ -289,9 +317,7 @@ pub async fn save_state(
 
     if let Some(storage) = eval_origin_storage(client, session_id, origin_js).await {
         current_origin = storage.origin.clone();
-        if !storage.local_storage.is_empty() || !storage.session_storage.is_empty() {
-            origins.push(storage);
-        }
+        origins.push(storage);
     }
 
     // 2. Collect localStorage from remaining origins via a disposable temp target
@@ -305,49 +331,189 @@ pub async fn save_state(
         }
     }
 
-    let state = StorageState { cookies, origins };
+    Ok(StorageState { cookies, origins })
+}
+
+/// Write `state` to `path` (with `.enc` appended when encryption is on) and
+/// return the path written. Origins with no stored entries are left out.
+fn write_state_file(mut state: StorageState, mut path: String) -> Result<String, String> {
+    state
+        .origins
+        .retain(|o| !o.local_storage.is_empty() || !o.session_storage.is_empty());
     let json_str = serde_json::to_string_pretty(&state)
         .map_err(|e| format!("Failed to serialize state: {}", e))?;
 
-    let mut save_path = match path {
-        Some(p) => p.to_string(),
-        None => {
-            let dir = get_sessions_dir();
-            let _ = fs::create_dir_all(&dir);
-            let name = session_name.unwrap_or("default");
-            if !is_valid_session_name(name) {
-                return Err(session_name_error(name));
-            }
-            dir.join(format!("{}-{}.json", name, session_id_str))
-                .to_string_lossy()
-                .to_string()
-        }
-    };
-
     if let Ok(key) = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY") {
         let encrypted = encrypt_data(json_str.as_bytes(), &key)?;
-        save_path.push_str(".enc");
-        fs::write(&save_path, &encrypted)
-            .map_err(|e| format!("Failed to write state to {}: {}", save_path, e))?;
+        path.push_str(".enc");
+        fs::write(&path, &encrypted)
+            .map_err(|e| format!("Failed to write state to {}: {}", path, e))?;
     } else {
-        fs::write(&save_path, &json_str)
-            .map_err(|e| format!("Failed to write state to {}: {}", save_path, e))?;
+        fs::write(&path, &json_str)
+            .map_err(|e| format!("Failed to write state to {}: {}", path, e))?;
     }
 
-    Ok(save_path)
+    Ok(path)
 }
 
+fn read_state(path: &str) -> Result<StorageState, String> {
+    let json_str = read_state_json(path)?;
+    serde_json::from_str(&json_str).map_err(|e| format!("Invalid state file: {}", e))
+}
+
+/// Merge entries keyed by `key`: start from `newest` and apply what changed
+/// between `baseline` and `current`. An entry in `current` that is new or
+/// differs from `baseline` replaces the one in `newest`. An entry in
+/// `baseline` that is missing from `current` is removed, but only while
+/// `newest` still holds the baseline's copy: a copy another session wrote
+/// since is kept. Everything else keeps the value `newest` holds. `current`'s
+/// order comes first, then the entries only `newest` holds.
+fn merge_entries<T: Clone + PartialEq, K: Clone + Eq + std::hash::Hash>(
+    newest: Vec<T>,
+    baseline: &[T],
+    current: &[T],
+    key: impl Fn(&T) -> K,
+) -> Vec<T> {
+    let base: HashMap<K, &T> = baseline.iter().map(|e| (key(e), e)).collect();
+    let current_keys: HashSet<K> = current.iter().map(&key).collect();
+    let newest_order: Vec<K> = newest.iter().map(&key).collect();
+    let mut newest_by_key: HashMap<K, T> = newest.into_iter().map(|e| (key(&e), e)).collect();
+
+    let mut merged = Vec::with_capacity(current.len().max(newest_by_key.len()));
+    for entry in current {
+        let k = key(entry);
+        if base.get(&k).copied() != Some(entry) {
+            merged.push(entry.clone());
+        } else if let Some(kept) = newest_by_key.remove(&k) {
+            merged.push(kept);
+        }
+    }
+    for k in newest_order {
+        if current_keys.contains(&k) {
+            continue;
+        }
+        let Some(kept) = newest_by_key.remove(&k) else {
+            continue;
+        };
+        if base.get(&k).copied() != Some(&kept) {
+            merged.push(kept);
+        }
+    }
+    merged
+}
+
+/// Apply what this session changed since `baseline` (the state it last
+/// loaded or published) on top of `newest` (the state the restore key's
+/// newest file holds), so sessions sharing a restore key keep each other's
+/// sign-ins.
+///
+/// Cookies are keyed by name, domain and path, and persistent cookies that
+/// expired by `now` (seconds since the Unix epoch) are dropped. Storage is
+/// merged per origin and per key, but only for origins listed in `current`:
+/// an origin this save did not read stays as `newest` has it, since its
+/// absence is not a deletion.
+pub fn merge_state(
+    newest: StorageState,
+    baseline: &StorageState,
+    current: &StorageState,
+    now: f64,
+) -> StorageState {
+    let mut cookies = merge_entries(newest.cookies, &baseline.cookies, &current.cookies, |c| {
+        (c.name.clone(), c.domain.clone(), c.path.clone())
+    });
+    cookies.retain(|c| c.session || c.expires <= 0.0 || c.expires > now);
+
+    let entry_key = |e: &StorageEntry| e.name.clone();
+    let base_origins: HashMap<&str, &OriginStorage> = baseline
+        .origins
+        .iter()
+        .map(|o| (o.origin.as_str(), o))
+        .collect();
+    let newest_order: Vec<String> = newest.origins.iter().map(|o| o.origin.clone()).collect();
+    let mut newest_origins: HashMap<String, OriginStorage> = newest
+        .origins
+        .into_iter()
+        .map(|o| (o.origin.clone(), o))
+        .collect();
+
+    let mut origins = Vec::with_capacity(current.origins.len().max(newest_origins.len()));
+    for cur in &current.origins {
+        let (newest_local, newest_session) = newest_origins
+            .remove(&cur.origin)
+            .map(|o| (o.local_storage, o.session_storage))
+            .unwrap_or_default();
+        let (base_local, base_session) = base_origins
+            .get(cur.origin.as_str())
+            .map(|o| (o.local_storage.as_slice(), o.session_storage.as_slice()))
+            .unwrap_or_default();
+        origins.push(OriginStorage {
+            origin: cur.origin.clone(),
+            local_storage: merge_entries(newest_local, base_local, &cur.local_storage, entry_key),
+            session_storage: merge_entries(
+                newest_session,
+                base_session,
+                &cur.session_storage,
+                entry_key,
+            ),
+        });
+    }
+    for origin in newest_order {
+        if let Some(kept) = newest_origins.remove(&origin) {
+            origins.push(kept);
+        }
+    }
+
+    StorageState { cookies, origins }
+}
+
+/// The baseline after a save that collected `current`: its cookies and the
+/// origins it read, plus `previous`'s copy of every origin it did not read.
+/// Dropping those would make a later read of their unchanged storage look new
+/// and overwrite what another session published for them since.
+pub fn advance_baseline(previous: StorageState, current: StorageState) -> StorageState {
+    let read: HashSet<&str> = current.origins.iter().map(|o| o.origin.as_str()).collect();
+    let unread: Vec<OriginStorage> = previous
+        .origins
+        .into_iter()
+        .filter(|o| !read.contains(o.origin.as_str()))
+        .collect();
+    let mut next = current;
+    next.origins.extend(unread);
+    next
+}
+
+/// Save this session's state for the restore key `session_name`, merged into
+/// the newest state any session published for that key (see `merge_state`).
+///
+/// Returns the published path and the state read from the browser, which is
+/// the session's next baseline.
 pub async fn save_auto_state_transactional(
     client: &CdpClient,
     session_id: &str,
     session_name: &str,
     session_id_str: &str,
     visited_origins: &HashSet<String>,
-) -> Result<String, String> {
+    baseline: &StorageState,
+) -> Result<(String, StorageState), String> {
     if !is_valid_session_name(session_name) {
         return Err(session_name_error(session_name));
     }
 
+    let current = collect_state(client, session_id, visited_origins).await?;
+    let path = publish_auto_state(session_name, session_id_str, baseline, &current)?;
+    Ok((path, current))
+}
+
+/// Merge `current` into the restore key's newest file and promote the result
+/// to this session's file. A lock file per key holds other daemons off from
+/// reading the newest file until this one is promoted, so two saves at once
+/// cannot drop each other's changes.
+fn publish_auto_state(
+    session_name: &str,
+    session_id_str: &str,
+    baseline: &StorageState,
+    current: &StorageState,
+) -> Result<String, String> {
     let dir = get_sessions_dir();
     fs::create_dir_all(&dir)
         .map_err(|e| format!("Failed to create state directory {}: {}", dir.display(), e))?;
@@ -360,6 +526,16 @@ pub async fn save_auto_state_transactional(
             e
         )
     })?;
+
+    let lock_path = dir.join(format!("{}.lock", session_name));
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("Failed to open state lock {}: {}", lock_path.display(), e))?;
+    lock.lock()
+        .map_err(|e| format!("Failed to lock {}: {}", lock_path.display(), e))?;
 
     let base_name = format!("{}-{}", session_name, session_id_str);
     let final_json_path = dir.join(format!("{}.json", base_name));
@@ -375,15 +551,19 @@ pub async fn save_auto_state_transactional(
     ));
     let candidate_arg = candidate_json_path.to_string_lossy().to_string();
 
-    let candidate_path = save_state(
-        client,
-        session_id,
-        Some(&candidate_arg),
-        Some(session_name),
-        session_id_str,
-        visited_origins,
-    )
-    .await?;
+    // The newest file may be this session's own; an unreadable one is skipped
+    // and this session's state is written whole, as it was before merging.
+    let state = match find_auto_state_file(session_name).and_then(|p| read_state(&p).ok()) {
+        Some(newest) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or_default();
+            merge_state(newest, baseline, current, now)
+        }
+        None => current.clone(),
+    };
+    let candidate_path = write_state_file(state, candidate_arg)?;
 
     if let Err(err) = validate_state_file(&candidate_path) {
         let _ = fs::remove_file(&candidate_path);
@@ -454,17 +634,22 @@ fn read_state_json(path: &str) -> Result<String, String> {
 }
 
 pub fn validate_state_file(path: &str) -> Result<(), String> {
-    let json_str = read_state_json(path)?;
-    let _: StorageState =
-        serde_json::from_str(&json_str).map_err(|e| format!("Invalid state file: {}", e))?;
-    Ok(())
+    read_state(path).map(|_| ())
 }
 
-pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Result<(), String> {
-    let json_str = read_state_json(path)?;
-
-    let state: StorageState =
-        serde_json::from_str(&json_str).map_err(|e| format!("Invalid state file: {}", e))?;
+/// Load the state file at `path` into the browser and return what it loaded:
+/// the file's storage, and the cookies the browser holds once the file's
+/// cookies are set.
+///
+/// The cookies are read back before any navigation, so a cookie the browser
+/// refused is not reported as loaded, and one a page sets or rotates while
+/// storage is restored is not mistaken for part of the file.
+pub async fn load_state(
+    client: &CdpClient,
+    session_id: &str,
+    path: &str,
+) -> Result<StorageState, String> {
+    let mut state = read_state(path)?;
 
     // Load cookies
     if !state.cookies.is_empty() {
@@ -475,6 +660,9 @@ pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Res
             .collect();
         cookies::set_cookies(client, session_id, cookie_values, None).await?;
     }
+    state.cookies = cookies::get_all_cookies(client, session_id)
+        .await
+        .unwrap_or_default();
 
     // Load storage per origin
     for origin in &state.origins {
@@ -534,7 +722,7 @@ pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Res
         }
     }
 
-    Ok(())
+    Ok(state)
 }
 
 fn is_state_file(path: &std::path::Path) -> bool {
@@ -1044,6 +1232,315 @@ mod tests {
         let result = dispatch_state_command(&cmd).unwrap();
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "Missing 'path' parameter");
+    }
+
+    const NOW: f64 = 1_800_000_000.0;
+
+    fn cookie(name: &str, value: &str) -> Cookie {
+        Cookie {
+            name: name.to_string(),
+            value: value.to_string(),
+            domain: ".example.com".to_string(),
+            path: "/".to_string(),
+            expires: -1.0,
+            size: 0,
+            http_only: true,
+            secure: true,
+            session: true,
+            same_site: Some("Lax".to_string()),
+        }
+    }
+
+    fn origin(origin: &str, local: &[(&str, &str)]) -> OriginStorage {
+        OriginStorage {
+            origin: origin.to_string(),
+            local_storage: local
+                .iter()
+                .map(|(name, value)| StorageEntry {
+                    name: name.to_string(),
+                    value: value.to_string(),
+                })
+                .collect(),
+            session_storage: vec![],
+        }
+    }
+
+    fn storage(cookies: Vec<Cookie>, origins: Vec<OriginStorage>) -> StorageState {
+        StorageState { cookies, origins }
+    }
+
+    fn cookie_pairs(state: &StorageState) -> Vec<(&str, &str)> {
+        state
+            .cookies
+            .iter()
+            .map(|c| (c.name.as_str(), c.value.as_str()))
+            .collect()
+    }
+
+    fn local_pairs<'a>(state: &'a StorageState, origin: &str) -> Option<Vec<(&'a str, &'a str)>> {
+        state.origins.iter().find(|o| o.origin == origin).map(|o| {
+            o.local_storage
+                .iter()
+                .map(|e| (e.name.as_str(), e.value.as_str()))
+                .collect()
+        })
+    }
+
+    /// What `write_state_file` would publish for `state`.
+    fn published(mut state: StorageState) -> StorageState {
+        state
+            .origins
+            .retain(|o| !o.local_storage.is_empty() || !o.session_storage.is_empty());
+        state
+    }
+
+    #[test]
+    fn test_merge_adds_cookie_this_session_set() {
+        let newest = storage(vec![cookie("other", "1")], vec![]);
+        let current = storage(vec![cookie("sid", "a")], vec![]);
+        let merged = merge_state(newest, &StorageState::default(), &current, NOW);
+        assert_eq!(cookie_pairs(&merged), vec![("sid", "a"), ("other", "1")]);
+    }
+
+    #[test]
+    fn test_merge_changes_cookie_this_session_changed() {
+        let newest = storage(vec![cookie("sid", "old"), cookie("other", "1")], vec![]);
+        let baseline = storage(vec![cookie("sid", "old")], vec![]);
+        let current = storage(vec![cookie("sid", "new")], vec![]);
+        let merged = merge_state(newest, &baseline, &current, NOW);
+        assert_eq!(cookie_pairs(&merged), vec![("sid", "new"), ("other", "1")]);
+    }
+
+    #[test]
+    fn test_merge_deletes_cookie_this_session_removed() {
+        let newest = storage(vec![cookie("sid", "a"), cookie("other", "1")], vec![]);
+        let baseline = storage(vec![cookie("sid", "a")], vec![]);
+        let current = storage(vec![], vec![]);
+        let merged = merge_state(newest, &baseline, &current, NOW);
+        assert_eq!(cookie_pairs(&merged), vec![("other", "1")]);
+    }
+
+    #[test]
+    fn test_merge_keeps_cookies_another_session_set_or_changed() {
+        // Another session added `b` and changed `a` after this one loaded.
+        let newest = storage(vec![cookie("a", "2"), cookie("b", "1")], vec![]);
+        let baseline = storage(vec![cookie("a", "1")], vec![]);
+        let current = storage(vec![cookie("a", "1")], vec![]);
+        let merged = merge_state(newest, &baseline, &current, NOW);
+        assert_eq!(cookie_pairs(&merged), vec![("a", "2"), ("b", "1")]);
+    }
+
+    #[test]
+    fn test_merge_keys_cookies_by_name_domain_and_path() {
+        let mut scoped = cookie("sid", "scoped");
+        scoped.path = "/app".to_string();
+        let newest = storage(vec![scoped.clone()], vec![]);
+        let current = storage(vec![cookie("sid", "root")], vec![]);
+        let merged = merge_state(newest, &StorageState::default(), &current, NOW);
+        assert_eq!(merged.cookies, vec![cookie("sid", "root"), scoped]);
+    }
+
+    #[test]
+    fn test_merge_keeps_cookie_another_session_refreshed_after_it_lapsed_here() {
+        // A's copy of sid expired in A's browser; B refreshed sid since.
+        let newest = storage(vec![cookie("sid", "b")], vec![]);
+        let baseline = storage(vec![cookie("sid", "a")], vec![]);
+        let current = storage(vec![], vec![]);
+        let merged = merge_state(newest, &baseline, &current, NOW);
+        assert_eq!(cookie_pairs(&merged), vec![("sid", "b")]);
+    }
+
+    #[test]
+    fn test_merge_prunes_lapsed_persistent_cookies() {
+        let persistent = |name: &str, expires: f64| Cookie {
+            expires,
+            session: false,
+            ..cookie(name, "1")
+        };
+        let newest = storage(
+            vec![
+                persistent("lapsed", NOW - 1.0),
+                persistent("live", NOW + 60.0),
+                cookie("session", "1"),
+            ],
+            vec![],
+        );
+        let current = storage(vec![persistent("lapsed_here", NOW)], vec![]);
+        let merged = merge_state(newest, &StorageState::default(), &current, NOW);
+        assert_eq!(cookie_pairs(&merged), vec![("live", "1"), ("session", "1")]);
+    }
+
+    #[test]
+    fn test_merge_keeps_storage_key_another_session_changed() {
+        let site = "https://site.example";
+        let newest = storage(vec![], vec![origin(site, &[("token", "from-other")])]);
+        let baseline = storage(vec![], vec![origin(site, &[("token", "mine")])]);
+        let current = storage(vec![], vec![origin(site, &[])]);
+        let merged = published(merge_state(newest, &baseline, &current, NOW));
+        assert_eq!(
+            local_pairs(&merged, site),
+            Some(vec![("token", "from-other")])
+        );
+    }
+
+    #[test]
+    fn test_baseline_of_unread_origin_survives_a_save() {
+        let site = "https://site.example";
+        // A restores the site with k=v1.
+        let restored = storage(vec![], vec![origin(site, &[("k", "v1")])]);
+        let mut a_baseline = restored.clone();
+
+        // A's next save does not read the site.
+        let a_first = StorageState::default();
+        let published = merge_state(restored, &a_baseline, &a_first, NOW);
+        a_baseline = advance_baseline(a_baseline, a_first);
+
+        // B, which loaded that file, publishes k=v2.
+        let b_current = storage(vec![], vec![origin(site, &[("k", "v2")])]);
+        let b_published = merge_state(published.clone(), &published, &b_current, NOW);
+
+        // A visits the site, where its browser still holds k=v1, and saves.
+        let a_second = storage(vec![], vec![origin(site, &[("k", "v1")])]);
+        let merged = merge_state(b_published, &a_baseline, &a_second, NOW);
+        assert_eq!(local_pairs(&merged, site), Some(vec![("k", "v2")]));
+    }
+
+    #[test]
+    fn test_merge_keeps_origin_this_save_did_not_read() {
+        let kept = origin("https://kept.example", &[("token", "t")]);
+        let newest = storage(vec![], vec![kept.clone()]);
+        let baseline = storage(vec![], vec![kept.clone()]);
+        let current = storage(vec![], vec![]);
+        let merged = merge_state(newest, &baseline, &current, NOW);
+        assert_eq!(merged.origins, vec![kept]);
+    }
+
+    #[test]
+    fn test_merge_deletes_origin_keys_this_session_removed() {
+        let site = "https://site.example";
+        let emptied = "https://emptied.example";
+        let newest = storage(
+            vec![],
+            vec![
+                origin(site, &[("k1", "1"), ("k2", "2"), ("k3", "from-other")]),
+                origin(emptied, &[("k", "v")]),
+            ],
+        );
+        let baseline = storage(
+            vec![],
+            vec![
+                origin(site, &[("k1", "1"), ("k2", "2")]),
+                origin(emptied, &[("k", "v")]),
+            ],
+        );
+        // This save read both origins: `site` lost k2, `emptied` was cleared.
+        let current = storage(
+            vec![],
+            vec![origin(site, &[("k1", "1")]), origin(emptied, &[])],
+        );
+        let merged = published(merge_state(newest, &baseline, &current, NOW));
+        assert_eq!(
+            local_pairs(&merged, site),
+            Some(vec![("k1", "1"), ("k3", "from-other")])
+        );
+        assert_eq!(local_pairs(&merged, emptied), None);
+    }
+
+    #[test]
+    fn test_merge_with_a_single_writer_publishes_what_it_collected() {
+        // A session restored `loaded` and is the key's only writer, so the
+        // newest file is its own last publish; every save must publish
+        // exactly what writing the collected state whole would.
+        let loaded = storage(
+            vec![
+                cookie("keep", "1"),
+                cookie("change", "1"),
+                cookie("drop", "1"),
+            ],
+            vec![
+                origin("https://a.example", &[("x", "1"), ("y", "1")]),
+                origin("https://b.example", &[("z", "1")]),
+            ],
+        );
+        let first = storage(
+            vec![
+                cookie("added", "1"),
+                cookie("change", "2"),
+                cookie("keep", "1"),
+            ],
+            vec![
+                origin("https://b.example", &[]),
+                origin("https://a.example", &[("y", "2"), ("x", "1"), ("w", "1")]),
+                origin("https://c.example", &[("n", "1")]),
+            ],
+        );
+        let second = storage(
+            vec![cookie("keep", "1"), cookie("added", "2")],
+            vec![
+                origin("https://a.example", &[("x", "1")]),
+                origin("https://c.example", &[("n", "1"), ("m", "1")]),
+            ],
+        );
+
+        let newest = published(loaded.clone());
+        let saved = published(merge_state(newest, &loaded, &first, NOW));
+        assert_eq!(saved, published(first.clone()));
+
+        let saved = published(merge_state(saved, &first, &second, NOW));
+        assert_eq!(saved, published(second));
+    }
+
+    #[test]
+    fn test_merge_does_not_reapply_change_already_published() {
+        // A signs in to X and publishes; B loads that and signs out of X.
+        let a_current = storage(vec![cookie("x", "1")], vec![]);
+        let a_published = merge_state(
+            StorageState::default(),
+            &StorageState::default(),
+            &a_current,
+            NOW,
+        );
+        let b_baseline = a_published.clone();
+        let b_published = merge_state(a_published, &b_baseline, &StorageState::default(), NOW);
+        assert!(b_published.cookies.is_empty());
+
+        // A still holds X, unchanged since it published it.
+        let a_next = merge_state(b_published, &a_current, &a_current, NOW);
+        assert!(a_next.cookies.is_empty(), "A must not bring X back");
+    }
+
+    #[test]
+    fn test_publish_auto_state_keeps_sign_in_of_session_that_saved_first() {
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "HOME",
+            "AGENT_BROWSER_NAMESPACE",
+            "AGENT_BROWSER_ENCRYPTION_KEY",
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("HOME", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        guard.remove("AGENT_BROWSER_ENCRYPTION_KEY");
+        let empty = StorageState::default();
+
+        // A and B launch on one key with nothing saved yet. B signs in and
+        // saves first; A saves after it, so A's file becomes the newest.
+        let b_current = storage(vec![cookie("b_sid", "b")], vec![]);
+        publish_auto_state("shared", "b", &empty, &b_current).unwrap();
+        let a_current = storage(
+            vec![cookie("a_pref", "a")],
+            vec![origin("https://a.example", &[("k", "v")])],
+        );
+        let a_path = publish_auto_state("shared", "a", &empty, &a_current).unwrap();
+
+        let published = read_state(&a_path).unwrap();
+        assert_eq!(
+            cookie_pairs(&published),
+            vec![("a_pref", "a"), ("b_sid", "b")]
+        );
+        assert_eq!(
+            local_pairs(&published, "https://a.example"),
+            Some(vec![("k", "v")])
+        );
     }
 
     #[test]

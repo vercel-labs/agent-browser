@@ -642,6 +642,11 @@ pub struct DaemonState {
     pub restore_validation_pending: bool,
     pub restore_save_status: String,
     pub restore_saved_path: Option<String>,
+    /// What this session last loaded from or published to its restore key.
+    /// An autosave publishes only its changes since then, so sessions sharing
+    /// a key keep each other's sign-ins. A save that does not read an origin
+    /// keeps that origin's earlier baseline (`state::advance_baseline`).
+    pub restore_baseline: state::StorageState,
     /// When the most recent browser-touching command finished. Periodic
     /// autosaves wait for a quiet period after this so a multi-second save
     /// never lands in the middle of an active command burst.
@@ -803,6 +808,7 @@ impl DaemonState {
             restore_validation_pending: false,
             restore_save_status: "not_attempted".to_string(),
             restore_saved_path: None,
+            restore_baseline: state::StorageState::default(),
             last_command_finished: None,
             last_autosave_attempt: None,
             session_id,
@@ -2380,6 +2386,7 @@ fn reset_restore_runtime_state(state: &mut DaemonState) {
     state.restore_validation_pending = false;
     state.restore_save_status = "not_attempted".to_string();
     state.restore_saved_path = None;
+    state.restore_baseline = state::StorageState::default();
 }
 
 fn command_restore_check_fields(
@@ -4692,6 +4699,7 @@ fn no_xvfb_from_launch_cmd(cmd: &Value) -> bool {
 }
 
 async fn try_auto_restore_state(state: &mut DaemonState) {
+    state.restore_baseline = state::StorageState::default();
     let session_name = match state.session_name.as_deref() {
         Some(n) if !n.is_empty() => n.to_string(),
         _ => {
@@ -4707,7 +4715,8 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
                 match state::load_state(&mgr.client, session_id, &path).await {
-                    Ok(()) => {
+                    Ok(loaded) => {
+                        state.restore_baseline = loaded;
                         state.restore_status = "loaded".to_string();
                         state.restore_status_detail = None;
                         state.restore_loaded_path = Some(path.clone());
@@ -4900,10 +4909,13 @@ pub(crate) async fn auto_save_restore_state(
         &session_name,
         &state.session_id,
         mgr.visited_origins(),
+        &state.restore_baseline,
     )
     .await
     {
-        Ok(path) => {
+        Ok((path, collected)) => {
+            state.restore_baseline =
+                state::advance_baseline(std::mem::take(&mut state.restore_baseline), collected);
             state.restore_save_status = "saved".to_string();
             state.restore_saved_path = Some(path.clone());
             // Saves from any path (close, relaunch, restore-key change) reset
