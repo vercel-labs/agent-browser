@@ -653,8 +653,10 @@ fn install_linux_deps() {
         // Run apt-get update before resolving t64 package variants. Fresh
         // sandbox images may have no local package index yet, which would
         // make apt-cache miss packages that are actually available.
-        println!("Running: sudo apt-get update");
-        let update_status = Command::new("sudo").args(["apt-get", "update"]).status();
+        println!("Running: {}apt-get update", privilege_prefix());
+        let update_status = privileged_command("apt-get")
+            .map(|mut cmd| cmd.arg("update").status())
+            .unwrap_or_else(|e| Err(io::Error::other(e)));
 
         match update_status {
             Ok(s) if !s.success() => {
@@ -697,10 +699,9 @@ fn install_linux_deps() {
         // due to dependency conflicts (e.g. on Ubuntu 24.04 with the
         // t64 transition).
         println!("Checking for conflicts...");
-        let sim_output = Command::new("sudo")
-            .args(["apt-get", "install", "--simulate"])
-            .args(&deps)
-            .output();
+        let sim_output = privileged_command("apt-get")
+            .map(|mut cmd| cmd.args(["install", "--simulate"]).args(&deps).output())
+            .unwrap_or_else(|e| Err(io::Error::other(e)));
 
         match sim_output {
             Ok(output) => {
@@ -721,7 +722,11 @@ fn install_linux_deps() {
                     }
                     eprintln!();
                     eprintln!("  To install dependencies manually, run:");
-                    eprintln!("    sudo apt-get install {}", deps.join(" "));
+                    eprintln!(
+                        "    {}apt-get install {}",
+                        privilege_prefix(),
+                        deps.join(" ")
+                    );
                     exit(1);
                 }
 
@@ -751,7 +756,11 @@ fn install_linux_deps() {
                     }
                     eprintln!();
                     eprintln!("  To install dependencies manually, run:");
-                    eprintln!("    sudo apt-get install {}", deps.join(" "));
+                    eprintln!(
+                        "    {}apt-get install {}",
+                        privilege_prefix(),
+                        deps.join(" ")
+                    );
                     eprintln!();
                     eprintln!("  Review the apt output carefully before confirming.");
                     exit(1);
@@ -767,22 +776,84 @@ fn install_linux_deps() {
         }
 
         // Safe to proceed: no removals detected
-        let install_cmd = format!("sudo apt-get install -y {}", deps.join(" "));
+        let install_cmd = format!(
+            "{}apt-get install -y {}",
+            privilege_prefix(),
+            deps.join(" ")
+        );
         println!("Running: {}", install_cmd);
-        let status = Command::new("sudo")
-            .args(["apt-get", "install", "-y"])
-            .args(&deps)
-            .status();
+        let status = privileged_command("apt-get")
+            .map(|mut cmd| cmd.args(["install", "-y"]).args(&deps).status())
+            .unwrap_or_else(|e| Err(io::Error::other(e)));
 
         report_install_status(status);
     } else {
         // dnf / yum path — these package managers do not remove packages
         // during install, so the simulate-first guard is not needed.
-        let install_cmd = format!("sudo {} install -y {}", pkg_mgr, deps.join(" "));
+        let install_cmd = format!(
+            "{} {} install -y {}",
+            privilege_prefix(),
+            pkg_mgr,
+            deps.join(" ")
+        );
         println!("Running: {}", install_cmd);
-        let status = Command::new("sh").arg("-c").arg(&install_cmd).status();
+        let status = privileged_command(pkg_mgr)
+            .map(|mut cmd| cmd.args(["install", "-y"]).args(&deps).status())
+            .unwrap_or_else(|e| Err(io::Error::other(e)));
 
         report_install_status(status);
+    }
+}
+
+/// Whether this process is running as root (effective UID 0).
+fn is_root() -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid() takes no arguments and always succeeds.
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// Build a command that runs a package-manager invocation with root
+/// privileges: the package manager directly when the process is already
+/// root (e.g. a minimal container without sudo), otherwise prefixed with
+/// `sudo`. Errors when neither root privileges nor sudo are available.
+fn privileged_command(pkg_mgr: &str) -> Result<Command, String> {
+    privileged_command_with(is_root(), which_exists("sudo"), pkg_mgr)
+}
+
+/// Testable core of `privileged_command`: decide how to invoke a package
+/// manager given whether the process is root and whether sudo exists.
+fn privileged_command_with(
+    is_root: bool,
+    has_sudo: bool,
+    pkg_mgr: &str,
+) -> Result<Command, String> {
+    if is_root {
+        return Ok(Command::new(pkg_mgr));
+    }
+    if has_sudo {
+        let mut cmd = Command::new("sudo");
+        cmd.arg(pkg_mgr);
+        return Ok(cmd);
+    }
+    Err(format!(
+        "{} needs root privileges to install system dependencies: run as root or install sudo",
+        pkg_mgr
+    ))
+}
+
+/// Display prefix for privileged invocations: empty when already root,
+/// `"sudo "` otherwise. Mirrors what `privileged_command` will actually run.
+fn privilege_prefix() -> &'static str {
+    if is_root() {
+        ""
+    } else {
+        "sudo "
     }
 }
 
@@ -909,6 +980,36 @@ mod tests {
             install_status_result(Err(io::Error::new(io::ErrorKind::NotFound, "missing sudo")))
                 .unwrap_err();
         assert!(err.contains("could not run install command"));
+    }
+
+    #[test]
+    fn privileged_command_runs_package_manager_directly_when_root() {
+        let cmd = privileged_command_with(true, false, "apt-get").unwrap();
+        assert_eq!(cmd.get_program(), "apt-get");
+        assert_eq!(cmd.get_args().count(), 0);
+    }
+
+    #[test]
+    fn privileged_command_prefers_sudo_when_not_root() {
+        let cmd = privileged_command_with(false, true, "apt-get").unwrap();
+        assert_eq!(cmd.get_program(), "sudo");
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("apt-get")]
+        );
+    }
+
+    #[test]
+    fn privileged_command_does_not_need_sudo_when_root() {
+        let cmd = privileged_command_with(true, false, "dnf").unwrap();
+        assert_eq!(cmd.get_program(), "dnf");
+    }
+
+    #[test]
+    fn privileged_command_errors_without_root_or_sudo() {
+        let err = privileged_command_with(false, false, "apt-get").unwrap_err();
+        assert!(err.contains("root privileges"));
+        assert!(err.contains("install sudo"));
     }
 
     #[tokio::test]
