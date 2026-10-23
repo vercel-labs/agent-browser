@@ -89,94 +89,97 @@ fn normalize_navigation_url(url: &str) -> String {
     }
 }
 
+/// Every top-level CLI command, including aliases and the commands `main`
+/// handles before `parse_command`.
+pub const TOP_LEVEL_COMMANDS: &[&str] = &[
+    "open",
+    "goto",
+    "navigate",
+    "back",
+    "forward",
+    "reload",
+    "read",
+    "click",
+    "dblclick",
+    "fill",
+    "type",
+    "hover",
+    "focus",
+    "check",
+    "uncheck",
+    "select",
+    "drag",
+    "upload",
+    "download",
+    "press",
+    "key",
+    "keydown",
+    "keyup",
+    "keyboard",
+    "scroll",
+    "scrollintoview",
+    "scrollinto",
+    "wait",
+    "screenshot",
+    "pdf",
+    "snapshot",
+    "eval",
+    "close",
+    "quit",
+    "exit",
+    "inspect",
+    "auth",
+    "confirm",
+    "deny",
+    "connect",
+    "stream",
+    "get",
+    "is",
+    "find",
+    "mouse",
+    "set",
+    "network",
+    "storage",
+    "cookies",
+    "tab",
+    "window",
+    "frame",
+    "dialog",
+    "trace",
+    "profiler",
+    "record",
+    "console",
+    "errors",
+    "highlight",
+    "clipboard",
+    "state",
+    "tap",
+    "swipe",
+    "device",
+    "diff",
+    "batch",
+    "react",
+    "vitals",
+    "web-vitals",
+    "a11y",
+    "pushstate",
+    "removeinitscript",
+    "session",
+    "mcp",
+    "doctor",
+    "install",
+    "upgrade",
+    "profiles",
+    "skills",
+    "dashboard",
+    "plugin",
+    "plugins",
+    "chat",
+    "webmcp",
+];
+
 pub fn is_top_level_command(value: &str) -> bool {
-    matches!(
-        value,
-        "open"
-            | "goto"
-            | "navigate"
-            | "back"
-            | "forward"
-            | "reload"
-            | "read"
-            | "click"
-            | "dblclick"
-            | "fill"
-            | "type"
-            | "hover"
-            | "focus"
-            | "check"
-            | "uncheck"
-            | "select"
-            | "drag"
-            | "upload"
-            | "download"
-            | "press"
-            | "key"
-            | "keydown"
-            | "keyup"
-            | "keyboard"
-            | "scroll"
-            | "scrollintoview"
-            | "scrollinto"
-            | "wait"
-            | "screenshot"
-            | "pdf"
-            | "snapshot"
-            | "eval"
-            | "close"
-            | "quit"
-            | "exit"
-            | "inspect"
-            | "auth"
-            | "confirm"
-            | "deny"
-            | "connect"
-            | "stream"
-            | "get"
-            | "is"
-            | "find"
-            | "mouse"
-            | "set"
-            | "network"
-            | "storage"
-            | "cookies"
-            | "tab"
-            | "window"
-            | "frame"
-            | "dialog"
-            | "trace"
-            | "profiler"
-            | "record"
-            | "console"
-            | "errors"
-            | "highlight"
-            | "clipboard"
-            | "state"
-            | "tap"
-            | "swipe"
-            | "device"
-            | "diff"
-            | "batch"
-            | "react"
-            | "vitals"
-            | "web-vitals"
-            | "a11y"
-            | "pushstate"
-            | "removeinitscript"
-            | "session"
-            | "mcp"
-            | "doctor"
-            | "install"
-            | "upgrade"
-            | "profiles"
-            | "skills"
-            | "dashboard"
-            | "plugin"
-            | "plugins"
-            | "chat"
-            | "webmcp"
-    )
+    TOP_LEVEL_COMMANDS.contains(&value)
 }
 
 /// Parse a cookies file in one of three auto-detected formats:
@@ -367,6 +370,13 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
     }
 
     let cmd = args[0].as_str();
+    // Unregistered commands are rejected here so a new parser arm can't work
+    // without also being added to TOP_LEVEL_COMMANDS (used by flag parsing).
+    if !is_top_level_command(cmd) {
+        return Err(ParseError::UnknownCommand {
+            command: cmd.to_string(),
+        });
+    }
     let rest: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
     let id = gen_id();
 
@@ -3574,10 +3584,10 @@ pub fn shell_words_split(s: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn default_flags() -> Flags {
+    pub(crate) fn default_flags() -> Flags {
         Flags {
             session: "test".to_string(),
             json: false,
@@ -3664,6 +3674,45 @@ mod tests {
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
+    }
+
+    /// Commands that `main` handles before `parse_command`.
+    const STANDALONE_COMMANDS: &[&str] = &[
+        "session",
+        "mcp",
+        "doctor",
+        "install",
+        "upgrade",
+        "profiles",
+        "skills",
+        "dashboard",
+        "plugin",
+        "plugins",
+        "chat",
+    ];
+
+    #[test]
+    fn test_top_level_commands_are_unique() {
+        let unique: std::collections::HashSet<_> = TOP_LEVEL_COMMANDS.iter().collect();
+        assert_eq!(unique.len(), TOP_LEVEL_COMMANDS.len());
+    }
+
+    #[test]
+    fn test_top_level_commands_reach_parser() {
+        for command in STANDALONE_COMMANDS {
+            assert!(TOP_LEVEL_COMMANDS.contains(command), "{command}");
+        }
+        for command in TOP_LEVEL_COMMANDS {
+            let unknown = matches!(
+                parse_command(&[command.to_string()], &default_flags()),
+                Err(ParseError::UnknownCommand { .. })
+            );
+            assert_eq!(
+                unknown,
+                STANDALONE_COMMANDS.contains(command),
+                "'{command}' should be parsed unless it is in STANDALONE_COMMANDS"
+            );
+        }
     }
 
     // === Cookies Tests ===
