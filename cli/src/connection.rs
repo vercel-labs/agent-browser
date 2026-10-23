@@ -389,16 +389,20 @@ pub fn get_port_for_session(session: &str) -> u16 {
     49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
 }
 
+/// The port the daemon wrote to the `.port` file once it was listening.
+#[cfg(windows)]
+fn written_port(session: &str) -> Option<u16> {
+    fs::read_to_string(get_port_path(session))
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+}
+
 /// Read the actual daemon port from the `.port` file written by the daemon.
 /// Falls back to the hash-derived port if the file does not exist or is
 /// unreadable (e.g. daemon has not started yet).
 #[cfg(windows)]
 pub fn resolve_port(session: &str) -> u16 {
-    let port_path = get_port_path(session);
-    fs::read_to_string(&port_path)
-        .ok()
-        .and_then(|s| s.trim().parse::<u16>().ok())
-        .unwrap_or_else(|| get_port_for_session(session))
+    written_port(session).unwrap_or_else(|| get_port_for_session(session))
 }
 
 pub fn daemon_ready(session: &str) -> bool {
@@ -409,7 +413,12 @@ pub fn daemon_ready(session: &str) -> bool {
     }
     #[cfg(windows)]
     {
-        let port = resolve_port(session);
+        // The hash-derived port is only where a daemon tries first. Another
+        // program may already listen there; that is not this session's
+        // daemon, which is known by the port it wrote.
+        let Some(port) = written_port(session) else {
+            return false;
+        };
         TcpStream::connect_timeout(
             &format!("127.0.0.1:{}", port).parse().unwrap(),
             Duration::from_millis(50),
@@ -1825,6 +1834,35 @@ mod tests {
         assert_ne!(namespaced_one, unnamespaced);
         assert_ne!(namespaced_two, unnamespaced);
         assert_ne!(namespaced_one, namespaced_two);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_another_program_on_the_derived_port_is_not_the_sessions_daemon() {
+        let dir = std::env::temp_dir().join("ab-test-derived-port-taken");
+        let _ = fs::create_dir_all(&dir);
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_NAMESPACE"]);
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        let session = "derived-port-taken";
+        let _ = fs::remove_file(get_port_path(session));
+
+        // Another program already listens on the port this session's daemon
+        // would try first (when binding fails, something else holds it).
+        let _other = std::net::TcpListener::bind(("127.0.0.1", get_port_for_session(session)));
+        assert!(!daemon_ready(session));
+
+        // A daemon writes the port it listens on once it is listening.
+        let daemon = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        fs::write(
+            get_port_path(session),
+            daemon.local_addr().unwrap().port().to_string(),
+        )
+        .unwrap();
+        assert!(daemon_ready(session));
+
+        let _ = fs::remove_file(get_port_path(session));
+        let _ = fs::remove_dir(&dir);
     }
 
     // === Daemon Version Mismatch Detection Tests ===
