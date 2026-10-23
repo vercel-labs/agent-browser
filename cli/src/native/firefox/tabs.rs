@@ -3,6 +3,7 @@
 use serde_json::{json, Value};
 
 use super::actions::session;
+use super::emulation;
 use crate::native::actions::DaemonState;
 use crate::native::browser::{format_tab_id, is_valid_label, TabRef};
 
@@ -51,6 +52,7 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         if let Some(label) = label {
             ff.tab_labels.insert(context.clone(), label.to_string());
         }
+        let _ = emulation::apply_to_context(ff, &context).await;
         match url {
             Some(url) => {
                 let nav = ff
@@ -223,6 +225,7 @@ pub async fn window_new(_cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         ff.context = context.clone();
         ff.top_context = context.clone();
         ff.refs.clear();
+        let _ = emulation::apply_to_context(ff, &context).await;
     }
     reset_refs(state);
     let total = tab_count(state).await?;

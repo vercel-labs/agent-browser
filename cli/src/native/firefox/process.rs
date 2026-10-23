@@ -42,14 +42,13 @@ pub struct FirefoxProcess {
     reader: Option<std::thread::JoinHandle<()>>,
 }
 
-/// Rejects options Firefox cannot honour. `cdp`, `auto_connect`, `provider` and
-/// `allowed_domains` are resolved from flags, env and config by the caller.
+/// Rejects options Firefox cannot honour. `cdp`, `auto_connect` and `provider`
+/// are resolved from flags, env and config by the caller.
 pub fn validate_firefox_options(
     options: &LaunchOptions,
     cdp: Option<&str>,
     auto_connect: bool,
     provider: Option<&str>,
-    allowed_domains: bool,
 ) -> Result<(), String> {
     let unsupported = |flag: &str| Err(format!("{flag} is not supported with --engine firefox"));
     if cdp.is_some() {
@@ -78,9 +77,6 @@ pub fn validate_firefox_options(
     }
     if options.ca_cert.is_some() {
         return unsupported("--ca-cert");
-    }
-    if allowed_domains {
-        return Err("allowed-domains is not yet supported on Firefox".to_string());
     }
     Ok(())
 }
@@ -148,7 +144,7 @@ pub fn check_firefox_version(version: &str) -> Result<(), String> {
     }
 }
 
-fn user_js(download_path: Option<&str>) -> String {
+fn user_js(download_path: Option<&str>, restrict_webrtc: bool) -> String {
     let mut js = String::from(
         "user_pref(\"devtools.debugger.remote-enabled\", true);\n\
          user_pref(\"devtools.chrome.enabled\", true);\n\
@@ -158,6 +154,9 @@ fn user_js(download_path: Option<&str>) -> String {
          user_pref(\"browser.download.always_ask_before_handling_new_types\", false);\n\
          user_pref(\"browser.download.manager.showWhenStarting\", false);\n",
     );
+    if restrict_webrtc {
+        js.push_str("user_pref(\"media.peerconnection.enabled\", false);\n");
+    }
     if let Some(dir) = download_path {
         let dir = serde_json::to_string(dir).unwrap_or_default();
         js.push_str(&format!(
@@ -206,9 +205,13 @@ fn prepare(
     headless: bool,
     profile_dir: &Path,
     download_path: Option<&str>,
+    restrict_webrtc: bool,
 ) -> Result<(DevtoolsEndpoint, Option<PathBuf>, Child), String> {
-    std::fs::write(profile_dir.join("user.js"), user_js(download_path))
-        .map_err(|e| format!("Failed to write Firefox profile: {e}"))?;
+    std::fs::write(
+        profile_dir.join("user.js"),
+        user_js(download_path, restrict_webrtc),
+    )
+    .map_err(|e| format!("Failed to write Firefox profile: {e}"))?;
     let (devtools, rdp, socket_dir) = devtools_endpoint(profile_dir)?;
     let mut args: Vec<String> = Vec::new();
     if headless {
@@ -241,6 +244,7 @@ impl FirefoxProcess {
         path: &Path,
         headless: bool,
         download_path: Option<&str>,
+        restrict_webrtc: bool,
         timeout: Duration,
     ) -> Result<Self, String> {
         let id = &uuid::Uuid::new_v4().simple().to_string()[..8];
@@ -248,9 +252,11 @@ impl FirefoxProcess {
         create_private_dir(&profile_dir)
             .map_err(|e| format!("Failed to create Firefox profile dir: {e}"))?;
         let (devtools, socket_dir, mut child) =
-            prepare(path, headless, &profile_dir, download_path).inspect_err(|_| {
-                let _ = std::fs::remove_dir_all(&profile_dir);
-            })?;
+            prepare(path, headless, &profile_dir, download_path, restrict_webrtc).inspect_err(
+                |_| {
+                    let _ = std::fs::remove_dir_all(&profile_dir);
+                },
+            )?;
         let stderr: Option<Box<dyn Read + Send>> = child.stderr.take().map(|s| Box::new(s) as _);
         let tail = Arc::new(Mutex::new(VecDeque::new()));
         let (tx, rx) = mpsc::channel();
@@ -378,12 +384,12 @@ mod tests {
     }
 
     fn err_of(o: &LaunchOptions) -> String {
-        validate_firefox_options(o, None, false, None, false).unwrap_err()
+        validate_firefox_options(o, None, false, None).unwrap_err()
     }
 
     #[test]
     fn validate_accepts_plain_options() {
-        assert!(validate_firefox_options(&ok(), None, false, None, false).is_ok());
+        assert!(validate_firefox_options(&ok(), None, false, None).is_ok());
     }
 
     #[test]
@@ -406,15 +412,12 @@ mod tests {
         let mut o = ok();
         o.ca_cert = Some("c".into());
         assert!(err_of(&o).contains("--ca-cert"));
-        let e = validate_firefox_options(&ok(), Some("9222"), false, None, false).unwrap_err();
+        let e = validate_firefox_options(&ok(), Some("9222"), false, None).unwrap_err();
         assert!(e.contains("--cdp"));
-        let e = validate_firefox_options(&ok(), None, true, None, false).unwrap_err();
+        let e = validate_firefox_options(&ok(), None, true, None).unwrap_err();
         assert!(e.contains("--auto-connect"));
-        let e =
-            validate_firefox_options(&ok(), None, false, Some("browserbase"), false).unwrap_err();
+        let e = validate_firefox_options(&ok(), None, false, Some("browserbase")).unwrap_err();
         assert!(e.contains("--provider"));
-        let e = validate_firefox_options(&ok(), None, false, None, true).unwrap_err();
-        assert!(e.contains("allowed-domains is not yet supported on Firefox"));
     }
 
     #[test]
@@ -428,6 +431,12 @@ mod tests {
             parse_bidi_url("WebDriver BiDi listening on ws://[::1]:9\r").as_deref(),
             Some("ws://[::1]:9")
         );
+    }
+
+    #[test]
+    fn webrtc_is_disabled_only_when_domains_are_restricted() {
+        assert!(user_js(None, true).contains("media.peerconnection.enabled\", false"));
+        assert!(!user_js(None, false).contains("peerconnection"));
     }
 
     #[test]
@@ -474,7 +483,7 @@ mod tests {
             dir.path(),
             "echo noise >&2\necho 'WebDriver BiDi listening on ws://127.0.0.1:4242' >&2\nexec sleep 30",
         );
-        let p = FirefoxProcess::launch(&bin, true, None, Duration::from_secs(10)).unwrap();
+        let p = FirefoxProcess::launch(&bin, true, None, false, Duration::from_secs(10)).unwrap();
         assert_eq!(p.bidi_url, "ws://127.0.0.1:4242");
         let profile = p.profile_dir.clone();
         assert!(profile.join("user.js").exists());
@@ -522,7 +531,7 @@ mod tests {
             log.display()
         );
         let bin = fake(dir.path(), &body);
-        let e = FirefoxProcess::launch(&bin, true, None, Duration::from_millis(800))
+        let e = FirefoxProcess::launch(&bin, true, None, false, Duration::from_millis(800))
             .err()
             .unwrap();
         assert!(e.contains("boom on stderr"), "{e}");
@@ -536,7 +545,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = fake(dir.path(), "echo 'bad profile' >&2\nexit 3");
         let start = Instant::now();
-        let e = FirefoxProcess::launch(&bin, true, None, Duration::from_secs(20))
+        let e = FirefoxProcess::launch(&bin, true, None, false, Duration::from_secs(20))
             .err()
             .unwrap();
         assert!(start.elapsed() < Duration::from_secs(10));
@@ -547,8 +556,8 @@ mod tests {
     #[ignore = "requires FIREFOX_BIN"]
     fn real_firefox_smoke() {
         let bin = std::env::var("FIREFOX_BIN").expect("FIREFOX_BIN");
-        let p =
-            FirefoxProcess::launch(Path::new(&bin), true, None, Duration::from_secs(30)).unwrap();
+        let p = FirefoxProcess::launch(Path::new(&bin), true, None, false, Duration::from_secs(30))
+            .unwrap();
         assert!(p.bidi_url.starts_with("ws://127.0.0.1:"), "{}", p.bidi_url);
         let profile = p.profile_dir.clone();
         drop(p);

@@ -5,6 +5,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::actions::session;
+use super::network;
 use super::session::FirefoxSession;
 use crate::native::actions::DaemonState;
 
@@ -51,6 +52,7 @@ pub async fn navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         Some("none") => "none",
         _ => "complete",
     };
+    network::set_origin_headers(cmd, url, state).await?;
     state.ref_map.invalidate_all_documents();
     state.active_frame_id = None;
     let ff = session(state)?;
@@ -341,7 +343,11 @@ pub async fn wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
     }
 
     if let Some(load_state) = cmd.get("loadState").and_then(Value::as_str) {
-        if let Some(check) = load_state_check(load_state) {
+        if load_state == "networkidle" {
+            network::wait_idle(state, timeout_ms)
+                .await
+                .map_err(|_| format!("Wait timed out after {timeout_ms}ms"))?;
+        } else if let Some(check) = load_state_check(load_state) {
             poll_until_true(ff, check, timeout_ms).await?;
         }
         return Ok(json!({ "waited": "load", "state": load_state }));
@@ -376,7 +382,11 @@ pub async fn waitforloadstate(cmd: &Value, state: &mut DaemonState) -> Result<Va
         .get("timeout")
         .and_then(Value::as_u64)
         .unwrap_or(state.default_timeout_ms);
-    if let Some(check) = load_state_check(load_state) {
+    if load_state == "networkidle" {
+        network::wait_idle(state, timeout_ms)
+            .await
+            .map_err(|_| "Timeout waiting for networkidle".to_string())?;
+    } else if let Some(check) = load_state_check(load_state) {
         let ff = session(state)?;
         poll_until_true_or_timeout(
             ff,
