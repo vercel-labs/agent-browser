@@ -1231,6 +1231,27 @@ impl DaemonState {
                 return Err(error);
             }
         };
+        let target_info = match client
+            .send_command_no_params("Target.getTargetInfo", Some(&session_id))
+            .await
+        {
+            Ok(info) => info,
+            Err(error) => {
+                self.rollback_failed_recording_start().await;
+                return Err(format!("Failed to resolve recording target: {error}"));
+            }
+        };
+        let target_id = match target_info
+            .get("targetInfo")
+            .and_then(|info| info.get("targetId"))
+            .and_then(Value::as_str)
+        {
+            Some(target_id) => target_id.to_string(),
+            None => {
+                self.rollback_failed_recording_start().await;
+                return Err("Failed to resolve recording target".to_string());
+            }
+        };
         let capture_session = match recording::attach_capture_session(
             &client,
             &session_id,
@@ -1269,6 +1290,7 @@ impl DaemonState {
         let handle = recording::spawn_recording_task(
             client,
             capture_session,
+            target_id,
             initial_frame,
             self.recording_state.output_path.clone(),
             self.recording_state.fps,
