@@ -246,7 +246,9 @@ jobs:
         run: cargo test --profile ci --manifest-path cli/Cargo.toml e2e -- --ignored --test-threads=1 --skip e2e_firefox
 
       - name: Run Firefox e2e tests
-        run: cargo test --profile ci --manifest-path cli/Cargo.toml e2e_firefox_smoke -- --ignored --test-threads=1
+        run: cargo test --profile ci --manifest-path cli/Cargo.toml e2e_firefox -- --ignored --test-threads=1 --skip e2e_firefox_route_mock --skip e2e_firefox_allowed_domains --skip e2e_firefox_download --skip e2e_firefox_emulation
+        env:
+          RUST_MIN_STACK: "67108864"
 
   windows-integration:
     name: Windows Integration Test

@@ -27,14 +27,24 @@ pub struct FirefoxSession {
     pub bidi: BidiClient,
     pub rdp: RdpClient,
     pub accessibility_actor: String,
-    /// Active top-level browsing context (tab) id.
+    /// Active browsing context id: a top-level tab, or a frame after `frame <sel>`.
     pub context: String,
+    /// Active top-level browsing context id (tab), restored by `frame main`.
+    pub top_context: String,
     /// Stable `t<N>` ids keyed by BiDi context; assigned on first sight and never reused.
     pub tab_ids: HashMap<String, u32>,
     next_tab_id: u32,
     /// Durable ref ids keyed by `(context, sharedId)`; reset when a document changes.
     pub refs: HashMap<(String, String), i64>,
+    pub next_node_id: i64,
+    pub frames: Option<super::snapshot::FrameWatch>,
+    /// Document node `sharedId` last snapshotted per context, used to reset `refs` on a new document.
+    pub documents: HashMap<String, String>,
     pub tab_labels: HashMap<String, String>,
+    /// Touch points of the active touch sequence, released by a later `input_touch` end.
+    pub touches: Vec<(f64, f64)>,
+    /// Durable ids of nodes inside open shadow roots, which a stale ref must never recover by role and name.
+    pub shadow_ids: std::collections::HashSet<i64>,
     events: broadcast::Receiver<Value>,
 }
 
@@ -149,9 +159,15 @@ impl FirefoxSession {
             accessibility_actor,
             tab_ids: HashMap::from([(context.clone(), 1)]),
             next_tab_id: 2,
+            top_context: context.clone(),
             context,
             refs: HashMap::new(),
+            next_node_id: 0,
+            frames: None,
+            documents: HashMap::new(),
             tab_labels: HashMap::new(),
+            touches: Vec::new(),
+            shadow_ids: Default::default(),
             events,
         })
     }
@@ -193,9 +209,10 @@ impl FirefoxSession {
         }
     }
 
-    /// Runs `fut` until it finishes or a prompt opens on the active context. Returns `None` for the prompt.
+    /// Runs `fut` until it finishes or a prompt opens in `context` or its owning tab. Returns `None` for the prompt.
     pub async fn race_prompt<T>(
         &self,
+        context: &str,
         fut: impl Future<Output = Result<T, String>>,
     ) -> Result<Option<T>, String> {
         let mut events = self.bidi.subscribe();
@@ -206,7 +223,8 @@ impl FirefoxSession {
                 e = events.recv() => match e {
                     Ok(e) if e["method"] == "browsingContext.userPromptOpened"
                         && e["params"]["handler"] != "accept"
-                        && e["params"]["context"] == self.context.as_str() => return Ok(None),
+                        && [context, &self.context, &self.top_context]
+                            .contains(&e["params"]["context"].as_str().unwrap_or_default()) => return Ok(None),
                     Err(broadcast::error::RecvError::Closed) => return fut.await.map(Some),
                     _ => {}
                 },
@@ -302,6 +320,38 @@ pub(crate) mod tests {
         tokio::sync::mpsc::UnboundedSender<Value>,
         Calls,
     ) {
+        fake_session_with(|_: &Value| json!({})).await
+    }
+
+    /// Like `fake_session`, but `script` supplies the raw result of each `script.callFunction`.
+    pub(crate) async fn fake_session_with_script<F>(
+        script: F,
+    ) -> (
+        FirefoxSession,
+        tokio::sync::mpsc::UnboundedSender<Value>,
+        Calls,
+    )
+    where
+        F: Fn(&Value) -> Value + Send + 'static,
+    {
+        fake_session_with(move |v: &Value| {
+            if v["method"] == "script.callFunction" {
+                script(&v["params"])
+            } else {
+                json!({})
+            }
+        })
+        .await
+    }
+
+    /// Same as `fake_session`, with `responder` deciding each command's `result`.
+    pub(crate) async fn fake_session_with(
+        responder: impl Fn(&Value) -> Value + Send + 'static,
+    ) -> (
+        FirefoxSession,
+        tokio::sync::mpsc::UnboundedSender<Value>,
+        Calls,
+    ) {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", l.local_addr().unwrap());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
@@ -316,7 +366,8 @@ pub(crate) mod tests {
                         let Some(Ok(Message::Text(t))) = m else { break };
                         let v: Value = serde_json::from_str(&t).unwrap();
                         log.lock().unwrap().push(v["method"].as_str().unwrap().to_string());
-                        let reply = json!({"type":"success","id":v["id"],"result":{}});
+                        let reply =
+                            json!({"type":"success","id":v["id"],"result":responder(&v)});
                         ws.send(Message::Text(reply.to_string())).await.unwrap();
                     }
                     Some(ev) = rx.recv() => {
@@ -342,8 +393,14 @@ pub(crate) mod tests {
             context: "ctx-active".into(),
             tab_ids: HashMap::from([("ctx-active".into(), 1)]),
             next_tab_id: 2,
+            top_context: "ctx-active".into(),
             refs: HashMap::new(),
+            next_node_id: 0,
+            frames: None,
+            documents: HashMap::new(),
             tab_labels: HashMap::new(),
+            touches: Vec::new(),
+            shadow_ids: Default::default(),
             events,
         };
         (session, tx, calls)
@@ -389,7 +446,7 @@ pub(crate) mod tests {
     async fn race_prompt_returns_none_when_a_prompt_opens_on_the_active_context() {
         let (s, tx, _) = fake_session().await;
         let hang = std::future::pending::<Result<(), String>>();
-        let racer = s.race_prompt(hang);
+        let racer = s.race_prompt("ctx-active", hang);
         tokio::pin!(racer);
         assert!(tokio::time::timeout(Duration::from_millis(50), &mut racer)
             .await

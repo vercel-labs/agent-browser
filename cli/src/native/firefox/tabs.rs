@@ -46,6 +46,7 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
             .send("browsingContext.activate", json!({"context": context}))
             .await?;
         ff.context = context.clone();
+        ff.top_context = context.clone();
         ff.refs.clear();
         if let Some(label) = label {
             ff.tab_labels.insert(context.clone(), label.to_string());
@@ -94,7 +95,7 @@ pub async fn tab_list(state: &mut DaemonState) -> Result<Value, String> {
             .unwrap_or(Value::Null);
         let ff = session(state)?;
         let label = ff.tab_labels.get(&context).cloned();
-        let active = context == ff.context;
+        let active = context == ff.top_context;
         tabs.push(json!({
             "tabId": format_tab_id(tab_id),
             "targetId": context,
@@ -130,6 +131,7 @@ pub async fn tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
             .send("browsingContext.activate", json!({"context": context}))
             .await?;
         ff.context = context.clone();
+        ff.top_context = context.clone();
         ff.refs.clear();
     }
     reset_refs(state);
@@ -152,7 +154,7 @@ pub async fn tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     if list.len() <= 1 {
         return Err("Cannot close the last tab".to_string());
     }
-    let active = session(state)?.context.clone();
+    let active = session(state)?.top_context.clone();
     let context = match requested {
         Some(input) => resolve_tab_ref(&list, input)?,
         None => active.clone(),
@@ -179,7 +181,8 @@ pub async fn tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .bidi
             .send("browsingContext.activate", json!({"context": successor}))
             .await;
-        ff.context = successor;
+        ff.context = successor.clone();
+        ff.top_context = successor;
         ff.refs.clear();
     }
     if state
@@ -218,6 +221,7 @@ pub async fn window_new(_cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             .send("browsingContext.activate", json!({"context": context}))
             .await?;
         ff.context = context.clone();
+        ff.top_context = context.clone();
         ff.refs.clear();
     }
     reset_refs(state);

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Firefox forms</title></head>
+<body>
+<label>Issues <input id="issues" value="is:issue is:open"></label>
+<div id="editor" contenteditable="true" role="textbox" aria-label="Editor"></div>
+<label>Guarded <input id="guarded"></label>
+<label>Password <input id="password" type="password"></label>
+<iframe title="Cross origin forms" src="__OTHER__/forms-frame.html"></iframe>
+<script>
+const issues = document.getElementById('issues');
+let issuesState = issues.value;
+issues.addEventListener('input', event => {
+    if (event.isTrusted) issuesState = issues.value;
+    issues.value = issuesState;
+});
+document.getElementById('guarded').addEventListener('beforeinput', event => event.preventDefault());
+</script>
+</body>
+</html>
