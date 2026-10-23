@@ -146,7 +146,7 @@ agent-browser click @e1 --human           # approach with reproducible curved mo
 agent-browser dblclick @e1                # double-click
 agent-browser hover @e1                   # hover
 agent-browser focus @e1                   # focus (useful before keyboard input)
-agent-browser fill @e2 "hello"            # clear then type
+agent-browser fill @e2 "hello"            # clear then type (sets date, time, color and range inputs directly)
 agent-browser type @e2 " world"           # type without clearing
 agent-browser press Enter                 # press a key at current focus
 agent-browser press Control+a             # key combination
