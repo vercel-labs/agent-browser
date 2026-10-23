@@ -36,11 +36,10 @@ agent-browser open example.com
 agent-browser snapshot -i
 
 # Output:
-# - heading "Example Domain" [ref=e1]
-# - link "More information..." [ref=e2]
+# - link "Learn more" [ref=e1]
 
 # Interact using refs
-agent-browser click @e2
+agent-browser click @e1
 agent-browser screenshot page.png
 agent-browser close
 ```
