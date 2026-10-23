@@ -57,6 +57,7 @@ export const navigation: NavSection[] = [
     title: "Providers",
     items: [
       { name: "AgentCore", href: "/providers/agentcore" },
+      { name: "Baizhi Cloud Browser", href: "/providers/baizhi-cloud-browser" },
       { name: "Browser Use", href: "/providers/browser-use" },
       { name: "Browserbase", href: "/providers/browserbase" },
       { name: "Browserless", href: "/providers/browserless" },
