@@ -362,7 +362,23 @@ pub async fn press_key_with_modifiers(
     key: &str,
     modifiers: Option<i32>,
 ) -> Result<(), String> {
-    let (key_name, code, key_code) = named_key_info(key);
+    let (key_name, _, _) = named_key_info(key);
+    let modifier_keys = modifiers.map(modifier_key_names).unwrap_or_default();
+    let modifiers = modifiers.filter(|modifiers| *modifiers != 0);
+    let mut pressed_modifiers: Vec<&'static str> = Vec::with_capacity(modifier_keys.len());
+
+    for modifier in &modifier_keys {
+        if let Err(error) =
+            dispatch_key_event(client, session_id, modifier, "keyDown", modifiers, None).await
+        {
+            for pressed in pressed_modifiers.iter().rev() {
+                let _ =
+                    dispatch_key_event(client, session_id, pressed, "keyUp", modifiers, None).await;
+            }
+            return Err(error);
+        }
+        pressed_modifiers.push(*modifier);
+    }
 
     // Suppress text insertion when Control (2) or Meta (4) modifiers are active,
     // since these are command chords (e.g. Ctrl+A = select-all), not text input.
@@ -373,32 +389,58 @@ pub async fn press_key_with_modifiers(
         key_text(&key_name)
     };
 
-    client
-        .send_command_typed::<_, Value>(
-            "Input.dispatchKeyEvent",
-            &DispatchKeyEventParams {
-                event_type: "keyDown".to_string(),
-                key: Some(key_name.clone()),
-                code: Some(code.clone()),
-                text: text.clone(),
-                unmodified_text: text.clone(),
-                windows_virtual_key_code: Some(key_code),
-                native_virtual_key_code: Some(key_code),
-                modifiers,
-            },
-            Some(session_id),
+    let key_result = async {
+        dispatch_key_event(
+            client,
+            session_id,
+            &key_name,
+            "keyDown",
+            modifiers,
+            text.clone(),
         )
         .await?;
+        dispatch_key_event(client, session_id, &key_name, "keyUp", modifiers, None).await
+    }
+    .await;
 
+    let mut release_error = None;
+    for modifier in pressed_modifiers.iter().rev() {
+        if let Err(error) =
+            dispatch_key_event(client, session_id, modifier, "keyUp", modifiers, None).await
+        {
+            release_error.get_or_insert(error);
+        }
+    }
+
+    key_result?;
+    release_error.map_or(Ok(()), Err)
+}
+
+fn modifier_key_names(modifiers: i32) -> Vec<&'static str> {
+    [(2, "Control"), (1, "Alt"), (8, "Shift"), (4, "Meta")]
+        .into_iter()
+        .filter_map(|(bit, key)| (modifiers & bit != 0).then_some(key))
+        .collect()
+}
+
+async fn dispatch_key_event(
+    client: &CdpClient,
+    session_id: &str,
+    key: &str,
+    event_type: &str,
+    modifiers: Option<i32>,
+    text: Option<String>,
+) -> Result<(), String> {
+    let (key_name, code, key_code) = named_key_info(key);
     client
         .send_command_typed::<_, Value>(
             "Input.dispatchKeyEvent",
             &DispatchKeyEventParams {
-                event_type: "keyUp".to_string(),
+                event_type: event_type.to_string(),
                 key: Some(key_name),
                 code: Some(code),
-                text: None,
-                unmodified_text: None,
+                text: text.clone(),
+                unmodified_text: text,
                 windows_virtual_key_code: Some(key_code),
                 native_virtual_key_code: Some(key_code),
                 modifiers,
@@ -406,7 +448,6 @@ pub async fn press_key_with_modifiers(
             Some(session_id),
         )
         .await?;
-
     Ok(())
 }
 
@@ -1304,6 +1345,15 @@ fn named_key_info(key: &str) -> (String, String, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modifier_key_names_follow_chord_order() {
+        assert_eq!(modifier_key_names(2 | 8), vec!["Control", "Shift"]);
+        assert_eq!(
+            modifier_key_names(1 | 2 | 4 | 8),
+            vec!["Control", "Alt", "Shift", "Meta"]
+        );
+    }
 
     /// Verify that `char_to_key_info` returns the correct (key, code,
     /// windowsVirtualKeyCode) triple for every character in Playwright's
