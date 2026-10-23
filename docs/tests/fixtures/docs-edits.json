@@ -37,6 +37,12 @@
         "from": "It is not supported on macOS or Windows.",
         "to": "Browser trust is not supported on macOS or Windows, where Chromium already uses the operating system trust store."
       }
+    ],
+    "/cdp-mode": [
+      {
+        "from": "pass it once and later commands and daemon restarts keep the strict semantics.",
+        "to": "pass it once and later commands keep the strict semantics. Daemon restarts keep the pin; an explicit close releases it so other sessions can take the tab, and the next pinned command pins again."
+      }
     ]
   },
   "resources": {

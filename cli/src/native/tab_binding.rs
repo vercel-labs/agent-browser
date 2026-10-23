@@ -141,6 +141,52 @@ pub fn save(session: &str, binding: &TabBinding) -> Result<(), String> {
     write_result
 }
 
+/// Name of another live session that holds a `--pin-tab` pin on `target_id`.
+///
+/// Read-only scan of `{socket_dir}/*.target`. A pin counts only while the
+/// owning session's daemon is alive (`<session>.pid` parses and the process
+/// exists), so pins left behind by a dead daemon do not lock the tab.
+pub fn pinned_owner(target_id: &str, own_session: &str) -> Option<String> {
+    let dir = crate::connection::get_socket_dir();
+    let mut owners: Vec<String> = fs::read_dir(&dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.strip_suffix(".target").map(str::to_string)
+        })
+        .filter(|session| session != own_session)
+        .filter(|session| {
+            matches!(
+                load(session),
+                Ok(Some(b)) if b.pinned && b.target_id.eq_ignore_ascii_case(target_id)
+            )
+        })
+        .filter(|session| {
+            fs::read_to_string(dir.join(format!("{}.pid", session)))
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u32>().ok())
+                .is_some_and(crate::connection::is_pid_alive)
+        })
+        .collect();
+    owners.sort();
+    owners.into_iter().next()
+}
+
+/// Release the pin on a session's binding while keeping its target and URL,
+/// so other sessions may take the tab once the owner has explicitly closed.
+/// Returns the updated binding when a pin was released.
+pub fn release_pin(session: &str) -> Result<Option<TabBinding>, String> {
+    match load(session)? {
+        Some(mut binding) if binding.pinned => {
+            binding.pinned = false;
+            save(session, &binding)?;
+            Ok(Some(binding))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Remove the persisted binding for a session.
 pub fn clear(session: &str) {
     let _ = fs::remove_file(binding_path(session));
@@ -340,5 +386,87 @@ mod tests {
         assert_eq!(sanitize_url("file:///tmp/secret"), "");
         assert_eq!(sanitize_url("not a url"), "");
         assert_eq!(sanitize_url(""), "");
+    }
+
+    fn write_pin(session: &str, target: &str, pinned: bool, pid: Option<u32>) {
+        save(
+            session,
+            &TabBinding {
+                target_id: target.to_string(),
+                url: String::new(),
+                pinned,
+            },
+        )
+        .unwrap();
+        if let Some(pid) = pid {
+            fs::write(
+                crate::connection::get_socket_dir().join(format!("{}.pid", session)),
+                pid.to_string(),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn test_pinned_owner_alive_pin_locks() {
+        with_socket_dir(|| {
+            write_pin("a", "TARGET1", true, Some(std::process::id()));
+            assert_eq!(pinned_owner("TARGET1", "b"), Some("a".to_string()));
+            assert_eq!(pinned_owner("OTHER", "b"), None);
+        });
+    }
+
+    #[test]
+    fn test_pinned_owner_unpinned_is_free() {
+        with_socket_dir(|| {
+            write_pin("a", "TARGET1", false, Some(std::process::id()));
+            assert_eq!(pinned_owner("TARGET1", "b"), None);
+        });
+    }
+
+    #[test]
+    fn test_pinned_owner_ignores_own_session() {
+        with_socket_dir(|| {
+            write_pin("a", "TARGET1", true, Some(std::process::id()));
+            assert_eq!(pinned_owner("TARGET1", "a"), None);
+        });
+    }
+
+    #[test]
+    fn test_pinned_owner_dead_or_missing_pid_is_free() {
+        with_socket_dir(|| {
+            write_pin("nopid", "TARGET1", true, None);
+            assert_eq!(pinned_owner("TARGET1", "b"), None);
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            let pid = child.id();
+            child.wait().unwrap();
+            write_pin("dead", "TARGET1", true, Some(pid));
+            assert_eq!(pinned_owner("TARGET1", "b"), None);
+        });
+    }
+
+    #[test]
+    fn test_release_pin_unlocks_even_with_live_pid() {
+        with_socket_dir(|| {
+            write_pin("a", "TARGET1", true, Some(std::process::id()));
+            assert_eq!(pinned_owner("TARGET1", "b"), Some("a".to_string()));
+            let released = release_pin("a").unwrap().unwrap();
+            assert!(!released.pinned);
+            assert_eq!(released.target_id, "TARGET1");
+            assert_eq!(pinned_owner("TARGET1", "b"), None);
+            assert_eq!(load("a").unwrap().unwrap().pinned, false);
+            assert_eq!(release_pin("a"), Ok(None));
+            assert_eq!(release_pin("missing"), Ok(None));
+        });
+    }
+
+    #[test]
+    fn test_release_pin_corrupt_file_errors_and_is_untouched() {
+        with_socket_dir(|| {
+            let path = binding_path("bad");
+            fs::write(&path, "{not json").unwrap();
+            assert!(release_pin("bad").is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), "{not json");
+        });
     }
 }
