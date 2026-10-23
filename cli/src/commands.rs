@@ -460,7 +460,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 context: "fill".to_string(),
                 usage: "fill <selector> <text>",
             })?;
-            Ok(json!({ "id": id, "action": "fill", "selector": sel, "value": rest[1..].join(" ") }))
+            let text = match rest.get(1) {
+                Some(&"--") => &rest[2..],
+                _ => &rest[1..],
+            };
+            Ok(json!({ "id": id, "action": "fill", "selector": sel, "value": text.join(" ") }))
         }
         "type" => {
             let sel = rest.first().ok_or_else(|| ParseError::MissingArguments {
@@ -476,6 +480,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             let mut i = 1;
             while i < rest.len() {
                 match rest[i] {
+                    "--" => {
+                        text_parts.extend(&rest[i + 1..]);
+                        break;
+                    }
                     "--clear" => clear = true,
                     "--delay" => {
                         // Error rather than silently drop a malformed value;
@@ -4493,6 +4501,25 @@ mod tests {
         assert_eq!(cmd["action"], "type");
         assert_eq!(cmd["selector"], "#input");
         assert_eq!(cmd["text"], "some text");
+    }
+
+    #[test]
+    fn test_fill_and_type_take_text_after_end_of_options_literally() {
+        let fill = parse_command(
+            &crate::flags::clean_args(&args("fill #field -- --json")),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(fill["value"], "--json");
+
+        let typed = parse_command(
+            &crate::flags::clean_args(&args("type #field -- --clear --delay 5")),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(typed["text"], "--clear --delay 5");
+        assert!(typed.get("clear").is_none());
+        assert!(typed.get("delay").is_none());
     }
 
     #[test]
