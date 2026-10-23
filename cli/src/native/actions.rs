@@ -9266,8 +9266,7 @@ async fn handle_clipboard(cmd: &Value, state: &DaemonState) -> Result<Value, Str
 async fn handle_wheel(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
-    let x = cmd.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let y = cmd.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let (x, y) = wheel_position(cmd, &state.mouse_state);
     let delta_x = cmd.get("deltaX").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let delta_y = cmd.get("deltaY").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
@@ -9286,6 +9285,18 @@ async fn handle_wheel(cmd: &Value, state: &DaemonState) -> Result<Value, String>
         .await?;
 
     Ok(json!({ "scrolled": true, "deltaX": delta_x, "deltaY": delta_y }))
+}
+
+fn wheel_position(cmd: &Value, mouse_state: &MouseState) -> (f64, f64) {
+    let x = cmd
+        .get("x")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(mouse_state.x);
+    let y = cmd
+        .get("y")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(mouse_state.y);
+    (x, y)
 }
 
 async fn handle_device(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -16732,6 +16743,24 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         assert_eq!(state.mouse_state.x, 0.0);
         assert_eq!(state.mouse_state.y, 0.0);
         assert_eq!(state.mouse_state.buttons, 0);
+    }
+
+    #[test]
+    fn test_wheel_position_defaults_to_current_pointer_and_preserves_overrides() {
+        let mouse_state = MouseState {
+            x: 420.0,
+            y: 330.0,
+            ..MouseState::default()
+        };
+
+        assert_eq!(
+            wheel_position(&json!({ "deltaY": 200 }), &mouse_state),
+            (420.0, 330.0)
+        );
+        assert_eq!(
+            wheel_position(&json!({ "x": 12, "y": 34, "deltaY": 200 }), &mouse_state),
+            (12.0, 34.0)
+        );
     }
 
     #[test]
