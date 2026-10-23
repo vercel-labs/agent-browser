@@ -245,6 +245,14 @@ async fn invoke_plugin_process(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if protocol != PROTOCOL_VERSION {
+        // Sensitive plugin responses may contain secrets in malformed metadata.
+        // Apply the same redaction boundary as success=false diagnostics.
+        if !expose_plugin_error {
+            return Err(format!(
+                "Plugin '{}' used unsupported protocol",
+                plugin.name
+            ));
+        }
         return Err(format!(
             "Plugin '{}' used unsupported protocol '{}'",
             plugin.name, protocol
@@ -1220,6 +1228,88 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":false,"error":"secr
 
         assert!(err.contains("success=false"));
         assert!(!err.contains("secret-token-value"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sensitive_plugin_protocol_failures_do_not_echo_response_data() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_path = dir.path().join("mock-invalid-protocol-plugin");
+        std::fs::write(
+            &plugin_path,
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s' "$1"
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&plugin_path, perms).unwrap();
+        let mut plugins = vec![PluginConfig {
+            name: "mock".to_string(),
+            command: plugin_path.to_string_lossy().to_string(),
+            capabilities: vec![
+                CAPABILITY_CREDENTIAL_READ.to_string(),
+                CAPABILITY_BROWSER_PROVIDER.to_string(),
+                CAPABILITY_LAUNCH_MUTATE.to_string(),
+            ],
+            ..PluginConfig::default()
+        }];
+
+        for success in [true, false] {
+            for protocol in [
+                Some(json!("synthetic-secret-token")),
+                Some(json!({ "unexpected": "synthetic-secret-token" })),
+                None,
+            ] {
+                let mut response = json!({
+                    "success": success,
+                    "error": "synthetic-error-secret",
+                    "credential": { "username": "user", "password": "synthetic-password" }
+                });
+                if let Some(protocol) = protocol {
+                    response["protocol"] = protocol;
+                }
+                // Arguments contain synthetic fixture data only.
+                plugins[0].args = vec![response.to_string()];
+                let errors = [
+                    resolve_credential_with_plugins(
+                        "mock",
+                        &plugins,
+                        CredentialResolveRequest {
+                            profile_name: "example",
+                            item_ref: None,
+                            url: None,
+                        },
+                    )
+                    .await
+                    .unwrap_err(),
+                    connect_browser_provider_with_plugins("mock", &plugins, json!({}))
+                        .await
+                        .unwrap_err(),
+                    close_browser_provider_with_plugins("mock", &plugins, json!({}))
+                        .await
+                        .unwrap_err(),
+                    launch_mutations_from_plugins(&plugins, json!({}))
+                        .await
+                        .unwrap_err(),
+                ];
+                for err in errors {
+                    assert_eq!(err, "Plugin 'mock' used unsupported protocol");
+                }
+            }
+        }
+
+        // Callers requesting detailed diagnostics retain the protocol value.
+        plugins[0].args =
+            vec![json!({ "protocol": "synthetic-secret-token", "success": true }).to_string()];
+        let err = invoke_plugin_process(&plugins[0], json!({}), 5, true)
+            .await
+            .unwrap_err();
+        assert!(err.contains("synthetic-secret-token"));
     }
 
     #[cfg(unix)]

@@ -2796,6 +2796,7 @@ Login behavior:
   Replaced or focus-redirected credential fields fail without submitting.
   Selector wait timeout follows the default action timeout.
   Plugin credentials are resolved just-in-time and are not saved locally.
+  Credential-provider diagnostics omit response error text and protocol values.
 
 Global Options:
   --json                   Output as JSON

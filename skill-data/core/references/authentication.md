@@ -169,6 +169,8 @@ agent-browser auth login work --no-navigate --url https://identity.example.com/l
 
 Use credential provider plugins when credentials live in external vault software. Plugins are configured in `agent-browser.json` and run as external executables over the `agent-browser.plugin.v1` stdio JSON protocol.
 
+Credential-provider failures omit response error text and unsupported protocol values from diagnostics to avoid exposing sensitive response data.
+
 Add a plugin with `plugin add`. A plain `name` or `@scope/name` resolves from npm; `owner/repo` resolves from GitHub:
 
 ```bash
