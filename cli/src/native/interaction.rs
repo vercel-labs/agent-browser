@@ -301,6 +301,7 @@ pub async fn type_text_into_active_context(
                         windows_virtual_key_code: Some(key_code),
                         native_virtual_key_code: Some(key_code),
                         modifiers: None,
+                        location: None,
                     },
                     Some(session_id),
                 )
@@ -318,6 +319,7 @@ pub async fn type_text_into_active_context(
                         windows_virtual_key_code: Some(key_code),
                         native_virtual_key_code: Some(key_code),
                         modifiers: None,
+                        location: None,
                     },
                     Some(session_id),
                 )
@@ -363,6 +365,7 @@ pub async fn press_key_with_modifiers(
     modifiers: Option<i32>,
 ) -> Result<(), String> {
     let (key_name, code, key_code) = named_key_info(key);
+    let location = key_location(&code);
 
     // Suppress text insertion when Control (2) or Meta (4) modifiers are active,
     // since these are command chords (e.g. Ctrl+A = select-all), not text input.
@@ -384,7 +387,8 @@ pub async fn press_key_with_modifiers(
                 unmodified_text: text.clone(),
                 windows_virtual_key_code: Some(key_code),
                 native_virtual_key_code: Some(key_code),
-                modifiers,
+                modifiers: with_own_modifier_bit(&key_name, modifiers),
+                location,
             },
             Some(session_id),
         )
@@ -402,12 +406,70 @@ pub async fn press_key_with_modifiers(
                 windows_virtual_key_code: Some(key_code),
                 native_virtual_key_code: Some(key_code),
                 modifiers,
+                location,
             },
             Some(session_id),
         )
         .await?;
 
     Ok(())
+}
+
+/// Presses `key` without releasing it; release it with [`key_up`].
+///
+/// Sends the same `key`, `code` and `keyCode` as [`press_key_with_modifiers`],
+/// so pages reading `event.code` / `event.keyCode` see the held key, and a
+/// printable key also types into the focused field.
+pub async fn key_down(client: &CdpClient, session_id: &str, key: &str) -> Result<(), String> {
+    dispatch_single_key_event(client, session_id, key, "keyDown").await
+}
+
+/// Releases a key held by [`key_down`].
+pub async fn key_up(client: &CdpClient, session_id: &str, key: &str) -> Result<(), String> {
+    dispatch_single_key_event(client, session_id, key, "keyUp").await
+}
+
+async fn dispatch_single_key_event(
+    client: &CdpClient,
+    session_id: &str,
+    key: &str,
+    event_type: &str,
+) -> Result<(), String> {
+    client
+        .send_command_typed::<_, Value>(
+            "Input.dispatchKeyEvent",
+            &single_key_event_params(key, event_type),
+            Some(session_id),
+        )
+        .await?;
+    Ok(())
+}
+
+/// Params for one `keyDown` or `keyUp` of `key`. Only keyDown carries `text`
+/// and the modifier key's own bit (see [`with_own_modifier_bit`]).
+fn single_key_event_params(key: &str, event_type: &str) -> DispatchKeyEventParams {
+    let (key_name, code, key_code) = named_key_info(key);
+    let is_down = event_type == "keyDown";
+    let text = if is_down { key_text(&key_name) } else { None };
+    let modifiers = if is_down {
+        with_own_modifier_bit(&key_name, None)
+    } else {
+        None
+    };
+    DispatchKeyEventParams {
+        event_type: event_type.to_string(),
+        location: key_location(&code),
+        key: Some(key_name),
+        code: Some(code),
+        text: text.clone(),
+        unmodified_text: text,
+        windows_virtual_key_code: Some(key_code),
+        // Chrome on macOS reads nativeVirtualKeyCode as a native key
+        // code, so sending the Windows code here hits the wrong key
+        // (#2053). windowsVirtualKeyCode alone sets `keyCode`.
+        native_virtual_key_code: None,
+        modifiers,
+    }
 }
 
 pub async fn scroll(
@@ -1290,8 +1352,32 @@ fn named_key_info(key: &str) -> (String, String, i32) {
         "pageup" => ("PageUp".to_string(), "PageUp".to_string(), 33),
         "pagedown" => ("PageDown".to_string(), "PageDown".to_string(), 34),
         "space" | " " => (" ".to_string(), "Space".to_string(), 32),
-        _ => {
-            if key.len() == 1 {
+        // Modifiers. Bare names map to the left-hand key, as in Playwright;
+        // `code` must be a real physical key or Chrome drops it.
+        "shift" | "shiftleft" => ("Shift".to_string(), "ShiftLeft".to_string(), 16),
+        "shiftright" => ("Shift".to_string(), "ShiftRight".to_string(), 16),
+        "control" | "ctrl" | "controlleft" => {
+            ("Control".to_string(), "ControlLeft".to_string(), 17)
+        }
+        "controlright" => ("Control".to_string(), "ControlRight".to_string(), 17),
+        "alt" | "altleft" => ("Alt".to_string(), "AltLeft".to_string(), 18),
+        "altright" => ("Alt".to_string(), "AltRight".to_string(), 18),
+        "meta" | "cmd" | "command" | "metaleft" => ("Meta".to_string(), "MetaLeft".to_string(), 91),
+        "metaright" => ("Meta".to_string(), "MetaRight".to_string(), 92),
+        lower => {
+            // Code-style names (KeyA-KeyZ, Digit0-Digit9) name the physical
+            // key; map them to the unshifted character it produces.
+            let code_char = lower
+                .strip_prefix("key")
+                .filter(|rest| rest.len() == 1 && rest.as_bytes()[0].is_ascii_lowercase())
+                .or_else(|| {
+                    lower
+                        .strip_prefix("digit")
+                        .filter(|rest| rest.len() == 1 && rest.as_bytes()[0].is_ascii_digit())
+                });
+            if let Some(rest) = code_char {
+                char_to_key_info(rest.chars().next().unwrap())
+            } else if key.len() == 1 {
                 let ch = key.chars().next().unwrap();
                 char_to_key_info(ch)
             } else {
@@ -1299,6 +1385,29 @@ fn named_key_info(key: &str) -> (String, String, i32) {
             }
         }
     }
+}
+
+/// `KeyboardEvent.location` for a key `code`: 1 for left-hand and 2 for
+/// right-hand modifier keys, `None` (standard) for everything else.
+fn key_location(code: &str) -> Option<i32> {
+    match code {
+        "ShiftLeft" | "ControlLeft" | "AltLeft" | "MetaLeft" => Some(1),
+        "ShiftRight" | "ControlRight" | "AltRight" | "MetaRight" => Some(2),
+        _ => None,
+    }
+}
+
+/// Add a modifier key's own CDP bit to `modifiers`, so its keyDown reports
+/// e.g. `shiftKey == true` as a real keyboard does. Other keys are unchanged.
+fn with_own_modifier_bit(key_name: &str, modifiers: Option<i32>) -> Option<i32> {
+    let bit = match key_name {
+        "Alt" => 1,
+        "Control" => 2,
+        "Meta" => 4,
+        "Shift" => 8,
+        _ => return modifiers,
+    };
+    Some(modifiers.unwrap_or(0) | bit)
 }
 
 #[cfg(test)]
@@ -1415,5 +1524,89 @@ mod tests {
         assert_eq!(key_text("ArrowUp"), None);
         assert_eq!(key_text("Backspace"), None);
         assert_eq!(key_text("Delete"), None);
+    }
+
+    /// Regression: modifier keys need a real physical `code` and VK code, or
+    /// Chrome drops the code and pages see `code == ""`, `keyCode == 0`.
+    #[test]
+    fn test_named_key_info() {
+        // (input, key, code, vk, location)
+        let cases: &[(&str, &str, &str, i32, Option<i32>)] = &[
+            // Modifiers: bare names map to the left-hand key.
+            ("Shift", "Shift", "ShiftLeft", 16, Some(1)),
+            ("ShiftRight", "Shift", "ShiftRight", 16, Some(2)),
+            ("Control", "Control", "ControlLeft", 17, Some(1)),
+            ("ctrl", "Control", "ControlLeft", 17, Some(1)),
+            ("ControlRight", "Control", "ControlRight", 17, Some(2)),
+            ("Alt", "Alt", "AltLeft", 18, Some(1)),
+            ("AltRight", "Alt", "AltRight", 18, Some(2)),
+            ("Meta", "Meta", "MetaLeft", 91, Some(1)),
+            ("Cmd", "Meta", "MetaLeft", 91, Some(1)),
+            ("MetaRight", "Meta", "MetaRight", 92, Some(2)),
+            // Code-style names map to the unshifted character.
+            ("KeyW", "w", "KeyW", 87, None),
+            ("keya", "a", "KeyA", 65, None),
+            ("Digit7", "7", "Digit7", 55, None),
+            // Near-miss code-style names pass through unchanged.
+            ("Key", "Key", "Key", 0, None),
+            ("KeyAB", "KeyAB", "KeyAB", 0, None),
+            ("Digit10", "Digit10", "Digit10", 0, None),
+            // Plain characters and named keys.
+            ("w", "w", "KeyW", 87, None),
+            ("ArrowUp", "ArrowUp", "ArrowUp", 38, None),
+        ];
+        for &(input, key, code, vk, location) in cases {
+            assert_eq!(
+                (named_key_info(input), key_location(code)),
+                ((key.to_string(), code.to_string(), vk), location),
+                "input {input:?}"
+            );
+        }
+    }
+
+    /// Regression: keydown/keyup must not send `nativeVirtualKeyCode`, which
+    /// Chrome on macOS reads as a native key code (#2053).
+    #[test]
+    fn test_single_key_event_params() {
+        let params = |key, event_type| {
+            serde_json::to_value(single_key_event_params(key, event_type)).unwrap()
+        };
+        assert_eq!(
+            params("Shift", "keyDown"),
+            serde_json::json!({
+                "type": "keyDown", "key": "Shift", "code": "ShiftLeft",
+                "windowsVirtualKeyCode": 16, "modifiers": 8, "location": 1
+            })
+        );
+        assert_eq!(
+            params("Shift", "keyUp"),
+            serde_json::json!({
+                "type": "keyUp", "key": "Shift", "code": "ShiftLeft",
+                "windowsVirtualKeyCode": 16, "location": 1
+            })
+        );
+        assert_eq!(
+            params("w", "keyDown"),
+            serde_json::json!({
+                "type": "keyDown", "key": "w", "code": "KeyW", "text": "w",
+                "unmodifiedText": "w", "windowsVirtualKeyCode": 87
+            })
+        );
+        assert_eq!(
+            params("w", "keyUp"),
+            serde_json::json!({
+                "type": "keyUp", "key": "w", "code": "KeyW", "windowsVirtualKeyCode": 87
+            })
+        );
+    }
+
+    #[test]
+    fn test_with_own_modifier_bit() {
+        assert_eq!(with_own_modifier_bit("Shift", None), Some(8));
+        assert_eq!(with_own_modifier_bit("Alt", None), Some(1));
+        assert_eq!(with_own_modifier_bit("Control", Some(8)), Some(10));
+        assert_eq!(with_own_modifier_bit("Meta", Some(4)), Some(4));
+        assert_eq!(with_own_modifier_bit("w", None), None);
+        assert_eq!(with_own_modifier_bit("w", Some(2)), Some(2));
     }
 }

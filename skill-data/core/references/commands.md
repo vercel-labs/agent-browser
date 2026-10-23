@@ -67,7 +67,8 @@ agent-browser fill @e2 "text"     # Clear and type
 agent-browser type @e2 "text"     # Type without clearing
 agent-browser press Enter         # Press key (alias: key)
 agent-browser press Control+a     # Key combination
-agent-browser keydown Shift       # Hold key down
+agent-browser keydown Shift       # Hold key down (shiftKey true, code ShiftLeft)
+agent-browser keydown w           # Hold W for games/canvas (code KeyW, keyCode 87); also types "w"
 agent-browser keyup Shift         # Release key
 agent-browser hover @e1           # Hover
 agent-browser check @e1           # Check checkbox
