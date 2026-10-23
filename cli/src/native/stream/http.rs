@@ -441,18 +441,29 @@ pub(super) async fn relay_command_to_daemon(
 }
 
 pub(super) fn serve_embedded_file(url_path: &str) -> (&'static str, &'static str, Vec<u8>) {
+    // The request target can carry a query or fragment: `/?port=9301` selects
+    // the dashboard session, and SPA routes may carry their own. Neither is
+    // part of the file identity, and leaving them in breaks both the asset
+    // lookup and the extension-based content type below (a query-only target
+    // has no extension, so the SPA shell was served as octet-stream and
+    // embedders showed a download dialog instead of the dashboard).
     let clean = url_path.trim_start_matches('/');
+    let clean = clean.split(['?', '#']).next().unwrap_or("");
     let key = if clean.is_empty() {
         "index.html"
     } else {
         clean
     };
 
-    let file = DashboardAssets::get(key).or_else(|| DashboardAssets::get("index.html"));
+    let file = DashboardAssets::get(key)
+        .map(|content| (key, content))
+        .or_else(|| DashboardAssets::get("index.html").map(|content| ("index.html", content)));
 
     match file {
-        Some(content) => {
-            let ext = key.rsplit('.').next().unwrap_or("");
+        Some((served_key, content)) => {
+            // The type describes the bytes served, not the path asked for: the
+            // SPA fallback is HTML even when the request path has no extension.
+            let ext = served_key.rsplit('.').next().unwrap_or("");
             let ct = match ext {
                 "html" => "text/html; charset=utf-8",
                 "js" => "application/javascript; charset=utf-8",
@@ -711,5 +722,49 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(relayed.contains(r#""action":"tabs""#), "{relayed}");
+    }
+
+    #[test]
+    fn dashboard_session_query_serves_spa_shell_as_html() {
+        // `/?port=<streamPort>` is how embedders address a dashboard session.
+        // The query is not part of the file identity: the SPA shell must come
+        // back as HTML, not octet-stream (which embedders render as a download
+        // dialog instead of the dashboard).
+        let (status, content_type, body) = serve_embedded_file("/?port=9301");
+        let (root_status, root_type, root_body) = serve_embedded_file("/");
+
+        assert_eq!(status, "200 OK", "unexpected status: {status}");
+        assert_eq!(
+            content_type, "text/html; charset=utf-8",
+            "unexpected content type: {content_type}"
+        );
+        assert_eq!(root_status, "200 OK", "unexpected status: {root_status}");
+        assert_eq!(
+            body, root_body,
+            "query-string request did not serve the dashboard shell"
+        );
+        assert_eq!(
+            root_type, "text/html; charset=utf-8",
+            "unexpected content type: {root_type}"
+        );
+    }
+
+    #[test]
+    fn extensionless_spa_route_falls_back_to_html_shell() {
+        // Client-side routes have no file extension. The fallback bytes are the
+        // SPA shell, so the type must describe those bytes rather than the
+        // request path.
+        let (status, content_type, body) = serve_embedded_file("/sessions/abc");
+        let (_, _, root_body) = serve_embedded_file("/");
+
+        assert_eq!(status, "200 OK", "unexpected status: {status}");
+        assert_eq!(
+            content_type, "text/html; charset=utf-8",
+            "unexpected content type: {content_type}"
+        );
+        assert_eq!(
+            body, root_body,
+            "extensionless route did not serve the dashboard shell"
+        );
     }
 }
