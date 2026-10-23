@@ -11,6 +11,7 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::sync::{broadcast, oneshot, RwLock};
 
 use crate::connection::{get_socket_dir, INTERNAL_DAEMON_SHUTDOWN_ACTION};
+use crate::session_files::SessionFile;
 use crate::validation::{is_valid_session_name, session_name_error};
 
 use super::a11y;
@@ -9339,7 +9340,7 @@ async fn handle_device(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 // ---------------------------------------------------------------------------
 
 fn stream_file_path(session_id: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.stream", session_id))
+    SessionFile::Stream.path(session_id)
 }
 
 fn write_stream_file(session_id: &str, port: u16) -> Result<(), String> {
@@ -9367,7 +9368,7 @@ fn remove_stream_file(session_id: &str) -> Result<(), String> {
 }
 
 fn engine_file_path(session_id: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.engine", session_id))
+    SessionFile::Engine.path(session_id)
 }
 
 fn write_engine_file(session_id: &str, engine: &str) {
@@ -9379,7 +9380,7 @@ fn remove_engine_file(session_id: &str) {
 }
 
 fn provider_file_path(session_id: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.provider", session_id))
+    SessionFile::Provider.path(session_id)
 }
 
 fn write_provider_file(session_id: &str, provider: &str) {
@@ -9391,7 +9392,7 @@ fn remove_provider_file(session_id: &str) {
 }
 
 fn extensions_file_path(session_id: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.extensions", session_id))
+    SessionFile::Extensions.path(session_id)
 }
 
 fn write_extensions_file(session_id: &str) {

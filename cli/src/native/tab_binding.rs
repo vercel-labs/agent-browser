@@ -40,7 +40,7 @@ pub struct TabBinding {
 
 /// Path of the binding file for a session: `{socket_dir}/{session}.target`.
 pub fn binding_path(session: &str) -> PathBuf {
-    crate::connection::get_socket_dir().join(format!("{}.target", session))
+    crate::session_files::SessionFile::Target.path(session)
 }
 
 /// Reduce a URL to safe diagnostic information before it is persisted or
