@@ -637,6 +637,8 @@ pub struct DaemonState {
     pub restore_check_fn: Option<String>,
     pub restore_status: String,
     pub restore_status_detail: Option<String>,
+    /// Origins whose storage the last launch-time restore skipped because the page left that origin.
+    pub restore_skipped_origins: Vec<String>,
     pub restore_loaded_path: Option<String>,
     pub restore_load_failed: bool,
     pub restore_validation_pending: bool,
@@ -798,6 +800,7 @@ impl DaemonState {
             restore_check_fn: env::var("AGENT_BROWSER_RESTORE_CHECK_FN").ok(),
             restore_status: "not_configured".to_string(),
             restore_status_detail: None,
+            restore_skipped_origins: Vec::new(),
             restore_loaded_path: None,
             restore_load_failed: false,
             restore_validation_pending: false,
@@ -2375,6 +2378,7 @@ fn plugins_from_command_or_env(cmd: &Value) -> Vec<crate::plugins::PluginConfig>
 fn reset_restore_runtime_state(state: &mut DaemonState) {
     state.restore_status = "pending".to_string();
     state.restore_status_detail = None;
+    state.restore_skipped_origins.clear();
     state.restore_loaded_path = None;
     state.restore_load_failed = false;
     state.restore_validation_pending = false;
@@ -4692,6 +4696,7 @@ fn no_xvfb_from_launch_cmd(cmd: &Value) -> bool {
 }
 
 async fn try_auto_restore_state(state: &mut DaemonState) {
+    state.restore_skipped_origins.clear();
     let session_name = match state.session_name.as_deref() {
         Some(n) if !n.is_empty() => n.to_string(),
         _ => {
@@ -4707,9 +4712,10 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
                 match state::load_state(&mgr.client, session_id, &path).await {
-                    Ok(()) => {
+                    Ok(skipped) => {
                         state.restore_status = "loaded".to_string();
                         state.restore_status_detail = None;
+                        state.restore_skipped_origins = skipped;
                         state.restore_loaded_path = Some(path.clone());
                         state.restore_load_failed = false;
                         state.restore_validation_pending = state.restore_check_url.is_some()
@@ -4927,15 +4933,15 @@ async fn load_storage_state(state: &mut DaemonState, path: &Option<String>) -> R
     if let Some(ref path) = path {
         ensure_state_replay_supported_by_active_domain_filter(state, "--state/storageState")
             .await?;
-        let mut loaded = false;
+        let mut skipped = None;
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
-                state::load_state(&mgr.client, session_id, path).await?;
-                loaded = true;
+                skipped = Some(state::load_state(&mgr.client, session_id, path).await?);
             }
         }
-        if loaded {
+        if let Some(skipped) = skipped {
             mark_explicit_storage_state_loaded(state, path);
+            state.restore_skipped_origins.extend(skipped);
         }
     }
 
@@ -7373,6 +7379,7 @@ async fn handle_session_info(state: &DaemonState) -> Result<Value, String> {
         "restoreKey": state.session_name,
         "restoreStatus": state.restore_status,
         "restoreStatusDetail": state.restore_status_detail,
+        "restoreSkippedOrigins": state.restore_skipped_origins,
         "restoreLoadedPath": state.restore_loaded_path,
         "restoreValidationPending": state.restore_validation_pending,
         "restoreSave": state.restore_save,
@@ -7411,9 +7418,9 @@ async fn handle_state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .ok_or("Missing 'path' parameter")?;
 
     ensure_state_replay_supported_by_active_domain_filter(state, "state load").await?;
-    state::load_state(&mgr.client, &session_id, path).await?;
+    let skipped = state::load_state(&mgr.client, &session_id, path).await?;
     mark_explicit_storage_state_loaded(state, path);
-    Ok(json!({ "loaded": true, "path": path }))
+    Ok(json!({ "loaded": true, "path": path, "skippedOrigins": skipped }))
 }
 
 // ---------------------------------------------------------------------------

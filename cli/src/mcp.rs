@@ -1547,7 +1547,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_STATE_LOAD,
             "State load",
-            "Load cookies and storage state.",
+            "Load cookies and storage state. Origins whose page does not stay on the saved origin are skipped and listed in skippedOrigins.",
             json!({ "path": { "type": "string" } }),
             &["path"],
         ),
@@ -4232,6 +4232,20 @@ fn response_text(value: &Value) -> Option<String> {
             {
                 return Some(crate::output::format_a11y_text(data));
             }
+            if let Some(skipped) = data
+                .get("skippedOrigins")
+                .and_then(|v| v.as_array())
+                .filter(|v| !v.is_empty())
+            {
+                let origins: Vec<&str> = skipped.iter().filter_map(|v| v.as_str()).collect();
+                return Some(format!(
+                    "{}\nSkipped storage for origins (page did not stay on that origin): {}",
+                    data.get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default(),
+                    origins.join(", ")
+                ));
+            }
             for key in [
                 "snapshot", "text", "html", "report", "value", "content", "title", "url", "path",
             ] {
@@ -4771,6 +4785,22 @@ mod tests {
             .unwrap()
             .contains("accessibility audits"));
         assert!(McpConfig::from_profiles(vec![ToolProfile::Debug]).allows(TOOL_A11Y));
+    }
+
+    #[test]
+    fn response_text_reports_skipped_state_origins() {
+        let text = response_text(&json!({
+            "success": true,
+            "data": {
+                "loaded": true,
+                "path": "./state.json",
+                "skippedOrigins": ["http://127.0.0.1:8001"]
+            }
+        }))
+        .unwrap();
+
+        assert!(text.starts_with("./state.json\n"));
+        assert!(text.contains("http://127.0.0.1:8001"));
     }
 
     #[test]

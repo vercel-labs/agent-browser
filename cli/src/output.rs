@@ -1301,6 +1301,15 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                         color::success_indicator(),
                         color::green(path)
                     );
+                    if let Some(skipped) = data.get("skippedOrigins").and_then(|v| v.as_array()) {
+                        for origin in skipped.iter().filter_map(|v| v.as_str()) {
+                            println!(
+                                "{} Skipped storage for {} (page did not stay on that origin)",
+                                color::warning_indicator(),
+                                origin
+                            );
+                        }
+                    }
                 }
                 // video_start and other commands that provide a path with a note
                 "video_start" => {
@@ -3097,7 +3106,8 @@ Save, restore, list, and manage browser state (cookies, localStorage, sessionSto
 
 Operations:
   save <path>                        Save current state to file
-  load <path>                        Load state from file
+  load <path>                        Load state from file (origins that redirect
+                                     elsewhere are skipped and listed)
   list                               List saved state files
   show <filename>                    Show state summary
   rename <old-name> <new-name>       Rename state file

@@ -142,6 +142,8 @@ agent-browser state load ./my-auth.json
 agent-browser open https://app.example.com/dashboard
 ```
 
+Saved localStorage and sessionStorage are written through Chrome DevTools, not page JavaScript, and only while the page is on the saved origin. If an origin redirects elsewhere or fails to load, its storage is skipped, the rest still loads, and `state load` lists it under `skippedOrigins`. For `--state` and `--restore` at launch, `session info` lists it under `restoreSkippedOrigins`.
+
 Combine with `--session <id> --restore` so the imported auth auto-persists across restarts:
 
 ```bash
