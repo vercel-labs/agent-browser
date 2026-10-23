@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
+use std::io;
 use std::path::PathBuf;
 
 use super::cdp::client::CdpClient;
@@ -14,6 +15,45 @@ use super::cdp::types::{
 };
 use super::cookies::{self, Cookie};
 use crate::validation::{is_valid_session_name, sanitize_session_component, session_name_error};
+
+/// Writes a state file with owner-only permissions on Unix.
+pub(crate) fn write_private(path: impl AsRef<std::path::Path>, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.set_len(0)?;
+        file.write_all(bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, bytes)
+    }
+}
+
+/// Creates a state directory that only the owner can enter on Unix, tightening it if it already exists.
+pub(crate) fn create_private_dir(path: &std::path::Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(path)
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -313,7 +353,7 @@ pub async fn save_state(
         Some(p) => p.to_string(),
         None => {
             let dir = get_sessions_dir();
-            let _ = fs::create_dir_all(&dir);
+            let _ = create_private_dir(&dir);
             let name = session_name.unwrap_or("default");
             if !is_valid_session_name(name) {
                 return Err(session_name_error(name));
@@ -327,10 +367,10 @@ pub async fn save_state(
     if let Ok(key) = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY") {
         let encrypted = encrypt_data(json_str.as_bytes(), &key)?;
         save_path.push_str(".enc");
-        fs::write(&save_path, &encrypted)
+        write_private(&save_path, &encrypted)
             .map_err(|e| format!("Failed to write state to {}: {}", save_path, e))?;
     } else {
-        fs::write(&save_path, &json_str)
+        write_private(&save_path, json_str.as_bytes())
             .map_err(|e| format!("Failed to write state to {}: {}", save_path, e))?;
     }
 
@@ -349,11 +389,11 @@ pub async fn save_auto_state_transactional(
     }
 
     let dir = get_sessions_dir();
-    fs::create_dir_all(&dir)
+    create_private_dir(&dir)
         .map_err(|e| format!("Failed to create state directory {}: {}", dir.display(), e))?;
 
     let tmp_dir = dir.join(".tmp");
-    fs::create_dir_all(&tmp_dir).map_err(|e| {
+    create_private_dir(&tmp_dir).map_err(|e| {
         format!(
             "Failed to create temporary state directory {}: {}",
             tmp_dir.display(),
@@ -918,6 +958,30 @@ mod tests {
         assert!(is_encrypted_state(std::path::Path::new(
             "auth.json.enc.previous"
         )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_overwrites_and_sets_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("existing.json");
+        fs::write(&existing, "old").unwrap();
+        fs::set_permissions(&existing, fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&existing, b"new").unwrap();
+        assert_eq!(fs::read_to_string(&existing).unwrap(), "new");
+        assert_eq!(
+            fs::metadata(&existing).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let fresh = dir.path().join("fresh.json");
+        write_private(&fresh, b"fresh").unwrap();
+        assert_eq!(fs::read_to_string(&fresh).unwrap(), "fresh");
+        assert_eq!(
+            fs::metadata(&fresh).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]

@@ -42,7 +42,7 @@ use windows_sys::Win32::System::Threading::{
 
 /// Windows equivalent of the small `std::process::Child` surface Chrome uses.
 /// The job is always terminated before its desktop and process handles close.
-pub(super) struct Child {
+pub(crate) struct Child {
     process: OwnedHandle,
     job: OwnedHandle,
     _desktop: Option<Desktop>,

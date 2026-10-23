@@ -110,6 +110,24 @@ pub(super) fn check(checks: &mut Vec<Check>) {
                     .with_fix("install lightpanda or unset AGENT_BROWSER_ENGINE"),
                 );
             }
+        } else if engine == "firefox" {
+            match crate::native::firefox::process::find_firefox(None) {
+                Ok(path) => {
+                    let version = query_chrome_version(&path)
+                        .map(|v| format!("{v} at "))
+                        .unwrap_or_default();
+                    checks.push(Check::new(
+                        "chrome.engine_firefox",
+                        category,
+                        Status::Pass,
+                        format!("{}{}", version, path.display()),
+                    ));
+                }
+                Err(e) => checks.push(
+                    Check::new("chrome.engine_firefox", category, Status::Fail, e)
+                        .with_fix("install Firefox 150 or newer or unset AGENT_BROWSER_ENGINE"),
+                ),
+            }
         } else if engine == "obscura" {
             // Same lookup as launch, so doctor and launch agree on where the
             // binary is.

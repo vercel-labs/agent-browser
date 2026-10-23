@@ -13607,3 +13607,600 @@ async fn e2e_mouse_interpolation_starts_at_last_element_interaction() {
     }
     assert_success(&execute_command(&json!({"id": "99", "action": "close"}), &mut state).await);
 }
+
+fn required_firefox_binary() -> String {
+    let path = std::env::var("FIREFOX_BIN")
+        .expect("FIREFOX_BIN is required for explicitly invoked Firefox E2E verification");
+    assert!(!path.trim().is_empty(), "FIREFOX_BIN must not be empty");
+    assert!(
+        std::path::Path::new(&path).is_file(),
+        "FIREFOX_BIN must point to an existing executable: {path}"
+    );
+    path
+}
+
+type FirefoxHits = Arc<Mutex<Vec<String>>>;
+
+struct FirefoxFixture {
+    url: String,
+    other: String,
+    hits: FirefoxHits,
+    servers: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl FirefoxFixture {
+    fn hit_count(&self, needle: &str) -> usize {
+        self.hits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|hit| hit.contains(needle))
+            .count()
+    }
+}
+
+impl Drop for FirefoxFixture {
+    fn drop(&mut self) {
+        for server in &self.servers {
+            server.abort();
+        }
+    }
+}
+
+fn firefox_serve(
+    listener: tokio::net::TcpListener,
+    other: String,
+    hits: FirefoxHits,
+) -> tokio::task::JoinHandle<()> {
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let n = stream.read(&mut request).await.unwrap_or(0);
+            let head = String::from_utf8_lossy(&request[..n]);
+            let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
+            hits.lock().unwrap().push(format!("{port}{path}"));
+            let (content_type, extra, body) = match path.as_str() {
+                "/" => (
+                    "text/html; charset=utf-8",
+                    "",
+                    include_str!("test_fixtures/firefox_probe.html").replace("__OTHER__", &other),
+                ),
+                "/frame.html" => (
+                    "text/html; charset=utf-8",
+                    "",
+                    include_str!("test_fixtures/firefox_frame.html").to_string(),
+                ),
+                "/api" => ("text/plain", "", "real".to_string()),
+                "/download.txt" => (
+                    "text/plain",
+                    "Content-Disposition: attachment; filename=\"download.txt\"\r\n",
+                    "downloaded".to_string(),
+                ),
+                _ => ("text/plain", "", "ok".to_string()),
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    })
+}
+
+/// Serves the probe page on `localhost` and a second origin on `127.0.0.1`.
+async fn firefox_fixture() -> FirefoxFixture {
+    let main = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let side = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://localhost:{}/", main.local_addr().unwrap().port());
+    let other = format!("http://127.0.0.1:{}", side.local_addr().unwrap().port());
+    let hits: FirefoxHits = Arc::default();
+    let servers = vec![
+        firefox_serve(main, other.clone(), hits.clone()),
+        firefox_serve(side, other.clone(), hits.clone()),
+    ];
+    FirefoxFixture {
+        url,
+        other,
+        hits,
+        servers,
+    }
+}
+
+async fn firefox_command(state: &mut DaemonState, command: Value) -> Value {
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(60),
+        execute_command(&command, state),
+    )
+    .await
+    .expect("Firefox command must not hang")
+}
+
+fn firefox_test_environment(tmp: &std::path::Path) -> EnvGuard<'static> {
+    const KEYS: [&str; 15] = [
+        "AGENT_BROWSER_CDP",
+        "AGENT_BROWSER_AUTO_CONNECT",
+        "AGENT_BROWSER_PROVIDER",
+        "AGENT_BROWSER_ENGINE",
+        "AGENT_BROWSER_EXECUTABLE_PATH",
+        "AGENT_BROWSER_PROXY",
+        "AGENT_BROWSER_PROXY_BYPASS",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    ];
+    let env = EnvGuard::new(&[&KEYS[..], &["TMPDIR"]].concat());
+    for key in KEYS {
+        env.remove(key);
+    }
+    env.set("TMPDIR", tmp.to_str().unwrap());
+    env
+}
+
+/// True when any process command line mentions `dir`, which is how an owned Firefox shows up.
+fn firefox_processes_using(dir: &std::path::Path) -> bool {
+    std::process::Command::new("pgrep")
+        .args(["-f", dir.to_str().unwrap()])
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+async fn launch_firefox(state: &mut DaemonState, extra: Value) {
+    let mut request = json!({
+        "id": "launch", "action": "launch", "headless": true,
+        "engine": "firefox", "executablePath": required_firefox_binary(),
+    });
+    request
+        .as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    let resp = firefox_command(state, request).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["launched"], true);
+    assert_eq!(state.engine, "firefox");
+}
+
+async fn firefox_open(state: &mut DaemonState, url: &str) {
+    let resp = firefox_command(
+        state,
+        json!({ "id": "nav", "action": "navigate", "url": url }),
+    )
+    .await;
+    assert_success(&resp);
+}
+
+async fn firefox_eval(state: &mut DaemonState, script: &str) -> Value {
+    let resp = firefox_command(
+        state,
+        json!({ "id": "eval", "action": "evaluate", "script": script }),
+    )
+    .await;
+    assert_success(&resp);
+    get_data(&resp)["result"].clone()
+}
+
+async fn firefox_title(state: &mut DaemonState) -> String {
+    let resp = firefox_command(state, json!({ "id": "title", "action": "title" })).await;
+    assert_success(&resp);
+    get_data(&resp)["title"].as_str().unwrap().to_string()
+}
+
+async fn firefox_ref(state: &mut DaemonState, name: &str) -> String {
+    let resp = firefox_command(
+        state,
+        json!({ "id": "snap", "action": "snapshot", "interactive": true }),
+    )
+    .await;
+    assert_success(&resp);
+    get_data(&resp)["refs"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, node)| node["name"] == name)
+        .map(|(ref_id, _)| format!("@{}", ref_id.trim_start_matches('@')))
+        .unwrap_or_else(|| panic!("no ref named {name} in {resp}"))
+}
+
+async fn firefox_act(state: &mut DaemonState, action: &str, selector: &str, extra: Value) -> Value {
+    let mut request = json!({ "id": action, "action": action, "selector": selector });
+    request
+        .as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    firefox_command(state, request).await
+}
+
+async fn firefox_close(state: &mut DaemonState) {
+    let resp = firefox_command(state, json!({ "id": "close", "action": "close" })).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["closed"], true);
+}
+
+/// PR1: open, title, evaluate, Chrome-only error, and close leaves no process or profile.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_smoke() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    assert!(
+        firefox_processes_using(tmp.path()),
+        "Firefox verification must own a Firefox process with a profile under the temp dir"
+    );
+    firefox_open(&mut state, &fixture.url).await;
+    assert_eq!(firefox_title(&mut state).await, "Firefox adapter probe");
+    assert_eq!(firefox_eval(&mut state, "1 + 1").await, json!(2));
+    let resp = firefox_command(&mut state, json!({ "id": "t", "action": "trace_start" })).await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert!(
+        resp["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("Chrome")),
+        "{resp}"
+    );
+    firefox_eval(
+        &mut state,
+        "setTimeout(() => { document.body.innerHTML = '<p id=ready>Done</p>'; }, 300); 0",
+    )
+    .await;
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "w", "action": "wait", "function": "document.querySelector('#ready').textContent === 'Done'", "timeout": 5000 }),
+    )
+    .await;
+    assert_success(&resp);
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "l", "action": "launch", "headless": true, "engine": "firefox", "initScripts": ["x.js"] }),
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert!(
+        resp["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("--init-script")),
+        "{resp}"
+    );
+    firefox_close(&mut state).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    assert!(
+        !firefox_processes_using(tmp.path()),
+        "close must leave no Firefox process"
+    );
+    assert_eq!(
+        std::fs::read_dir(tmp.path()).unwrap().count(),
+        0,
+        "close must remove the temp profile"
+    );
+}
+
+/// PR2: fill, click by ref, title reflects the action, and refs survive DOM changes.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_core_flow_and_ref_stability() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+
+    let name = firefox_ref(&mut state, "Name").await;
+    assert_success(&firefox_act(&mut state, "fill", &name, json!({ "value": "Ada" })).await);
+    let go = firefox_ref(&mut state, "Go").await;
+    assert_success(&firefox_act(&mut state, "click", &go, json!({})).await);
+    assert_eq!(firefox_title(&mut state).await, "Hello Ada");
+
+    let second = firefox_ref(&mut state, "Second").await;
+    firefox_eval(
+        &mut state,
+        "document.getElementById('list').prepend(document.createElement('div')); 0",
+    )
+    .await;
+    assert_success(&firefox_act(&mut state, "click", &second, json!({})).await);
+    assert_eq!(firefox_title(&mut state).await, "clicked-second");
+
+    firefox_close(&mut state).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    assert!(!firefox_processes_using(tmp.path()));
+}
+
+/// PR2: a confirm() dialog is resolved with `dialog accept`.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_dialog() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+
+    let ask = firefox_ref(&mut state, "Ask").await;
+    assert_success(&firefox_act(&mut state, "click", &ask, json!({})).await);
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "d", "action": "dialog", "response": "accept" }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(firefox_title(&mut state).await, "confirmed");
+    firefox_close(&mut state).await;
+}
+
+/// PR2: refs inside a cross-origin iframe and an open shadow root are clickable.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_iframe_and_shadow_root_refs() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+
+    let shadow = firefox_ref(&mut state, "Shadow button").await;
+    assert_success(&firefox_act(&mut state, "click", &shadow, json!({})).await);
+    assert_eq!(firefox_title(&mut state).await, "shadow-clicked");
+
+    let frame = firefox_ref(&mut state, "Frame button").await;
+    assert_success(&firefox_act(&mut state, "click", &frame, json!({})).await);
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    assert_eq!(firefox_title(&mut state).await, "frame-clicked");
+    firefox_close(&mut state).await;
+}
+
+/// PR3: a route mocks `/api`, and an unrouted fetch reaches the server.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_route_mock() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+
+    let fetch = "fetch('/api').then(r => r.text())";
+    assert_eq!(firefox_eval(&mut state, fetch).await, json!("real"));
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "r", "action": "route", "url": "**/api", "response": { "body": "mocked" } }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(firefox_eval(&mut state, fetch).await, json!("mocked"));
+    firefox_close(&mut state).await;
+}
+
+/// PR3: allowed-domains blocks a cross-origin worker fetch and a WebSocket.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_allowed_domains_block_worker_and_websocket() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({ "allowedDomains": ["localhost"] })).await;
+    firefox_open(&mut state, &fixture.url).await;
+
+    let own = format!("runWorker('{}hit')", fixture.url);
+    assert_eq!(firefox_eval(&mut state, &own).await, json!("ok"));
+    assert!(
+        fixture.hit_count("/hit") > 0,
+        "allowed origin must be reachable"
+    );
+
+    let worker = format!("runWorker('{}/hit')", fixture.other);
+    assert_eq!(firefox_eval(&mut state, &worker).await, json!("blocked"));
+    let socket = format!(
+        "runSocket('{}/ws')",
+        fixture.other.replace("http://", "ws://")
+    );
+    assert_ne!(firefox_eval(&mut state, &socket).await, json!("open"));
+    let other_port = fixture.other.rsplit(':').next().unwrap();
+    assert_eq!(
+        fixture.hit_count(&format!("{other_port}/hit"))
+            + fixture.hit_count(&format!("{other_port}/ws")),
+        0,
+        "blocked requests must never reach the disallowed origin"
+    );
+    firefox_close(&mut state).await;
+}
+
+/// PR3: clicking a download link saves the file to the requested path.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_download() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let out = tempfile::tempdir().unwrap();
+    let dest = out.path().join("download.txt");
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+
+    let resp = firefox_act(
+        &mut state,
+        "download",
+        "#dl",
+        json!({ "path": dest.to_str().unwrap() }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "downloaded");
+    firefox_close(&mut state).await;
+}
+
+/// PR3: timezone and color-scheme emulation are visible to page scripts.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_emulation() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "tz", "action": "timezone", "timezoneId": "Asia/Tokyo" }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        firefox_eval(
+            &mut state,
+            "Intl.DateTimeFormat().resolvedOptions().timeZone"
+        )
+        .await,
+        json!("Asia/Tokyo")
+    );
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "m", "action": "set_media", "colorScheme": "dark" }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        firefox_eval(
+            &mut state,
+            "matchMedia('(prefers-color-scheme: dark)').matches"
+        )
+        .await,
+        json!(true)
+    );
+    firefox_close(&mut state).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_full_page_screenshot_larger_than_64mb() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        "const c = document.createElement('canvas'); c.width = 1280; c.height = 16000; \
+         const x = c.getContext('2d'); const d = x.createImageData(1280, 16000); \
+         for (let i = 0; i < d.data.length; i += 65536) crypto.getRandomValues(d.data.subarray(i, i + 65536)); \
+         for (let i = 3; i < d.data.length; i += 4) d.data[i] = 255; \
+         x.putImageData(d, 0, 0); document.body.append(c); true",
+    )
+    .await;
+    let path = tmp.path().join("full.png");
+    let shot = execute_command(
+        &json!({ "id": "full", "action": "screenshot", "fullPage": true, "path": path }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(shot["success"], json!(true), "{shot}");
+    assert!(std::fs::metadata(&path).unwrap().len() > 48 * 1024 * 1024);
+    assert_eq!(firefox_eval(&mut state, "1 + 1").await, json!(2));
+    firefox_close(&mut state).await;
+}
+
+/// Alerts and beforeunload prompts are auto-accepted, so they never block the next command.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_auto_dialog() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+
+    assert_eq!(
+        firefox_eval(&mut state, "alert('Heads up'); 1").await,
+        json!(1)
+    );
+    assert_eq!(firefox_eval(&mut state, "1 + 1").await, json!(2));
+
+    firefox_eval(&mut state, "window.onbeforeunload = () => 'leave?'").await;
+    firefox_open(&mut state, &fixture.other).await;
+    assert_eq!(firefox_eval(&mut state, "1 + 1").await, json!(2));
+
+    state
+        .firefox
+        .as_mut()
+        .unwrap()
+        .drain_events(&mut state.pending_dialog);
+    assert!(state.pending_dialog.is_none());
+    firefox_close(&mut state).await;
+}
+
+/// A cookie set without a path uses the RFC 6265 default-path; an explicit path stays scoped.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_cookie_default_path() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &format!("{}one", fixture.url)).await;
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "c1", "action": "cookies_set", "name": "default_path", "value": "1" }),
+    )
+    .await;
+    assert_success(&resp);
+    firefox_open(&mut state, &format!("{}two", fixture.url)).await;
+    assert!(
+        firefox_eval(&mut state, "document.cookie")
+            .await
+            .as_str()
+            .is_some_and(|cookies| cookies.contains("default_path=1")),
+        "a cookie set without a path must be visible outside the page directory"
+    );
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "c2", "action": "cookies_set", "name": "explicit_path", "value": "2", "path": "/one" }),
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        !firefox_eval(&mut state, "document.cookie")
+            .await
+            .as_str()
+            .is_some_and(|cookies| cookies.contains("explicit_path=2")),
+        "an explicit cookie path must stay scoped"
+    );
+    firefox_open(&mut state, &format!("{}one", fixture.url)).await;
+    assert!(
+        firefox_eval(&mut state, "document.cookie")
+            .await
+            .as_str()
+            .is_some_and(|cookies| cookies.contains("explicit_path=2")),
+        "the explicit path cookie must be visible under its path"
+    );
+    firefox_close(&mut state).await;
+}

@@ -549,7 +549,7 @@ impl BrowserManager {
             }
             _ => {
                 return Err(format!(
-                    "Unknown engine '{}'. Supported engines: chrome, lightpanda, obscura",
+                    "Unknown engine '{}'. Supported engines: chrome, lightpanda, obscura, firefox",
                     engine
                 ));
             }
