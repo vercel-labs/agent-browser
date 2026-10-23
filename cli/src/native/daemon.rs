@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::env;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::Arc;
 use std::time::Duration;
@@ -151,6 +151,8 @@ pub async fn run_daemon(session: &str) {
     {
         let _ = fs::remove_file(socket_dir.join(format!("{}.port", session)));
     }
+    // Must run before the .pid file is removed: ownership is checked against it.
+    remove_owned_config_file(&socket_dir, session, process::id());
     let _ = fs::remove_file(&pid_path);
     let _ = fs::remove_file(&version_path);
     let _ = fs::remove_file(&stream_path);
@@ -161,6 +163,25 @@ pub async fn run_daemon(session: &str) {
     if let Err(e) = result {
         let _ = writeln!(std::io::stderr(), "Daemon error: {}", e);
         process::exit(1);
+    }
+}
+
+/// Remove `<session>.config` on daemon exit.
+///
+/// The CLI writes this file once the daemon is ready, but nothing removed it
+/// after a clean shutdown, so one file per session name accumulated in the
+/// socket directory forever (and every `session list` has to walk them all).
+///
+/// The file is only removed while `<session>.pid` still holds our pid. If a new
+/// daemon for the same session has already taken over, its `.config` is left
+/// alone; removing it would make the next command treat the new daemon as
+/// unconfigured.
+fn remove_owned_config_file(socket_dir: &Path, session: &str, pid: u32) {
+    let owner = fs::read_to_string(socket_dir.join(format!("{}.pid", session)))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    if owner == Some(pid) {
+        let _ = fs::remove_file(socket_dir.join(format!("{}.config", session)));
     }
 }
 
@@ -708,6 +729,32 @@ fn get_port_for_session(session: &str) -> u16 {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+
+    #[test]
+    fn test_remove_owned_config_file_removes_config_while_owned() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("s.pid"), "4242").unwrap();
+        fs::write(dir.path().join("s.config"), "fingerprint").unwrap();
+        remove_owned_config_file(dir.path(), "s", 4242);
+        assert!(!dir.path().join("s.config").exists());
+    }
+
+    #[test]
+    fn test_remove_owned_config_file_keeps_config_of_newer_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("s.pid"), "5151\n").unwrap();
+        fs::write(dir.path().join("s.config"), "fingerprint").unwrap();
+        remove_owned_config_file(dir.path(), "s", 4242);
+        assert!(dir.path().join("s.config").exists());
+    }
+
+    #[test]
+    fn test_remove_owned_config_file_keeps_config_without_pid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("s.config"), "fingerprint").unwrap();
+        remove_owned_config_file(dir.path(), "s", 4242);
+        assert!(dir.path().join("s.config").exists());
+    }
 
     #[test]
     fn test_resolve_idle_timeout_unset_applies_default() {
