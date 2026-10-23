@@ -1292,7 +1292,15 @@ fn parity_tools() -> Vec<Value> {
             TOOL_TAB_NEW,
             "Tab new",
             "Open a new tab after applying session setup before its first navigation.",
-            json!({ "url": { "type": "string" }, "label": { "type": "string" } }),
+            json!({
+                "url": { "type": "string" },
+                // Must match is_valid_label in native/browser.rs.
+                "label": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                    "description": "Tab label: a letter, then letters, digits, `-`, or `_` (no spaces)."
+                }
+            }),
             &[],
         ),
         tool(TOOL_TAB_LIST, "Tab list", "List tabs.", json!({}), &[]),
@@ -5100,6 +5108,38 @@ mod tests {
             open["inputSchema"]["properties"]["idleTimeout"]["type"],
             "string"
         );
+    }
+
+    #[test]
+    fn tool_schema_tab_new_label_matches_runtime_validation() {
+        let tools = tools();
+        let tab_new = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some(TOOL_TAB_NEW))
+            .unwrap();
+        assert_eq!(
+            tab_new["inputSchema"]["properties"]["label"]["pattern"],
+            "^[A-Za-z][A-Za-z0-9_-]*$"
+        );
+        // These cases pin is_valid_label; the schema pattern above states the same rule and must change with it.
+        for (label, valid) in [
+            ("docs", true),
+            ("Docs", true),
+            ("app-2", true),
+            ("my_tab", true),
+            ("my tab", false),
+            ("2nd", false),
+            ("-docs", false),
+            ("docs.v2", false),
+            ("caf\u{e9}", false),
+            ("", false),
+        ] {
+            assert_eq!(
+                crate::native::browser::is_valid_label(label),
+                valid,
+                "{label:?}"
+            );
+        }
     }
 
     #[test]
