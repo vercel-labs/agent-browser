@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex};
 
 use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchOptions};
 use super::cdp::client::CdpClient;
@@ -436,8 +436,113 @@ impl BrowserProcess {
     }
 }
 
+/// Connection-owned event receivers. Target lifecycle events use a lossless
+/// method tap so console/network bursts cannot discard an attachment or detach.
+/// Ordinary telemetry keeps its bounded broadcast buffer.
+pub(super) struct BrowserEvents {
+    events: broadcast::Receiver<CdpEvent>,
+    targets: mpsc::UnboundedReceiver<CdpEvent>,
+    pending_target: Option<CdpEvent>,
+}
+
+impl BrowserEvents {
+    const TARGET_METHODS: &'static [&'static str] = &[
+        "Target.targetCreated",
+        "Target.targetInfoChanged",
+        "Target.targetDestroyed",
+        "Target.attachedToTarget",
+        "Target.detachedFromTarget",
+    ];
+
+    pub fn subscribe(client: &CdpClient) -> Self {
+        Self {
+            events: client.subscribe(),
+            targets: client.subscribe_methods(Self::TARGET_METHODS),
+            pending_target: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_test_events(batch: impl IntoIterator<Item = (&'static str, Value)>) -> Self {
+        let batch: Vec<_> = batch.into_iter().collect();
+        let (event_tx, events) = broadcast::channel(batch.len().max(1));
+        let (target_tx, targets) = mpsc::unbounded_channel();
+        for (index, (method, params)) in batch.into_iter().enumerate() {
+            let event = CdpEvent {
+                sequence: index as u64 + 1,
+                method: method.to_string(),
+                params,
+                session_id: None,
+            };
+            if Self::TARGET_METHODS.contains(&method) {
+                target_tx.send(event.clone()).unwrap();
+            }
+            event_tx.send(event).unwrap();
+        }
+        Self {
+            events,
+            targets,
+            pending_target: None,
+        }
+    }
+
+    /// Drain a finite batch in wire order. The broadcast's last received event
+    /// bounds the batch: a newer target must wait for its accompanying telemetry
+    /// rather than overtake it just because the target tap is polled later.
+    pub fn drain(&mut self) -> Vec<Result<CdpEvent, broadcast::error::TryRecvError>> {
+        let mut events = Vec::new();
+        let mut errors = Vec::new();
+        let mut last_sequence = None;
+        for _ in 0..self.events.len() {
+            match self.events.try_recv() {
+                Ok(event) => {
+                    last_sequence = Some(event.sequence);
+                    if !Self::TARGET_METHODS.contains(&event.method.as_str()) {
+                        events.push(event);
+                    }
+                }
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(error) => {
+                    let closed = matches!(error, broadcast::error::TryRecvError::Closed);
+                    errors.push(error);
+                    if closed {
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(last_sequence) = last_sequence {
+            // The reader publishes to the method tap before the broadcast, so
+            // every target up to this sequence is already available here.
+            loop {
+                let Some(event) = self
+                    .pending_target
+                    .take()
+                    .or_else(|| self.targets.try_recv().ok())
+                else {
+                    break;
+                };
+                if event.sequence > last_sequence {
+                    self.pending_target = Some(event);
+                    break;
+                }
+                events.push(event);
+            }
+        }
+        events.sort_unstable_by_key(|event| event.sequence);
+        events
+            .into_iter()
+            .map(Ok)
+            .chain(errors.into_iter().map(Err))
+            .collect()
+    }
+}
+
 pub struct BrowserManager {
     pub client: Arc<CdpClient>,
+    /// Subscribe before discovery enables auto-attach, then transfer these
+    /// receivers to the daemon without losing initialization events.
+    initial_events: Option<BrowserEvents>,
     browser_process: Option<BrowserProcess>,
     ws_url: String,
     pages: Vec<PageInfo>,
@@ -502,6 +607,10 @@ const CDP_PORT_WAIT: Duration = Duration::from_secs(2);
 const CDP_PORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 impl BrowserManager {
+    pub(super) fn take_initial_events(&mut self) -> Option<BrowserEvents> {
+        self.initial_events.take()
+    }
+
     #[cfg(test)]
     pub(super) fn owns_obscura_process(&self) -> bool {
         matches!(
@@ -599,6 +708,7 @@ impl BrowserManager {
         } else {
             let client = Arc::new(CdpClient::connect(&ws_url).await?);
             let mut manager = Self {
+                initial_events: Some(BrowserEvents::subscribe(&client)),
                 client,
                 browser_process: Some(process),
                 ws_url,
@@ -713,6 +823,7 @@ impl BrowserManager {
         let ws_url = resolve_cdp_url(url).await?;
         let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
         let mut manager = Self {
+            initial_events: Some(BrowserEvents::subscribe(&client)),
             client,
             browser_process: None,
             ws_url,
@@ -2425,6 +2536,7 @@ async fn initialize_lightpanda_manager(
         };
 
         let mut manager = BrowserManager {
+            initial_events: Some(BrowserEvents::subscribe(&client)),
             client: Arc::new(client),
             browser_process: None,
             ws_url: ws_url.clone(),
@@ -2534,6 +2646,7 @@ async fn initialize_obscura_manager(
         };
 
         let mut manager = BrowserManager {
+            initial_events: Some(BrowserEvents::subscribe(&client)),
             client: Arc::new(client),
             browser_process: None,
             ws_url: ws_url.clone(),
@@ -3257,8 +3370,45 @@ mod tests {
     // poll_network_idle tests
     // -----------------------------------------------------------------------
 
+    #[test]
+    fn browser_events_defer_targets_beyond_the_broadcast_batch() {
+        let (event_tx, events) = broadcast::channel(16);
+        let (target_tx, targets) = mpsc::unbounded_channel();
+        let mut rx = BrowserEvents {
+            events,
+            targets,
+            pending_target: None,
+        };
+        let event = |sequence, method: &str| CdpEvent {
+            sequence,
+            method: method.to_string(),
+            params: json!({}),
+            session_id: None,
+        };
+        event_tx.send(event(1, "Runtime.consoleAPICalled")).unwrap();
+        let target = event(2, "Target.targetDestroyed");
+        // Pause publication between the reliable tap and the broadcast. A
+        // target from the next batch must not overtake that batch's events.
+        target_tx.send(target.clone()).unwrap();
+        let first: Vec<_> = rx
+            .drain()
+            .into_iter()
+            .map(|event| event.unwrap().sequence)
+            .collect();
+        assert_eq!(first, [1]);
+        event_tx.send(target).unwrap();
+        event_tx.send(event(3, "Runtime.consoleAPICalled")).unwrap();
+        let second: Vec<_> = rx
+            .drain()
+            .into_iter()
+            .map(|event| event.unwrap().sequence)
+            .collect();
+        assert_eq!(second, [2, 3]);
+    }
+
     fn cdp_event(method: &str, session_id: &str, params: Value) -> CdpEvent {
         CdpEvent {
+            sequence: 0,
             method: method.to_string(),
             params,
             session_id: Some(session_id.to_string()),
@@ -3416,6 +3566,7 @@ mod tests {
         });
         let client = CdpClient::connect(&format!("ws://{}", addr)).await.unwrap();
         BrowserManager {
+            initial_events: Some(BrowserEvents::subscribe(&client)),
             client: Arc::new(client),
             browser_process: None,
             ws_url: format!("ws://{}", addr),
@@ -3476,6 +3627,7 @@ mod tests {
 
         let client = CdpClient::connect(&format!("ws://{}", addr)).await.unwrap();
         let mut manager = BrowserManager {
+            initial_events: Some(BrowserEvents::subscribe(&client)),
             client: Arc::new(client),
             browser_process: None,
             ws_url: format!("ws://{}", addr),
