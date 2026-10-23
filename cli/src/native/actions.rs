@@ -2745,6 +2745,16 @@ fn policy_actions_for_command(
     if action == "a11y" && cmd.get("url").and_then(|v| v.as_str()).is_some() {
         actions.push("navigate".to_string());
     }
+    // Loading a `javascript:` URL runs script in the current page, so it must
+    // pass the same policy as `evaluate`.
+    if matches!(action, "navigate" | "tab_new" | "a11y" | "vitals")
+        && cmd
+            .get("url")
+            .and_then(|v| v.as_str())
+            .is_some_and(is_javascript_url)
+    {
+        actions.push("evaluate".to_string());
+    }
     if action == "auth_login" {
         if let Some(provider) = cmd.get("credentialProvider").and_then(|v| v.as_str()) {
             let plugins = plugins_from_command_or_env(cmd);
@@ -2772,6 +2782,10 @@ fn policy_actions_for_command(
         }
     }
     actions
+}
+
+fn is_javascript_url(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|url| url.scheme() == "javascript")
 }
 
 fn append_launch_policy_actions(
@@ -15011,6 +15025,30 @@ mod tests {
         assert_eq!(
             policy_actions_for_command(&current_page, "a11y", false, None),
             vec!["a11y".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_javascript_url_policy_actions_include_evaluate() {
+        for action in ["navigate", "tab_new", "a11y", "vitals"] {
+            for url in ["javascript:document.title='x'", " JavaScript:void(0)"] {
+                let cmd = json!({ "action": action, "id": "js-url-policy", "url": url });
+                assert!(
+                    policy_actions_for_command(&cmd, action, false, None)
+                        .contains(&"evaluate".to_string()),
+                    "{action} with {url:?} must require evaluate"
+                );
+            }
+        }
+
+        let https = json!({
+            "action": "navigate",
+            "id": "js-url-policy-https",
+            "url": "https://example.com/javascript:"
+        });
+        assert_eq!(
+            policy_actions_for_command(&https, "navigate", false, None),
+            vec!["navigate".to_string()]
         );
     }
 
