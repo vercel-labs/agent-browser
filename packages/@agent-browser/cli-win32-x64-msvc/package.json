@@ -1,0 +1,29 @@
+{
+  "name": "@agent-browser/cli-win32-x64-msvc",
+  "version": "0.39.1",
+  "description": "The win32-x64-msvc native binary for agent-browser",
+  "files": [
+    "bin/agent-browser.exe"
+  ],
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "preferUnplugged": true,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vercel-labs/agent-browser",
+    "directory": "packages/@agent-browser/cli-win32-x64-msvc"
+  },
+  "bugs": {
+    "url": "https://github.com/vercel-labs/agent-browser/issues"
+  },
+  "homepage": "https://agent-browser.dev",
+  "publishConfig": {
+    "access": "public"
+  }
+}

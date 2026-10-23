@@ -9,7 +9,29 @@ patchedDependencies:
 
 importers:
 
-  .: {}
+  .:
+    optionalDependencies:
+      '@agent-browser/cli-darwin-arm64':
+        specifier: workspace:*
+        version: link:packages/@agent-browser/cli-darwin-arm64
+      '@agent-browser/cli-darwin-x64':
+        specifier: workspace:*
+        version: link:packages/@agent-browser/cli-darwin-x64
+      '@agent-browser/cli-linux-arm64-gnu':
+        specifier: workspace:*
+        version: link:packages/@agent-browser/cli-linux-arm64-gnu
+      '@agent-browser/cli-linux-arm64-musl':
+        specifier: workspace:*
+        version: link:packages/@agent-browser/cli-linux-arm64-musl
+      '@agent-browser/cli-linux-x64-gnu':
+        specifier: workspace:*
+        version: link:packages/@agent-browser/cli-linux-x64-gnu
+      '@agent-browser/cli-linux-x64-musl':
+        specifier: workspace:*
+        version: link:packages/@agent-browser/cli-linux-x64-musl
+      '@agent-browser/cli-win32-x64-msvc':
+        specifier: workspace:*
+        version: link:packages/@agent-browser/cli-win32-x64-msvc
 
   docs:
     dependencies:
@@ -122,6 +144,20 @@ importers:
       typescript:
         specifier: ^5
         version: 5.9.3
+
+  packages/@agent-browser/cli-darwin-arm64: {}
+
+  packages/@agent-browser/cli-darwin-x64: {}
+
+  packages/@agent-browser/cli-linux-arm64-gnu: {}
+
+  packages/@agent-browser/cli-linux-arm64-musl: {}
+
+  packages/@agent-browser/cli-linux-x64-gnu: {}
+
+  packages/@agent-browser/cli-linux-x64-musl: {}
+
+  packages/@agent-browser/cli-win32-x64-msvc: {}
 
   packages/@agent-browser/eve:
     dependencies:

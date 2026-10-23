@@ -9,7 +9,7 @@
     "pnpm": ">=11.0.0"
   },
   "files": [
-    "bin",
+    "bin/agent-browser.js",
     "scripts",
     "skill-data",
     "skills",
@@ -51,5 +51,14 @@
     "url": "https://github.com/vercel-labs/agent-browser/issues"
   },
   "homepage": "https://agent-browser.dev",
+  "optionalDependencies": {
+    "@agent-browser/cli-darwin-arm64": "workspace:*",
+    "@agent-browser/cli-darwin-x64": "workspace:*",
+    "@agent-browser/cli-linux-x64-gnu": "workspace:*",
+    "@agent-browser/cli-linux-arm64-gnu": "workspace:*",
+    "@agent-browser/cli-linux-x64-musl": "workspace:*",
+    "@agent-browser/cli-linux-arm64-musl": "workspace:*",
+    "@agent-browser/cli-win32-x64-msvc": "workspace:*"
+  },
   "devDependencies": {}
 }

@@ -305,17 +305,23 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            package: cli-linux-x64-gnu
             binary: agent-browser-linux-x64
           - os: macos-latest
             target: aarch64-apple-darwin
+            package: cli-darwin-arm64
             binary: agent-browser-darwin-arm64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            package: cli-win32-x64-msvc
             binary: agent-browser-win32-x64.exe
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -335,22 +341,39 @@ jobs:
       - name: Build Rust CLI
         run: cargo build --release --manifest-path cli/Cargo.toml --target ${{ matrix.target }}
 
-      - name: Copy CLI binary to bin directory (Unix)
-        if: runner.os != 'Windows'
-        run: cp cli/target/${{ matrix.target }}/release/agent-browser bin/${{ matrix.binary }}
-
-      - name: Copy CLI binary to bin directory (Windows)
-        if: runner.os == 'Windows'
-        run: Copy-Item cli/target/${{ matrix.target }}/release/agent-browser.exe bin/${{ matrix.binary }}
-
-      - name: Test npm global install
+      - name: Copy CLI binary into its platform package
         run: |
-          npm pack
-          npm install -g agent-browser-*.tgz
+          dir=packages/@agent-browser/${{ matrix.package }}/bin
+          mkdir -p "$dir"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp cli/target/${{ matrix.target }}/release/agent-browser.exe "$dir/agent-browser.exe"
+          else
+            cp cli/target/${{ matrix.target }}/release/agent-browser "$dir/agent-browser"
+          fi
+        shell: bash
+
+      # pnpm pack resolves the workspace:* optionalDependencies to this version.
+      # npm pack keeps the binary's execute bit, as the release workflow does.
+      - name: Pack agent-browser and the platform package
+        run: |
+          pnpm install --frozen-lockfile --filter agent-browser
+          mkdir -p packs
+          pnpm pack --pack-destination packs
+          (cd packages/@agent-browser/${{ matrix.package }} && npm pack --pack-destination ../../../packs)
+          ls -la packs
+        shell: bash
+
+      # The platform package is installed next to agent-browser instead of being
+      # fetched as its optional dependency, so the binary under test is the one
+      # built above. The launcher resolves it from the global node_modules.
+      - name: Install with install scripts blocked
+        run: |
+          npm install -g --omit=optional --ignore-scripts packs/*.tgz
+          agent-browser --version
           agent-browser --version
         shell: bash
 
-      - name: Verify symlink points to native binary (Unix)
+      - name: Verify first run linked the native binary (Unix)
         if: runner.os != 'Windows'
         run: |
           SYMLINK=$(npm prefix -g)/bin/agent-browser
@@ -364,7 +387,7 @@ jobs:
           echo "Symlink correctly points to native binary"
         shell: bash
 
-      - name: Verify shim points to native binary (Windows)
+      - name: Verify first run linked the native binary (Windows)
         if: runner.os == 'Windows'
         run: |
           $shimPath = "$(npm prefix -g)\agent-browser.cmd"
@@ -377,4 +400,49 @@ jobs:
             exit 1
           }
           echo "Shim correctly points to native binary"
+        shell: pwsh
+
+      - name: Verify skills resolve from the linked binary
+        run: agent-browser skills list | grep -qE '^[[:space:]]*core[[:space:]]'
+        shell: bash
+
+      - name: Verify uninstall removes the linked bin entry
+        run: |
+          npm uninstall -g agent-browser @agent-browser/${{ matrix.package }}
+          if command -v agent-browser; then
+            echo "ERROR: agent-browser is still on PATH after uninstall"
+            exit 1
+          fi
+        shell: bash
+
+      - name: Install with install scripts allowed
+        run: npm install -g --omit=optional packs/*.tgz
+        shell: bash
+
+      - name: Verify postinstall linked the native binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          SYMLINK=$(npm prefix -g)/bin/agent-browser
+          TARGET=$(readlink "$SYMLINK")
+          echo "Symlink: $SYMLINK"
+          echo "Target: $TARGET"
+          if [[ "$TARGET" != *"${{ matrix.binary }}"* ]]; then
+            echo "ERROR: Symlink should point to native binary, not JS wrapper"
+            exit 1
+          fi
+          agent-browser --version
+        shell: bash
+
+      - name: Verify postinstall linked the native binary (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $shimPath = "$(npm prefix -g)\agent-browser.cmd"
+          $content = Get-Content $shimPath -Raw
+          echo "Shim content:"
+          echo $content
+          if ($content -notmatch "agent-browser-win32-x64\.exe") {
+            echo "ERROR: Shim should point to native .exe, not JS wrapper"
+            exit 1
+          }
+          agent-browser --version
         shell: pwsh

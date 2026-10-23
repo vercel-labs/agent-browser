@@ -1,0 +1,31 @@
+{
+  "name": "@agent-browser/cli-linux-arm64-gnu",
+  "version": "0.39.1",
+  "description": "The linux-arm64-gnu native binary for agent-browser",
+  "files": [
+    "bin/agent-browser"
+  ],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "preferUnplugged": true,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vercel-labs/agent-browser",
+    "directory": "packages/@agent-browser/cli-linux-arm64-gnu"
+  },
+  "bugs": {
+    "url": "https://github.com/vercel-labs/agent-browser/issues"
+  },
+  "homepage": "https://agent-browser.dev",
+  "publishConfig": {
+    "access": "public"
+  }
+}
