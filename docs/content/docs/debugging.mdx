@@ -5,6 +5,12 @@ navTitle: "Debugging"
 
 Use debugging commands to inspect browser logs, page errors, JavaScript dialogs, Chrome DevTools traces, highlighted elements, and the live DevTools frontend during automation.
 
+## Daemon diagnostics
+
+Start a new session with `--debug` (or `AGENT_BROWSER_DEBUG=1`) to write daemon diagnostics to `<socket-dir>/<session>.log` on Windows and Unix. The log uses the normal socket directory, which can be overridden with `AGENT_BROWSER_SOCKET_DIR`.
+
+Windows daemons otherwise discard stderr through `NUL`, so warnings remain safe after the launching CLI exits. If the Windows debug log cannot be opened, stderr falls back to `NUL`. MCP tools use the same daemon logging behavior as CLI commands.
+
 ## Console and page errors
 
 ```bash
