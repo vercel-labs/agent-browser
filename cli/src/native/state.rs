@@ -107,6 +107,44 @@ async fn eval_origin_storage(
     parse_origin_storage(&data)
 }
 
+/// Whether a command failed because the browser answered it with a CDP error,
+/// as opposed to a timeout or a dropped connection.
+fn is_cdp_error(error: &str) -> bool {
+    error.starts_with("CDP error (")
+}
+
+/// Create the scratch page used to read storage from other origins.
+///
+/// Nobody needs to see this page, so ask for `background` and `hidden`: the
+/// target is reachable over CDP but never takes focus and never appears in the
+/// tab strip. `hidden` is experimental in the protocol and `background` is not
+/// supported by every browser, so one that does not know them may answer with
+/// a CDP error. Each CDP error steps down to a plainer request, ending with the
+/// bare `about:blank` create this code always sent, so the extra parameters
+/// can never make a save fail that would succeed without them.
+async fn create_scratch_target(client: &CdpClient) -> Result<CreateTargetResult, String> {
+    let [hidden, background_only, plain] =
+        [(Some(true), Some(true)), (Some(true), None), (None, None)].map(|(background, hidden)| {
+            CreateTargetParams {
+                url: "about:blank".to_string(),
+                background,
+                hidden,
+            }
+        });
+    for params in [&hidden, &background_only] {
+        match client
+            .send_command_typed("Target.createTarget", params, None)
+            .await
+        {
+            Err(error) if is_cdp_error(&error) => continue,
+            result => return result,
+        }
+    }
+    client
+        .send_command_typed("Target.createTarget", &plain, None)
+        .await
+}
+
 /// Create a temporary CDP target, navigate it to each origin to collect localStorage,
 /// then close it. Uses Fetch interception to serve blank HTML instead of making real
 /// network requests.
@@ -115,15 +153,7 @@ async fn collect_storage_via_temp_target(
     origins: &[String],
     origin_js: &str,
 ) -> Result<Vec<OriginStorage>, String> {
-    let create_result: CreateTargetResult = client
-        .send_command_typed(
-            "Target.createTarget",
-            &CreateTargetParams {
-                url: "about:blank".to_string(),
-            },
-            None,
-        )
-        .await?;
+    let create_result = create_scratch_target(client).await?;
 
     let target_id = create_result.target_id;
 
@@ -1057,5 +1087,253 @@ mod tests {
         let result = dispatch_state_command(&cmd).unwrap();
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "Missing 'name' parameter");
+    }
+
+    const SCRATCH_SESSION: &str = "scratch-session";
+
+    /// A command the fake browser received.
+    struct Received {
+        method: String,
+        params: Value,
+        session_id: Option<String>,
+    }
+
+    fn storage_eval(origin: &str, entries: &[(&str, &str)]) -> Value {
+        let local_storage: Vec<Value> = entries
+            .iter()
+            .map(|(name, value)| json!({ "name": name, "value": value }))
+            .collect();
+        json!({ "result": { "type": "object", "value": {
+            "origin": origin, "localStorage": local_storage, "sessionStorage": []
+        } } })
+    }
+
+    /// A fake browser that answers what `save_state` asks of it: the current page
+    /// has no storage, and every other origin is read through a scratch target
+    /// that holds one localStorage entry. `reject` picks the `Target.createTarget`
+    /// requests that get a CDP error, the way a browser without support for
+    /// `hidden` or `background` answers them.
+    async fn fake_browser(
+        reject: fn(&Value) -> bool,
+    ) -> (String, tokio::task::JoinHandle<Vec<Received>>) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut received = Vec::new();
+            let mut navigated = String::new();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let method = request["method"].as_str().unwrap().to_string();
+                let params = request["params"].clone();
+                let session_id = request["sessionId"].as_str().map(str::to_string);
+                received.push(Received {
+                    method: method.clone(),
+                    params: params.clone(),
+                    session_id: session_id.clone(),
+                });
+
+                let mut events = Vec::new();
+                let outcome: Result<Value, Value> = match method.as_str() {
+                    "Network.getAllCookies" => Ok(json!({ "cookies": [] })),
+                    "Page.getFrameTree" => Ok(
+                        json!({ "frameTree": { "frame": { "url": "https://current.example/" } } }),
+                    ),
+                    "Runtime.evaluate" if session_id.as_deref() == Some(SCRATCH_SESSION) => Ok(
+                        storage_eval(navigated.trim_end_matches('/'), &[("token", "stored")]),
+                    ),
+                    "Runtime.evaluate" => Ok(storage_eval("https://current.example", &[])),
+                    "Target.createTarget" if reject(&params) => {
+                        Err(json!({ "code": -32602, "message": "Invalid parameters" }))
+                    }
+                    "Target.createTarget" => Ok(json!({ "targetId": "scratch-target" })),
+                    "Target.attachToTarget" => Ok(json!({ "sessionId": SCRATCH_SESSION })),
+                    "Page.navigate" => {
+                        navigated = params["url"].as_str().unwrap().to_string();
+                        events.push(json!({
+                            "method": "Fetch.requestPaused", "params": { "requestId": "request" }
+                        }));
+                        Ok(json!({ "frameId": "frame" }))
+                    }
+                    "Fetch.fulfillRequest" => {
+                        events.push(json!({ "method": "Page.loadEventFired", "params": {} }));
+                        Ok(json!({}))
+                    }
+                    "Target.closeTarget" => Ok(json!({ "success": true })),
+                    _ => Ok(json!({})),
+                };
+                let response = match outcome {
+                    Ok(result) => json!({ "id": request["id"], "result": result }),
+                    Err(error) => json!({ "id": request["id"], "error": error }),
+                };
+                ws.send(Message::Text(response.to_string())).await.unwrap();
+                for mut event in events {
+                    event["sessionId"] = json!(SCRATCH_SESSION);
+                    ws.send(Message::Text(event.to_string())).await.unwrap();
+                }
+            }
+            received
+        });
+        (url, server)
+    }
+
+    /// Run `save_state` against the fake browser with two origins to collect
+    /// besides the current page. Returns the save result, every command the
+    /// browser received and the origins that ended up in the saved file.
+    async fn save_with_fake_browser(
+        reject: fn(&Value) -> bool,
+    ) -> (Result<String, String>, Vec<Received>, Vec<String>) {
+        let env = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_ENCRYPTION_KEY"]);
+        env.remove("AGENT_BROWSER_ENCRYPTION_KEY");
+
+        let (url, server) = fake_browser(reject).await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let visited = HashSet::from([
+            "https://one.example".to_string(),
+            "https://two.example".to_string(),
+        ]);
+        let saved = save_state(
+            &client,
+            "page-session",
+            path.to_str(),
+            None,
+            "fixture",
+            &visited,
+        )
+        .await;
+        client.close().await;
+        let received = server.await.unwrap();
+
+        let mut saved_origins = Vec::new();
+        if saved.is_ok() {
+            let state: StorageState =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            for origin in state.origins {
+                assert_eq!(
+                    origin.local_storage.len(),
+                    1,
+                    "{} lost its localStorage",
+                    origin.origin
+                );
+                assert_eq!(origin.local_storage[0].name, "token");
+                assert_eq!(origin.local_storage[0].value, "stored");
+                saved_origins.push(origin.origin);
+            }
+            saved_origins.sort();
+        }
+        (saved, received, saved_origins)
+    }
+
+    fn create_target_requests(received: &[Received]) -> Vec<Value> {
+        received
+            .iter()
+            .filter(|command| command.method == "Target.createTarget")
+            .map(|command| command.params.clone())
+            .collect()
+    }
+
+    fn both_origins() -> Vec<String> {
+        vec![
+            "https://one.example".to_string(),
+            "https://two.example".to_string(),
+        ]
+    }
+
+    /// The scratch page is read through its own session and closed afterwards.
+    fn assert_scratch_target_used_and_closed(received: &[Received]) {
+        let navigations: Vec<_> = received
+            .iter()
+            .filter(|command| command.method == "Page.navigate")
+            .collect();
+        assert_eq!(navigations.len(), 2);
+        assert!(navigations
+            .iter()
+            .all(|command| command.session_id.as_deref() == Some(SCRATCH_SESSION)));
+        let closes: Vec<_> = received
+            .iter()
+            .filter(|command| command.method == "Target.closeTarget")
+            .collect();
+        assert_eq!(closes.len(), 1);
+        assert_eq!(closes[0].params, json!({ "targetId": "scratch-target" }));
+    }
+
+    #[tokio::test]
+    async fn save_state_creates_scratch_target_hidden_and_in_background() {
+        let (saved, received, origins) = save_with_fake_browser(|_| false).await;
+
+        assert!(saved.is_ok(), "{saved:?}");
+        assert_eq!(
+            create_target_requests(&received),
+            vec![json!({ "url": "about:blank", "background": true, "hidden": true })]
+        );
+        assert_eq!(origins, both_origins());
+        assert_scratch_target_used_and_closed(&received);
+    }
+
+    #[tokio::test]
+    async fn save_state_retries_in_background_when_hidden_is_rejected() {
+        let (saved, received, origins) =
+            save_with_fake_browser(|params| params.get("hidden").is_some()).await;
+
+        assert!(saved.is_ok(), "{saved:?}");
+        assert_eq!(
+            create_target_requests(&received),
+            vec![
+                json!({ "url": "about:blank", "background": true, "hidden": true }),
+                json!({ "url": "about:blank", "background": true }),
+            ]
+        );
+        assert_eq!(origins, both_origins());
+        assert_scratch_target_used_and_closed(&received);
+    }
+
+    #[tokio::test]
+    async fn save_state_falls_back_to_a_plain_target_when_background_is_rejected() {
+        let (saved, received, origins) = save_with_fake_browser(|params| {
+            params.get("hidden").is_some() || params.get("background").is_some()
+        })
+        .await;
+
+        assert!(saved.is_ok(), "{saved:?}");
+        assert_eq!(
+            create_target_requests(&received),
+            vec![
+                json!({ "url": "about:blank", "background": true, "hidden": true }),
+                json!({ "url": "about:blank", "background": true }),
+                json!({ "url": "about:blank" }),
+            ]
+        );
+        assert_eq!(origins, both_origins());
+        assert_scratch_target_used_and_closed(&received);
+    }
+
+    #[tokio::test]
+    async fn save_state_still_saves_when_no_scratch_target_can_be_created() {
+        let (saved, received, origins) = save_with_fake_browser(|_| true).await;
+
+        // Same outcome as before the fallbacks existed: the save goes through
+        // with the current page's data and nothing is left open.
+        assert!(saved.is_ok(), "{saved:?}");
+        assert_eq!(create_target_requests(&received).len(), 3);
+        assert!(origins.is_empty());
+        assert!(!received
+            .iter()
+            .any(|command| command.method == "Target.closeTarget"));
+    }
+
+    #[test]
+    fn only_browser_answers_count_as_cdp_errors() {
+        assert!(is_cdp_error(
+            "CDP error (Target.createTarget): {\"code\":-32602,\"message\":\"Invalid parameters\"}"
+        ));
+        assert!(!is_cdp_error("CDP command timed out: Target.createTarget"));
+        assert!(!is_cdp_error("CDP response channel closed"));
+        assert!(!is_cdp_error("Failed to send CDP command: broken pipe"));
     }
 }
