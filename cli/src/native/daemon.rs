@@ -18,7 +18,7 @@ use super::actions::{
 use super::cdp::client::CdpClient;
 use super::state;
 use super::stream::{IdleActivity, StreamServer};
-use crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION;
+use crate::connection::close_completed_response;
 
 pub async fn run_daemon(session: &str) {
     let socket_dir = get_daemon_socket_dir();
@@ -619,35 +619,6 @@ fn looks_like_http(line: &str) -> bool {
         "GET ", "POST ", "PUT ", "DELETE ", "PATCH ", "HEAD ", "OPTIONS ", "CONNECT ", "TRACE ",
     ];
     prefixes.iter().any(|p| line.starts_with(p))
-}
-
-fn close_completed_response(action: &str, response: &Value) -> bool {
-    if !matches!(
-        action,
-        "close" | "confirm" | INTERNAL_DAEMON_SHUTDOWN_ACTION
-    ) {
-        return false;
-    }
-
-    fn data_closed(data: &Value) -> bool {
-        data.get("closed").and_then(|v| v.as_bool()) == Some(true)
-    }
-
-    if response.get("success").and_then(|v| v.as_bool()) != Some(true) {
-        return false;
-    }
-
-    let Some(data) = response.get("data") else {
-        return false;
-    };
-    if data_closed(data) {
-        return true;
-    }
-
-    data.get("result").is_some_and(|result| {
-        result.get("success").and_then(|v| v.as_bool()) == Some(true)
-            && result.get("data").is_some_and(data_closed)
-    })
 }
 
 async fn shutdown_signal() {

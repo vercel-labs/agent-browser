@@ -1121,6 +1121,36 @@ const READ_ONLY_ACTIONS: &[&str] = &[
     "stream_status",
 ];
 
+/// Whether `response` to `action` means the daemon is about to exit.
+pub(crate) fn close_completed_response(action: &str, response: &Value) -> bool {
+    if !matches!(
+        action,
+        "close" | "confirm" | INTERNAL_DAEMON_SHUTDOWN_ACTION
+    ) {
+        return false;
+    }
+
+    fn data_closed(data: &Value) -> bool {
+        data.get("closed").and_then(|v| v.as_bool()) == Some(true)
+    }
+
+    if response.get("success").and_then(|v| v.as_bool()) != Some(true) {
+        return false;
+    }
+
+    let Some(data) = response.get("data") else {
+        return false;
+    };
+    if data_closed(data) {
+        return true;
+    }
+
+    data.get("result").is_some_and(|result| {
+        result.get("success").and_then(|v| v.as_bool()) == Some(true)
+            && result.get("data").is_some_and(data_closed)
+    })
+}
+
 fn is_read_only(cmd: &Value) -> bool {
     cmd.get("action")
         .and_then(Value::as_str)
@@ -1128,7 +1158,21 @@ fn is_read_only(cmd: &Value) -> bool {
 }
 
 pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
-    send_with_retry(is_read_only(&cmd), || send_command_once(&cmd, session))
+    let response = send_with_retry(is_read_only(&cmd), || send_command_once(&cmd, session))?;
+    // The daemon replies to a close before it stops accepting connections, so
+    // wait for it to go away; otherwise the next command can reach it while it
+    // shuts down and get no response.
+    let action = cmd
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if close_completed_response(
+        action,
+        &json!({ "success": response.success, "data": response.data }),
+    ) {
+        wait_for_daemon_exit(session, Duration::from_secs(5));
+    }
+    Ok(response)
 }
 
 /// Retry transient errors (EAGAIN/EWOULDBLOCK/connection issues). Once a
@@ -1347,6 +1391,60 @@ mod tests {
         assert_eq!(requests.load(Ordering::SeqCst), 1, "request was re-sent");
         assert!(!resp.success);
         assert_eq!(resp.code.as_deref(), Some("outcome_unknown"));
+    }
+
+    /// Repro for #2134: a daemon answers `close` before it stops accepting
+    /// connections, so `send_command` must not return until it is gone.
+    #[test]
+    #[cfg(unix)]
+    fn send_command_waits_for_the_daemon_to_exit_after_close() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!("ab-close-exit-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.to_str().unwrap());
+
+        let session = "close-exit";
+        let socket_path = get_socket_path(session);
+        let _ = fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+
+        let daemon_socket = socket_path.clone();
+        let daemon = thread::spawn(move || {
+            let mut closing_since: Option<Instant> = None;
+            loop {
+                if closing_since.is_some_and(|t| t.elapsed() > Duration::from_millis(300)) {
+                    let _ = fs::remove_file(&daemon_socket);
+                    return;
+                }
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        let mut line = String::new();
+                        let _ = BufReader::new(&stream).read_line(&mut line);
+                        if line.contains("\"close\"") {
+                            let _ = stream
+                                .write_all(b"{\"success\":true,\"data\":{\"closed\":true}}\n");
+                            closing_since = Some(Instant::now());
+                        }
+                    }
+                    Err(_) => thread::sleep(Duration::from_millis(10)),
+                }
+            }
+        });
+
+        let resp = send_command(json!({"id": "1", "action": "close"}), session).unwrap();
+        let socket_left = socket_path.exists();
+        daemon.join().unwrap();
+        let _ = fs::remove_dir(&dir);
+
+        assert!(resp.success);
+        assert!(
+            !socket_left,
+            "close returned while the daemon still accepted connections"
+        );
     }
 
     /// In-memory stream: accepts at most `accept` bytes, then fails writes
