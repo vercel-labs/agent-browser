@@ -1,3 +1,4 @@
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
@@ -5,20 +6,16 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::{AttachToTargetParams, AttachToTargetResult};
 
-/// Capture rate used when the caller does not ask for one. 30 fps reads as
-/// smooth motion, so scrolls, hovers, and CSS transitions survive the
-/// recording instead of turning into a slideshow.
+/// Default output frame rate, not a guarantee of Chrome's repaint rate.
 pub const DEFAULT_FPS: u32 = 30;
 
-/// Highest capture rate the recorder accepts. 60 fps is worth asking for on
-/// short, motion-heavy clips (drag interactions, animation, scroll polish
-/// work) where the extra temporal detail is the point.
+/// Highest output frame rate. Capture timing is reported separately.
 pub const MAX_FPS: u32 = 60;
 
 /// Changed-pixel ratio that selects a contact-sheet frame when the caller
@@ -515,19 +512,71 @@ fn cursor_video_frame(source: &[u8], cursor: RecordingCursorState) -> Result<Vec
     Ok(output)
 }
 
+#[derive(Default)]
+pub struct CaptureStats {
+    started: Option<tokio::time::Instant>,
+    started_at: Option<DateTime<Utc>>,
+    ended_at: Option<DateTime<Utc>>,
+    duration: Option<Duration>,
+    first_frame_at: Option<DateTime<Utc>>,
+    last_frame_at: Option<DateTime<Utc>>,
+    first_frame_after: Option<Duration>,
+    last_frame_after: Option<Duration>,
+    max_frame_gap: Duration,
+    initial_frame_included: bool,
+    captured: u64,
+    written: u64,
+    held: u64,
+    last_written_sequence: Option<u64>,
+    encoded: Option<u64>,
+    encoder_succeeded: Option<bool>,
+}
+
+impl CaptureStats {
+    fn start(&mut self) {
+        self.started = Some(tokio::time::Instant::now());
+        self.started_at = Some(Utc::now());
+    }
+
+    fn frame(&mut self, at: DateTime<Utc>, elapsed: Duration) {
+        self.captured += 1;
+        self.first_frame_at.get_or_insert(at);
+        self.first_frame_after.get_or_insert(elapsed);
+        self.max_frame_gap = self
+            .max_frame_gap
+            .max(elapsed.saturating_sub(self.last_frame_after.unwrap_or_default()));
+        self.last_frame_at = Some(at);
+        self.last_frame_after = Some(elapsed);
+    }
+
+    fn written(&mut self, sequence: u64) {
+        self.written += 1;
+        self.held += u64::from(self.last_written_sequence == Some(sequence));
+        self.last_written_sequence = Some(sequence);
+    }
+
+    fn finish(&mut self) {
+        if self.duration.is_none() && self.started.is_some() {
+            self.duration = self.started.map(|started| started.elapsed());
+            self.ended_at = Some(Utc::now());
+            self.max_frame_gap = self.max_frame_gap.max(
+                self.duration
+                    .unwrap_or_default()
+                    .saturating_sub(self.last_frame_after.unwrap_or_default()),
+            );
+        }
+    }
+}
+
 pub struct RecordingState {
     pub active: bool,
+    pub recording_id: String,
     pub output_path: String,
-    /// Capture rate for the active (or most recent) recording.
+    /// Requested output rate, not the observed capture rate.
     pub fps: u32,
-    /// Frames written to the file.
-    pub frame_count: u64,
-    /// Frames received from the screencast.
-    pub captured_count: u64,
+    pub stats: Arc<Mutex<CaptureStats>>,
     pub contact_sheet_frame_count: u64,
     pub capture_task: Option<tokio::task::JoinHandle<Result<(), String>>>,
-    pub shared_frame_count: Option<Arc<AtomicU64>>,
-    pub shared_captured_count: Option<Arc<AtomicU64>>,
     pub shared_contact_sheet_count: Option<Arc<AtomicU64>>,
     pub cancel_tx: Option<oneshot::Sender<()>>,
     /// Shared with the daemon's event handlers.
@@ -542,20 +591,21 @@ pub struct RecordingState {
     pub contact_sheet: bool,
     pub contact_sheet_threshold: f64,
     pub contact_sheet_path: Option<String>,
+    pub last_receipt: Option<Value>,
+    /// One exact transport retry, retained across a subsequent start.
+    pub last_stop_response: Option<(String, String, Value)>,
 }
 
 impl RecordingState {
     pub fn new() -> Self {
         Self {
             active: false,
+            recording_id: String::new(),
             output_path: String::new(),
             fps: DEFAULT_FPS,
-            frame_count: 0,
-            captured_count: 0,
+            stats: Arc::new(Mutex::new(CaptureStats::default())),
             contact_sheet_frame_count: 0,
             capture_task: None,
-            shared_frame_count: None,
-            shared_captured_count: None,
             shared_contact_sheet_count: None,
             cancel_tx: None,
             capture_session: Arc::new(Mutex::new(None)),
@@ -565,7 +615,90 @@ impl RecordingState {
             contact_sheet: false,
             contact_sheet_threshold: DEFAULT_CONTACT_SHEET_THRESHOLD,
             contact_sheet_path: None,
+            last_receipt: None,
+            last_stop_response: None,
         }
+    }
+
+    fn receipt(&self, outcome: Option<&Result<(), String>>) -> Value {
+        let stats = self.stats.lock().unwrap();
+        let duration = stats
+            .duration
+            .or_else(|| stats.started.map(|start| start.elapsed()));
+        let utc = |at: Option<DateTime<Utc>>| {
+            at.map(|at| at.to_rfc3339_opts(SecondsFormat::Millis, true))
+        };
+        let ms = |duration: Duration| duration.as_secs_f64() * 1000.0;
+        let max_gap = stats.max_frame_gap.max(
+            duration
+                .unwrap_or_default()
+                .saturating_sub(stats.last_frame_after.unwrap_or_default()),
+        );
+        let file = std::fs::metadata(&self.output_path)
+            .ok()
+            .filter(|metadata| metadata.is_file());
+        let mut receipt = json!({
+            "recordingId": self.recording_id,
+            "path": self.output_path,
+            "success": outcome.map(Result::is_ok),
+            "error": outcome.and_then(|result| result.as_ref().err()),
+            "frames": stats.written,
+            "capturedFrames": stats.captured,
+            "fps": self.fps,
+            "capture": {
+                "startedAt": utc(stats.started_at),
+                "endedAt": utc(stats.ended_at),
+                "durationMs": duration.map(ms),
+                "firstFrameAt": utc(stats.first_frame_at),
+                "lastFrameAt": utc(stats.last_frame_at),
+                "firstFrameAfterMs": stats.first_frame_after.map(ms),
+                "lastFrameAfterMs": stats.last_frame_after.map(ms),
+                "averageFps": duration.filter(|d| !d.is_zero()).map(|d| stats.captured as f64 / d.as_secs_f64()),
+                "maxFrameGapMs": duration.map(|_| ms(max_gap)),
+                "timestampSource": "local-receive",
+                "initialFrameIncluded": stats.initial_frame_included,
+            },
+            "output": {
+                "frames": stats.written,
+                "encodedFrames": stats.encoded,
+                "fps": self.fps,
+                "durationMs": if stats.encoder_succeeded == Some(true) {
+                    stats.encoded.map(|frames| frames as f64 * 1000.0 / self.fps as f64)
+                } else { None },
+                "durationSource": "encoded-frames/fps",
+                "heldFrames": stats.held,
+                "droppedFrames": outcome.map(|_| stats.captured.saturating_sub(stats.written - stats.held)),
+                "skippedFrames": 0,
+                "encoderSucceeded": stats.encoder_succeeded,
+            },
+            "file": { "exists": file.is_some(), "sizeBytes": file.map(|m| m.len()) },
+            "warning": if stats.captured.saturating_sub(u64::from(stats.initial_frame_included)) <= 1 {
+                "Fewer than two screencast frames received; this recording cannot establish motion or smoothness."
+            } else {
+                "Capture is repaint-driven; output FPS includes held frames and does not establish smoothness."
+            },
+        });
+        if let Some(ref path) = self.contact_sheet_path {
+            receipt["contactSheetPath"] = json!(path);
+            receipt["contactSheetFrames"] = json!(self.contact_sheet_frame_count);
+            receipt["contactSheetThreshold"] = json!(self.contact_sheet_threshold);
+        }
+        receipt
+    }
+
+    pub fn info(&self) -> Value {
+        json!({
+            "current": self.active.then(|| self.receipt(None)),
+            "last": self.last_receipt,
+        })
+    }
+
+    pub fn finish(&mut self, outcome: Result<(), String>) -> Value {
+        self.stats.lock().unwrap().finish();
+        self.active = false;
+        let receipt = self.receipt(Some(&outcome));
+        self.last_receipt = Some(receipt.clone());
+        receipt
     }
 }
 
@@ -640,10 +773,10 @@ pub fn recording_start(
     let threshold = validate_contact_sheet_threshold(options.contact_sheet_threshold)?;
 
     state.active = true;
+    state.recording_id = uuid::Uuid::new_v4().to_string();
     state.output_path = path.to_string();
     state.fps = fps;
-    state.frame_count = 0;
-    state.captured_count = 0;
+    state.stats = Arc::new(Mutex::new(CaptureStats::default()));
     state.contact_sheet_frame_count = 0;
     state.cursor = options.cursor;
     if let Ok(mut cursor) = state.shared_cursor.lock() {
@@ -658,6 +791,7 @@ pub fn recording_start(
 
     let mut result = json!({
         "started": true,
+        "recordingId": state.recording_id,
         "path": path,
         "fps": fps,
         "cursor": options.cursor,
@@ -670,29 +804,22 @@ pub fn recording_start(
     Ok(result)
 }
 
-pub fn recording_stop(state: &mut RecordingState) -> Result<Value, String> {
+/// Finish once and retain the terminal outcome even if the caller disconnects.
+pub async fn recording_stop(state: &mut RecordingState) -> Result<Value, String> {
     if !state.active {
-        return Err("No recording in progress".to_string());
+        return state
+            .last_receipt
+            .clone()
+            .ok_or_else(|| "No recording in progress".to_string());
     }
-
-    state.active = false;
-
-    if state.frame_count == 0 {
-        return Err("No frames captured".to_string());
-    }
-
-    let mut result = json!({
-        "path": &state.output_path,
-        "frames": state.frame_count,
-        "capturedFrames": state.captured_count,
-        "fps": state.fps,
+    let outcome = stop_recording_task(state).await.and_then(|()| {
+        if state.stats.lock().unwrap().written == 0 {
+            Err("No frames captured".to_string())
+        } else {
+            Ok(())
+        }
     });
-    if let Some(ref path) = state.contact_sheet_path {
-        result["contactSheetPath"] = json!(path);
-        result["contactSheetFrames"] = json!(state.contact_sheet_frame_count);
-        result["contactSheetThreshold"] = json!(state.contact_sheet_threshold);
-    }
-    Ok(result)
+    Ok(state.finish(outcome))
 }
 
 fn build_ffmpeg_command(output_path: &str, fps: u32, cursor: bool) -> tokio::process::Command {
@@ -701,27 +828,35 @@ fn build_ffmpeg_command(output_path: &str, fps: u32, cursor: bool) -> tokio::pro
 
     // -hide_banner keeps the version and build banner out of stderr, so a
     // failure message is the cause rather than the configure line.
-    cmd.args(["-y", "-hide_banner", "-loglevel", "error"])
-        .args([
-            "-fpsprobesize",
-            "0",
-            "-probesize",
-            "32",
-            "-analyzeduration",
-            "0",
-        ])
-        .args([
-            "-f",
-            "image2pipe",
-            "-c:v",
-            if cursor { "ppm" } else { "png" },
-            "-framerate",
-            &fps.to_string(),
-            "-i",
-            "pipe:0",
-        ])
-        .args(["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
-        .args(["-fps_mode", "vfr"]);
+    cmd.args([
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostats",
+        "-progress",
+        "pipe:1",
+    ])
+    .args([
+        "-fpsprobesize",
+        "0",
+        "-probesize",
+        "32",
+        "-analyzeduration",
+        "0",
+    ])
+    .args([
+        "-f",
+        "image2pipe",
+        "-c:v",
+        if cursor { "ppm" } else { "png" },
+        "-framerate",
+        &fps.to_string(),
+        "-i",
+        "pipe:0",
+    ])
+    .args(["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"])
+    .args(["-fps_mode", "vfr"]);
 
     if output_extension(output_path).as_deref() == Some("webm") {
         cmd.args(["-c:v", "libvpx", "-crf", "18"])
@@ -744,7 +879,7 @@ fn build_ffmpeg_command(output_path: &str, fps: u32, cursor: bool) -> tokio::pro
         ])
         .arg(output_path)
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
@@ -1434,8 +1569,7 @@ pub fn spawn_recording_task(
     initial_frame: InitialRecordingFrame,
     output_path: String,
     fps: u32,
-    shared_count: Arc<AtomicU64>,
-    shared_captured: Arc<AtomicU64>,
+    stats: Arc<Mutex<CaptureStats>>,
     cursor: bool,
     shared_cursor: SharedRecordingCursor,
     cursor_overlays: SharedCursorOverlays,
@@ -1481,10 +1615,17 @@ pub fn spawn_recording_task(
             false,
             shared_cursor.clone(),
             frame_rx,
+            stats.clone(),
         ));
 
         // Chrome does not reliably emit an initial PNG screencast frame for a
         // static page. Seed both outputs before listening for later repaints.
+        {
+            let mut stats = stats.lock().unwrap();
+            stats.start();
+            stats.initial_frame_included = true;
+            stats.frame(Utc::now(), Duration::ZERO);
+        }
         let frame = CapturedVideoFrame {
             sequence: 0,
             image_data: Arc::new(initial_frame.image_data),
@@ -1495,7 +1636,6 @@ pub fn spawn_recording_task(
             device_height: initial_frame.device_height,
         };
         let seeded = seed_recording_outputs(&frame_tx, contact_tx.as_ref(), frame).await;
-        shared_captured.fetch_add(1, Ordering::Relaxed);
 
         let started = match seeded {
             Ok(()) => client
@@ -1520,13 +1660,15 @@ pub fn spawn_recording_task(
                     events,
                     frame_tx,
                     contact_tx,
-                    &shared_captured,
+                    &stats,
                     cancel_rx,
                 )
                 .await
             }
             Err(error) => Err(error),
         };
+        // Freeze capture timing before CDP teardown or encoder completion.
+        stats.lock().unwrap().finish();
 
         client.unsubscribe_session(&capture_session);
 
@@ -1565,10 +1707,9 @@ pub fn spawn_recording_task(
             }
             return Err(error);
         }
-        let streamed = encoder
+        encoder
             .await
             .map_err(|e| format!("Recording encoder task failed: {}", e))??;
-        shared_count.store(streamed, Ordering::Relaxed);
         let contact_sheet_count = match contact_worker {
             Some(worker) => worker
                 .await
@@ -1634,11 +1775,11 @@ async fn collect_frames(
     mut events: mpsc::Receiver<super::cdp::types::CdpEvent>,
     frame_tx: mpsc::Sender<CapturedVideoFrame>,
     contact_tx: Option<std::sync::mpsc::SyncSender<CapturedVideoFrame>>,
-    shared_captured: &AtomicU64,
+    stats: &Mutex<CaptureStats>,
     cancel_rx: oneshot::Receiver<()>,
 ) -> Result<(), String> {
     let mut cancel_rx = std::pin::pin!(cancel_rx);
-    let started = tokio::time::Instant::now();
+    let started = stats.lock().unwrap().started.unwrap();
     let mut sequence = 1u64;
 
     loop {
@@ -1673,7 +1814,7 @@ async fn collect_frames(
                             device_height: metadata["deviceHeight"].as_f64().unwrap_or(0.0),
                         };
                         sequence += 1;
-                        shared_captured.fetch_add(1, Ordering::Relaxed);
+                        stats.lock().unwrap().frame(Utc::now(), elapsed);
                         frame_tx.try_send(frame.clone()).map_err(|error| match error {
                             mpsc::error::TrySendError::Full(_) => format!(
                                 "Recording encoder fell behind by more than {} buffered frames",
@@ -1812,9 +1953,24 @@ async fn encode_stream(
     cursor: bool,
     shared_cursor: SharedRecordingCursor,
     mut frames: mpsc::Receiver<CapturedVideoFrame>,
+    stats: Arc<Mutex<CaptureStats>>,
 ) -> Result<u64, String> {
     let mut command = build_ffmpeg_command(&output_path, fps, cursor);
     let mut ffmpeg = spawn_ffmpeg_command(&mut command)?;
+    let progress_stats = stats.clone();
+    let progress = ffmpeg.stdout.take().map(|stdout| {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(frames) = line
+                    .strip_prefix("frame=")
+                    .and_then(|value| value.trim().parse::<u64>().ok())
+                {
+                    progress_stats.lock().unwrap().encoded = Some(frames);
+                }
+            }
+        })
+    });
     let mut stdin = ffmpeg
         .stdin
         .take()
@@ -1826,6 +1982,7 @@ async fn encode_stream(
     let mut decoded = None;
     let mut written = 0u64;
 
+    let streamed = async {
     loop {
         tokio::select! {
             frame = frames.recv() => {
@@ -1856,6 +2013,7 @@ async fn encode_stream(
                     write_encoder_bytes(&mut stdin, &frame.image_data).await?;
                 }
                 written += 1;
+                stats.lock().unwrap().written(frame.sequence);
             }
         }
     }
@@ -1876,17 +2034,23 @@ async fn encode_stream(
     // Include the final image even when the take stops before its first tick.
     write_encoder_bytes(&mut stdin, &final_image).await?;
     written += 1;
+    stats.lock().unwrap().written(frame.sequence);
+    Ok::<_, String>(written)
+    }.await;
     drop(stdin);
 
-    let output = ffmpeg
-        .wait_with_output()
-        .await
-        .map_err(|e| format!("ffmpeg wait failed: {}", e))?;
+    let output = ffmpeg.wait_with_output().await;
+    if let Some(progress) = progress {
+        let _ = progress.await;
+    }
+    stats.lock().unwrap().encoder_succeeded =
+        Some(output.as_ref().is_ok_and(|output| output.status.success()));
+    let output = output.map_err(|e| format!("ffmpeg wait failed: {}", e))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("ffmpeg failed: {}", ffmpeg_error_tail(&stderr)));
     }
-    Ok(written)
+    streamed
 }
 
 fn scale_cursor_dimensions(
@@ -1945,7 +2109,7 @@ fn cursor_for_video_frame(
     }
 }
 
-pub async fn stop_recording_task(state: &mut RecordingState) -> Result<(), String> {
+async fn stop_recording_task(state: &mut RecordingState) -> Result<(), String> {
     if let Some(tx) = state.cancel_tx.take() {
         let _ = tx.send(());
     }
@@ -1954,8 +2118,6 @@ pub async fn stop_recording_task(state: &mut RecordingState) -> Result<(), Strin
         cursor.enabled = false;
     }
 
-    let counter = state.shared_frame_count.take();
-    let captured = state.shared_captured_count.take();
     let contact_sheet = state.shared_contact_sheet_count.take();
     let handle = state.capture_task.take();
 
@@ -1969,12 +2131,6 @@ pub async fn stop_recording_task(state: &mut RecordingState) -> Result<(), Strin
         Ok(())
     };
 
-    if let Some(c) = counter {
-        state.frame_count = c.load(Ordering::Relaxed);
-    }
-    if let Some(c) = captured {
-        state.captured_count = c.load(Ordering::Relaxed);
-    }
     if let Some(c) = contact_sheet {
         state.contact_sheet_frame_count = c.load(Ordering::Relaxed);
     }
@@ -2328,12 +2484,14 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join(format!("sparse.{extension}"));
             let (tx, rx) = mpsc::channel(4);
+            let stats = Arc::new(Mutex::new(CaptureStats::default()));
             let encoder = tokio::spawn(encode_stream(
                 path.to_string_lossy().into_owned(),
                 30,
                 cursor,
                 Arc::new(Mutex::new(RecordingCursorHistory::default())),
                 rx,
+                stats.clone(),
             ));
             for (sequence, color) in [[255, 0, 0], [0, 0, 255]].into_iter().enumerate() {
                 let image = image::RgbImage::from_pixel(64, 64, image::Rgb(color));
@@ -2381,6 +2539,13 @@ mod tests {
                 .collect();
             assert!(times.len() >= 3, "{extension}: {times:?}");
             assert_eq!(times.len() as u64, count);
+            {
+                let stats = stats.lock().unwrap();
+                assert_eq!(stats.encoded, Some(times.len() as u64));
+                assert_eq!(stats.encoder_succeeded, Some(true));
+                assert_eq!(stats.written, count);
+                assert_eq!(stats.held, count - 2);
+            }
             assert!(
                 times
                     .windows(2)
@@ -2455,7 +2620,7 @@ mod tests {
         assert!(!state.contact_sheet);
         assert!(!RecordingOptions::default().contact_sheet);
         assert!(state.output_path.is_empty());
-        assert_eq!(state.frame_count, 0);
+        assert!(state.info()["current"].is_null());
         assert_eq!(state.fps, DEFAULT_FPS);
     }
 
@@ -2466,7 +2631,7 @@ mod tests {
         assert!(result.is_ok());
         assert!(state.active);
         assert_eq!(state.output_path, "/tmp/test.mp4");
-        assert_eq!(state.frame_count, 0);
+        assert_eq!(state.info()["current"]["frames"], 0);
         assert_eq!(state.fps, 30);
         assert_eq!(result.unwrap()["fps"], 30);
     }
@@ -2956,32 +3121,31 @@ mod tests {
         assert!(result.unwrap_err().contains("already active"));
     }
 
-    #[test]
-    fn test_recording_stop_not_active() {
+    #[tokio::test]
+    async fn test_recording_stop_not_active() {
         let mut state = RecordingState::new();
-        let result = recording_stop(&mut state);
+        let result = recording_stop(&mut state).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("No recording"));
     }
 
-    #[test]
-    fn test_recording_stop_no_frames() {
-        let mut state = RecordingState::new();
-        recording_start(&mut state, "/tmp/test.mp4", options(None)).unwrap();
-        let result = recording_stop(&mut state);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("No frames"));
-        assert!(!state.active);
-    }
-
-    #[test]
-    fn test_recording_stop_reports_fps() {
-        let mut state = RecordingState::new();
-        recording_start(&mut state, "/tmp/test.webm", options(Some(60))).unwrap();
-        state.frame_count = 120;
-        let result = recording_stop(&mut state).unwrap();
-        assert_eq!(result["frames"], 120);
-        assert_eq!(result["fps"], 60);
+    #[tokio::test]
+    async fn test_recording_stop_no_frames_retains_failed_receipt() {
+        for fps in [None, Some(60)] {
+            let mut state = RecordingState::new();
+            recording_start(&mut state, "/tmp/test.webm", options(fps)).unwrap();
+            let receipt = recording_stop(&mut state).await.unwrap();
+            assert_eq!(receipt["success"], false);
+            assert_eq!(receipt["error"], "No frames captured");
+            assert_eq!(receipt["fps"], fps.unwrap_or(DEFAULT_FPS));
+            assert_eq!(receipt["capturedFrames"], 0);
+            assert!(receipt["capture"]["startedAt"].is_null());
+            assert!(receipt["capture"]["firstFrameAt"].is_null());
+            assert!(!state.active);
+            assert_eq!(recording_stop(&mut state).await.unwrap(), receipt);
+            assert_eq!(state.info()["last"], receipt);
+            assert!(state.info()["current"].is_null());
+        }
     }
 
     #[test]
