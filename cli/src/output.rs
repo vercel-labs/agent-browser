@@ -1736,6 +1736,10 @@ XPath, or an element reference from snapshot (e.g., @e1).
 If another element covers the click point, agent-browser reports the
 covering element instead of dispatching a click to the wrong target.
 
+Click and dblclick fail, instead of reporting success, when the element
+is hidden, disabled, or outside the viewport. With --new-tab, click opens
+the link's URL directly, so these checks do not apply.
+
 Options:
   --new-tab            Open link in a new tab instead of navigating current tab.
                        The new tab inherits session setup before its first load.
@@ -1764,6 +1768,9 @@ Usage: agent-browser dblclick <selector>
 
 Double-clicks on the specified element. Useful for text selection
 or triggering double-click handlers.
+
+Double-click fails, instead of reporting success, when the element is
+hidden, disabled, or outside the viewport.
 
 Global Options:
   --json               Output as JSON
@@ -2236,6 +2243,8 @@ Refs can be reused across snapshots. Take a fresh snapshot after navigation.
 Iframe lines use the iframe's name as a display fallback when the accessibility
 tree has no name. Ref identity keeps the real accessibility name, and iframe
 URLs are not displayed.
+If a ref's element was replaced, the action uses the one element with the same
+role and name. If that is ambiguous, it fails: run snapshot again.
 
 Options:
   -i, --interactive    Only include interactive elements
@@ -3606,6 +3615,10 @@ Chat Options:
 Each tool call runs one agent-browser command. Chat can load bundled skills
 (skills get <name>) and use page WebMCP tools, fetching a tool's schema with
 webmcp list <tool> --frame <frame-id> --json before invoking it in that frame.
+Chat runs in the session you select and cannot create or switch sessions. To use
+another engine, open the session first with
+agent-browser --session <name> --engine <engine> open <url>, then pass --session <name> to chat.
+Chat commands cannot set global flags other than --json and --annotate.
 
 Global Options:
   --json                 Structured JSON output per turn
@@ -3661,7 +3674,12 @@ Common tools include:
   agent_browser_close      Close the browser session
 
 Each tool has typed fields such as url, selector, text, key, and session.
-Each tool also accepts extraArgs for advanced CLI flags and exact CLI parity.
+Each tool also accepts extraArgs for per-command options and display or emulation
+flags such as --engine. Global flags that change network, file, policy, or host
+access (such as --allowed-domains, --action-policy, --executable-path, --args,
+and --config) are rejected in extraArgs and must be set in the MCP server's
+environment or config, and structured allowedDomains is rejected when the server
+already sets allowed domains.
 Tool discovery is paginated and includes read-only/open-world annotations so
 modern MCP clients can load the large typed surface incrementally.
 Use agent_browser_snapshot after navigation to get fresh refs before clicking.
@@ -3741,9 +3759,12 @@ Subcommands:
   show <name>              Show one configured plugin
   run <name> <type>        Run a command.run or custom plugin request
 
-Plugins are configured in agent-browser.json. A plugin entry declares a name,
-an executable command, optional args, and capabilities. Plugins run as
-external processes over the agent-browser.plugin.v1 stdio JSON protocol.
+Plugins are configured in ~/.agent-browser/config.json or a file loaded with
+--config. A plugin entry declares a name, an executable command, optional args,
+and capabilities. Plugins run as external processes over the
+agent-browser.plugin.v1 stdio JSON protocol.
+plugin add writes ~/.agent-browser/config.json by default; use --project for
+./agent-browser.json (only used with --config).
 
 Add sources:
   <name>                   npm package, e.g. agent-browser-plugin-captcha
@@ -3753,7 +3774,7 @@ Add sources:
 Add options:
   --name <name>            Override the configured plugin name
   --capability <name>      Declare a capability if the plugin has no manifest
-  --global                 Write ~/.agent-browser/config.json instead of ./agent-browser.json
+  --project                Write ./agent-browser.json instead of ~/.agent-browser/config.json
   --no-manifest            Skip plugin.manifest discovery
 
 plugin add asks the package for plugin.manifest to discover name and
@@ -4030,8 +4051,9 @@ Options:
                              (or AGENT_BROWSER_INIT_SCRIPTS env, comma-separated)
   --enable <feature>         Built-in init scripts: react-devtools (repeatable or comma-separated)
                              (or AGENT_BROWSER_ENABLE env)
-  --args <args>              Browser launch args, comma or newline separated (or AGENT_BROWSER_ARGS)
-                             e.g., --args "--no-sandbox,--disable-blink-features=AutomationControlled"
+  --args <args>              Browser launch args, newline separated, or comma separated before another flag
+                             (or AGENT_BROWSER_ARGS). Commas inside a value are kept.
+                             e.g., --args "--no-sandbox,--disable-features=Translate,HttpsUpgrades"
   --user-agent <ua>          Custom User-Agent (or AGENT_BROWSER_USER_AGENT)
   --proxy <server>           Proxy server URL (or AGENT_BROWSER_PROXY, HTTP_PROXY, HTTPS_PROXY, ALL_PROXY)
                              Supports authenticated proxies: --proxy "http://user:pass@127.0.0.1:7890"
@@ -4102,6 +4124,7 @@ Configuration:
 
   Use --config <path> to load a specific config file instead of the defaults.
   If --config points to a missing or invalid file, agent-browser exits with an error.
+  The auto-discovered ./agent-browser.json cannot set executablePath, args or plugins (they are ignored with a warning); set them in ~/.agent-browser/config.json, env vars or flags, or load the file explicitly with --config ./agent-browser.json.
 
   Boolean flags accept an optional true/false value to override config:
     --headed           (same as --headed true)

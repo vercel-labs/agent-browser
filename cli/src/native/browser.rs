@@ -498,6 +498,9 @@ const OBSCURA_CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const OBSCURA_CDP_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const OBSCURA_TARGET_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 
+const CDP_PORT_WAIT: Duration = Duration::from_secs(2);
+const CDP_PORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 impl BrowserManager {
     #[cfg(test)]
     pub(super) fn owns_obscura_process(&self) -> bool {
@@ -680,6 +683,13 @@ impl BrowserManager {
 
     pub async fn connect_cdp(url: &str) -> Result<Self, String> {
         Self::connect_cdp_inner(url, false, None).await
+    }
+
+    /// Like [`Self::connect_cdp`], but first waits up to two seconds while the target
+    /// port refuses connections, so attaching right after a browser starts succeeds.
+    pub async fn connect_cdp_when_listening(url: &str) -> Result<Self, String> {
+        wait_while_cdp_port_refuses(url, CDP_PORT_WAIT).await;
+        Self::connect_cdp(url).await
     }
 
     /// Connect to a provider CDP proxy where the WebSocket IS the page session.
@@ -2593,6 +2603,35 @@ fn obscura_target_init_timeout(last_error: Option<&str>) -> String {
     message
 }
 
+/// Returns the `host:port` a CDP target listens on, or `None` when the input has no
+/// explicit port, such as a provider `wss://` endpoint.
+fn cdp_port_address(input: &str) -> Option<String> {
+    if let Ok(port) = input.parse::<u16>() {
+        return Some(format!("127.0.0.1:{}", port));
+    }
+    let parsed = url::Url::parse(input).ok()?;
+    Some(format!("{}:{}", parsed.host_str()?, parsed.port()?))
+}
+
+/// Polls the CDP port until it stops refusing connections or `window` elapses.
+async fn wait_while_cdp_port_refuses(input: &str, window: Duration) {
+    let Some(address) = cdp_port_address(input) else {
+        return;
+    };
+    let deadline = Instant::now() + window;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, tokio::net::TcpStream::connect(&address)).await {
+            Ok(Err(err)) if err.kind() == std::io::ErrorKind::ConnectionRefused => {}
+            _ => return,
+        }
+        if Instant::now() + CDP_PORT_POLL_INTERVAL >= deadline {
+            return;
+        }
+        tokio::time::sleep(CDP_PORT_POLL_INTERVAL).await;
+    }
+}
+
 async fn resolve_cdp_url(input: &str) -> Result<String, String> {
     if input.starts_with("ws://") || input.starts_with("wss://") {
         return Ok(input.to_string());
@@ -2635,6 +2674,64 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cdp_port_address_needs_an_explicit_port() {
+        assert_eq!(cdp_port_address("9222").as_deref(), Some("127.0.0.1:9222"));
+        assert_eq!(
+            cdp_port_address("ws://localhost:9333/devtools/browser/x").as_deref(),
+            Some("localhost:9333")
+        );
+        assert_eq!(
+            cdp_port_address("http://[::1]:9222").as_deref(),
+            Some("[::1]:9222")
+        );
+        assert_eq!(cdp_port_address("wss://cdp.example.com/session"), None);
+    }
+
+    fn free_local_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    #[tokio::test]
+    async fn port_wait_returns_once_the_port_listens() {
+        let port = free_local_port();
+        let late_listener = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .unwrap()
+        });
+        let started = Instant::now();
+        wait_while_cdp_port_refuses(&port.to_string(), Duration::from_secs(2)).await;
+        assert!(started.elapsed() >= Duration::from_millis(250));
+        assert!(started.elapsed() < Duration::from_millis(1500));
+        drop(late_listener.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn port_wait_stops_at_an_error_other_than_refused() {
+        let started = Instant::now();
+        wait_while_cdp_port_refuses(
+            "http://agent-browser-test.invalid:9222",
+            Duration::from_secs(10),
+        )
+        .await;
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn port_wait_gives_up_after_the_window() {
+        let port = free_local_port();
+        let started = Instant::now();
+        wait_while_cdp_port_refuses(&port.to_string(), Duration::from_millis(300)).await;
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
     use tokio::time::sleep;
 
     #[tokio::test]

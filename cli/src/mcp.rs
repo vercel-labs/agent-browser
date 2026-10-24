@@ -13,8 +13,9 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, Write};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -836,7 +837,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_SNAPSHOT,
             "Snapshot page",
-            "Return an accessibility-tree snapshot with reusable element refs. Iframe names are used only as a display fallback when the accessibility tree has no name; refs keep the real accessibility name and iframe URLs are not displayed.",
+            "Return an accessibility-tree snapshot with reusable element refs. Iframe names are used only as a display fallback when the accessibility tree has no name; refs keep the real accessibility name and iframe URLs are not displayed. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref.",
             json!({
                 "interactive": { "type": "boolean", "default": true, "description": "Only include interactive elements." },
                 "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements." },
@@ -1719,7 +1720,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_CONNECT,
             "Connect CDP",
-            "Connect to a browser over CDP. With pinTab, the session is strictly bound to its own tab: it re-binds by target id after restarts and fails with a tab_gone error instead of adopting another tab. Structured errors include code=tab_gone, data.targetId, and optional sanitized data.lastUrl. Pass pinTab: false to explicitly disable a sticky pin; omit it to keep the current state.",
+            "Connect to a browser over CDP. With pinTab, the session is strictly bound to its own tab: it re-binds by target id after restarts and fails with a tab_gone error instead of adopting another tab. Structured errors include code=tab_gone, data.targetId, and optional sanitized data.lastUrl. Pass pinTab: false to explicitly disable a sticky pin; omit it to keep the current state. The session stays attached until agent_browser_close, so later tools without a connection target use the same browser.",
             json!({
                 "target": { "type": "string", "description": "CDP port or URL." },
                 "pinTab": { "type": "boolean", "description": "Strict session-to-tab binding (sticky for the session). Explicit false disables a sticky pin; omitted leaves it unchanged." }
@@ -1814,7 +1815,7 @@ fn parity_tools() -> Vec<Value> {
                 "reference": { "type": "string", "description": "npm package, scoped package, or owner/repo GitHub reference." },
                 "name": { "type": "string", "description": "Override the configured plugin name." },
                 "capabilities": string_array_schema("Capabilities to declare when manifest discovery is skipped or unavailable."),
-                "global": { "type": "boolean", "default": false, "description": "Write ~/.agent-browser/config.json instead of ./agent-browser.json." },
+                "project": { "type": "boolean", "default": false, "description": "Write ./agent-browser.json instead of ~/.agent-browser/config.json." },
                 "noManifest": { "type": "boolean", "default": false, "description": "Skip plugin.manifest discovery." }
             }),
             &["reference"],
@@ -2049,7 +2050,7 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         json!({
             "type": "array",
             "items": { "type": "string" },
-            "description": "Advanced: extra CLI arguments, including --engine chrome|lightpanda|obscura and --executable-path, preserving full CLI parity. Obscura is experimental and rejects --proxy-bypass (including resolved config/environment settings). Explicit Obscura launches send this invocation's resolved bypass setting even to an existing daemon."
+            "description": "Advanced: extra CLI arguments, including --engine chrome|lightpanda|obscura. Global flags that change network, file, policy, or host access (such as --allowed-domains, --executable-path, --args, --config) are rejected; set them in the MCP server environment or config. Obscura is experimental and rejects --proxy-bypass (including resolved config/environment settings). Explicit Obscura launches send this invocation's resolved bypass setting even to an existing daemon."
         }),
     );
     props.insert(
@@ -2163,10 +2164,57 @@ fn is_open_world_tool(name: &str) -> bool {
     )
 }
 
-fn is_known_tool(name: &str) -> bool {
+fn find_tool(name: &str) -> Option<Value> {
     tools()
-        .iter()
-        .any(|tool| tool.get("name").and_then(|v| v.as_str()) == Some(name))
+        .into_iter()
+        .find(|tool| tool.get("name").and_then(|v| v.as_str()) == Some(name))
+}
+
+/// Returns an error naming any argument keys the tool's input schema does not declare.
+fn reject_unknown_arguments(
+    name: &str,
+    definition: &Value,
+    arguments: &Value,
+) -> Result<(), ProtocolError> {
+    let Some(args) = arguments.as_object() else {
+        return Ok(());
+    };
+    let empty = serde_json::Map::new();
+    let declared = definition
+        .pointer("/inputSchema/properties")
+        .and_then(|v| v.as_object())
+        .unwrap_or(&empty);
+    let mut unknown: Vec<&str> = args
+        .keys()
+        .filter(|key| !declared.contains_key(*key))
+        .map(|key| key.as_str())
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    unknown.sort();
+    let shared = tool("", "", "", json!({}), &[]);
+    let shared_keys = shared
+        .pointer("/inputSchema/properties")
+        .and_then(|v| v.as_object())
+        .unwrap_or(&empty);
+    let mut own: Vec<&str> = declared
+        .keys()
+        .filter(|key| !shared_keys.contains_key(*key))
+        .map(|key| key.as_str())
+        .collect();
+    own.sort();
+    let own = if own.is_empty() {
+        "none".to_string()
+    } else {
+        own.join(", ")
+    };
+    Err(ProtocolError::invalid_params(format!(
+        "Unknown argument(s) for {}: {}. Tool arguments: {}.",
+        name,
+        unknown.join(", "),
+        own
+    )))
 }
 
 fn wait_tool(
@@ -2198,12 +2246,12 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         .ok_or_else(|| ProtocolError::invalid_params("tools/call params.name must be a string"))?;
     let arguments = params.get("arguments").unwrap_or(&Value::Null);
 
-    if !is_known_tool(name) {
+    let Some(tool_def) = find_tool(name) else {
         return Err(ProtocolError::invalid_params(format!(
             "Unknown tool: {}",
             name
         )));
-    }
+    };
 
     if !config.allows(name) {
         return Err(ProtocolError::invalid_params(format!(
@@ -2212,6 +2260,8 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
             config.profile_names().join(", ")
         )));
     }
+
+    reject_unknown_arguments(name, &tool_def, arguments)?;
 
     match name {
         TOOL_TOOLS_PROFILES => call_tools_profiles(config),
@@ -2447,12 +2497,56 @@ fn call_cli_tool(
     Ok(tool_result_from_run(run))
 }
 
+/// Global flags an MCP caller may pass in extraArgs; every other global flag must come from the server's environment or config.
+const MCP_EXTRA_ARGS_GLOBALS: &[&str] = &[
+    "--json",
+    "--headed",
+    "--webgpu",
+    "--no-webmcp",
+    "--debug",
+    "--hide-scrollbars",
+    "--annotate",
+    "--pin-tab",
+    "--no-pin-tab",
+    "-v",
+    "--verbose",
+    "-q",
+    "--quiet",
+    "--offline",
+    "--quick",
+    "--session",
+    "--namespace",
+    "--idle-timeout",
+    "--restore",
+    "--restore-save",
+    "--restore-check-url",
+    "--restore-check-text",
+    "--restore-check-fn",
+    "--device",
+    "--user-agent",
+    "--color-scheme",
+    "--engine",
+    "--input-mode",
+    "--screenshot-quality",
+    "--screenshot-format",
+];
+
 fn cli_tool_args(
     arguments: &Value,
     command_args: Vec<String>,
     session: Option<&str>,
 ) -> Result<Vec<String>, ProtocolError> {
     let extra_args = optional_string_array(arguments, "extraArgs")?.unwrap_or_default();
+    for token in &extra_args {
+        let name = token.split('=').next().unwrap_or(token);
+        let global = crate::flags::clean_args(&[name.to_string()]).is_empty();
+        if global && !MCP_EXTRA_ARGS_GLOBALS.contains(&name) {
+            return Err(ProtocolError::invalid_params(format!(
+                "extraArgs may not set {}; configure it in the MCP server's environment or config",
+                name
+            )));
+        }
+    }
     let mut args = vec!["--json".to_string()];
     append_common_global_args(&mut args, arguments, session)?;
     args.extend(command_args);
@@ -3547,8 +3641,8 @@ fn plugin_add_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
             args.push(capability);
         }
     }
-    if optional_bool(arguments, "global")?.unwrap_or(false) {
-        args.push("--global".to_string());
+    if optional_bool(arguments, "project")?.unwrap_or(false) {
+        args.push("--project".to_string());
     }
     if optional_bool(arguments, "noManifest")?.unwrap_or(false) {
         args.push("--no-manifest".to_string());
@@ -3868,6 +3962,14 @@ fn append_common_global_args(
     }
     if let Some(domains) = optional_string_array(arguments, "allowedDomains")? {
         if !domains.is_empty() {
+            if env::var_os("AGENT_BROWSER_ALLOWED_DOMAINS").is_some()
+                || crate::flags::load_config(&[])
+                    .is_ok_and(|c| c.allowed_domains.is_some_and(|d| !d.is_empty()))
+            {
+                return Err(ProtocolError::invalid_params(
+                    "allowedDomains is already set in the MCP server's environment or config",
+                ));
+            }
             args.push("--allowed-domains".to_string());
             args.push(domains.join(","));
         }
@@ -3893,11 +3995,39 @@ fn append_common_global_args(
     Ok(())
 }
 
-fn run_cli(args: &[String], stdin_body: Option<String>, timeout_ms: u64) -> Result<CliRun, String> {
-    let exe = env::current_exe().map_err(|e| e.to_string())?;
-    let mut command = Command::new(exe);
+const POST_EXIT_DRAIN: Duration = Duration::from_secs(2);
+
+fn spawn_reader<R: io::Read + Send + 'static>(
+    mut stream: R,
+) -> (Arc<Mutex<Vec<u8>>>, thread::JoinHandle<()>) {
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let shared = Arc::clone(&buffer);
+    let handle = thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        while let Ok(n) = stream.read(&mut chunk) {
+            if n == 0 || Arc::strong_count(&shared) == 1 {
+                break;
+            }
+            if let Ok(mut guard) = shared.lock() {
+                guard.extend_from_slice(&chunk[..n]);
+            }
+        }
+    });
+    (buffer, handle)
+}
+
+fn buffer_to_string(buffer: &Mutex<Vec<u8>>) -> String {
+    let bytes = buffer.lock().map(|g| g.clone()).unwrap_or_default();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Runs a command with piped output and a timeout. After the child exits it waits at most two seconds for the pipes to close, so a detached grandchild holding them cannot block the caller.
+fn run_command(
+    mut command: Command,
+    stdin_body: Option<String>,
+    timeout_ms: u64,
+) -> Result<CliRun, String> {
     command
-        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(if stdin_body.is_some() {
@@ -3918,40 +4048,30 @@ fn run_cli(args: &[String], stdin_body: Option<String>, timeout_ms: u64) -> Resu
             .map_err(|e| format!("failed to write child stdin: {}", e))?;
     }
 
-    let mut child_stdout = child
+    let child_stdout = child
         .stdout
         .take()
         .ok_or_else(|| "failed to open child stdout".to_string())?;
-    let mut child_stderr = child
+    let child_stderr = child
         .stderr
         .take()
         .ok_or_else(|| "failed to open child stderr".to_string())?;
 
-    let stdout_thread = thread::spawn(move || {
-        let mut buf = Vec::new();
-        child_stdout.read_to_end(&mut buf).map(|_| buf)
-    });
-    let stderr_thread = thread::spawn(move || {
-        let mut buf = Vec::new();
-        child_stderr.read_to_end(&mut buf).map(|_| buf)
-    });
+    let (stdout_buf, stdout_thread) = spawn_reader(child_stdout);
+    let (stderr_buf, stderr_thread) = spawn_reader(child_stderr);
 
     let started = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
+    let mut timed_out = false;
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
+            Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 if started.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    let stdout = join_output(stdout_thread)?;
-                    let stderr = join_output(stderr_thread)?;
-                    return Ok(CliRun {
-                        exit_code: None,
-                        stdout,
-                        stderr: append_timeout_message(stderr, timeout_ms),
-                    });
+                    timed_out = true;
+                    break None;
                 }
                 thread::sleep(Duration::from_millis(20));
             }
@@ -3959,22 +4079,30 @@ fn run_cli(args: &[String], stdin_body: Option<String>, timeout_ms: u64) -> Resu
         }
     };
 
-    let stdout = join_output(stdout_thread)?;
-    let stderr = join_output(stderr_thread)?;
+    let deadline = Instant::now() + POST_EXIT_DRAIN;
+    while Instant::now() < deadline && !(stdout_thread.is_finished() && stderr_thread.is_finished())
+    {
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let stdout = buffer_to_string(&stdout_buf);
+    let mut stderr = buffer_to_string(&stderr_buf);
+    if timed_out {
+        stderr = append_timeout_message(stderr, timeout_ms);
+    }
 
     Ok(CliRun {
-        exit_code: status.code(),
+        exit_code: status.and_then(|s| s.code()),
         stdout,
         stderr,
     })
 }
 
-fn join_output(handle: thread::JoinHandle<io::Result<Vec<u8>>>) -> Result<String, String> {
-    let bytes = handle
-        .join()
-        .map_err(|_| "failed to join output reader".to_string())?
-        .map_err(|e| e.to_string())?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+fn run_cli(args: &[String], stdin_body: Option<String>, timeout_ms: u64) -> Result<CliRun, String> {
+    let exe = env::current_exe().map_err(|e| e.to_string())?;
+    let mut command = Command::new(exe);
+    command.args(args);
+    run_command(command, stdin_body, timeout_ms)
 }
 
 fn append_timeout_message(stderr: String, timeout_ms: u64) -> String {
@@ -4259,6 +4387,17 @@ mod tests {
 
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn run_command_returns_when_a_grandchild_holds_the_pipe() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("sleep 30 & echo ready");
+        let started = Instant::now();
+        let run = run_command(command, None, 25_000).expect("run_command should succeed");
+        assert!(run.stdout.contains("ready"), "stdout: {:?}", run.stdout);
+        assert!(started.elapsed() < Duration::from_secs(15));
+    }
+
     #[test]
     fn tools_list_contains_typed_tools() {
         let tools = tools();
@@ -4330,14 +4469,20 @@ mod tests {
 
     #[test]
     fn open_uses_cli_headless_selection_with_custom_windows_chrome() {
-        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_HEADED"]);
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_HEADED",
+            "AGENT_BROWSER_EXECUTABLE_PATH",
+        ]);
         guard.set("AGENT_BROWSER_HEADED", "true");
+        guard.set(
+            "AGENT_BROWSER_EXECUTABLE_PATH",
+            "C:\\Chrome for Testing\\chrome.exe",
+        );
         // An MCP caller can explicitly select the headless/private-desktop
         // launch path even when the user's default is headed.
         let arguments = json!({
             "headed": false,
-            "url": "https://example.com",
-            "extraArgs": ["--executable-path", "C:\\Chrome for Testing\\chrome.exe"]
+            "url": "https://example.com"
         });
         let args = cli_tool_args(&arguments, open_args(&arguments).unwrap(), None).unwrap();
         let flags = crate::flags::parse_flags(&args);
@@ -4576,6 +4721,30 @@ mod tests {
     }
 
     #[test]
+    fn call_tool_rejects_unknown_argument() {
+        let err = call_tool(
+            Some(&json!({
+                "name": TOOL_TAB_CLOSE,
+                "arguments": {"tabId": "t13"}
+            })),
+            &McpConfig::default(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("tabId"));
+        let listed = err.message.split("Tool arguments:").nth(1).unwrap();
+        assert!(listed.contains("tab"));
+        assert!(!listed.contains("session"));
+    }
+
+    #[test]
+    fn reject_unknown_arguments_accepts_declared_and_shared_keys() {
+        let definition = find_tool(TOOL_CLICK).unwrap();
+        let args = json!({"selector": "@e1", "session": "s", "timeoutMs": 5});
+        reject_unknown_arguments(TOOL_CLICK, &definition, &args).unwrap();
+    }
+
+    #[test]
     fn tools_profiles_tool_lists_startup_profiles() {
         let result = call_tool(
             Some(&json!({
@@ -4685,7 +4854,7 @@ mod tests {
             "reference": "@company/agent-browser-plugin-vault",
             "name": "vault",
             "capabilities": ["credential.read", "command.run"],
-            "global": true,
+            "project": true,
             "noManifest": true,
         }))
         .unwrap();
@@ -4702,7 +4871,7 @@ mod tests {
                 "credential.read",
                 "--capability",
                 "command.run",
-                "--global",
+                "--project",
                 "--no-manifest",
             ]
         );
@@ -4729,16 +4898,14 @@ mod tests {
 
     #[test]
     fn obscura_extra_args_use_the_canonical_cli_parser() {
-        let arguments = json!({"extraArgs": [
-            "--engine", "obscura", "--executable-path", "/tmp/obscura",
-            "--proxy-bypass", "localhost"
-        ]});
-        let mut args = vec!["open".to_string(), "https://example.com".to_string()];
-        args.extend(
-            optional_string_array(&arguments, "extraArgs")
-                .unwrap()
-                .unwrap(),
-        );
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_EXECUTABLE_PATH",
+            "AGENT_BROWSER_PROXY_BYPASS",
+        ]);
+        guard.set("AGENT_BROWSER_EXECUTABLE_PATH", "/tmp/obscura");
+        guard.set("AGENT_BROWSER_PROXY_BYPASS", "localhost");
+        let arguments = json!({"extraArgs": ["--engine", "obscura"]});
+        let args = cli_tool_args(&arguments, vec!["open".to_string()], None).unwrap();
         let flags = crate::flags::parse_flags(&args);
         assert_eq!(flags.engine.as_deref(), Some("obscura"));
         assert_eq!(flags.executable_path.as_deref(), Some("/tmp/obscura"));
@@ -4762,6 +4929,42 @@ mod tests {
     }
 
     #[test]
+    fn extra_args_reject_operator_owned_globals() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_CONFIG",
+            "HOME",
+        ]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        guard.remove("AGENT_BROWSER_CONFIG");
+        guard.set("HOME", dir.path().to_str().unwrap());
+        for bad in [
+            vec!["--allowed-domains", "x"],
+            vec!["--action-policy", "/p"],
+            vec!["--confirm-actions", "none"],
+            vec!["--executable-path", "/bin/sh"],
+            vec!["--args", "--foo"],
+            vec!["--config", "/c.json"],
+            vec!["--allowed-domains=x"],
+        ] {
+            let arguments = json!({ "extraArgs": bad });
+            let error = cli_tool_args(&arguments, vec!["open".to_string()], None).unwrap_err();
+            assert!(error.message.contains("extraArgs may not set"), "{:?}", bad);
+        }
+        for ok in [vec!["--engine", "obscura"], vec!["--full"], vec!["-i"]] {
+            let arguments = json!({ "extraArgs": ok });
+            assert!(cli_tool_args(&arguments, vec!["open".to_string()], None).is_ok());
+        }
+        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", "localhost");
+        let mut args = Vec::new();
+        let error =
+            append_common_global_args(&mut args, &json!({ "allowedDomains": ["127.0.0.1"] }), None)
+                .unwrap_err();
+        assert!(error.message.contains("already set"));
+    }
+
+    #[test]
     fn common_global_args_use_equals_form_for_string_restore_key() {
         let mut args = Vec::new();
 
@@ -4780,6 +4983,15 @@ mod tests {
 
     #[test]
     fn common_global_args_include_allowed_domains() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_CONFIG",
+            "HOME",
+        ]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        guard.remove("AGENT_BROWSER_CONFIG");
+        guard.set("HOME", dir.path().to_str().unwrap());
         let mut args = Vec::new();
 
         append_common_global_args(

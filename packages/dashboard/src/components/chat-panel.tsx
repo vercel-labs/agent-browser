@@ -3,9 +3,8 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import { useAtomValue } from "jotai/react";
 import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
 import { Streamdown } from "streamdown";
-import { getChatApiUrl, chatModelAtom, availableModelsAtom } from "@/store/chat";
+import { CHAT_STORAGE_PREFIX, chatModelAtom, availableModelsAtom, getChat, setChatModel, stripImagesForStorage } from "@/store/chat";
 import { activeSessionNameAtom } from "@/store/sessions";
 import { ModelSelector } from "@/components/model-selector";
 import { shikiTheme } from "@/lib/shiki-theme";
@@ -64,14 +63,6 @@ const chatComponents = {
     );
   },
 };
-
-const STORAGE_PREFIX = "dashboard-chat-";
-const IMAGE_DATA_URL_RE = /data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g;
-
-function stripImagesForStorage(messages: unknown[]): unknown[] {
-  const json = JSON.stringify(messages);
-  return JSON.parse(json.replace(IMAGE_DATA_URL_RE, "[image stripped]"));
-}
 
 const SUGGESTIONS = [
   "Go to vercel.com",
@@ -320,32 +311,19 @@ export function ChatPanel() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const sessionName = useAtomValue(activeSessionNameAtom);
   const chatId = sessionName || "default";
-  const storageKey = `${STORAGE_PREFIX}${chatId}`;
-  const sessionRef = useRef(chatId);
-  sessionRef.current = chatId;
-  const modelRef = useRef(selectedModel);
-  modelRef.current = selectedModel;
+  const storageKey = `${CHAT_STORAGE_PREFIX}${chatId}`;
+  setChatModel(selectedModel);
   const messageTimestamps = useRef<Record<string, number>>({});
 
   useEffect(() => {
     if (defaultModel) setSelectedModel(defaultModel);
   }, [defaultModel]);
 
-  const transport = useRef(
-    new DefaultChatTransport({
-      api: getChatApiUrl(),
-      body: () => ({
-        session: sessionRef.current,
-        model: modelRef.current,
-      }),
-    }),
-  ).current;
+  const { messages, sendMessage, stop, status, setMessages, error } = useChat({ chat: getChat(chatId) });
 
-  const { messages, sendMessage, stop, status, setMessages, error } = useChat({
-    id: chatId,
-    transport,
-    onError: () => setErrorDismissed(false),
-  });
+  useEffect(() => {
+    setErrorDismissed(false);
+  }, [error]);
 
   const visibleError = error && !errorDismissed ? error : undefined;
   const isLoading = status === "streaming" || status === "submitted";
@@ -393,23 +371,6 @@ export function ChatPanel() {
   useEffect(() => {
     scrollToBottom();
   }, [messages, visibleError, scrollToBottom]);
-
-  // Restore messages from localStorage when chatId changes
-  useEffect(() => {
-    try {
-      const stored = localStorage.getItem(storageKey);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          setMessages(parsed);
-          return;
-        }
-      }
-    } catch {
-      // ignore
-    }
-    setMessages([]);
-  }, [chatId, storageKey, setMessages]);
 
   // Persist messages to localStorage (strip base64 images to save space)
   useEffect(() => {

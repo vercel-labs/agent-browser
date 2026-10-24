@@ -87,7 +87,7 @@ File permissions are enforced on both Unix (`chmod 600`/`700`) and Windows (`ica
 
 ### Plugins
 
-Plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol. Configure them in `agent-browser.json`:
+Plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol. Configure them in `~/.agent-browser/config.json`. The auto-discovered `./agent-browser.json` cannot set `plugins` (it is ignored with a warning); set them in `~/.agent-browser/config.json`, env vars or flags, or load the file explicitly with `--config ./agent-browser.json`.
 
 See [Plugins](/plugins) for the plugin author protocol and implementation examples. Use `agent-browser plugin add <ref>` to create plugin config automatically.
 
@@ -245,6 +245,8 @@ Example policy (restrictive):
   "allow": ["navigate", "snapshot", "click", "scroll", "wait", "get"]
 }
 ```
+
+A missing or invalid policy file blocks every command until it is fixed (`close --all` can still shut the daemon down); an empty `allow` list falls back to `default`.
 
 <table>
   <thead>

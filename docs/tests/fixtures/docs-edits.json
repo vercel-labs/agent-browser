@@ -8,12 +8,56 @@
       {
         "from": "# Clear CA trust retained by the running session",
         "to": "# Clear CA trust retained by the running session\n--use-system-ca          # Use the OS trust store for CLI requests (read, install, upgrade, doctor)"
+      },
+      {
+        "from": "Each tool also accepts `extraArgs` for advanced CLI flags and exact CLI parity.",
+        "to": "Each tool also accepts `extraArgs` for per-command options and display or emulation flags such as `--engine`, but global flags that change network, file, policy, or host access (such as `--allowed-domains`, `--action-policy`, `--executable-path`, `--args`, and `--config`) are rejected and must be set in the MCP server's environment or config."
+      },
+      {
+        "from": "Each tool also accepts extraArgs for advanced CLI flags and exact CLI parity.",
+        "to": "Each tool also accepts extraArgs for per-command options and display or emulation flags such as --engine, but global flags that change network, file, policy, or host access (such as --allowed-domains, --action-policy, --executable-path, --args, and --config) are rejected and must be set in the MCP server's environment or config."
       }
     ],
     "/configuration": [
       {
         "from": "This initial implementation does not support",
         "to": "Browser trust does not support"
+      },
+      {
+        "from": "Project-level plugin entries are appended after user-level entries. If two entries use the same name, agent-browser resolves the later entry, so a project can override a user default. `AGENT_BROWSER_PLUGINS` can replace config discovery with a JSON array using the same shape.",
+        "to": "Plugins from `~/.agent-browser/config.json` are used, and the auto-discovered `./agent-browser.json` cannot set `plugins`; load a project file explicitly with `--config` to use its plugin entries. `AGENT_BROWSER_PLUGINS` can replace config discovery with a JSON array using the same shape."
+      },
+      {
+        "from": "Project-level plugin entries are appended after user-level entries. If two entries use the same name, agent-browser resolves the later entry, so a project can override a user default. AGENT_BROWSER_PLUGINS can replace config discovery with a JSON array using the same shape.",
+        "to": "Plugins from ~/.agent-browser/config.json are used, and the auto-discovered ./agent-browser.json cannot set plugins; load a project file explicitly with --config to use its plugin entries. AGENT_BROWSER_PLUGINS can replace config discovery with a JSON array using the same shape."
+      },
+      {
+        "from": "See [Plugins](/plugins) for the plugin author protocol and implementation examples. Use `agent-browser plugin add <ref>` to create this config automatically.",
+        "to": "See [Plugins](/plugins) for the plugin author protocol and implementation examples. Use `agent-browser plugin add <ref>` to create this config automatically; it writes `~/.agent-browser/config.json` by default, and `--project` writes `./agent-browser.json` (only used with `--config`)."
+      },
+      {
+        "from": "See Plugins for the plugin author protocol and implementation examples. Use agent-browser plugin add <ref> to create this config automatically.",
+        "to": "See Plugins for the plugin author protocol and implementation examples. Use agent-browser plugin add <ref> to create this config automatically; it writes ~/.agent-browser/config.json by default, and --project writes ./agent-browser.json (only used with --config)."
+      }
+    ],
+    "/plugins": [
+      {
+        "from": "`plugin add` writes `./agent-browser.json` by default. Use `--global` to write `~/.agent-browser/config.json` instead.",
+        "to": "`plugin add` writes `~/.agent-browser/config.json` by default. Use `--project` to write `./agent-browser.json` instead (only used with `--config`)."
+      },
+      {
+        "from": "plugin add writes ./agent-browser.json by default. Use --global to write ~/.agent-browser/config.json instead.",
+        "to": "plugin add writes ~/.agent-browser/config.json by default. Use --project to write ./agent-browser.json instead (only used with --config)."
+      }
+    ],
+    "/security": [
+      {
+        "from": "Plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol. Configure them in `agent-browser.json`:",
+        "to": "Plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol. Configure them in `~/.agent-browser/config.json`. The auto-discovered `./agent-browser.json` cannot set `plugins` (it is ignored with a warning); set them in `~/.agent-browser/config.json`, env vars or flags, or load the file explicitly with `--config ./agent-browser.json`."
+      },
+      {
+        "from": "Plugins run out-of-process over the agent-browser.plugin.v1 stdio JSON protocol. Configure them in agent-browser.json:",
+        "to": "Plugins run out-of-process over the agent-browser.plugin.v1 stdio JSON protocol. Configure them in ~/.agent-browser/config.json. The auto-discovered ./agent-browser.json cannot set plugins (it is ignored with a warning); set them in ~/.agent-browser/config.json, env vars or flags, or load the file explicitly with --config ./agent-browser.json."
       }
     ],
     "/proxy": [
@@ -36,6 +80,16 @@
       {
         "from": "It is not supported on macOS or Windows.",
         "to": "Browser trust is not supported on macOS or Windows, where Chromium already uses the operating system trust store."
+      }
+    ],
+    "/engines/obscura": [
+      {
+        "from": "MCP tools use the same provider through `extraArgs`: `[\"--engine\", \"obscura\", \"--executable-path\", \"/path/to/obscura\"]`.",
+        "to": "MCP tools use the same provider: set `AGENT_BROWSER_EXECUTABLE_PATH` in the MCP server's environment and pass `extraArgs: [\"--engine\", \"obscura\"]`, because `--executable-path` is rejected in `extraArgs`."
+      },
+      {
+        "from": "MCP tools use the same provider through extraArgs: [\"--engine\", \"obscura\", \"--executable-path\", \"/path/to/obscura\"].",
+        "to": "MCP tools use the same provider: set AGENT_BROWSER_EXECUTABLE_PATH in the MCP server's environment and pass extraArgs: [\"--engine\", \"obscura\"], because --executable-path is rejected in extraArgs."
       }
     ]
   },

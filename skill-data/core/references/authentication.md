@@ -167,9 +167,9 @@ agent-browser auth login work --no-navigate --url https://identity.example.com/l
 
 ## Plugins
 
-Use credential provider plugins when credentials live in external vault software. Plugins are configured in `agent-browser.json` and run as external executables over the `agent-browser.plugin.v1` stdio JSON protocol.
+Use credential provider plugins when credentials live in external vault software. Plugins are configured in `~/.agent-browser/config.json` and run as external executables over the `agent-browser.plugin.v1` stdio JSON protocol. The auto-discovered `./agent-browser.json` cannot set `plugins` (it is ignored with a warning); set them in `~/.agent-browser/config.json`, env vars or flags, or load the file explicitly with `--config ./agent-browser.json`.
 
-Add a plugin with `plugin add`. A plain `name` or `@scope/name` resolves from npm; `owner/repo` resolves from GitHub:
+Add a plugin with `plugin add`, which writes `~/.agent-browser/config.json` by default; use `--project` for `./agent-browser.json` (only used with `--config`). A plain `name` or `@scope/name` resolves from npm; `owner/repo` resolves from GitHub:
 
 ```bash
 agent-browser plugin add agent-browser-plugin-vault --name vault

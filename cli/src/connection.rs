@@ -206,6 +206,60 @@ pub fn is_pid_alive(pid: u32) -> bool {
     }
 }
 
+/// Returns true only when the process image name starts with "agent-browser" (case-insensitive), and false when it cannot be determined.
+/// Another agent-browser process that reuses the PID still passes.
+pub fn is_agent_browser_process(pid: u32) -> bool {
+    let path: Option<String>;
+    #[cfg(target_os = "linux")]
+    {
+        path = fs::read_link(format!("/proc/{}/exe", pid))
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut buf = vec![0u8; 4096];
+        let n =
+            unsafe { libc::proc_pidpath(pid as i32, buf.as_mut_ptr() as *mut libc::c_void, 4096) };
+        path = if n > 0 {
+            Some(String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+        } else {
+            None
+        };
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::QueryFullProcessImageNameW;
+        path = unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle == 0 {
+                None
+            } else {
+                let mut buf = [0u16; 1024];
+                let mut len = buf.len() as u32;
+                let ok = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut len);
+                CloseHandle(handle);
+                if ok != 0 {
+                    Some(String::from_utf16_lossy(&buf[..len as usize]))
+                } else {
+                    None
+                }
+            }
+        };
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = pid;
+        path = None;
+    }
+    path.and_then(|p| {
+        p.rsplit(['/', '\\'])
+            .next()
+            .map(|n| n.to_ascii_lowercase().starts_with("agent-browser"))
+    })
+    .unwrap_or(false)
+}
+
 /// A currently-running daemon session discovered by [`walk_daemons`].
 #[derive(Debug, Clone)]
 pub struct ActiveSession {
@@ -723,7 +777,12 @@ fn kill_stale_daemon(session: &str) {
 
     let pid_path = get_pid_path(session);
     if let Ok(pid_str) = fs::read_to_string(&pid_path) {
-        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+        if let Some(pid) = pid_str
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|p| is_agent_browser_process(*p))
+        {
             #[cfg(unix)]
             {
                 unsafe {
@@ -786,6 +845,22 @@ fn request_graceful_daemon_shutdown(session: &str) -> bool {
 fn stop_existing_daemon_for_restart(session: &str) {
     if !request_graceful_daemon_shutdown(session) {
         kill_stale_daemon(session);
+    }
+}
+
+/// Marks this process's stdout and stderr non-inheritable so a detached child cannot hold a reader's pipes open.
+#[cfg(windows)]
+pub(crate) fn prevent_stdio_handle_inheritance() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+
+    for handle in [
+        std::io::stdout().as_raw_handle(),
+        std::io::stderr().as_raw_handle(),
+    ] {
+        if !handle.is_null() {
+            unsafe { SetHandleInformation(handle as HANDLE, HANDLE_FLAG_INHERIT, 0) };
+        }
     }
 }
 
@@ -897,6 +972,8 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+
+        prevent_stdio_handle_inheritance();
 
         let mut cmd = Command::new(&exe_path);
         cmd.env("AGENT_BROWSER_DAEMON", "1");
@@ -1211,6 +1288,18 @@ fn exchange<S: Read + Write>(mut stream: S, request: &[u8]) -> Result<Response, 
 mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
+
+    #[cfg(unix)]
+    #[test]
+    fn unrelated_process_is_not_agent_browser() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let unrelated = is_agent_browser_process(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(!unrelated);
+        assert!(!is_agent_browser_process(0));
+        assert!(!is_agent_browser_process(u32::MAX));
+    }
 
     /// Repro for #2032: a daemon that reads the request and closes without
     /// replying must see the request once.

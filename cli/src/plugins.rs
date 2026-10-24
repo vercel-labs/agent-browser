@@ -496,7 +496,7 @@ fn parse_plugin_add_args(args: &[String]) -> Result<PluginAddOptions, String> {
     let mut reference = None;
     let mut name = None;
     let mut capabilities = Vec::new();
-    let mut scope = PluginConfigScope::Project;
+    let mut scope = PluginConfigScope::Global;
     let mut no_manifest = false;
     let mut i = 2;
 

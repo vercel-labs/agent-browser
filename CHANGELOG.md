@@ -1,8 +1,43 @@
 # agent-browser
 
-## 0.39.1
+## 0.39.2
 
 <!-- release:start -->
+
+### Bug Fixes
+
+- Fixed **paused network requests** being lost when the CDP event receiver falls behind, preventing requests from remaining stalled (#2110)
+- Fixed **domain-filtered redirects** so `open` reports an error when the main document redirects to a blocked host (#2114)
+- Fixed **Eve compatibility** with the current tool contract and sandbox execution model (#2157)
+- Fixed **browser launch arguments** so commas and negative coordinates inside flag values are preserved in `--args` and `AGENT_BROWSER_ARGS` (#2141)
+- Fixed **MCP argument validation** so undeclared keys return an error instead of silently selecting default behavior (#2175)
+- Fixed **click and double-click targeting** so hidden, disabled, and off-viewport elements return an error instead of reporting success (#2173)
+- Fixed **CDP attachment persistence** so follow-up commands retain the attached browser (#2155)
+- Fixed **stale element references** so ambiguous recovery fails instead of selecting another element (#2145)
+- Fixed **target and session invalidation** when related CDP events arrive in the same batch (#2176)
+- Fixed **policy loading failures** so unreadable or invalid policy files deny actions instead of continuing without the policy (#2179)
+
+### Testing
+
+- Made **native E2E fixtures** independent of live websites and installed the required Obscura binary for engine verification (#2113)
+
+### Contributors
+
+- @Railly
+- @lahfir
+- @cmpadden
+- @holny
+- @KimHyeongRae0
+- @jin-2-kakaoent
+- @asif786ka
+- @tlq5l
+- @aniketsaurav18
+- @jerryfane
+
+<!-- release:end -->
+
+## 0.39.1
+
 ### Bug Fixes
 
 - Fixed **duplicate command execution after a lost daemon response** so mutating and launch commands are no longer retried after any request bytes have been sent. CLI JSON and MCP responses report `outcome_unknown` so callers can inspect the result before retrying; read-only commands and failures before sending retain their retries (#2085)
@@ -11,7 +46,6 @@
 
 - @Railly
 - @rotemb-wond
-<!-- release:end -->
 
 ## 0.39.0
 
