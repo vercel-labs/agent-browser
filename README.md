@@ -378,12 +378,16 @@ agent-browser network har stop [output.har]    # Stop and save HAR (temp path if
 
 ```bash
 agent-browser tab                              # List tabs (shows `tabId` and optional label)
+agent-browser tab list --filter docs --limit 5 # First 5 tabs matching title or URL
+agent-browser tab --filter example.com        # Shorthand for tab list --filter
 agent-browser tab new [url]                    # New tab (optionally with URL)
 agent-browser tab new --label docs [url]       # New tab with a user-assigned label
 agent-browser tab <t<N>|label>                 # Switch to a tab by id or label
 agent-browser tab close [t<N>|label]           # Close a tab (defaults to active)
 agent-browser window new                       # New window
 ```
+
+`agent-browser tab list [--filter <text>] [--limit <n>]` (alias: `agent-browser tab [--filter <text>] [--limit <n>]`) filters by case-insensitive literal substring in the title or URL, not labels or regex; an empty filter matches all tabs. Filtering precedes the positive-integer limit, preserves order, stable ids and active flags, and never changes tab selection. With neither option, the full output and JSON schema are unchanged. Missing option values and zero, negative, fractional, invalid or overflowing limits are errors. MCP `agent_browser_tab_list` accepts the same optional `filter` string and positive-integer `limit`.
 
 Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused within a session, so scripts and agents can keep referring to the same tab even after other tabs are opened or closed. Positional integers like `tab 2` are **not** accepted; the `t` prefix disambiguates handles from indices and mirrors the `@e1` convention used for element refs.
 
@@ -1036,6 +1040,8 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 
 | Option | Description |
 |--------|-------------|
+| `--filter <text>` (tab listing only) | Case-insensitive literal substring match on tab title or URL |
+| `--limit <n>` (tab listing only) | Return at most N tabs after filtering; requires a positive integer |
 | `--session <name>` | Use isolated session (or `AGENT_BROWSER_SESSION` env) |
 | `--restore [name]` | Auto-save/restore session state. Bare `--restore` uses `--session` as the key |
 | `--restore-save <policy>` | Restore save policy: `auto`, `always`, or `never` |
