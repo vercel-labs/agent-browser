@@ -1794,6 +1794,76 @@ async fn e2e_snapshot_refs_invalidate_iframe_navigation() {
     assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
 }
 
+/// Iframe HTML names are useful presentation fallbacks without changing the
+/// accessibility name kept in the ref map or exposing frame URLs.
+#[tokio::test]
+#[ignore]
+async fn e2e_snapshot_labels_nested_iframes_without_leaking_urls() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(&json!({ "action": "launch", "headless": true }), &mut state).await,
+    );
+
+    let html = r#"<body>
+        <iframe id="outer" name="outer-frame" srcdoc="<iframe name='content-frame' srcdoc='&lt;button&gt;Nested result&lt;/button&gt;'></iframe>"></iframe>
+        <iframe id="titled" name="title-helper" title="Accessible frame" srcdoc="<button>Title result</button>"></iframe>
+        <iframe id="anonymous" src="about:blank?token=secret-frame-token"></iframe>
+    </body>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    assert_success(
+        &execute_command(&json!({ "action": "navigate", "url": url }), &mut state).await,
+    );
+    assert_evaluate(
+        &mut state,
+        "wait",
+        "new Promise(resolve => { const ready = () => { const outer = document.getElementById('outer'); const titled = document.getElementById('titled'); const nested = outer?.contentDocument?.querySelector('iframe'); if (nested?.contentDocument?.readyState === 'complete' && titled?.contentDocument?.readyState === 'complete') resolve(true); else requestAnimationFrame(ready); }; ready(); })",
+        json!(true),
+    )
+    .await;
+
+    let snapshot_response = execute_command(&json!({ "action": "snapshot" }), &mut state).await;
+    assert_success(&snapshot_response);
+    let data = get_data(&snapshot_response);
+    let snapshot = data["snapshot"].as_str().unwrap();
+    assert!(snapshot.contains("Iframe \"outer-frame\""), "{snapshot}");
+    assert!(snapshot.contains("Iframe \"content-frame\""), "{snapshot}");
+    assert!(
+        snapshot.contains("Iframe \"Accessible frame\""),
+        "{snapshot}"
+    );
+    assert_eq!(snapshot.matches("Iframe [ref=").count(), 1, "{snapshot}");
+    assert!(!snapshot.contains("secret-frame-token"), "{snapshot}");
+
+    let refs = data["refs"].as_object().unwrap();
+    let title_ref = refs
+        .iter()
+        .find(|(_, node)| node["role"] == "Iframe" && node["name"] == "Accessible frame")
+        .map(|(ref_id, _)| ref_id.clone())
+        .expect("title should remain the iframe's accessible ref name");
+    assert!(refs
+        .values()
+        .any(|node| node["role"] == "Iframe" && node["name"] == ""));
+    assert!(!refs.values().any(|node| {
+        node["role"] == "Iframe"
+            && (node["name"] == "outer-frame" || node["name"] == "content-frame")
+    }));
+
+    assert_success(
+        &execute_command(
+            &json!({ "action": "frame", "selector": format!("@{title_ref}") }),
+            &mut state,
+        )
+        .await,
+    );
+    let selected = execute_command(&json!({ "action": "snapshot" }), &mut state).await;
+    assert_success(&selected);
+    assert!(get_data(&selected)["snapshot"]
+        .as_str()
+        .unwrap()
+        .contains("Title result"));
+    assert_success(&execute_command(&json!({ "action": "close" }), &mut state).await);
+}
+
 // ---------------------------------------------------------------------------
 // Screenshot
 // ---------------------------------------------------------------------------
