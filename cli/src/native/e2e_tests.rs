@@ -6392,6 +6392,53 @@ async fn e2e_snapshot_cursor_interactive() {
     assert_success(&resp);
 }
 
+/// A full-page screenshot with a real device scale factor of 2 (not the
+/// emulated one, which already reports CSS pixels) must be the page size
+/// times two, with the page filling it, not twice that with the page in the
+/// top-left quarter.
+#[tokio::test]
+#[ignore]
+async fn e2e_screenshot_full_page_high_dpi() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true, "args": ["--force-device-scale-factor=2"] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "navigate", "url": "data:text/html,<body style='margin:0'><div style='height:2500px;background:%23c00'></div>" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let out = std::env::temp_dir()
+        .join("agent-browser-e2e-full-page-high-dpi.png")
+        .to_string_lossy()
+        .to_string();
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "screenshot", "fullPage": true, "path": out }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let img = image::open(&out).expect("decode screenshot").to_rgb8();
+    let _ = std::fs::remove_file(&out);
+    assert_eq!(img.dimensions(), (2560, 5000));
+    let corner = img.get_pixel(2550, 4990);
+    assert!(
+        corner[0] > 150 && corner[1] < 60 && corner[2] < 60,
+        "bottom-right corner should be page content, got {corner:?}"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// Verifies that `screenshot --annotate` completes in bounded time even with
 /// many interactive elements. Guards against the sequential CDP round-trip
 /// regression that caused hangs over high-latency WSS (Issue #841).
