@@ -918,6 +918,37 @@ impl BrowserManager {
     }
 
     async fn prepare_domains(&self, session_id: &str) -> Result<(), String> {
+        // Resume a target that browser-level auto-attach paused with
+        // `waitForDebuggerOnStart` before sending any renderer-bound command.
+        //
+        // A renderer-initiated opener popup (a real `target="_blank"` click)
+        // attaches paused before its navigation starts: `url: ""`, no execution
+        // context. Such a renderer never answers `Page.enable` below, so the
+        // command rides the 30s CDP timeout and
+        // `close_after_network_control_failure` tears the whole browser down
+        // (#1651, #2031). `Runtime.runIfWaitingForDebugger` is the command that
+        // unblocks it and is a no-op on a target that is not waiting, so it is
+        // safe to send first on every path. It is sent without waiting for a
+        // response so a renderer that cannot answer at all (a discarded tab,
+        // #1528) still fails on the command that matters instead of stalling
+        // here.
+        //
+        // Containment: callers that install network controls on an
+        // auto-attached session send `Fetch.enable` BEFORE calling this (see
+        // `install_network_controls_for_session` in actions.rs), because the
+        // browser process answers it even while the renderer is frozen and a
+        // renderer-initiated popup issues its first navigation request the
+        // moment it is resumed. That keeps the popup's first request
+        // fail-closed. The resume still precedes
+        // `Page.addScriptToEvaluateOnNewDocument`, so the in-page half of the
+        // filter can miss the popup's first document; it covers the next
+        // document, and `waitForDebuggerOnStart` itself stays enabled because
+        // pausing new targets before their first request is the containment
+        // guarantee the network controls are built on.
+        let _ = self
+            .client
+            .send_command_no_wait("Runtime.runIfWaitingForDebugger", None, Some(session_id))
+            .await;
         self.client
             .send_command_no_params("Page.enable", Some(session_id))
             .await?;
@@ -5092,5 +5123,217 @@ mod tests {
             0,
             "cancelled connect-time probes left orphaned CDP requests in the pending map"
         );
+    }
+
+    /// Mock CDP endpoint that models a `waitForDebuggerOnStart`-paused
+    /// renderer-initiated popup: a session answers no renderer-bound command
+    /// until `Runtime.runIfWaitingForDebugger` has arrived for it, while
+    /// browser-side commands (`Fetch.enable`, `Target.*`) are answered even
+    /// while frozen, exactly like Chrome. A `Page.enable` that arrives before
+    /// the resume is answered with an explicit error so a regression fails fast
+    /// instead of riding the 30s CDP timeout. Every command is recorded as
+    /// "method:session" so tests can assert the ordering.
+    async fn start_mock_paused_popup_cdp() -> (String, Arc<Mutex<Vec<String>>>) {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let order = Arc::new(Mutex::new(Vec::<String>::new()));
+        let order_for_server = order.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "ws://127.0.0.1:{}/devtools/browser/mock",
+            listener.local_addr().unwrap().port()
+        );
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let (mut tx, mut rx) = ws.split();
+            let mut resumed: HashSet<String> = HashSet::new();
+
+            while let Some(Ok(msg)) = rx.next().await {
+                let text = match msg {
+                    Message::Text(t) => t,
+                    Message::Ping(p) => {
+                        let _ = tx.send(Message::Pong(p)).await;
+                        continue;
+                    }
+                    _ => continue,
+                };
+                let cmd: Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let Some(id) = cmd["id"].as_u64() else {
+                    continue;
+                };
+                let method = cmd["method"].as_str().unwrap_or("").to_string();
+                let session = cmd["sessionId"].as_str().unwrap_or("").to_string();
+                order_for_server
+                    .lock()
+                    .await
+                    .push(format!("{}:{}", method, session));
+
+                if method == "Runtime.runIfWaitingForDebugger" {
+                    resumed.insert(session);
+                    let _ = tx
+                        .send(Message::Text(json!({ "id": id, "result": {} }).to_string()))
+                        .await;
+                    continue;
+                }
+                if !session.is_empty() && !resumed.contains(&session) {
+                    // Browser-side commands (Fetch.*, Target.*) are answered
+                    // even while the renderer is frozen, like real Chrome;
+                    // renderer-bound commands get no answer until the resume.
+                    // `Page.enable` reports the ordering mistake explicitly so
+                    // a regression fails fast.
+                    let renderer_bound = matches!(
+                        method.as_str(),
+                        "Page.enable"
+                            | "Page.addScriptToEvaluateOnNewDocument"
+                            | "Runtime.enable"
+                            | "Runtime.evaluate"
+                            | "Network.enable"
+                    );
+                    if !renderer_bound {
+                        let _ = tx
+                            .send(Message::Text(json!({ "id": id, "result": {} }).to_string()))
+                            .await;
+                        continue;
+                    }
+                    if method == "Page.enable" {
+                        let _ = tx
+                            .send(Message::Text(
+                                json!({
+                                    "id": id,
+                                    "error": {
+                                        "code": -32000,
+                                        "message": "renderer paused: Page.enable before Runtime.runIfWaitingForDebugger"
+                                    }
+                                })
+                                .to_string(),
+                            ))
+                            .await;
+                    }
+                    continue;
+                }
+                let _ = tx
+                    .send(Message::Text(json!({ "id": id, "result": {} }).to_string()))
+                    .await;
+            }
+        });
+
+        (url, order)
+    }
+
+    /// A manager bound to the mock endpoint, with no real browser behind it.
+    fn paused_popup_manager(client: CdpClient) -> BrowserManager {
+        BrowserManager {
+            client: Arc::new(client),
+            browser_process: None,
+            ws_url: String::new(),
+            pages: Vec::new(),
+            active_page_index: 0,
+            default_timeout_ms: 25_000,
+            download_path: None,
+            ignore_https_errors: false,
+            visited_origins: HashSet::new(),
+            next_tab_id: 1,
+            direct_page: false,
+            pin_tab: false,
+            bound_target_id: None,
+            bound_target_gone: None,
+            headless: true,
+        }
+    }
+
+    /// Regression for the `target="_blank"` popup failure: a renderer-initiated
+    /// opener popup attaches paused (`url: ""`, no execution context), so
+    /// `Page.enable` is never answered until `Runtime.runIfWaitingForDebugger`
+    /// resumes the target. `prepare_domains` must resume before its first
+    /// renderer-bound command, which covers every path that shares it: the
+    /// popup handler, `install_active_network_controls`, the iframe handler and
+    /// `enable_domains`.
+    #[tokio::test]
+    async fn prepare_domains_resumes_paused_target_before_page_enable() {
+        let (url, order) = start_mock_paused_popup_cdp().await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mgr = paused_popup_manager(client);
+
+        tokio::time::timeout(Duration::from_secs(5), mgr.prepare_domains_pub("S-popup"))
+            .await
+            .expect("prepare_domains must not stall on a paused popup session")
+            .expect("prepare_domains must succeed on a paused popup session");
+
+        let order = order.lock().await;
+        let commands: Vec<&str> = order
+            .iter()
+            .filter_map(|entry| entry.strip_suffix(":S-popup"))
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                "Runtime.runIfWaitingForDebugger",
+                "Page.enable",
+                "Runtime.enable",
+                "Network.enable",
+                "WebMCP.enable",
+                "Target.setAutoAttach",
+            ],
+            "the resume must precede every renderer-bound command"
+        );
+
+        mgr.client.close().await;
+    }
+
+    /// The resume must not open a containment hole: a renderer-initiated popup
+    /// issues its first navigation request the moment it is resumed, so
+    /// `install_network_controls_for_session` has to install the Fetch
+    /// interception first (the browser process answers `Fetch.enable` even
+    /// while the renderer is frozen), then resume and enable domains, and only
+    /// then install the in-page filter script, which needs a live renderer.
+    #[tokio::test]
+    async fn network_controls_install_fetch_interception_before_resume() {
+        let (url, order) = start_mock_paused_popup_cdp().await;
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mgr = paused_popup_manager(client);
+        let filter = crate::native::network::DomainFilter::new("example.com");
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::native::actions::install_network_controls_for_session(
+                &mgr,
+                "S-popup",
+                Some(&filter),
+                false,
+            ),
+        )
+        .await
+        .expect("installing controls must not stall on a paused popup session")
+        .expect("controls must install on a paused popup session");
+
+        let order = order.lock().await;
+        let commands: Vec<&str> = order
+            .iter()
+            .filter_map(|entry| entry.strip_suffix(":S-popup"))
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                "Fetch.enable",
+                "Runtime.runIfWaitingForDebugger",
+                "Page.enable",
+                "Runtime.enable",
+                "Network.enable",
+                "WebMCP.enable",
+                "Target.setAutoAttach",
+                "Page.addScriptToEvaluateOnNewDocument",
+                "Runtime.evaluate",
+            ],
+            "Fetch interception must precede the resume and the filter script must follow it"
+        );
+
+        mgr.client.close().await;
     }
 }

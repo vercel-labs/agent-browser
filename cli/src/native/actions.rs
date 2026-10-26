@@ -1013,41 +1013,86 @@ impl DaemonState {
                         let df = domain_filter.read().await.clone();
                         let has_proxy_creds = proxy_credentials.read().await.is_some();
                         let controls_active = df.is_some() || has_proxy_creds;
-                        let controls_result = if controls_active && target_needs_controls {
-                            async {
-                                if let Some(ref target) = target_info {
-                                    prepare_network_control_target_session(&client, &sid, target)
-                                        .await?;
-                                }
-                                if let Some(ref target) = target_info {
-                                    if target_is_worker_like(target) {
-                                        install_worker_network_controls_for_session(
-                                            &client,
-                                            &sid,
-                                            df.as_ref(),
-                                            has_proxy_creds,
-                                            target,
-                                        )
-                                        .await
+                        if controls_active && target_needs_controls {
+                            // The setup below awaits renderer-bound commands,
+                            // and a target paused by `waitForDebuggerOnStart`
+                            // only answers them once its first request has been
+                            // resolved on THIS event loop
+                            // (`Fetch.requestPaused`). Running the setup inline
+                            // would block the loop against its own resolver and
+                            // deadlock until the 30s CDP timeout, so it runs on
+                            // its own task and leaves the loop free.
+                            let client = client.clone();
+                            let sid = sid.clone();
+                            tokio::spawn(async move {
+                                let setup = async {
+                                    if let Some(ref target) = target_info {
+                                        if target_is_worker_like(target) {
+                                            prepare_network_control_target_session(
+                                                &client, &sid, target,
+                                            )
+                                            .await?;
+                                            install_worker_network_controls_for_session(
+                                                &client,
+                                                &sid,
+                                                df.as_ref(),
+                                                has_proxy_creds,
+                                                target,
+                                            )
+                                            .await
+                                        } else {
+                                            // Fetch interception first: the
+                                            // browser process answers it even
+                                            // while the renderer is frozen, and
+                                            // a renderer-initiated popup issues
+                                            // its first request the moment it
+                                            // resumes.
+                                            install_fetch_interception(
+                                                &client,
+                                                &sid,
+                                                df.as_ref(),
+                                                has_proxy_creds,
+                                            )
+                                            .await?;
+                                            prepare_network_control_target_session(
+                                                &client, &sid, target,
+                                            )
+                                            .await?;
+                                            install_domain_filter_script_for_session(
+                                                &client,
+                                                &sid,
+                                                df.as_ref(),
+                                            )
+                                            .await
+                                        }
                                     } else {
-                                        install_network_controls_for_session(
-                                            &client,
-                                            &sid,
-                                            df.as_ref(),
-                                            has_proxy_creds,
-                                        )
-                                        .await
+                                        Ok(())
                                     }
-                                } else {
-                                    Ok(())
                                 }
-                            }
-                            .await
+                                .await;
+                                match setup {
+                                    Ok(()) => {
+                                        let _ = client
+                                            .send_command_no_wait(
+                                                "Runtime.runIfWaitingForDebugger",
+                                                None,
+                                                Some(&sid),
+                                            )
+                                            .await;
+                                    }
+                                    Err(error) => {
+                                        eprintln!(
+                                            "Failed to apply browser network controls to auto-attached target: {}",
+                                            error
+                                        );
+                                    }
+                                }
+                            });
                         } else {
-                            Ok(())
-                        };
-
-                        if controls_result.is_ok() {
+                            // No controls to install, but the target may still
+                            // be paused by auto-attach (e.g. a cross-origin
+                            // iframe): resume it right away so its navigation
+                            // is not left frozen.
                             let _ = client
                                 .send_command_no_wait(
                                     "Runtime.runIfWaitingForDebugger",
@@ -1055,11 +1100,6 @@ impl DaemonState {
                                     Some(&sid),
                                 )
                                 .await;
-                        } else if let Err(error) = controls_result {
-                            eprintln!(
-                                "Failed to apply browser network controls to auto-attached target: {}",
-                                error
-                            );
                         }
                     }
                     Some(event) if event.method == "Fetch.requestPaused" => {
@@ -1363,7 +1403,13 @@ impl DaemonState {
             let controls_active = filter.is_some() || has_proxy_creds;
             let setup_result = if let Some(ref mgr) = self.browser {
                 async {
-                    mgr.prepare_domains_pub(iframe_sid).await?;
+                    install_network_controls_for_session(
+                        mgr,
+                        iframe_sid,
+                        filter.as_ref(),
+                        has_proxy_creds,
+                    )
+                    .await?;
                     let _ = mgr
                         .client
                         .send_command_no_params("DOM.enable", Some(iframe_sid.as_str()))
@@ -1372,15 +1418,6 @@ impl DaemonState {
                         .client
                         .send_command_no_params("Accessibility.enable", Some(iframe_sid.as_str()))
                         .await;
-                    if controls_active {
-                        install_network_controls_for_session(
-                            &mgr.client,
-                            iframe_sid,
-                            filter.as_ref(),
-                            has_proxy_creds,
-                        )
-                        .await?;
-                    }
                     mgr.resume_if_waiting_pub(iframe_sid).await
                 }
                 .await
@@ -1399,24 +1436,25 @@ impl DaemonState {
         }
 
         // Register top-level pages that browser-level auto-attach paused before
-        // their first request. Controls must be installed before resuming.
+        // their first request. `install_network_controls_for_session` installs
+        // the Fetch interception first (the browser answers it even while the
+        // renderer is frozen), then `prepare_domains` resumes the paused target
+        // before its first renderer-bound command, then the in-page filter
+        // script lands: a renderer-initiated popup issues its first request the
+        // moment it resumes, so interception must already be in place.
         for (target_info, page_sid) in &drained.attached_page_sessions {
             let filter = self.domain_filter.read().await.clone();
             let has_proxy_creds = self.proxy_credentials.read().await.is_some();
             let controls_active = filter.is_some() || has_proxy_creds;
             let setup_result = if let Some(ref mut mgr) = self.browser {
                 async {
-                    mgr.prepare_domains_pub(page_sid).await?;
-                    if controls_active {
-                        install_network_controls_for_session(
-                            &mgr.client,
-                            page_sid,
-                            filter.as_ref(),
-                            has_proxy_creds,
-                        )
-                        .await?;
-                    }
-
+                    install_network_controls_for_session(
+                        mgr,
+                        page_sid,
+                        filter.as_ref(),
+                        has_proxy_creds,
+                    )
+                    .await?;
                     let mut page_url = target_info.url.clone();
                     if let Some(ref filter) = filter {
                         if should_blank_existing_url(&page_url, filter) {
@@ -1543,16 +1581,13 @@ impl DaemonState {
                             None,
                         )
                         .await?;
-                    mgr.prepare_domains_pub(&attach.session_id).await?;
-                    if controls_active {
-                        install_network_controls_for_session(
-                            &mgr.client,
-                            &attach.session_id,
-                            filter.as_ref(),
-                            has_proxy_creds,
-                        )
-                        .await?;
-                    }
+                    install_network_controls_for_session(
+                        mgr,
+                        &attach.session_id,
+                        filter.as_ref(),
+                        has_proxy_creds,
+                    )
+                    .await?;
 
                     let mut page_url = te.target_info.url.clone();
                     if let Some(ref filter) = filter {
@@ -3823,6 +3858,14 @@ fn allowed_domains_disallowed_chrome_arg(args: &[String]) -> Option<&'static str
 }
 
 async fn prepare_auto_attached_session(client: &CdpClient, session_id: &str) -> Result<(), String> {
+    // Resume a `waitForDebuggerOnStart`-paused target before the first
+    // renderer-bound command: a paused renderer never answers `Page.enable`,
+    // which rides the 30s CDP timeout and closes the browser. See the note in
+    // `BrowserManager::prepare_domains` for the full reasoning and the
+    // containment trade-off. No-op when nothing is waiting.
+    let _ = client
+        .send_command_no_wait("Runtime.runIfWaitingForDebugger", None, Some(session_id))
+        .await;
     client
         .send_command_no_params("Page.enable", Some(session_id))
         .await?;
@@ -3873,24 +3916,50 @@ async fn prepare_network_control_target_session(
     }
 }
 
-async fn install_network_controls_for_session(
+pub(super) async fn install_network_controls_for_session(
+    mgr: &BrowserManager,
+    session_id: &str,
+    filter: Option<&DomainFilter>,
+    handle_auth_requests: bool,
+) -> Result<(), String> {
+    install_fetch_interception(&mgr.client, session_id, filter, handle_auth_requests).await?;
+    // `prepare_domains` resumes a `waitForDebuggerOnStart`-paused target
+    // before its first renderer-bound command (see the note in browser.rs).
+    mgr.prepare_domains_pub(session_id).await?;
+    install_domain_filter_script_for_session(&mgr.client, session_id, filter).await
+}
+
+/// Install the Fetch-level half of the network controls on an auto-attached
+/// session. Must run BEFORE the session is resumed: the browser process
+/// answers `Fetch.enable` even while the renderer is frozen, and a
+/// renderer-initiated popup issues its first navigation request the moment it
+/// is resumed, so interception has to be in place first or that request
+/// escapes the domain filter.
+async fn install_fetch_interception(
     client: &CdpClient,
     session_id: &str,
     filter: Option<&DomainFilter>,
     handle_auth_requests: bool,
 ) -> Result<(), String> {
-    if let Some(filter) = filter {
-        network::install_domain_filter(
-            client,
-            session_id,
-            &filter.allowed_domains,
-            handle_auth_requests,
-        )
-        .await?;
-    } else if handle_auth_requests {
-        network::install_domain_filter_fetch(client, session_id, true).await?;
+    if filter.is_none() && !handle_auth_requests {
+        return Ok(());
     }
+    network::install_domain_filter_fetch(client, session_id, handle_auth_requests).await
+}
 
+/// Install the in-page half of the domain filter. Must run AFTER the session
+/// is resumed: `Page.addScriptToEvaluateOnNewDocument` and `Runtime.evaluate`
+/// are renderer-bound and a frozen renderer never answers them. The script
+/// still covers the popup's next document, and the Fetch interception
+/// installed before the resume keeps every request fail-closed.
+async fn install_domain_filter_script_for_session(
+    client: &CdpClient,
+    session_id: &str,
+    filter: Option<&DomainFilter>,
+) -> Result<(), String> {
+    if let Some(filter) = filter {
+        network::install_domain_filter_script(client, session_id, &filter.allowed_domains).await?;
+    }
     Ok(())
 }
 
@@ -3950,9 +4019,8 @@ async fn install_active_network_controls(
     let session_ids = network_control_session_ids(mgr)?;
 
     for session_id in session_ids {
-        mgr.prepare_domains_pub(&session_id).await?;
         install_network_controls_for_session(
-            &mgr.client,
+            mgr,
             &session_id,
             filter.as_ref(),
             handle_auth_requests,
