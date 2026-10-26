@@ -462,8 +462,8 @@ agent-browser state load <path>       # Load auth state
 agent-browser state list              # List saved state files
 agent-browser state show <file>       # Show state summary
 agent-browser state rename <old> <new> # Rename state file
-agent-browser state clear [name]      # Clear states for session
-agent-browser state clear --all       # Clear all saved states
+agent-browser state clear <name>      # Clear saved states for one session name
+agent-browser state clear --all       # Clear all saved states (bare `state clear` is an error)
 agent-browser state clean --older-than <days>  # Delete old states
 ```
 

@@ -876,7 +876,7 @@ fn cleanup_restore_state_files(restore_key: &str) {
     if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
         for entry in entries.flatten() {
             let fname = entry.file_name().to_string_lossy().to_string();
-            if fname.starts_with(&format!("{}-", restore_key)) {
+            if fname.starts_with(&format!("{}.", restore_key)) {
                 let path = entry.path();
                 let _ = std::fs::remove_file(&path);
                 let _ = std::fs::remove_file(format!("{}.previous", path.to_string_lossy()));
@@ -11289,7 +11289,7 @@ async fn e2e_session_name_auto_restores_cookies() {
     if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
         for entry in entries.flatten() {
             let fname = entry.file_name().to_string_lossy().to_string();
-            if fname.starts_with(&format!("{}-", session_name)) {
+            if fname.starts_with(&format!("{}.", session_name)) {
                 let _ = std::fs::remove_file(entry.path());
             }
         }

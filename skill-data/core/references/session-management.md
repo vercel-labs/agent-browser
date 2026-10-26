@@ -96,7 +96,7 @@ agent-browser --session "$SESSION" session info --json
 
 ### Manual State Files
 
-Use `state save`, `state load`, and `--state <path>` when you need an explicit portable JSON file. Do not make agents construct paths under `~/.agent-browser/sessions/`; prefer `--restore` for reusable agent sessions.
+Use `state save`, `state load`, and `--state <path>` when you need an explicit portable JSON file. Do not make agents construct paths under `~/.agent-browser/sessions/`; prefer `--restore` for reusable agent sessions. `state clear <name>` removes only that restore key's saved states; `state clear --all` removes every saved state, and bare `state clear` is an error.
 
 ## Common Patterns
 
