@@ -2549,6 +2549,7 @@ fn cli_tool_args(
     }
     let mut args = vec!["--json".to_string()];
     append_common_global_args(&mut args, arguments, session)?;
+    args.push("--".to_string());
     args.extend(command_args);
     args.extend(extra_args);
     Ok(args)
