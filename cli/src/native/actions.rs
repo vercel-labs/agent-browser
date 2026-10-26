@@ -201,6 +201,14 @@ pub enum BackendType {
     WebDriver,
 }
 
+/// A file chooser an agent click opened. Chrome handed it to us instead of
+/// showing the operating system's file window, which no CDP command can close.
+#[derive(Debug, Clone)]
+pub struct PendingFileChooser {
+    pub session_id: String,
+    pub backend_node_id: i64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PendingDialog {
     pub dialog_type: String,
@@ -703,6 +711,8 @@ pub struct DaemonState {
     pub input_mode: String,
     /// Tracks the currently open JavaScript dialog (alert/confirm/prompt), if any.
     pub pending_dialog: Option<PendingDialog>,
+    /// The file chooser the last click opened, filled by the next `upload`.
+    pub pending_file_chooser: Option<PendingFileChooser>,
     /// A mouse button left logically down because a dialog opened between
     /// mousePressed and mouseReleased; released when the dialog is resolved.
     pub pending_pointer_release: Option<super::interaction::PendingRelease>,
@@ -834,6 +844,7 @@ impl DaemonState {
             mouse_state: MouseState::default(),
             input_mode: "instant".to_string(),
             pending_dialog: None,
+            pending_file_chooser: None,
             pending_pointer_release: None,
             auto_dialog: !matches!(
                 env::var("AGENT_BROWSER_NO_AUTO_DIALOG").as_deref(),
@@ -6467,14 +6478,18 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .await?;
     }
 
-    let result = interaction::click(
+    let (result, file_chooser) = intercept_file_chooser(
         &mgr.client,
         &session_id,
-        &state.ref_map,
-        selector,
-        button,
-        click_count,
-        &state.iframe_sessions,
+        interaction::click(
+            &mgr.client,
+            &session_id,
+            &state.ref_map,
+            selector,
+            button,
+            click_count,
+            &state.iframe_sessions,
+        ),
     )
     .await?;
     record_click_animation(
@@ -6483,11 +6498,68 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         &state.recording_state.shared_cursor,
     );
 
+    let file_chooser_opened = file_chooser.is_some();
+    state.pending_file_chooser = file_chooser;
     if result.dialog_opened {
         state.pending_pointer_release = result.pending_release;
         return Ok(json!({ "clicked": selector, "dialogOpened": true }));
     }
+    if file_chooser_opened {
+        return Ok(json!({ "clicked": selector, "fileChooserOpened": true }));
+    }
     Ok(json!({ "clicked": selector }))
+}
+
+/// Run `action` with Chrome's file chooser intercepted on `session_id` and
+/// return the chooser it opened, if any. Without interception a click on an
+/// upload control opens the operating system's file window, which stays on
+/// screen after `upload` has set the files, because no CDP command closes it.
+/// Interception covers only the agent's own action, so a person clicking the
+/// same control still gets the normal file window.
+async fn intercept_file_chooser<T>(
+    client: &CdpClient,
+    session_id: &str,
+    action: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<(T, Option<PendingFileChooser>), String> {
+    let mut events = client.subscribe();
+    client
+        .send_command(
+            "Page.setInterceptFileChooserDialog",
+            Some(json!({ "enabled": true })),
+            Some(session_id),
+        )
+        .await?;
+    let result = action.await;
+    // The page reports an opened chooser before it answers this command, so
+    // the event is already in `events` once it returns.
+    let disabled = client
+        .send_command(
+            "Page.setInterceptFileChooserDialog",
+            Some(json!({ "enabled": false })),
+            Some(session_id),
+        )
+        .await;
+    let mut chooser = None;
+    loop {
+        match events.try_recv() {
+            Ok(event) if event.method == "Page.fileChooserOpened" => {
+                if let (Some(session_id), Some(backend_node_id)) = (
+                    event.session_id,
+                    event.params.get("backendNodeId").and_then(Value::as_i64),
+                ) {
+                    chooser = Some(PendingFileChooser {
+                        session_id,
+                        backend_node_id,
+                    });
+                }
+            }
+            Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+            Err(_) => break,
+        }
+    }
+    let result = result?;
+    disabled?;
+    Ok((result, chooser))
 }
 
 async fn handle_dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -8738,7 +8810,8 @@ async fn handle_dialog(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     Ok(json!({ "handled": true, "accepted": accept }))
 }
 
-async fn handle_upload(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_upload(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let pending_chooser = state.pending_file_chooser.take();
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let selector = cmd
         .get("selector")
@@ -8760,8 +8833,47 @@ async fn handle_upload(cmd: &Value, state: &DaemonState) -> Result<Value, String
         })
         .unwrap_or_default();
 
-    mgr.upload_files(selector, &files, &state.ref_map, &state.iframe_sessions)
+    let is_file_input = mgr
+        .upload_files(selector, &files, &state.ref_map, &state.iframe_sessions)
         .await?;
+    if !is_file_input {
+        // A button or drop zone that opens a file chooser: use the chooser the
+        // last click opened, or click it now to open one.
+        let chooser = match pending_chooser {
+            Some(chooser) => chooser,
+            None => {
+                let session_id = mgr.active_session_id()?.to_string();
+                intercept_file_chooser(
+                    &mgr.client,
+                    &session_id,
+                    interaction::click(
+                        &mgr.client,
+                        &session_id,
+                        &state.ref_map,
+                        selector,
+                        "left",
+                        1,
+                        &state.iframe_sessions,
+                    ),
+                )
+                .await?
+                .1
+                .ok_or_else(|| {
+                    format!(
+                        "Element '{}' is not a file input and clicking it opened no file chooser",
+                        selector
+                    )
+                })?
+            }
+        };
+        mgr.client
+            .send_command(
+                "DOM.setFileInputFiles",
+                Some(json!({ "files": files, "backendNodeId": chooser.backend_node_id })),
+                Some(&chooser.session_id),
+            )
+            .await?;
+    }
     Ok(json!({ "uploaded": files.len(), "selector": selector }))
 }
 

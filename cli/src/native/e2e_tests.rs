@@ -9474,6 +9474,78 @@ async fn e2e_upload_with_css_selector() {
     assert_success(&resp);
 }
 
+/// A click on a control that opens a file chooser must not leave the
+/// operating system's file window on screen: the chooser is intercepted,
+/// reported on the click, and filled by `upload` on the same control, or by
+/// `upload` alone, which opens the chooser itself.
+#[tokio::test]
+#[ignore]
+async fn e2e_upload_through_file_chooser_button() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": native_test_fixture_url("upload_probe") }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let tmp = std::env::temp_dir().join(format!("ab-upload-chooser-{}.txt", std::process::id()));
+    std::fs::write(&tmp, "test").unwrap();
+    let name = tmp.file_name().unwrap().to_string_lossy().to_string();
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "click", "selector": "#pickButton" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["fileChooserOpened"], true);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "upload", "selector": "#pickButton", "files": [tmp.to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "gettext", "selector": "#result" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["text"], format!("uploaded:{}", name));
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "document.getElementById('result').textContent = ''; document.getElementById('fileInput').value = ''" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "upload", "selector": "#pickButton", "files": [tmp.to_string_lossy()] }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "8", "action": "gettext", "selector": "#result" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(get_data(&resp)["text"], format!("uploaded:{}", name));
+
+    let _ = std::fs::remove_file(&tmp);
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 // ---------------------------------------------------------------------------
 // Recording: default records the current active page
 // ---------------------------------------------------------------------------

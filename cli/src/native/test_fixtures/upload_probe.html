@@ -5,6 +5,7 @@
   <h1>Upload Test</h1>
   <label for="fileInput">Choose file:</label>
   <input type="file" id="fileInput" name="fileInput">
+  <button id="pickButton" onclick="document.getElementById('fileInput').click()">Select files</button>
   <div id="result"></div>
   <script>
     document.getElementById('fileInput').addEventListener('change', function(e) {

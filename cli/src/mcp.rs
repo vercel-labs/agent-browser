@@ -996,7 +996,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_UPLOAD,
             "Upload files",
-            "Upload files through a file input.",
+            "Upload files through a file input, or through the button or drop zone that opens a file chooser.",
             json!({ "selector": selector_schema(), "files": string_array_schema("File paths to upload.") }),
             &["selector", "files"],
         ),

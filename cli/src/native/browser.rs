@@ -2059,7 +2059,7 @@ impl BrowserManager {
         files: &[String],
         ref_map: &RefMap,
         iframe_sessions: &HashMap<String, String>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let session_id = self.active_session_id()?;
 
         let (object_id, effective_session_id) =
@@ -2074,6 +2074,29 @@ impl BrowserManager {
                 Some(&effective_session_id),
             )
             .await?;
+
+        // Only an <input type=file> takes files directly; for anything else
+        // the caller goes through the file chooser the element opens.
+        let node = describe.get("node");
+        let is_file_input = node
+            .and_then(|n| n.get("nodeName"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("input"))
+            && node
+                .and_then(|n| n.get("attributes"))
+                .and_then(|v| v.as_array())
+                .is_some_and(|attrs| {
+                    attrs.chunks(2).any(|pair| {
+                        pair[0].as_str() == Some("type")
+                            && pair
+                                .get(1)
+                                .and_then(|v| v.as_str())
+                                .is_some_and(|t| t.eq_ignore_ascii_case("file"))
+                    })
+                });
+        if !is_file_input {
+            return Ok(false);
+        }
 
         let backend_node_id = describe
             .get("node")
@@ -2092,7 +2115,7 @@ impl BrowserManager {
             )
             .await?;
 
-        Ok(())
+        Ok(true)
     }
 
     pub async fn add_script_to_evaluate(&self, source: &str) -> Result<String, String> {
