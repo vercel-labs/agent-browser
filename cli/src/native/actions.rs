@@ -4,7 +4,7 @@ use std::env;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
@@ -7906,6 +7906,22 @@ async fn handle_set_media(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     Ok(json!({ "set": true }))
 }
 
+/// Canonicalizes an existing directory for use as a Chrome download directory.
+///
+/// On Windows `std::fs::canonicalize` returns a verbatim `\\?\` path, which
+/// `Browser.setDownloadBehavior` accepts but then cancels every download into.
+/// `dunce` returns the plain form whenever that keeps the path's meaning.
+fn canonicalize_for_cdp(path: &Path) -> std::io::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        dunce::canonicalize(path)
+    }
+    #[cfg(not(windows))]
+    {
+        path.canonicalize()
+    }
+}
+
 async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let selector = cmd
         .get("selector")
@@ -7936,8 +7952,7 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .map_err(|e| format!("Failed to create download directory: {}", e))?;
 
     // Canonicalize after mkdir so the path actually exists for resolution
-    let download_dir = download_dir
-        .canonicalize()
+    let download_dir = canonicalize_for_cdp(&download_dir)
         .map_err(|e| format!("Failed to resolve download directory: {}", e))?;
     let dest = download_dir.join(
         raw_dest
@@ -7954,13 +7969,36 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     // Set download behavior to save to the parent directory
     mgr.set_download_behavior(download_dir_str).await?;
 
+    let result = click_and_save_download(state, &session_id, selector, &download_dir, &dest).await;
+
+    // Point later downloads back at the launch configuration so a plain click
+    // saves into `--download-path` under the server's file name again. A
+    // failure here must not hide the download's own outcome.
+    if let Some(mgr) = state.browser.as_ref() {
+        let _ = mgr.restore_download_behavior().await;
+    }
+
+    result
+}
+
+/// Clicks `selector` while downloads go to `download_dir` under their GUID,
+/// waits for the download to finish and moves it to `dest`.
+async fn click_and_save_download(
+    state: &mut DaemonState,
+    session_id: &str,
+    selector: &str,
+    download_dir: &Path,
+    dest: &Path,
+) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+
     // Subscribe to CDP events before clicking so we don't miss the download event
     let mut rx = mgr.client.subscribe();
 
     // Click the element to trigger the download
     let result = interaction::click(
         &mgr.client,
-        &session_id,
+        session_id,
         &state.ref_map,
         selector,
         "left",
@@ -7991,7 +8029,7 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
                 // or with a different sessionId than the page session, so we
                 // accept them regardless. Page-domain events are matched by
                 // session to avoid cross-tab confusion.
-                let is_page_session = event.session_id.as_deref() == Some(&session_id);
+                let is_page_session = event.session_id.as_deref() == Some(session_id);
                 let is_download_event = |method: &str, browser_method: &str, page_method: &str| {
                     method == browser_method || (method == page_method && is_page_session)
                 };
@@ -8040,7 +8078,7 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
         if guid_path.exists() {
-            std::fs::rename(&guid_path, &dest)
+            std::fs::rename(&guid_path, dest)
                 .map_err(|e| format!("Failed to rename downloaded file: {}", e))?;
         } else {
             // The file might have been saved under its original name instead
@@ -18694,5 +18732,21 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             let auto_handled = auto_dialog && matches!(*dialog_type, "beforeunload" | "alert");
             assert!(!auto_handled, "{dialog_type} should NOT be auto-handled");
         }
+    }
+
+    #[test]
+    fn canonicalize_for_cdp_returns_a_plain_path_to_the_same_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolved = canonicalize_for_cdp(dir.path()).unwrap();
+        assert!(resolved.is_absolute(), "{resolved:?}");
+        // Chrome cancels downloads into verbatim `\\?\` paths on Windows.
+        assert!(
+            !resolved.to_string_lossy().starts_with(r"\\?\"),
+            "{resolved:?}"
+        );
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            dir.path().canonicalize().unwrap()
+        );
     }
 }

@@ -13607,3 +13607,116 @@ async fn e2e_mouse_interpolation_starts_at_last_element_interaction() {
     }
     assert_success(&execute_command(&json!({"id": "99", "action": "close"}), &mut state).await);
 }
+
+// ---------------------------------------------------------------------------
+// Downloads
+// ---------------------------------------------------------------------------
+
+const DOWNLOAD_BODY: &str = "id,amount\n1,42\n";
+
+/// Serves a page whose `#dl` link downloads `report.csv` as an attachment.
+async fn start_download_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buffer = vec![0u8; 4096];
+                let _ = stream.read(&mut buffer).await;
+                let request = String::from_utf8_lossy(&buffer);
+                let response = if request.starts_with("GET /report.csv ") {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nContent-Disposition: attachment; filename=\"report.csv\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        DOWNLOAD_BODY.len(),
+                        DOWNLOAD_BODY
+                    )
+                } else {
+                    let body = "<!doctype html><a id=\"dl\" href=\"/report.csv\">Download</a>";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                };
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (format!("http://127.0.0.1:{port}/"), handle)
+}
+
+/// `download` must save the exact bytes at the requested path, and must not
+/// leave its own directory and GUID naming behind: a later plain click has to
+/// save into `--download-path` under the server's file name again.
+#[tokio::test]
+#[ignore]
+async fn e2e_download_saves_file_and_restores_download_path() {
+    let (url, server) = start_download_server().await;
+    let download_path = tempfile::tempdir().unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let target = target_dir.path().join("nested").join("saved.csv");
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({
+            "id": "1",
+            "action": "launch",
+            "headless": true,
+            "downloadPath": download_path.path().to_string_lossy(),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "download",
+            "selector": "#dl",
+            "path": target.to_string_lossy(),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), DOWNLOAD_BODY);
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "click", "selector": "#dl" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let saved = download_path.path().join("report.csv");
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
+    while std::fs::read_to_string(&saved).ok().as_deref() != Some(DOWNLOAD_BODY)
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+    let names: Vec<String> = std::fs::read_dir(download_path.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["report.csv".to_string()],
+        "a click after `download` must save into --download-path under the server's file name"
+    );
+    assert_eq!(std::fs::read_to_string(&saved).unwrap(), DOWNLOAD_BODY);
+
+    assert_success(&execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await);
+    server.abort();
+}
