@@ -3103,6 +3103,10 @@ agent-browser state - Manage browser state
 Usage: agent-browser state <operation> [args]
 
 Save, restore, list, and manage browser state (cookies, localStorage, sessionStorage).
+Saving collects visited origins without revisiting sites over the network.
+Restored origins are remembered for later localStorage collection;
+skipped origins are not.
+A temporary-target collection failure leaves the existing snapshot unchanged.
 
 Operations:
   save <path>                        Save current state to file

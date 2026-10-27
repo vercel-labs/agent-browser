@@ -97,6 +97,8 @@ agent-browser --session "$SESSION" session info --json
 
 ### Manual State Files
 
+State saving collects storage from previously visited origins using blank intercepted pages, without revisiting those sites over the network. Later saves also collect localStorage from origins restored by `state load`, `--state`, or `--restore`, without needing to revisit them. Skipped origins are not remembered. If temporary-target collection fails, the save fails and leaves the existing snapshot unchanged.
+
 Use `state save`, `state load`, and `--state <path>` when you need an explicit portable JSON file. Do not make agents construct paths under `~/.agent-browser/sessions/`; prefer `--restore` for reusable agent sessions.
 
 ## Common Patterns

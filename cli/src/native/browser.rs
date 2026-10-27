@@ -2472,6 +2472,18 @@ impl BrowserManager {
         &self.visited_origins
     }
 
+    /// Replay a state file and return the origins it skipped. Only origins
+    /// whose storage was restored join the history used to collect future saves.
+    pub async fn load_state(
+        &mut self,
+        session_id: &str,
+        path: &str,
+    ) -> Result<Vec<String>, String> {
+        let loaded = super::state::load_state(&self.client, session_id, path).await?;
+        self.visited_origins.extend(loaded.restored_origins);
+        Ok(loaded.skipped_origins)
+    }
+
     /// Keep the configured download location and turn on `Browser.download*`
     /// events, which carry the saved file's path, so `wait --download` can
     /// find the file. Without `eventsEnabled` Chrome sends only `Page.*`

@@ -243,11 +243,10 @@ fn batch_send_error_preserves_identity_without_a_daemon_response() {
         let mut requests = 0;
         while requests < 2 {
             let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
+            // macOS can reject socket options after a readiness probe closes.
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
             let mut line = String::new();
-            BufReader::new(&stream).read_line(&mut line).unwrap();
+            let _ = BufReader::new(&stream).read_line(&mut line);
             if line.is_empty() {
                 continue;
             }

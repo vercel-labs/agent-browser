@@ -3878,11 +3878,36 @@ async fn e2e_state_management() {
 #[tokio::test]
 #[ignore]
 async fn e2e_save_state_cross_domain() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let origin_a = format!("http://127.0.0.1:{port}");
+    let origin_b = format!("http://localhost:{port}");
+    let document_requests = Arc::new(AtomicUsize::new(0));
+    let requests = document_requests.clone();
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let requests = requests.clone();
+            tokio::spawn(async move {
+                let mut buffer = [0; 4096];
+                let n = stream.read(&mut buffer).await.unwrap_or(0);
+                if buffer[..n].starts_with(b"GET / HTTP/") {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                }
+                let body = "<title>Storage fixture</title>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
     let mut state = DaemonState::new();
+    let restore_key = format!("e2e-cross-origin-{}", uuid::Uuid::new_v4());
 
     // Launch
     let resp = execute_command(
-        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &json!({ "id": "1", "action": "launch", "headless": true, "restoreKey": restore_key }),
         &mut state,
     )
     .await;
@@ -3890,7 +3915,7 @@ async fn e2e_save_state_cross_domain() {
 
     // Navigate to domain A and set cookie + localStorage
     let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": "https://httpbin.org/html" }),
+        &json!({ "id": "2", "action": "navigate", "url": &origin_a }),
         &mut state,
     )
     .await;
@@ -3918,7 +3943,7 @@ async fn e2e_save_state_cross_domain() {
 
     // Navigate to domain B and set cookie + localStorage
     let resp = execute_command(
-        &json!({ "id": "5", "action": "navigate", "url": "https://example.com" }),
+        &json!({ "id": "5", "action": "navigate", "url": &origin_b }),
         &mut state,
     )
     .await;
@@ -3944,9 +3969,13 @@ async fn e2e_save_state_cross_domain() {
     .await;
     assert_success(&resp);
 
-    // Save state (currently on example.com)
-    let tmp_state = std::env::temp_dir()
-        .join("agent-browser-e2e-cross-domain-state.json")
+    // Saving older origins must use blank intercepted documents, without
+    // depending on their servers or running their scripts again.
+    let requests_before_save = document_requests.load(Ordering::SeqCst);
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let tmp_state = tmp_dir
+        .path()
+        .join("state.json")
         .to_string_lossy()
         .to_string();
     let resp = execute_command(
@@ -3960,51 +3989,239 @@ async fn e2e_save_state_cross_domain() {
     let saved = std::fs::read_to_string(&tmp_state).expect("State file should exist");
     let state_data: serde_json::Value = serde_json::from_str(&saved).unwrap();
 
+    let requests_after_save = document_requests.load(Ordering::SeqCst);
+    let title = execute_command(&json!({ "id": "9", "action": "title" }), &mut state).await;
+    let closed = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&closed);
+    assert_eq!(get_data(&closed)["saveStatus"], "saved");
+    let mut auto_path = get_data(&closed)["statePath"].as_str().unwrap().to_string();
+    assert_success(&title);
+    assert_eq!(get_data(&title)["title"], "Storage fixture");
+    assert_eq!(requests_before_save, 2);
+    assert_eq!(
+        requests_after_save, requests_before_save,
+        "state save revisited an origin over the network"
+    );
+
     // Verify BOTH domain cookies are present
     let cookies = state_data["cookies"].as_array().unwrap();
     let has_domain_a = cookies.iter().any(|c| c["name"] == "domainA_cookie");
     let has_domain_b = cookies.iter().any(|c| c["name"] == "domainB_cookie");
     assert!(
         has_domain_a,
-        "Should include cross-domain cookie from httpbin.org: {:?}",
+        "Should include cookie from origin A: {:?}",
         cookies
     );
     assert!(
         has_domain_b,
-        "Should include cookie from example.com: {:?}",
+        "Should include cookie from origin B: {:?}",
         cookies
     );
 
     // Verify BOTH origins' localStorage are present
     let origins = state_data["origins"].as_array().unwrap();
     let has_origin_a = origins.iter().any(|o| {
-        o["origin"].as_str().is_some_and(|s| s.contains("httpbin"))
-            && o["localStorage"]
-                .as_array()
-                .is_some_and(|ls| ls.iter().any(|e| e["name"] == "domainA_key"))
+        o["origin"] == origin_a
+            && o["localStorage"].as_array().is_some_and(|ls| {
+                ls.iter()
+                    .any(|e| e["name"] == "domainA_key" && e["value"] == "domainA_val")
+            })
     });
     let has_origin_b = origins.iter().any(|o| {
-        o["origin"].as_str().is_some_and(|s| s.contains("example"))
-            && o["localStorage"]
-                .as_array()
-                .is_some_and(|ls| ls.iter().any(|e| e["name"] == "domainB_key"))
+        o["origin"] == origin_b
+            && o["localStorage"].as_array().is_some_and(|ls| {
+                ls.iter()
+                    .any(|e| e["name"] == "domainB_key" && e["value"] == "domainB_val")
+            })
     });
     assert!(
         has_origin_a,
-        "Should include localStorage from httpbin.org origin: {:?}",
+        "Should include localStorage from origin A: {:?}",
         origins
     );
     assert!(
         has_origin_b,
-        "Should include localStorage from example.com origin: {:?}",
+        "Should include localStorage from origin B: {:?}",
         origins
     );
 
-    // Clean up
-    let _ = std::fs::remove_file(&tmp_state);
+    // Each import path must retain every origin for future saves, without
+    // revisiting old sites through BrowserManager::navigate. The fixture has
+    // no scripts that could recreate missing storage during replay.
+    let mut roundtrips = Vec::new();
+    for (name, launch) in [
+        (
+            "state load",
+            json!({ "action": "launch", "headless": true }),
+        ),
+        (
+            "--state",
+            json!({ "action": "launch", "headless": true, "storageState": tmp_state }),
+        ),
+        (
+            "--restore",
+            json!({ "action": "launch", "headless": true, "restoreKey": restore_key }),
+        ),
+    ] {
+        let mut restored = DaemonState::new();
+        let resp = execute_command(&launch, &mut restored).await;
+        assert_success(&resp);
+        if name == "state load" {
+            let resp = execute_command(
+                &json!({ "action": "state_load", "path": tmp_state }),
+                &mut restored,
+            )
+            .await;
+            assert_success(&resp);
+        }
+        let requests_before_save = document_requests.load(Ordering::SeqCst);
+        let path = tmp_dir.path().join("resaved.json");
+        let resp = execute_command(
+            &json!({ "action": "state_save", "path": path }),
+            &mut restored,
+        )
+        .await;
+        assert_success(&resp);
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let extra_requests = document_requests.load(Ordering::SeqCst) - requests_before_save;
+        let requests_before_close = document_requests.load(Ordering::SeqCst);
+        let closed = execute_command(&json!({ "action": "close" }), &mut restored).await;
+        assert_success(&closed);
+        roundtrips.push((name, saved, extra_requests));
+        if name == "--restore" {
+            assert_eq!(get_data(&closed)["saveStatus"], "saved");
+            auto_path = get_data(&closed)["statePath"].as_str().unwrap().to_string();
+            let auto_saved: Value =
+                serde_json::from_str(&std::fs::read_to_string(&auto_path).unwrap()).unwrap();
+            roundtrips.push((
+                "save on close after restore",
+                auto_saved,
+                document_requests.load(Ordering::SeqCst) - requests_before_close,
+            ));
+        }
+    }
+    server.abort();
+    let _ = std::fs::remove_file(&auto_path);
+    let _ = std::fs::remove_file(format!("{auto_path}.previous"));
 
-    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
-    assert_success(&resp);
+    let mut expected = origins.clone();
+    expected.sort_by_key(|origin| origin["origin"].as_str().unwrap().to_string());
+    for (name, saved, extra_requests) in roundtrips {
+        let mut actual = saved["origins"].as_array().unwrap().clone();
+        actual.sort_by_key(|origin| origin["origin"].as_str().unwrap().to_string());
+        assert_eq!(
+            actual, expected,
+            "{name} dropped restored storage on the next save"
+        );
+        assert_eq!(extra_requests, 0, "{name} revisited an origin while saving");
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_save_state_bypasses_service_workers() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let origin_a = format!("http://127.0.0.1:{port}");
+    let origin_b = format!("http://localhost:{port}");
+    let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = requests.clone();
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let seen = seen.clone();
+            tokio::spawn(async move {
+                let mut buffer = [0; 4096];
+                let n = stream.read(&mut buffer).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..n]);
+                let Some(path) = request.split_whitespace().nth(1) else {
+                    return;
+                };
+                seen.lock().unwrap().push(path.to_string());
+                let (content_type, body) = if path == "/sw.js" {
+                    (
+                        "application/javascript",
+                        "self.addEventListener('install', e => e.waitUntil(self.skipWaiting()));
+                        self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+                        self.addEventListener('fetch', e => {
+                            if (new URL(e.request.url).pathname !== '/') return;
+                            e.waitUntil(fetch('/sw-beacon'));
+                            e.respondWith(new Response(
+                                `<script>localStorage.setItem('sw-executed', 'yes'); fetch('/beacon')</script>`,
+                                { headers: { 'Content-Type': 'text/html' } }));
+                        });",
+                    )
+                } else {
+                    ("text/html", "<title>Storage fixture</title>")
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({ "id": "1", "action": "launch", "headless": true }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({ "id": "2", "action": "navigate", "url": format!("{origin_a}/start") }),
+            &mut state,
+        )
+        .await,
+    );
+    assert_evaluate(
+        &mut state,
+        "3",
+        "(async () => { const registration = await navigator.serviceWorker.register('/sw.js'); \
+         await navigator.serviceWorker.ready; localStorage.setItem('persist', 'one'); \
+         return !!registration.active; })()",
+        json!(true),
+    )
+    .await;
+    assert_success(
+        &execute_command(
+            &json!({ "id": "4", "action": "navigate", "url": format!("{origin_b}/start") }),
+            &mut state,
+        )
+        .await,
+    );
+
+    // The worker controls origin A's root, where collection navigates. Neither
+    // its fetch handler nor the page it serves may run during the save.
+    let requests_before_save = requests.lock().unwrap().len();
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let path = tmp_dir.path().join("state.json");
+    let save = execute_command(
+        &json!({ "id": "5", "action": "state_save", "path": path }),
+        &mut state,
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let save_requests = requests.lock().unwrap()[requests_before_save..].to_vec();
+    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    server.abort();
+
+    assert_success(&save);
+    assert_eq!(save_requests, Vec::<String>::new());
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let saved_a = saved["origins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|origin| origin["origin"] == origin_a)
+        .expect("origin A storage was collected");
+    assert_eq!(
+        saved_a["localStorage"],
+        json!([{ "name": "persist", "value": "one" }])
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -14283,12 +14500,16 @@ async fn e2e_state_load_keeps_storage_away_from_page_scripts_and_redirects() {
             "cookies": [],
             "origins": [
                 {
+                    "origin": "http://invalid origin",
+                    "localStorage": [{ "name": "invalid-token", "value": "invalid-secret" }]
+                },
+                {
                     "origin": redirect_origin,
                     "localStorage": [{ "name": "redirect-token", "value": "redirect-secret" }],
                     "sessionStorage": [{ "name": "redirect-session", "value": "redirect-secret" }]
                 },
                 {
-                    "origin": hook_origin,
+                    "origin": format!("{}/", hook_origin.replacen("http", "HTTP", 1)),
                     "localStorage": [{ "name": "hook-token", "value": "hook-secret" }],
                     "sessionStorage": [{ "name": "hook-session", "value": "hook-secret" }]
                 }
@@ -14312,7 +14533,10 @@ async fn e2e_state_load_keeps_storage_away_from_page_scripts_and_redirects() {
     )
     .await;
     assert_success(&load);
-    assert_eq!(get_data(&load)["skippedOrigins"], json!([redirect_origin]));
+    assert_eq!(
+        get_data(&load)["skippedOrigins"],
+        json!(["http://invalid origin", redirect_origin])
+    );
 
     assert_evaluate(&mut state, "3", "window.__captured.length", json!(0)).await;
     assert_evaluate(
@@ -14337,6 +14561,31 @@ async fn e2e_state_load_keeps_storage_away_from_page_scripts_and_redirects() {
         json!(0),
     )
     .await;
+
+    // Away from the restored page, a save must still collect the restored
+    // origin under its canonical name. Remembering a skipped origin instead
+    // would drop that storage or make collection, and so the save, fail.
+    let resaved_path = temp_dir.path().join("resaved.json");
+    let resave = execute_command(
+        &json!({ "id": "7", "action": "state_save", "path": resaved_path }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resave);
+    let resaved: Value =
+        serde_json::from_str(&std::fs::read_to_string(&resaved_path).unwrap()).unwrap();
+    let resaved_origins = resaved["origins"].as_array().unwrap();
+    assert_eq!(
+        resaved_origins
+            .iter()
+            .map(|origin| origin["origin"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(hook_origin)]
+    );
+    assert_eq!(
+        resaved_origins[0]["localStorage"],
+        json!([{ "name": "hook-token", "value": "hook-secret" }])
+    );
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     other_server.abort();
