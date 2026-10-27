@@ -80,12 +80,17 @@ impl ActionPolicy {
         let path = env::var("AGENT_BROWSER_ACTION_POLICY")
             .or_else(|_| env::var("AGENT_BROWSER_POLICY"))
             .ok()?;
+        Some(Self::load_or_deny(&path))
+    }
+
+    /// Load policy from `path`; a file that cannot be loaded denies every action except `close`.
+    pub fn load_or_deny(path: &str) -> Self {
         let mut policy = Self {
             path: PathBuf::from(path),
             ..Self::default()
         };
         policy.reload();
-        Some(policy)
+        policy
     }
 
     /// Check whether an action is allowed, denied, or requires confirmation.

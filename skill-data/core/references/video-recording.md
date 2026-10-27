@@ -12,6 +12,7 @@ Capture browser automation as video for debugging, documentation, or verificatio
 - [Frame Rate](#frame-rate)
 - [Visible Cursor](#visible-cursor)
 - [Contact Sheets](#contact-sheets)
+- [Recording Receipts](#recording-receipts)
 - [Use Cases](#use-cases)
 - [Best Practices](#best-practices)
 - [Output Format](#output-format)
@@ -47,7 +48,7 @@ agent-browser record stop
 # Launch a session first
 agent-browser open
 
-# Start recording to file (30 fps)
+# Start recording to file (30 output fps)
 agent-browser record start ./output.webm
 
 # Start recording at a specific rate (1-60)
@@ -69,7 +70,7 @@ agent-browser record start ./output.webm
 
 ## Frame Rate
 
-Recording captures 30 fps by default, so scrolling, hover states, and CSS transitions read as motion instead of a slideshow. `--fps` takes any rate from 1 to 60.
+`--fps` controls output playback (30 by default, 1 to 60 allowed), not the rate of new pictures. Chrome supplies repaint-driven screencast images, which may be sparse. Requesting 60 fps does not prove smoothness or that intermediate states were captured.
 
 | Rate | Use it for |
 | --- | --- |
@@ -88,7 +89,7 @@ agent-browser record stop
 agent-browser record start ./soak.webm --fps 5
 ```
 
-The video uses the requested frame rate and holds the latest Chrome frame between repaints. `record stop --json` reports `frames` (written) and `capturedFrames` (distinct frames from Chrome).
+The video uses the requested output rate, seeds an initial screenshot, and holds the latest image between repaints. The encoder catches up after short stalls and fails on overload instead of silently shortening the timeline. Playback duration and output FPS are not evidence of continuous capture.
 
 ## Visible Cursor
 
@@ -110,6 +111,19 @@ agent-browser record start ./checkout.webm --contact-sheet-threshold 0.02
 ```
 
 The threshold accepts values from `0` to `1` and defaults to `0.05`. Passing `--contact-sheet-threshold` implies `--contact-sheet`. At most 100 frames are included.
+
+## Recording Receipts
+
+Keep `recordingId` from `record start`. Start success does not prove motion or successful encoding. `record stop --json` returns a receipt in `data` on both success and failure:
+
+- `capture.startedAt`/`endedAt`: ISO-8601 UTC capture-loop times. `durationMs`: monotonic capture wall time, excluding teardown and encoder completion.
+- `capture.firstFrameAt`/`lastFrameAt` and `firstFrameAfterMs`/`lastFrameAfterMs`: frame receipt times and offsets from capture start. `timestampSource` is `local-receive`, not browser presentation time. Values are `null` until frames arrive.
+- `capturedFrames`: the initial screenshot and decoded screencast events consumed by the loop, including those later discarded, not pixel-unique images. `capture.initialFrameIncluded` identifies the initial screenshot. `capture.averageFps` is the count divided by wall duration; `maxFrameGapMs` includes leading and trailing gaps.
+- `frames`/`output.frames`: images written to ffmpeg. `output.encodedFrames`: ffmpeg's reported count. `output.fps`: requested output rate. `output.durationMs`: encoded frames divided by output rate after encoder success, not capture wall duration.
+- `output.heldFrames`: repeated images. Terminal `droppedFrames`: captured images never written to ffmpeg (`null` while capture is active). `skippedFrames`: zero for the live encoder, which fails on overload rather than skipping slots. Frames lost before the capture loop are not measured.
+- `success`/`error` and `output.encoderSucceeded`: terminal outcome and encoder exit result. `file.exists`/`sizeBytes` are separate evidence; an existing file is not proof of successful encoding. Pending or unavailable evidence is `null`.
+
+After a stop timeout, inspect `session info --json` → `data.runtime.recording.current`/`last` and match `recordingId`. Exact transport retries replay the original stop response without stopping a newer take; a new stop command targets the current take. `record restart` returns `previousRecording`, including failed receipts, separately from the new recording. Receipts are in daemon memory and do not survive its exit. Read the timing/gap warning and inspect the video before claiming smoothness.
 
 ## Use Cases
 
@@ -231,7 +245,7 @@ agent-browser record stop
 ## Output Format
 
 - Format follows the extension: `.webm` (VP8 via libvpx) or `.mp4` (H.264 via libx264); other extensions get H.264 in that container
-- Default frame rate: 30 fps (`--fps` accepts 1 to 60)
+- Default output frame rate: 30 fps (`--fps` accepts 1 to 60); capture rate is reported separately
 - Optional contact sheet: timestamped PNG with changed-region highlights
 - Compatible with all modern browsers and video players
 - Compressed but high quality
@@ -240,5 +254,5 @@ agent-browser record stop
 
 - Recording adds slight overhead to automation, and higher frame rates add more
 - Large recordings can consume significant disk space
-- Distinct frames per second are bounded by how often the page repaints, so a page rendering below 60 fps records below it too
+- Capture depends on repaint frequency and recorder throughput; frame event counts do not prove unique pixels or smoothness
 - Some headless environments may have codec limitations; an ffmpeg built without libvpx or libx264 cannot write the matching format

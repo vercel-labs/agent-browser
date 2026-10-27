@@ -472,6 +472,7 @@ pub struct DaemonResult {
 /// Note: `confirm_interactive` is intentionally absent -- it is a CLI-side
 /// UX concern (prompting the user on stdin) and not a daemon configuration.
 /// The daemon only needs `confirm_actions` to gate action categories.
+#[derive(Default)]
 pub struct DaemonOptions<'a> {
     pub headed: bool,
     pub debug: bool,
@@ -852,6 +853,48 @@ pub(crate) fn prevent_stdio_handle_inheritance() {
 }
 
 pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
+    ensure_daemon_inner(session, opts, true)
+}
+
+/// A pending HTTP-read confirmation needs daemon memory, not new browser or
+/// daemon configuration. Reuse a running daemon exactly as it is.
+pub fn ensure_daemon_without_reconfigure(
+    session: &str,
+    opts: &DaemonOptions,
+) -> Result<DaemonResult, String> {
+    ensure_daemon_inner(session, opts, false)
+}
+
+/// Whether `session` already has a daemon that owns its runtime restrictions.
+/// A daemon that cannot be used unchanged is an error, never "absent".
+pub fn existing_daemon(session: &str) -> Result<bool, String> {
+    if daemon_ready(session) {
+        if !daemon_version_matches(session) {
+            return Err("Running daemon has a different version; leaving it unchanged instead of restarting it".to_string());
+        }
+        return Ok(true);
+    }
+    if fs::read_to_string(get_pid_path(session))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .is_some_and(is_pid_alive)
+    {
+        return Err("Existing daemon is not reachable; leaving it unchanged".to_string());
+    }
+    Ok(false)
+}
+
+fn ensure_daemon_inner(
+    session: &str,
+    opts: &DaemonOptions,
+    reconfigure: bool,
+) -> Result<DaemonResult, String> {
+    if !reconfigure && existing_daemon(session)? {
+        return Ok(DaemonResult {
+            already_running: true,
+            restarted: false,
+        });
+    }
     let mut restarted = false;
 
     // Socket connectivity is the sole liveness check — no PID check — so
@@ -987,7 +1030,8 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
             {
                 return Ok(result);
             }
-            if wait_for_matching_ready_daemon(session, opts, Duration::from_secs(1)) {
+            if !reconfigure || wait_for_matching_ready_daemon(session, opts, Duration::from_secs(1))
+            {
                 return Ok(DaemonResult {
                     already_running: true,
                     restarted,
@@ -1013,7 +1057,9 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
                 {
                     thread::sleep(Duration::from_millis(200));
                     if daemon_ready(session) {
-                        if wait_for_matching_ready_daemon(session, opts, Duration::from_secs(1)) {
+                        if !reconfigure
+                            || wait_for_matching_ready_daemon(session, opts, Duration::from_secs(1))
+                        {
                             return Ok(DaemonResult {
                                 already_running: true,
                                 restarted,
@@ -1107,6 +1153,7 @@ const READ_ONLY_ACTIONS: &[&str] = &[
     "tab_list",
     "cdp_url",
     "stream_status",
+    "session_info",
 ];
 
 fn is_read_only(cmd: &Value) -> bool {
@@ -1228,11 +1275,49 @@ pub(crate) fn read_timeout_for(cmd: &Value) -> Duration {
 }
 
 fn send_command_once(cmd: &Value, session: &str) -> Result<Response, SendError> {
+    let mut stream = connect(session).map_err(SendError::NotSent)?;
+    if crate::read::is_explicit_url_read(cmd)
+        && (cmd["requireConfirmation"] == true || cmd.get("actionPolicy").is_some())
+    {
+        // A source upgrade may retain the same version label. Negotiate on
+        // this socket so a reconnect cannot send the read to an unchecked daemon.
+        // Each feature has its own marker: an older daemon can support ID-checked
+        // confirmations without supporting per-read action policies.
+        let needed = if cmd.get("actionPolicy").is_some() {
+            "readActionPolicy"
+        } else {
+            "readRequiresConfirmation"
+        };
+        let info = exchange_command(
+            &mut stream,
+            &json!({
+                "id": format!("{}-capabilities", cmd["id"].as_str().unwrap_or("read")),
+                "action": "session_info",
+                "capabilitiesOnly": true,
+            }),
+        )
+        .map_err(|error| match error {
+            SendError::NotSent(message) | SendError::OutcomeUnknown(message) => {
+                SendError::NotSent(message)
+            }
+        })?;
+        if !info.success
+            || !info
+                .data
+                .as_ref()
+                .is_some_and(|data| data["capabilities"][needed] == true)
+        {
+            return Err(SendError::NotSent(format!(
+                "Running daemon does not support {needed} for HTTP reads; no read was sent. Use a separate session with a compatible daemon."
+            )));
+        }
+    }
+    exchange_command(&mut stream, cmd)
+}
+
+fn exchange_command(stream: &mut Connection, cmd: &Value) -> Result<Response, SendError> {
     let mut json_str = serde_json::to_string(cmd).map_err(|e| SendError::NotSent(e.to_string()))?;
     json_str.push('\n');
-
-    let stream = connect(session).map_err(SendError::NotSent)?;
-
     stream.set_read_timeout(Some(read_timeout_for(cmd))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 

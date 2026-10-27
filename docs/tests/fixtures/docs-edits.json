@@ -16,6 +16,68 @@
       {
         "from": "Each tool also accepts extraArgs for advanced CLI flags and exact CLI parity.",
         "to": "Each tool also accepts extraArgs for per-command options and display or emulation flags such as --engine, but global flags that change network, file, policy, or host access (such as --allowed-domains, --action-policy, --executable-path, --args, and --config) are rejected and must be set in the MCP server's environment or config."
+      },
+      {
+        "from": "`read` fetches a URL without launching Chrome.",
+        "to": "Explicit URL reads run HTTP directly without launching, reconnecting, or reconfiguring a browser, including in batches."
+      },
+      {
+        "from": "read fetches a URL without launching Chrome.",
+        "to": "Explicit URL reads run HTTP directly without launching, reconnecting, or reconfiguring a browser, including in batches."
+      },
+      {
+        "from": "# Start video recording (.webm/.mp4, 30 fps; needs ffmpeg)",
+        "to": "# Record at 30 output fps (.webm/.mp4; needs ffmpeg)"
+      },
+      {
+        "from": "# Record at 60 fps (--fps accepts 1-60)",
+        "to": "# Request 60 output fps (capture rate varies; 1-60 allowed)"
+      },
+      {
+        "from": "Pending confirmations auto-deny after 60 seconds.",
+        "to": "The ID is required and must match the current pending action. Treat returned IDs as opaque; do not construct or truncate them. Missing or stale IDs fail without browser work, execution, or consuming a newer pending action. A newer confirmation request replaces the previous pending action."
+      }
+    ],
+    "/recording": [
+      {
+        "from": "Recording captures 30 frames per second by default, which is enough for scrolling, hover states, and CSS transitions to read as motion rather than as a slideshow. Use `--fps` to change it:",
+        "to": "`--fps` controls the output playback rate (30 by default, 1 to 60 allowed), not the rate at which Chrome supplies new images. Capture is repaint-driven and may be sparse. Requesting 60 fps cannot prove smoothness or the presence of intermediate states."
+      },
+      {
+        "from": "Recording captures 30 frames per second by default, which is enough for scrolling, hover states, and CSS transitions to read as motion rather than as a slideshow. Use --fps to change it:",
+        "to": "--fps controls the output playback rate (30 by default, 1 to 60 allowed), not the rate at which Chrome supplies new images. Capture is repaint-driven and may be sparse. Requesting 60 fps cannot prove smoothness or the presence of intermediate states."
+      },
+      {
+        "from": "# 60 fps for a short, motion-heavy take",
+        "to": "# Request a higher output rate; inspect capture evidence separately"
+      },
+      {
+        "from": "Valid rates are 1 to 60. The latest Chrome frame is held between repaints so the file duration matches wall clock.",
+        "to": "The recorder seeds an initial screenshot and repeats the latest image between repaints. It catches up after short encoder stalls and fails if capture or encoding falls too far behind, rather than silently shortening the timeline. Playback duration and output FPS do not establish how much motion was captured."
+      },
+      {
+        "from": "`record stop` reports `frames` written to the file and distinct `capturedFrames` received from Chrome.",
+        "to": "A successful `record start` returns `recordingId` but does not prove motion or successful encoding. `record stop --json` returns a receipt in `data`, including when the outer `success` is `false`:"
+      },
+      {
+        "from": "record stop reports frames written to the file and distinct capturedFrames received from Chrome.",
+        "to": "A successful record start returns recordingId but does not prove motion or successful encoding. record stop --json returns a receipt in data, including when the outer success is false:"
+      },
+      {
+        "from": "<tr><td>Frame rate</td><td>30 fps by default, 1 to 60 with <code>--fps</code></td></tr>",
+        "to": "<tr><td>Output frame rate</td><td>30 fps by default, 1 to 60 with <code>--fps</code>; observed capture rate is reported separately</td></tr>"
+      },
+      {
+        "from": "30 fps by default, 1 to 60 with --fps",
+        "to": "30 fps by default, 1 to 60 with --fps; observed capture rate is reported separately"
+      },
+      {
+        "from": "Long recordings can use significant disk space; 60 fps roughly doubles the bitrate of 30 fps.",
+        "to": "Long recordings can use significant disk space; higher output rates increase encoder work."
+      },
+      {
+        "from": "Distinct frames per second are bounded by how often the page repaints, so a page that renders below 60 fps records below it too.",
+        "to": "Capture depends on repaint frequency and recorder throughput. Frame event counts do not prove pixel-unique images or smoothness."
       }
     ],
     "/configuration": [
@@ -58,6 +120,18 @@
       {
         "from": "Plugins run out-of-process over the agent-browser.plugin.v1 stdio JSON protocol. Configure them in agent-browser.json:",
         "to": "Plugins run out-of-process over the agent-browser.plugin.v1 stdio JSON protocol. Configure them in ~/.agent-browser/config.json. The auto-discovered ./agent-browser.json cannot set plugins (it is ignored with a warning); set them in ~/.agent-browser/config.json, env vars or flags, or load the file explicitly with --config ./agent-browser.json."
+      },
+      {
+        "from": "**Confirmation timeout.** Pending confirmations auto-deny after 60 seconds. Orchestrators must respond within that window.",
+        "to": "**One pending confirmation per session.** A newer confirmation request replaces the previous one. Missing or stale IDs are rejected without consuming the current action; use the exact ID returned by the intended request."
+      },
+      {
+        "from": "Confirmation timeout. Pending confirmations auto-deny after 60 seconds. Orchestrators must respond within that window.",
+        "to": "One pending confirmation per session. A newer confirmation request replaces the previous one. Missing or stale IDs are rejected without consuming the current action; use the exact ID returned by the intended request."
+      },
+      {
+        "from": "Pending confirmations auto-deny after 60 seconds.",
+        "to": "The confirmation ID is required and must match the current pending command before it can be executed or discarded. Request IDs use UUIDs rather than reusable clock fragments; treat them as opaque and do not construct or truncate them. Missing or stale IDs fail without browser work or consuming a newer pending action."
       }
     ],
     "/proxy": [
