@@ -152,6 +152,8 @@ agent-browser download <sel> <path>   # Click element to trigger download
 agent-browser wait --download [path]  # Wait for any download to complete
 ```
 
+`wait --download` returns the oldest download not yet claimed by an earlier wait, including one that finished before the command ran, so it can follow the command that triggered it. With `[path]`, the file is moved there; without it, the output is where the browser saved it. The move only applies to a browser agent-browser launched: over `--cdp`, `--auto-connect`, or a provider, the saved path comes from the remote endpoint, so `[path]` is rejected.
+
 Use `--download-path <dir>` (or `AGENT_BROWSER_DOWNLOAD_PATH` env) to set a default download directory. Without it, downloads go to a temporary directory that is deleted when the browser closes.
 
 See [Files & Clipboard](/files) for upload, download, local file, screenshot, PDF, and clipboard workflows.
@@ -671,6 +673,8 @@ echo '[
   ["click", "@e1"],
   ["screenshot", "result.png"]
 ]' | agent-browser batch --json
+
+echo '[["fill", "#password", "secret"]]' | agent-browser batch --json --omit-command
 ```
 
 <table>
@@ -680,8 +684,11 @@ echo '[
   <tbody>
     <tr><td><code>--bail</code></td><td>Stop on first error (default: continue all commands)</td></tr>
     <tr><td><code>--json</code></td><td>Output results as a JSON array</td></tr>
+    <tr><td><code>--omit-command</code></td><td>With <code>--json</code>, replace each <code>command</code> array with a stable zero-based <code>index</code> field</td></tr>
   </tbody>
 </table>
+
+With `--json --omit-command`, rows use a stable zero-based `index` field on success, failure, or `--bail`; default JSON output keeps the `command` field. This only removes command arrays and does not make output safe for secrets. Errors and response data are unchanged: `type` echoes typed text, and `get value`/`eval` may return input values. The MCP `agent_browser_batch` tool accepts `omitCommand: true`.
 
 ## MCP server
 

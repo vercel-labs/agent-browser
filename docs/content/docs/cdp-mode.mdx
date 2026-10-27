@@ -85,8 +85,9 @@ With `--pin-tab`:
 - If the bound tab is closed, commands fail with a `tab_gone` error instead of silently acting on another tab. JSON responses carry <code>"code": "tab_gone"</code>, <code>data.targetId</code>, and optional <code>data.lastUrl</code>
 - `tab list`, `tab new`, and `tab <ref>` still work in that state, so an agent can recover by binding a new tab
 - Tabs opened by other sessions or the user never steal the pinned session's active tab
+- Another session cannot take a pinned tab with `tab <ref>` while the pinning session is running; the switch fails with `tab_locked` naming the owner
 
-The flag is sticky per session: pass it once and later commands and daemon restarts keep the strict semantics. Pass `--no-pin-tab` to explicitly turn the pin off again. See [Sessions](/sessions) for the multi-session workflow and [Commands](/commands) for tab refs by CDP target id.
+The flag is sticky per session: pass it once and later commands keep the strict semantics. Daemon restarts keep the pin; an explicit close releases it so other sessions can take the tab, and the next pinned command pins again. Pass `--no-pin-tab` to explicitly turn the pin off again. See [Sessions](/sessions) for the multi-session workflow and [Commands](/commands) for tab refs by CDP target id.
 
 The structured <code>lastUrl</code> is emitted only for sanitized HTTP(S) URLs and <code>about:blank</code>. Credentials, query strings, and fragments are removed from HTTP(S) URLs, while opaque URLs such as <code>data:</code> are omitted. Batch JSON exposes the recovery object under <code>result</code>.
 

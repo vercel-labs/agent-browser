@@ -1967,8 +1967,14 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         // === Batch ===
         "batch" => {
             let bail = rest.contains(&"--bail");
-            let commands: Vec<&str> = rest.iter().filter(|a| **a != "--bail").copied().collect();
-            let mut cmd = json!({ "id": id, "action": "batch", "bail": bail });
+            let omit_command = rest.contains(&"--omit-command");
+            let commands: Vec<&str> = rest
+                .iter()
+                .filter(|a| **a != "--bail" && **a != "--omit-command")
+                .copied()
+                .collect();
+            let mut cmd =
+                json!({ "id": id, "action": "batch", "bail": bail, "omitCommand": omit_command });
             if !commands.is_empty() {
                 cmd["commands"] = json!(commands);
             }

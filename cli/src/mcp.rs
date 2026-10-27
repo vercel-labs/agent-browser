@@ -1547,7 +1547,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_STATE_LOAD,
             "State load",
-            "Load cookies and storage state.",
+            "Load cookies and storage state. Origins whose page does not stay on the saved origin are skipped and listed in skippedOrigins.",
             json!({ "path": { "type": "string" } }),
             &["path"],
         ),
@@ -1632,7 +1632,7 @@ fn parity_tools() -> Vec<Value> {
             TOOL_BATCH,
             "Batch",
             "Run multiple commands sequentially.",
-            json!({ "commands": { "type": "array", "items": { "type": "array", "items": { "type": "string" }, "minItems": 1 }, "minItems": 1 }, "bail": { "type": "boolean" } }),
+            json!({ "commands": { "type": "array", "items": { "type": "array", "items": { "type": "string" }, "minItems": 1 }, "minItems": 1 }, "bail": { "type": "boolean" }, "omitCommand": { "type": "boolean", "description": "Replace only command arrays with a stable zero-based input index. Does not make output safe for secrets: errors and response data are unchanged; type echoes typed text, and get value/eval may return input values." } }),
             &["commands"],
         ),
         tool(
@@ -3514,6 +3514,9 @@ fn call_batch(arguments: &Value) -> Result<Value, ProtocolError> {
     if optional_bool(arguments, "bail")?.unwrap_or(false) {
         args.push("--bail".to_string());
     }
+    if optional_bool(arguments, "omitCommand")?.unwrap_or(false) {
+        args.push("--omit-command".to_string());
+    }
     let stdin = serde_json::to_string(&parsed_commands)
         .map_err(|e| ProtocolError::invalid_params(format!("commands encode error: {}", e)))?;
     call_cli_tool(arguments, args, Some(stdin))
@@ -4173,6 +4176,10 @@ fn tool_text(parsed: Option<&Value>, stdout: &str, stderr: &str) -> String {
             });
             // Most hosts put text content in the model context; preserving
             // metadata only in structuredContent is not sufficient.
+            if let Some(warning) = primary.get("warning").and_then(Value::as_str) {
+                text.push_str("\n\nwarning: ");
+                text.push_str(warning);
+            }
             for context in contexts {
                 text.push_str("\n\n");
                 text.push_str(&context);
@@ -4231,6 +4238,20 @@ fn response_text(value: &Value) -> Option<String> {
                     .is_some()
             {
                 return Some(crate::output::format_a11y_text(data));
+            }
+            if let Some(skipped) = data
+                .get("skippedOrigins")
+                .and_then(|v| v.as_array())
+                .filter(|v| !v.is_empty())
+            {
+                let origins: Vec<&str> = skipped.iter().filter_map(|v| v.as_str()).collect();
+                return Some(format!(
+                    "{}\nSkipped storage for origins (page did not stay on that origin): {}",
+                    data.get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default(),
+                    origins.join(", ")
+                ));
             }
             for key in [
                 "snapshot", "text", "html", "report", "value", "content", "title", "url", "path",
@@ -4296,6 +4317,18 @@ fn write_json_line(stdout: &mut io::Stdout, value: &Value) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tool_text_keeps_response_warnings() {
+        let value = json!({ "success": true, "data": { "url": "about:blank" },
+                            "warning": "page_wedged: the active tab was replaced" });
+        let text = tool_text(Some(&value), "", "");
+        assert!(text.contains("about:blank"), "{text}");
+        assert!(
+            text.contains("page_wedged: the active tab was replaced"),
+            "{text}"
+        );
+    }
+
     #[test]
     fn recording_timeline_options_use_cli_parser() {
         for operation in ["start", "restart"] {
@@ -4771,6 +4804,22 @@ mod tests {
             .unwrap()
             .contains("accessibility audits"));
         assert!(McpConfig::from_profiles(vec![ToolProfile::Debug]).allows(TOOL_A11Y));
+    }
+
+    #[test]
+    fn response_text_reports_skipped_state_origins() {
+        let text = response_text(&json!({
+            "success": true,
+            "data": {
+                "loaded": true,
+                "path": "./state.json",
+                "skippedOrigins": ["http://127.0.0.1:8001"]
+            }
+        }))
+        .unwrap();
+
+        assert!(text.starts_with("./state.json\n"));
+        assert!(text.contains("http://127.0.0.1:8001"));
     }
 
     #[test]

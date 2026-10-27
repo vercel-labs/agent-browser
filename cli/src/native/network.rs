@@ -162,6 +162,7 @@ pub async fn install_domain_filter_script(
     client: &CdpClient,
     session_id: &str,
     allowed_domains: &[String],
+    paused_before_document: bool,
 ) -> Result<(), String> {
     if allowed_domains.is_empty() {
         return Ok(());
@@ -177,7 +178,13 @@ pub async fn install_domain_filter_script(
         )
         .await?;
 
-    install_domain_filter_runtime_script(client, session_id, allowed_domains).await?;
+    install_domain_filter_runtime_script(
+        client,
+        session_id,
+        allowed_domains,
+        paused_before_document,
+    )
+    .await?;
 
     Ok(())
 }
@@ -186,19 +193,32 @@ async fn install_domain_filter_runtime_script(
     client: &CdpClient,
     session_id: &str,
     allowed_domains: &[String],
+    paused_before_document: bool,
 ) -> Result<(), String> {
     if allowed_domains.is_empty() {
         return Ok(());
     }
 
     let script = domain_filter_script(allowed_domains);
-    let evaluation = client
+    let evaluation = match client
         .send_command(
             "Runtime.evaluate",
             Some(json!({ "expression": &script })),
             Some(session_id),
         )
-        .await?;
+        .await
+    {
+        Ok(evaluation) => evaluation,
+        // An auto-attached target is paused before its first document, so it
+        // has no context to patch; the new-document script above covers it.
+        Err(error)
+            if paused_before_document
+                && error.contains("Cannot find default execution context") =>
+        {
+            return Ok(())
+        }
+        Err(error) => return Err(error),
+    };
     if let Some(details) = evaluation.get("exceptionDetails") {
         let message = details
             .get("exception")
@@ -462,9 +482,11 @@ pub async fn install_domain_filter(
     session_id: &str,
     allowed_domains: &[String],
     handle_auth_requests: bool,
+    paused_before_document: bool,
 ) -> Result<(), String> {
     install_domain_filter_fetch(client, session_id, handle_auth_requests).await?;
-    install_domain_filter_script(client, session_id, allowed_domains).await?;
+    install_domain_filter_script(client, session_id, allowed_domains, paused_before_document)
+        .await?;
     Ok(())
 }
 
@@ -662,6 +684,76 @@ impl EventTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn install_script_with_runtime_error(
+        message: &'static str,
+        paused_before_document: bool,
+    ) -> Result<(), String> {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let mut response = json!({ "id": request["id"] });
+                if request["method"] == "Runtime.evaluate" {
+                    response["error"] = json!({ "code": -32000, "message": message });
+                } else {
+                    response["result"] = json!({ "identifier": "1" });
+                }
+                ws.send(Message::Text(response.to_string())).await.unwrap();
+            }
+        });
+
+        let client = CdpClient::connect(&url).await.unwrap();
+        let result = install_domain_filter_script(
+            &client,
+            "session",
+            &["example.com".to_string()],
+            paused_before_document,
+        )
+        .await;
+        drop(client);
+        server.abort();
+        result
+    }
+
+    #[tokio::test]
+    async fn domain_filter_script_skips_targets_without_a_context() {
+        assert_eq!(
+            install_script_with_runtime_error("Cannot find default execution context", true).await,
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn domain_filter_script_fails_closed_without_a_context_on_live_targets() {
+        let error =
+            install_script_with_runtime_error("Cannot find default execution context", false)
+                .await
+                .unwrap_err();
+        assert!(
+            error.contains("Cannot find default execution context"),
+            "{}",
+            error
+        );
+    }
+
+    #[tokio::test]
+    async fn domain_filter_script_fails_closed_on_other_runtime_errors() {
+        let error = install_script_with_runtime_error("Execution context was destroyed.", true)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("Execution context was destroyed"),
+            "{}",
+            error
+        );
+    }
 
     #[test]
     fn test_domain_filter_exact() {

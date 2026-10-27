@@ -1,8 +1,55 @@
 # agent-browser
 
-## 0.39.2
+## 0.39.4
 
 <!-- release:start -->
+
+### Bug Fixes
+
+- Fixed **`wait --download`** timing out when the download finished before the wait started, and moving the file to the requested path (#2027)
+- Fixed **`--allowed-domains` launches** failing with "Cannot find default execution context" on pages that embed cross-origin iframes (#2116)
+- Fixed **full-page screenshots** on high-DPI displays being twice the page size with the page in the top-left quarter (#2125)
+- Fixed **selector screenshots** being blank for elements outside the first viewport, after scrolling, or inside iframes (#2126)
+- Fixed **unresponsive tabs** permanently breaking a session; a wedged tab now fails with `page_wedged` and, in a launched browser, is replaced after a second timeout (#2100)
+- Fixed **`--pin-tab`** so another session cannot take a pinned tab with `tab <targetId>` (#2135)
+
+### Contributors
+
+- @Railly
+- @WianBroes
+- @justjavac
+- @aamirhullur
+- @zyz619963502zyz
+
+<!-- release:end -->
+
+## 0.39.3
+
+### Bug Fixes
+
+- Fixed **auth encryption keys** being overwritten when the configured key or existing key file is invalid, preserving access to previously saved credentials (#2178)
+- Fixed **project config trust** so auto-discovered files cannot set executable paths, browser arguments, or plugins; `plugin add` now writes the user config by default (#2180)
+- Fixed **MCP access limits** so tool arguments cannot override the server's network, file, policy, or host access settings (#2181)
+- Fixed **inspect WebSocket origins** so browser connections must come from the local Chrome DevTools origin (#2182)
+- Fixed **stale process cleanup** so daemon restarts, `close --all`, and dashboard shutdown check process identity before sending signals (#2183)
+- Fixed **copied Chrome profiles** so their saved preferences mark the copy as cleanly closed, avoiding repeated crash-restore prompts while retaining saved tabs (#2189)
+- Fixed **dashboard chat sessions** so commands stay in their thread's session, background turns remain attached to that session, and closed sessions stop their chat (#2190)
+- Fixed **Windows output capture** so detached daemons and dashboards do not hold the CLI's output pipes open, and MCP output draining is bounded after child exit (#2160)
+
+### Improvements
+
+- Improved **CDP startup attachment** so `connect` and `--cdp` wait up to two seconds for a debugging port that is still refusing connections (#2159)
+
+### Contributors
+
+- @lahfir
+- @holny
+- @pei711
+- @Muhtasham
+- @BetterAndBetterII
+- @dwin-gharibi
+
+## 0.39.2
 
 ### Bug Fixes
 
@@ -33,8 +80,6 @@
 - @tlq5l
 - @aniketsaurav18
 - @jerryfane
-
-<!-- release:end -->
 
 ## 0.39.1
 

@@ -442,6 +442,8 @@ agent-browser doctor --json              # structured output for programmatic co
 
 **"Ref not found" / "Element not found: @eN"** Page changed since the snapshot. Run `agent-browser snapshot -i` again, then use the new refs.
 
+**`page_wedged` error or warning** The page stopped responding, for example a script stuck in a loop. When agent-browser launched the browser and the tab times out twice in a row, it is replaced by a blank one: navigate again and take a fresh snapshot. With `--cdp` or `--auto-connect`, or when policy gates `tab_new` or `tab_close`, the tab is left alone; close it or switch tabs.
+
 **"Stale ref ... cannot be recovered"** The element was replaced and duplicates make the match ambiguous, so the action did not run. Run `agent-browser snapshot -i` and use a fresh ref.
 
 **Element exists in the DOM but not in the snapshot** It's probably off-screen or not yet rendered. Try:

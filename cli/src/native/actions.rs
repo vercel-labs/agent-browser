@@ -11,11 +11,12 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::sync::{broadcast, oneshot, RwLock};
 
 use crate::connection::{get_socket_dir, INTERNAL_DAEMON_SHUTDOWN_ACTION};
+use crate::session_files::SessionFile;
 use crate::validation::{is_valid_session_name, session_name_error};
 
 use super::a11y;
 use super::auth;
-use super::browser::{should_track_target, BrowserManager, WaitUntil};
+use super::browser::{should_track_target, BrowserManager, WaitUntil, WedgeReport};
 use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
@@ -25,6 +26,7 @@ use super::cdp::types::{
 };
 use super::cookies;
 use super::diff;
+use super::downloads::{DownloadLedger, DownloadState};
 use super::element::RefMap;
 use super::inspect_server::InspectServer;
 use super::interaction;
@@ -637,6 +639,8 @@ pub struct DaemonState {
     pub restore_check_fn: Option<String>,
     pub restore_status: String,
     pub restore_status_detail: Option<String>,
+    /// Origins whose storage the last launch-time restore skipped because the page left that origin.
+    pub restore_skipped_origins: Vec<String>,
     pub restore_loaded_path: Option<String>,
     pub restore_load_failed: bool,
     pub restore_validation_pending: bool,
@@ -653,6 +657,8 @@ pub struct DaemonState {
     pub tracing_state: TracingState,
     pub recording_state: RecordingState,
     event_rx: Option<broadcast::Receiver<CdpEvent>>,
+    /// Downloads seen on the attached browser, for `wait --download`.
+    downloads: DownloadLedger,
     pub webmcp: webmcp::RuntimeState,
     /// Whether the active launch opted into Chrome's experimental WebMCP features.
     pub webmcp_enabled: bool,
@@ -703,6 +709,11 @@ pub struct DaemonState {
     pub input_mode: String,
     /// Tracks the currently open JavaScript dialog (alert/confirm/prompt), if any.
     pub pending_dialog: Option<PendingDialog>,
+    /// A `page_wedged` report whose response may not have reached the client,
+    /// keyed by the request id. The client's read timeout can expire before
+    /// the daemon finishes replacing the tab, so a retry of the same request
+    /// gets the report instead of running on the blank replacement tab.
+    pub undelivered_wedge: Option<(String, WedgeReport)>,
     /// A mouse button left logically down because a dialog opened between
     /// mousePressed and mouseReleased; released when the dialog is resolved.
     pub pending_pointer_release: Option<super::interaction::PendingRelease>,
@@ -761,6 +772,18 @@ fn default_idle_shutdown_is_blocked(
 }
 
 impl DaemonState {
+    /// The client received the `page_wedged` response to request `id`, so it
+    /// is not replayed. A newer report from another request stays pending.
+    pub fn wedge_report_delivered(&mut self, id: &str) {
+        if self
+            .undelivered_wedge
+            .as_ref()
+            .is_some_and(|(wedged_id, _)| wedged_id == id)
+        {
+            self.undelivered_wedge = None;
+        }
+    }
+
     pub fn new() -> Self {
         let session_id =
             env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string());
@@ -798,6 +821,7 @@ impl DaemonState {
             restore_check_fn: env::var("AGENT_BROWSER_RESTORE_CHECK_FN").ok(),
             restore_status: "not_configured".to_string(),
             restore_status_detail: None,
+            restore_skipped_origins: Vec::new(),
             restore_loaded_path: None,
             restore_load_failed: false,
             restore_validation_pending: false,
@@ -809,6 +833,7 @@ impl DaemonState {
             tracing_state: TracingState::new(),
             recording_state: RecordingState::new(),
             event_rx: None,
+            downloads: DownloadLedger::default(),
             webmcp: webmcp::RuntimeState::default(),
             webmcp_enabled: false,
             screencasting: false,
@@ -834,6 +859,7 @@ impl DaemonState {
             mouse_state: MouseState::default(),
             input_mode: "instant".to_string(),
             pending_dialog: None,
+            undelivered_wedge: None,
             pending_pointer_release: None,
             auto_dialog: !matches!(
                 env::var("AGENT_BROWSER_NO_AUTO_DIALOG").as_deref(),
@@ -911,6 +937,7 @@ impl DaemonState {
     }
 
     fn subscribe_to_browser_events(&mut self) {
+        self.downloads.clear();
         if let Some(ref browser) = self.browser {
             self.event_rx = Some(browser.client.subscribe());
         }
@@ -1009,6 +1036,11 @@ impl DaemonState {
                         let target_needs_controls = target_info
                             .as_ref()
                             .is_some_and(target_supports_network_controls);
+                        let waiting_for_debugger = event
+                            .params
+                            .get("waitingForDebugger")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
 
                         let df = domain_filter.read().await.clone();
                         let has_proxy_creds = proxy_credentials.read().await.is_some();
@@ -1035,6 +1067,7 @@ impl DaemonState {
                                             &sid,
                                             df.as_ref(),
                                             has_proxy_creds,
+                                            waiting_for_debugger,
                                         )
                                         .await
                                     }
@@ -1378,6 +1411,7 @@ impl DaemonState {
                             iframe_sid,
                             filter.as_ref(),
                             has_proxy_creds,
+                            false,
                         )
                         .await?;
                     }
@@ -1413,6 +1447,7 @@ impl DaemonState {
                             page_sid,
                             filter.as_ref(),
                             has_proxy_creds,
+                            false,
                         )
                         .await?;
                     }
@@ -1550,6 +1585,7 @@ impl DaemonState {
                             &attach.session_id,
                             filter.as_ref(),
                             has_proxy_creds,
+                            false,
                         )
                         .await?;
                     }
@@ -1732,6 +1768,9 @@ impl DaemonState {
         loop {
             match rx.try_recv() {
                 Ok(event) => {
+                    if self.downloads.observe(&event.method, &event.params) {
+                        continue;
+                    }
                     // Target events are not session-scoped; handle them first
                     match event.method.as_str() {
                         "Target.targetCreated" => {
@@ -2375,6 +2414,7 @@ fn plugins_from_command_or_env(cmd: &Value) -> Vec<crate::plugins::PluginConfig>
 fn reset_restore_runtime_state(state: &mut DaemonState) {
     state.restore_status = "pending".to_string();
     state.restore_status_detail = None;
+    state.restore_skipped_origins.clear();
     state.restore_loaded_path = None;
     state.restore_load_failed = false;
     state.restore_validation_pending = false;
@@ -2819,6 +2859,18 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 
     let cmd_start = std::time::Instant::now();
 
+    // A retry of the request that wedged the tab must not run on its blank
+    // replacement: `url` would report about:blank as a success.
+    if let Some((_, report)) = state
+        .undelivered_wedge
+        .as_ref()
+        .filter(|(wedged_id, _)| *wedged_id == id)
+    {
+        let mut resp = error_response(&id, &report.error_message());
+        resp["data"] = report.data();
+        return resp;
+    }
+
     if let Err(err) = validate_restore_config_from_command(cmd) {
         return error_response(&id, &err);
     }
@@ -3121,7 +3173,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
-    let result = match action {
+    let mut result = match action {
         "launch" => {
             let webmcp_enabled = cmd
                 .get("webmcp")
@@ -3315,6 +3367,40 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         state.last_command_finished = Some(std::time::Instant::now());
     }
 
+    let mut wedge = None;
+    if result.is_ok() {
+        if let Some(mgr) = state.browser.as_mut() {
+            mgr.clear_wedge_suspect_if_responsive().await;
+        }
+    }
+    if let Err(ref e) = result {
+        if e.contains("CDP command timed out") {
+            // A dialog opened by this command blocks the renderer like a
+            // wedge does; its event is only seen once events are drained.
+            let _ = state.drain_cdp_events_background().await;
+            let dialog_session = state
+                .pending_dialog
+                .as_ref()
+                .and_then(|d| d.session_id.clone());
+            let may_replace = may_replace_wedged_tab(state);
+            if let Some(mgr) = state.browser.as_mut() {
+                wedge = mgr
+                    .handle_command_timeout(dialog_session.as_deref(), may_replace)
+                    .await;
+            }
+            if let Some(old_session_id) = wedge
+                .as_ref()
+                .filter(|w| w.replacement_target_id.is_some())
+                .map(|w| w.session_id.clone())
+            {
+                if let Err(e) = adopt_replacement_tab(state, &old_session_id).await {
+                    result = Err(e);
+                    wedge = None;
+                }
+            }
+        }
+    }
+
     // Persist the session-to-tab binding (write-on-change) so a fresh daemon
     // re-attaches to this session's tab instead of adopting the browser's
     // most recently active one.
@@ -3324,29 +3410,38 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         None
     };
 
-    let mut resp = match result {
-        Ok(data) => success_response(&id, data),
-        Err(e) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
+    let mut resp = match (result, &wedge) {
+        (_, Some(report)) => {
+            let mut resp = error_response(&id, &report.error_message());
+            resp["data"] = report.data();
+            resp
+        }
+        (Ok(data), None) => success_response(&id, data),
+        (Err(e), None) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
     };
     attach_tab_gone_data(&mut resp, state);
+    if let Some(report) = wedge {
+        state.undelivered_wedge = Some((id.clone(), report));
+    } else if let Some((_, report)) = state.undelivered_wedge.take() {
+        // The wedged command's response never reached the client.
+        append_warning(&mut resp, &report.error_message());
+    }
 
     // A failed binding write is retried on the next command, but a pinned
     // session must know its isolation may not survive a daemon restart.
     if let Some(err) = persist_error {
-        if let Some(obj) = resp.as_object_mut() {
-            let hint = if state.pin_tab {
-                " --pin-tab isolation may not survive a daemon restart until the binding persists."
-            } else {
-                ""
-            };
-            obj.insert(
-                "warning".to_string(),
-                json!(format!(
-                    "Failed to persist the session tab binding: {}.{}",
-                    err, hint
-                )),
-            );
-        }
+        let hint = if state.pin_tab {
+            " --pin-tab isolation may not survive a daemon restart until the binding persists."
+        } else {
+            ""
+        };
+        append_warning(
+            &mut resp,
+            &format!(
+                "Failed to persist the session tab binding: {}.{}",
+                err, hint
+            ),
+        );
     }
     inject_lifecycle(
         &mut resp,
@@ -3374,15 +3469,13 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     // Auto-report pending JavaScript dialog so agents know why commands may hang
     if action != "dialog" {
         if let Some(ref dialog) = state.pending_dialog {
-            if let Some(obj) = resp.as_object_mut() {
-                obj.insert(
-                    "warning".to_string(),
-                    json!(format!(
-                        "A JavaScript {} dialog is blocking the page: \"{}\" — use `dialog accept` or `dialog dismiss` to resolve it",
-                        dialog.dialog_type, dialog.message
-                    )),
-                );
-            }
+            append_warning(
+                &mut resp,
+                &format!(
+                    "A JavaScript {} dialog is blocking the page: \"{}\" — use `dialog accept` or `dialog dismiss` to resolve it",
+                    dialog.dialog_type, dialog.message
+                ),
+            );
         }
     }
 
@@ -3878,6 +3971,7 @@ async fn install_network_controls_for_session(
     session_id: &str,
     filter: Option<&DomainFilter>,
     handle_auth_requests: bool,
+    paused_before_document: bool,
 ) -> Result<(), String> {
     if let Some(filter) = filter {
         network::install_domain_filter(
@@ -3885,6 +3979,7 @@ async fn install_network_controls_for_session(
             session_id,
             &filter.allowed_domains,
             handle_auth_requests,
+            paused_before_document,
         )
         .await?;
     } else if handle_auth_requests {
@@ -3956,6 +4051,7 @@ async fn install_active_network_controls(
             &session_id,
             filter.as_ref(),
             handle_auth_requests,
+            false,
         )
         .await?;
         mgr.resume_if_waiting_pub(&session_id).await?;
@@ -3966,6 +4062,64 @@ async fn install_active_network_controls(
     }
 
     Ok(())
+}
+
+/// The wedged tab was replaced by a blank one: drop the old tab's refs and
+/// frame scope, and give the new tab the session setup and network controls
+/// (headers, routes, domain filter) that `tab new` installs.
+async fn adopt_replacement_tab(
+    state: &mut DaemonState,
+    old_session_id: &str,
+) -> Result<(), String> {
+    state.webmcp.clear_page_scope(old_session_id);
+    state.webmcp.observations.remove(old_session_id);
+    state.ref_map.begin_snapshot();
+    state.active_iframe_sessions.clear();
+    state.active_frame_id = None;
+    state.webmcp.clear_invocations();
+    let session_id = state
+        .browser
+        .as_ref()
+        .ok_or("Browser not launched")?
+        .active_session_id()?
+        .to_string();
+    let has_proxy_creds = state.proxy_credentials.read().await.is_some();
+    apply_session_setup(state, &session_id).await?;
+    install_network_controls_or_close(state, has_proxy_creds).await?;
+    state.drain_cdp_events_background().await?;
+    state.refresh_active_iframe_sessions().await;
+    Ok(())
+}
+
+/// Replacing a wedged tab opens one tab and closes another, so it runs only
+/// when policy would let the agent do both itself without a confirmation.
+fn may_replace_wedged_tab(state: &DaemonState) -> bool {
+    ["tab_new", "tab_close"].iter().all(|action| {
+        let confirmed = state.confirmed_policy_actions.contains(*action);
+        let policy_ok = state
+            .policy
+            .as_ref()
+            .is_none_or(|policy| match policy.check(action) {
+                PolicyResult::Allow => true,
+                PolicyResult::RequiresConfirmation => confirmed,
+                PolicyResult::Deny(_) => false,
+            });
+        let category_ok = confirmed
+            || !state
+                .confirm_actions
+                .as_ref()
+                .is_some_and(|ca| ca.requires_confirmation(action));
+        policy_ok && category_ok
+    })
+}
+
+/// Add to the response's warning instead of replacing one already set.
+fn append_warning(resp: &mut Value, warning: &str) {
+    let merged = match resp.get("warning").and_then(Value::as_str) {
+        Some(existing) => format!("{}\n{}", existing, warning),
+        None => warning.to_string(),
+    };
+    resp["warning"] = json!(merged);
 }
 
 async fn install_network_controls_or_close(
@@ -4692,6 +4846,7 @@ fn no_xvfb_from_launch_cmd(cmd: &Value) -> bool {
 }
 
 async fn try_auto_restore_state(state: &mut DaemonState) {
+    state.restore_skipped_origins.clear();
     let session_name = match state.session_name.as_deref() {
         Some(n) if !n.is_empty() => n.to_string(),
         _ => {
@@ -4707,9 +4862,10 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
                 match state::load_state(&mgr.client, session_id, &path).await {
-                    Ok(()) => {
+                    Ok(skipped) => {
                         state.restore_status = "loaded".to_string();
                         state.restore_status_detail = None;
+                        state.restore_skipped_origins = skipped;
                         state.restore_loaded_path = Some(path.clone());
                         state.restore_load_failed = false;
                         state.restore_validation_pending = state.restore_check_url.is_some()
@@ -4927,15 +5083,15 @@ async fn load_storage_state(state: &mut DaemonState, path: &Option<String>) -> R
     if let Some(ref path) = path {
         ensure_state_replay_supported_by_active_domain_filter(state, "--state/storageState")
             .await?;
-        let mut loaded = false;
+        let mut skipped = None;
         if let Some(ref mgr) = state.browser {
             if let Ok(session_id) = mgr.active_session_id() {
-                state::load_state(&mgr.client, session_id, path).await?;
-                loaded = true;
+                skipped = Some(state::load_state(&mgr.client, session_id, path).await?);
             }
         }
-        if loaded {
+        if let Some(skipped) = skipped {
             mark_explicit_storage_state_loaded(state, path);
+            state.restore_skipped_origins.extend(skipped);
         }
     }
 
@@ -5869,25 +6025,39 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     }
 
     state.ref_map.invalidate_all_documents();
-    match save_result {
-        Ok(Some(path)) => Ok(json!({
+    // An explicit close releases this session's pin before replying, so other
+    // sessions need not wait for the daemon process to exit.
+    let pin_release_error = match tab_binding::release_pin(&state.session_id) {
+        Ok(Some(binding)) => {
+            state.last_persisted_binding = Some(binding);
+            None
+        }
+        Ok(None) => None,
+        Err(e) => Some(e),
+    };
+    let mut reply = match save_result {
+        Ok(Some(path)) => json!({
             "closed": true,
             "restoreStatus": state.restore_status,
             "saveStatus": state.restore_save_status,
             "statePath": path
-        })),
-        Ok(None) => Ok(json!({
+        }),
+        Ok(None) => json!({
             "closed": true,
             "restoreStatus": state.restore_status,
             "saveStatus": state.restore_save_status
-        })),
-        Err(err) => Ok(json!({
+        }),
+        Err(err) => json!({
             "closed": true,
             "restoreStatus": state.restore_status,
             "saveStatus": state.restore_save_status,
             "saveError": err
-        })),
+        }),
+    };
+    if let Some(err) = pin_release_error {
+        reply["pinReleaseError"] = json!(err);
     }
+    Ok(reply)
 }
 
 // ---------------------------------------------------------------------------
@@ -7373,6 +7543,7 @@ async fn handle_session_info(state: &DaemonState) -> Result<Value, String> {
         "restoreKey": state.session_name,
         "restoreStatus": state.restore_status,
         "restoreStatusDetail": state.restore_status_detail,
+        "restoreSkippedOrigins": state.restore_skipped_origins,
         "restoreLoadedPath": state.restore_loaded_path,
         "restoreValidationPending": state.restore_validation_pending,
         "restoreSave": state.restore_save,
@@ -7411,9 +7582,9 @@ async fn handle_state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value
         .ok_or("Missing 'path' parameter")?;
 
     ensure_state_replay_supported_by_active_domain_filter(state, "state load").await?;
-    state::load_state(&mgr.client, &session_id, path).await?;
+    let skipped = state::load_state(&mgr.client, &session_id, path).await?;
     mark_explicit_storage_state_loaded(state, path);
-    Ok(json!({ "loaded": true, "path": path }))
+    Ok(json!({ "loaded": true, "path": path, "skippedOrigins": skipped }))
 }
 
 // ---------------------------------------------------------------------------
@@ -7763,6 +7934,18 @@ async fn handle_tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
         mgr.resolve_tab_ref(&tab_ref)?
     };
+    if let Some(target_id) = state
+        .browser
+        .as_ref()
+        .and_then(|mgr| mgr.target_id_for_tab(tab_id))
+    {
+        if let Some(owner) = super::tab_binding::pinned_owner(target_id, &state.session_id) {
+            return Err(format!(
+                "tab_locked: tab {} is pinned by session '{}' (--pin-tab); close that session or use another tab",
+                target_id, owner
+            ));
+        }
+    }
     let dialog_session = state
         .pending_dialog
         .as_ref()
@@ -7906,7 +8089,31 @@ async fn handle_set_media(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     Ok(json!({ "set": true }))
 }
 
+/// Chrome may still be flushing a download to disk after signalling
+/// completion; wait briefly for the file to appear.
+async fn wait_for_downloaded_file(path: &std::path::Path) -> bool {
+    for _ in 0..10 {
+        if path.exists() {
+            return true;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+    path.exists()
+}
+
 async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let result = download_to_path(cmd, state).await;
+    // `download` points the browser at the destination's directory; restore the
+    // configured one so later downloads land where `wait --download` expects.
+    if let Some(mgr) = state.browser.as_ref() {
+        if !mgr.is_cdp_connection() {
+            mgr.enable_download_events().await;
+        }
+    }
+    result
+}
+
+async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
@@ -8027,19 +8234,15 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         }
     }
 
+    if let Some(ref guid) = downloaded_guid {
+        state.downloads.mark_claimed(guid);
+    }
+
     // With "allowAndName" behavior, Chrome saves the file using the GUID as filename.
     // Rename it to the user-requested filename.
     if let Some(guid) = downloaded_guid {
         let guid_path = download_dir.join(&guid);
-        // Chrome may still be flushing the file to disk after signalling
-        // completion; wait briefly for it to appear.
-        for _ in 0..10 {
-            if guid_path.exists() {
-                break;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-        if guid_path.exists() {
+        if wait_for_downloaded_file(&guid_path).await {
             std::fs::rename(&guid_path, &dest)
                 .map_err(|e| format!("Failed to rename downloaded file: {}", e))?;
         } else {
@@ -9339,7 +9542,7 @@ async fn handle_device(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 // ---------------------------------------------------------------------------
 
 fn stream_file_path(session_id: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.stream", session_id))
+    SessionFile::Stream.path(session_id)
 }
 
 fn write_stream_file(session_id: &str, port: u16) -> Result<(), String> {
@@ -9367,7 +9570,7 @@ fn remove_stream_file(session_id: &str) -> Result<(), String> {
 }
 
 fn engine_file_path(session_id: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.engine", session_id))
+    SessionFile::Engine.path(session_id)
 }
 
 fn write_engine_file(session_id: &str, engine: &str) {
@@ -9379,7 +9582,7 @@ fn remove_engine_file(session_id: &str) {
 }
 
 fn provider_file_path(session_id: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.provider", session_id))
+    SessionFile::Provider.path(session_id)
 }
 
 fn write_provider_file(session_id: &str, provider: &str) {
@@ -9391,7 +9594,7 @@ fn remove_provider_file(session_id: &str) {
 }
 
 fn extensions_file_path(session_id: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.extensions", session_id))
+    SessionFile::Extensions.path(session_id)
 }
 
 fn write_extensions_file(session_id: &str) {
@@ -11195,43 +11398,112 @@ async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, 
     }
 }
 
-async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
+async fn handle_waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let timeout_ms = state.timeout_ms(cmd);
+    let mut rx = state
+        .browser
+        .as_ref()
+        .ok_or("Browser not launched")?
+        .client
+        .subscribe();
+    // Events that arrived after the per-command drain, such as during the
+    // liveness check, are not delivered to the new receiver. Drain them into
+    // the ledger now so a download that already finished is claimed (#561).
+    state.drain_cdp_events_background().await?;
 
-    let mut rx = mgr.client.subscribe();
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
-
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return Err("Timeout waiting for download".to_string());
+    let record = loop {
+        if let Some(record) = state.downloads.claim_finished() {
+            break record;
         }
-
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(event)) => {
-                // Browser-domain events may arrive without a sessionId;
-                // Page-domain events are matched by session.
-                let is_page_session = event.session_id.as_deref() == Some(&session_id);
-                let is_progress = event.method == "Browser.downloadProgress"
-                    || (event.method == "Page.downloadProgress" && is_page_session);
-
-                if is_progress
-                    && event.params.get("state").and_then(|v| v.as_str()) == Some("completed")
-                {
-                    let path = cmd
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("download");
-                    return Ok(json!({ "path": path }));
-                }
+                state.downloads.observe(&event.method, &event.params);
             }
             Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
             Ok(Err(_)) => return Err("Event stream closed".to_string()),
             Err(_) => return Err("Timeout waiting for download".to_string()),
         }
+    };
+
+    if record.state == DownloadState::Canceled {
+        return Err("Download was canceled".to_string());
     }
+    let path_arg = cmd.get("path").and_then(|v| v.as_str());
+    let Some(saved) = record.file_path else {
+        if path_arg.is_none() {
+            return Ok(json!({ "completed": true }));
+        }
+        return Err(
+            "Download completed but the browser did not report where it saved the file".to_string(),
+        );
+    };
+    let saved = PathBuf::from(saved);
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let launched_locally = !mgr.is_cdp_connection();
+    let download_dir = mgr.download_path.clone();
+    // A CDP endpoint reports a path on its own filesystem, which may not be
+    // this machine's.
+    if launched_locally && !wait_for_downloaded_file(&saved).await {
+        return Err(format!(
+            "Download completed but no file is at {}",
+            saved.display()
+        ));
+    }
+
+    let Some(path_str) = path_arg else {
+        return Ok(json!({ "path": saved.to_string_lossy() }));
+    };
+    if !may_move_download(&saved, launched_locally, download_dir.as_deref()) {
+        state.downloads.release(&record.guid);
+        return Err(format!(
+            "Refusing to move {}: only downloads from a browser agent-browser launched, inside its download directory, can be moved",
+            saved.display()
+        ));
+    }
+    // A bad destination must not consume the download, so a retry can claim it.
+    move_download(&saved, path_str).inspect_err(|_| state.downloads.release(&record.guid))
+}
+
+/// The saved path comes from a CDP event, so only a browser this daemon
+/// launched is trusted to name a local file. A remote endpoint could otherwise
+/// point the move at any file the daemon can read.
+fn may_move_download(
+    saved: &std::path::Path,
+    launched_locally: bool,
+    download_dir: Option<&str>,
+) -> bool {
+    if !launched_locally {
+        return false;
+    }
+    let Some(dir) = download_dir else {
+        return true;
+    };
+    match (fs::canonicalize(saved), fs::canonicalize(dir)) {
+        (Ok(saved), Ok(dir)) => saved.starts_with(dir),
+        _ => false,
+    }
+}
+
+fn move_download(saved: &std::path::Path, path_str: &str) -> Result<Value, String> {
+    let dest = if std::path::Path::new(path_str).is_absolute() {
+        PathBuf::from(path_str)
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("Failed to get current directory: {}", e))?
+            .join(path_str)
+    };
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create download directory: {}", e))?;
+    }
+    if fs::rename(saved, &dest).is_err() {
+        // rename fails across filesystems; copy, then remove the original.
+        fs::copy(saved, &dest).map_err(|e| format!("Failed to move downloaded file: {}", e))?;
+        let _ = fs::remove_file(saved);
+    }
+    Ok(json!({ "path": dest.to_string_lossy() }))
 }
 
 async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -13847,6 +14119,8 @@ fn error_response(id: &str, error: &str) -> Value {
     // using --json can match on it instead of parsing the message.
     if error.starts_with(super::browser::TAB_GONE_PREFIX) {
         resp["code"] = json!("tab_gone");
+    } else if error.starts_with(super::browser::PAGE_WEDGED_PREFIX) {
+        resp["code"] = json!("page_wedged");
     } else if let Some((code, _)) = error.split_once(": ") {
         if code.starts_with("webmcp_") {
             resp["code"] = json!(code);
@@ -13876,6 +14150,263 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wedged_tab_replacement_follows_tab_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy_with = |body: &str| {
+            let path = dir.path().join("policy.json");
+            std::fs::write(&path, body).unwrap();
+            ActionPolicy::load(path.to_str().unwrap()).unwrap()
+        };
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        assert!(may_replace_wedged_tab(&state));
+
+        state.policy = Some(policy_with(r#"{"default":"allow","deny":["tab_close"]}"#));
+        assert!(!may_replace_wedged_tab(&state));
+
+        state.policy = Some(policy_with(r#"{"default":"allow","confirm":["tab_new"]}"#));
+        assert!(!may_replace_wedged_tab(&state));
+        state.confirmed_policy_actions.insert("tab_new".to_string());
+        assert!(may_replace_wedged_tab(&state));
+
+        state.policy = None;
+        state.confirmed_policy_actions.clear();
+        state.confirm_actions = Some(ConfirmActions {
+            categories: ["tab_close".to_string()].into_iter().collect(),
+        });
+        assert!(!may_replace_wedged_tab(&state));
+    }
+
+    #[test]
+    fn wedge_report_delivered_only_clears_its_own_request() {
+        let mut state = DaemonState::new();
+        let report = || super::super::browser::WedgeReport {
+            target_id: "T".to_string(),
+            session_id: "S".to_string(),
+            last_url: String::new(),
+            replacement_target_id: None,
+            kept: false,
+        };
+        state.undelivered_wedge = Some(("b".to_string(), report()));
+        state.wedge_report_delivered("a");
+        assert!(state.undelivered_wedge.is_some());
+        state.wedge_report_delivered("b");
+        assert!(state.undelivered_wedge.is_none());
+    }
+
+    #[test]
+    fn only_a_launched_browser_may_name_the_file_to_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let downloads = dir.path().join("downloads");
+        std::fs::create_dir(&downloads).unwrap();
+        let inside = downloads.join("report.bin");
+        let outside = dir.path().join("secret");
+        std::fs::write(&inside, "").unwrap();
+        std::fs::write(&outside, "").unwrap();
+        let downloads = downloads.to_str();
+
+        assert!(!super::may_move_download(&inside, false, None));
+        assert!(!super::may_move_download(&inside, false, downloads));
+        assert!(super::may_move_download(&outside, true, None));
+        assert!(super::may_move_download(&inside, true, downloads));
+        assert!(!super::may_move_download(&outside, true, downloads));
+        let escape = dir.path().join("downloads").join("..").join("secret");
+        assert!(!super::may_move_download(&escape, true, downloads));
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("downloads").join("link");
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            assert!(!super::may_move_download(&link, true, downloads));
+        }
+    }
+
+    async fn start_finished_download(
+        state: &mut super::DaemonState,
+        download_dir: &std::path::Path,
+    ) -> std::path::PathBuf {
+        for cmd in [
+            serde_json::json!({ "id": "1", "action": "launch", "headless": true,
+                "downloadPath": download_dir.to_string_lossy() }),
+            serde_json::json!({ "id": "2", "action": "navigate", "url":
+                "data:text/html,<a id=dl download=report.bin href='data:application/octet-stream,report'>dl</a>" }),
+            serde_json::json!({ "id": "3", "action": "evaluate",
+                "script": "document.getElementById('dl').click()" }),
+        ] {
+            let resp = super::execute_command(&cmd, state).await;
+            assert_eq!(resp["success"], true, "{resp}");
+        }
+        let saved = download_dir.join("report.bin");
+        for _ in 0..50 {
+            if saved.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            saved.exists(),
+            "download should land in the configured directory"
+        );
+        saved
+    }
+
+    /// Events that arrive after the per-command drain, for example during the
+    /// liveness check, are still in the daemon's receiver when the wait starts.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_wait_download_claims_a_completion_left_in_the_daemon_receiver() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = super::DaemonState::new();
+        start_finished_download(&mut state, &dir.path().join("downloads")).await;
+
+        let result = super::handle_waitfordownload(
+            &serde_json::json!({ "action": "waitfordownload", "timeout": 2000 }),
+            &mut state,
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        super::execute_command(
+            &serde_json::json!({ "id": "9", "action": "close" }),
+            &mut state,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_wait_download_failed_move_leaves_the_download_claimable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = super::DaemonState::new();
+        let saved = start_finished_download(&mut state, &dir.path().join("downloads")).await;
+
+        // A regular file as the parent directory makes the destination invalid.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "").unwrap();
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "4", "action": "waitfordownload",
+                "path": blocker.join("report.bin").to_string_lossy(), "timeout": 2000 }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false, "{resp}");
+        assert!(saved.exists(), "a failed move keeps the source file");
+
+        let dest = dir.path().join("out").join("report.bin");
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "5", "action": "waitfordownload",
+                "path": dest.to_string_lossy(), "timeout": 2000 }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "report");
+        super::execute_command(
+            &serde_json::json!({ "id": "9", "action": "close" }),
+            &mut state,
+        )
+        .await;
+    }
+
+    /// `download` points the browser at another directory; later downloads must
+    /// go back to the configured one so `wait --download` can still move them.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_wait_download_after_download_command_uses_configured_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = super::DaemonState::new();
+        start_finished_download(&mut state, &dir.path().join("downloads")).await;
+        let claimed = super::execute_command(
+            &serde_json::json!({ "id": "4", "action": "waitfordownload", "timeout": 2000 }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(claimed["success"], true, "{claimed}");
+
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "5", "action": "download", "selector": "#dl",
+                "path": dir.path().join("other").join("first.bin").to_string_lossy() }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "6", "action": "evaluate",
+                "script": "document.getElementById('dl').click()" }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+
+        let dest = dir.path().join("out").join("second.bin");
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "7", "action": "waitfordownload",
+                "path": dest.to_string_lossy(), "timeout": 5000 }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "report");
+        super::execute_command(
+            &serde_json::json!({ "id": "9", "action": "close" }),
+            &mut state,
+        )
+        .await;
+    }
+
+    /// Connecting over CDP must not reset the attached browser's download
+    /// directory, and the wait must not require the file on the local disk.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_cdp_connect_keeps_the_browser_download_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let download_dir = dir.path().join("downloads");
+        std::fs::create_dir_all(&download_dir).unwrap();
+        let mut owner = super::DaemonState::new();
+        for cmd in [
+            serde_json::json!({ "id": "1", "action": "launch", "headless": true,
+                "downloadPath": download_dir.to_string_lossy() }),
+            serde_json::json!({ "id": "2", "action": "navigate", "url":
+                "data:text/html,<a id=dl download=report.bin href='data:application/octet-stream,report'>dl</a>" }),
+        ] {
+            let resp = super::execute_command(&cmd, &mut owner).await;
+            assert_eq!(resp["success"], true, "{resp}");
+        }
+        let cdp_url = owner.browser.as_ref().unwrap().get_cdp_url().to_string();
+
+        let mut attached = super::DaemonState::new();
+        for cmd in [
+            serde_json::json!({ "id": "3", "action": "launch", "cdpUrl": cdp_url }),
+            serde_json::json!({ "id": "4", "action": "evaluate",
+                "script": "document.getElementById('dl').click()" }),
+        ] {
+            let resp = super::execute_command(&cmd, &mut attached).await;
+            assert_eq!(resp["success"], true, "{resp}");
+        }
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "5", "action": "waitfordownload", "timeout": 5000 }),
+            &mut attached,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        let saved = download_dir.join("report.bin");
+        for _ in 0..50 {
+            if saved.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            saved.exists(),
+            "download should stay in the configured directory"
+        );
+        super::execute_command(
+            &serde_json::json!({ "id": "9", "action": "close" }),
+            &mut owner,
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn test_auth_login_releases_remote_objects_after_failures() {
         use futures_util::{SinkExt, StreamExt};
