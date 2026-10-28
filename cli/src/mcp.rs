@@ -828,8 +828,8 @@ fn tools() -> Vec<Value> {
                 "raw": { "type": "boolean", "description": "Return the response body without HTML extraction." },
                 "requireMd": { "type": "boolean", "description": "Fail unless the response is Content-Type: text/markdown." },
                 "llms": { "type": "string", "enum": ["index", "full"], "description": "Return nearest-ancestor llms data: index for compact llms.txt links, full for llms-full.txt." },
-                "outline": { "type": "boolean", "description": "Return a heading outline for the selected page instead of the full page text." },
-                "filter": { "type": "string", "description": "Filter page sections, --llms links/sections, or --outline headings." },
+                "outline": { "type": "boolean", "description": "Return a heading outline for the selected page, ignoring heading-like lines inside fenced code blocks." },
+                "filter": { "type": "string", "description": "Filter page sections, --llms links/sections, or --outline headings. Matching sections preserve fenced code blocks." },
                 "readTimeoutMs": { "type": "integer", "description": "Request timeout in milliseconds." }
             }),
             &[],

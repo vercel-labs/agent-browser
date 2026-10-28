@@ -1704,6 +1704,8 @@ text extracted from HTML, and print only the document content by default.
 Use --outline for a compact heading outline of a single page. Use --llms index
 or --llms full for nearest-ancestor llms files; with no URL, --llms and
 --require-md use the active tab URL because they depend on HTTP resources.
+Section filters preserve fenced code blocks. Outlines ignore heading-like
+lines inside backtick or tilde fences.
 
 Options:
   --raw                Print the response body without HTML extraction

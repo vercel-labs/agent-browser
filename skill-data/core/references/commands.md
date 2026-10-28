@@ -16,6 +16,7 @@ agent-browser read [url]      # Fetch agent-readable text, or read rendered acti
                               # Walks ancestor paths for llms.txt before HTML fallback
                               # --llms and --require-md without URL use the active tab URL
                               # --filter narrows page content to matching heading sections
+                              # Section filters preserve fenced code; outlines ignore headings inside it
                               # Honors --allowed-domains, --content-boundaries, and --max-output
                               # Options: --raw, --require-md, --outline, --llms <index|full>, --filter, --timeout <ms>
 agent-browser back            # Go back
