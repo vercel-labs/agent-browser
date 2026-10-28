@@ -544,6 +544,9 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         return;
     }
 
+    // Printed before the per-action formatting, most of which returns early.
+    print_warning(resp);
+
     if let Some(data) = &resp.data {
         print_lifecycle_note(data);
 
@@ -570,7 +573,6 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                 } else {
                     println!("{} No dialog is currently open", color::success_indicator());
                 }
-                print_warning(resp);
                 return;
             }
         }
@@ -1301,6 +1303,15 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                         color::success_indicator(),
                         color::green(path)
                     );
+                    if let Some(skipped) = data.get("skippedOrigins").and_then(|v| v.as_array()) {
+                        for origin in skipped.iter().filter_map(|v| v.as_str()) {
+                            println!(
+                                "{} Skipped storage for {} (page did not stay on that origin)",
+                                color::warning_indicator(),
+                                origin
+                            );
+                        }
+                    }
                 }
                 // video_start and other commands that provide a path with a note
                 "video_start" => {
@@ -1530,8 +1541,6 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         // Default success
         println!("{} Done", color::success_indicator());
     }
-
-    print_warning(resp);
 }
 
 fn print_lifecycle_note(data: &serde_json::Value) {
@@ -1736,6 +1745,10 @@ XPath, or an element reference from snapshot (e.g., @e1).
 If another element covers the click point, agent-browser reports the
 covering element instead of dispatching a click to the wrong target.
 
+Click and dblclick fail, instead of reporting success, when the element
+is hidden, disabled, or outside the viewport. With --new-tab, click opens
+the link's URL directly, so these checks do not apply.
+
 Options:
   --new-tab            Open link in a new tab instead of navigating current tab.
                        The new tab inherits session setup before its first load.
@@ -1764,6 +1777,9 @@ Usage: agent-browser dblclick <selector>
 
 Double-clicks on the specified element. Useful for text selection
 or triggering double-click handlers.
+
+Double-click fails, instead of reporting success, when the element is
+hidden, disabled, or outside the viewport.
 
 Global Options:
   --json               Output as JSON
@@ -2233,6 +2249,8 @@ Usage: agent-browser snapshot [options]
 Returns an accessibility tree representation of the page with element
 references (like @e1, @e2) that can be used in subsequent commands.
 Refs can be reused across snapshots. Take a fresh snapshot after navigation.
+If a ref's element was replaced, the action uses the one element with the same
+role and name. If that is ambiguous, it fails: run snapshot again.
 
 Options:
   -i, --interactive    Only include interactive elements
@@ -2532,6 +2550,7 @@ Subcommands:
   route <url> [options]      Intercept requests matching URL pattern
     --abort                  Abort matching requests
     --body <json>            Respond with custom body
+    --allow-origin <origin>  Let a page on <origin> read the mocked body cross-origin
   unroute [url]              Remove route (all if no URL)
   requests [options]         List captured requests
     --clear                  Clear request log
@@ -2782,6 +2801,9 @@ Login behavior:
   auth login navigates, then waits for form selectors before filling/clicking.
   --no-navigate preserves the active top-level page and checks its origin
   against the effective credential URL. Submit-triggered navigation is allowed.
+  Matches are checked for size, computed visibility/opacity, and disabled/readonly
+  state, including custom selectors.
+  Replaced or focus-redirected credential fields fail without submitting.
   Selector wait timeout follows the default action timeout.
   Plugin credentials are resolved just-in-time and are not saved locally.
 
@@ -3085,7 +3107,8 @@ Save, restore, list, and manage browser state (cookies, localStorage, sessionSto
 
 Operations:
   save <path>                        Save current state to file
-  load <path>                        Load state from file
+  load <path>                        Load state from file (origins that redirect
+                                     elsewhere are skipped and listed)
   list                               List saved state files
   show <filename>                    Show state summary
   rename <old-name> <new-name>       Rename state file
@@ -3504,6 +3527,7 @@ separated by blank lines (or as a JSON array with --json).
 Options:
   --bail               Stop on first error (default: continue all commands)
   --json               Output results as a JSON array
+  --omit-command       With --json, replace each command array with a zero-based `index` field
 
 Argument Mode:
   Each quoted argument is a full command string:
@@ -3523,7 +3547,10 @@ Examples:
   agent-browser batch "open https://example.com" "screenshot"
   agent-browser batch --bail "open https://example.com" "click @e1" "screenshot"
   echo '[["open", "https://example.com"], ["snapshot"]]' | agent-browser batch
+  echo '[["fill", "#password", "secret"]]' | agent-browser batch --json --omit-command
   agent-browser batch --bail < commands.json
+
+With --json --omit-command, each row replaces its command array with a stable zero-based `index` field on success, failure, or --bail. This only removes command arrays and does not make output safe for secrets. Errors and response data are unchanged: type echoes typed text, and get value/eval may return input values.
 "##
         }
 
@@ -3597,6 +3624,14 @@ Chat Options:
   -v, --verbose          Show tool commands and their raw output
   -q, --quiet            Show only the AI text response (hide tool calls)
 
+Each tool call runs one agent-browser command. Chat can load bundled skills
+(skills get <name>) and use page WebMCP tools, fetching a tool's schema with
+webmcp list <tool> --frame <frame-id> --json before invoking it in that frame.
+Chat runs in the session you select and cannot create or switch sessions. To use
+another engine, open the session first with
+agent-browser --session <name> --engine <engine> open <url>, then pass --session <name> to chat.
+Chat commands cannot set global flags other than --json and --annotate.
+
 Global Options:
   --json                 Structured JSON output per turn
   --session <name>       Target session for commands
@@ -3651,7 +3686,12 @@ Common tools include:
   agent_browser_close      Close the browser session
 
 Each tool has typed fields such as url, selector, text, key, and session.
-Each tool also accepts extraArgs for advanced CLI flags and exact CLI parity.
+Each tool also accepts extraArgs for per-command options and display or emulation
+flags such as --engine. Global flags that change network, file, policy, or host
+access (such as --allowed-domains, --action-policy, --executable-path, --args,
+and --config) are rejected in extraArgs and must be set in the MCP server's
+environment or config, and structured allowedDomains is rejected when the server
+already sets allowed domains.
 Tool discovery is paginated and includes read-only/open-world annotations so
 modern MCP clients can load the large typed surface incrementally.
 Use agent_browser_snapshot after navigation to get fresh refs before clicking.
@@ -3731,9 +3771,12 @@ Subcommands:
   show <name>              Show one configured plugin
   run <name> <type>        Run a command.run or custom plugin request
 
-Plugins are configured in agent-browser.json. A plugin entry declares a name,
-an executable command, optional args, and capabilities. Plugins run as
-external processes over the agent-browser.plugin.v1 stdio JSON protocol.
+Plugins are configured in ~/.agent-browser/config.json or a file loaded with
+--config. A plugin entry declares a name, an executable command, optional args,
+and capabilities. Plugins run as external processes over the
+agent-browser.plugin.v1 stdio JSON protocol.
+plugin add writes ~/.agent-browser/config.json by default; use --project for
+./agent-browser.json (only used with --config).
 
 Add sources:
   <name>                   npm package, e.g. agent-browser-plugin-captcha
@@ -3743,7 +3786,7 @@ Add sources:
 Add options:
   --name <name>            Override the configured plugin name
   --capability <name>      Declare a capability if the plugin has no manifest
-  --global                 Write ~/.agent-browser/config.json instead of ./agent-browser.json
+  --project                Write ./agent-browser.json instead of ~/.agent-browser/config.json
   --no-manifest            Skip plugin.manifest discovery
 
 plugin add asks the package for plugin.manifest to discover name and
@@ -3861,7 +3904,7 @@ Browser Settings:  agent-browser set <setting> [value]
   media [dark|light] [reduced-motion]
 
 Network:  agent-browser network <action>
-  route <url> [--abort|--body <json>] [--resource-type <csv>]
+  route <url> [--abort|--body <json> [--allow-origin <origin>]] [--resource-type <csv>]
   unroute [url]
   requests [--clear] [--filter <pattern>]
   har <start|stop> [path]
@@ -3932,8 +3975,9 @@ Init scripts:
   removeinitscript <id>      Remove a registered script from every tab in the session
 
 Batch:
-  batch [--bail] ["cmd" ...]  Execute multiple commands sequentially (args or stdin)
+  batch [options] ["cmd" ...] Execute multiple commands sequentially (args or stdin)
                               --bail stops on first error (default: continue all)
+                              --omit-command uses a zero-based `index` field with --json
 
 Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
@@ -4020,8 +4064,9 @@ Options:
                              (or AGENT_BROWSER_INIT_SCRIPTS env, comma-separated)
   --enable <feature>         Built-in init scripts: react-devtools (repeatable or comma-separated)
                              (or AGENT_BROWSER_ENABLE env)
-  --args <args>              Browser launch args, comma or newline separated (or AGENT_BROWSER_ARGS)
-                             e.g., --args "--no-sandbox,--disable-blink-features=AutomationControlled"
+  --args <args>              Browser launch args, newline separated, or comma separated before another flag
+                             (or AGENT_BROWSER_ARGS). Commas inside a value are kept.
+                             e.g., --args "--no-sandbox,--disable-features=Translate,HttpsUpgrades"
   --user-agent <ua>          Custom User-Agent (or AGENT_BROWSER_USER_AGENT)
   --proxy <server>           Proxy server URL (or AGENT_BROWSER_PROXY, HTTP_PROXY, HTTPS_PROXY, ALL_PROXY)
                              Supports authenticated proxies: --proxy "http://user:pass@127.0.0.1:7890"
@@ -4029,8 +4074,11 @@ Options:
                              e.g., --proxy-bypass "localhost,*.internal.com"
   --ignore-https-errors      Ignore HTTPS certificate errors
   --ca-cert <path>           Trust a specific CA certificate for HTTPS interception proxies
-                             (or AGENT_BROWSER_CA_CERT; local Chromium on Linux; install --with-deps provides certutil)
+                             (or AGENT_BROWSER_CA_CERT; CLI requests everywhere, local Chromium on Linux;
+                             install --with-deps provides certutil)
   --no-ca-cert               Clear CA trust retained by the running browser session
+  --use-system-ca            Use the OS trust store for CLI requests (read, install, upgrade, doctor)
+                             (or AGENT_BROWSER_USE_SYSTEM_CA)
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
   --hide-scrollbars <bool>   Hide native scrollbars in headless Chromium screenshots (default: true)
                              Use --hide-scrollbars false to keep scrollbars visible
@@ -4060,9 +4108,18 @@ Options:
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
   --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
-  --engine <name>            Browser engine: chrome (default), lightpanda (or AGENT_BROWSER_ENGINE)
   --idle-timeout <time>      Shut down daemon after inactivity: 10s, 3m, 1h, or raw ms
                              (default: 1h; 0 disables; dashboard input resets the timer)
+  --engine <name>            Browser engine: chrome (default), lightpanda, obscura (experimental)
+                             (or AGENT_BROWSER_ENGINE); Obscura rejects --proxy-bypass,
+                             proxyBypass config, AGENT_BROWSER_PROXY_BYPASS, NO_PROXY/no_proxy,
+                             --webgpu, --ca-cert, --args, profiles, state, extensions,
+                             headed mode, and file access. Discovery and CDP initialization
+                             each have a 10s deadline plus bounded failure cleanup.
+                             Explicit Obscura launches validate this invocation's resolved
+                             bypass settings, even with an existing daemon; stale daemon
+                             environment values are not reused when bypass is cleared.
+                             Obscura has accessibility, iframe, and screenshot fidelity gaps.
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
   --model <name>             AI model for chat (or AI_GATEWAY_MODEL env)
   -v, --verbose              Show tool commands and their raw output
@@ -4080,6 +4137,7 @@ Configuration:
 
   Use --config <path> to load a specific config file instead of the defaults.
   If --config points to a missing or invalid file, agent-browser exits with an error.
+  The auto-discovered ./agent-browser.json cannot set executablePath, args or plugins (they are ignored with a warning); set them in ~/.agent-browser/config.json, env vars or flags, or load the file explicitly with --config ./agent-browser.json.
 
   Boolean flags accept an optional true/false value to override config:
     --headed           (same as --headed true)
@@ -4124,6 +4182,7 @@ Environment:
   AGENT_BROWSER_IGNORE_HTTPS_ERRORS Ignore HTTPS certificate errors
   AGENT_BROWSER_CA_CERT          Path to CA certificate to trust (HTTPS interception proxies)
   AGENT_BROWSER_CLEAR_CA_CERT    Clear CA trust retained by the running browser session
+  AGENT_BROWSER_USE_SYSTEM_CA    Use the OS trust store for CLI requests
   AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless, agentcore, or plugin name)
   BROWSER_USE_API_KEY            Browser Use Cloud API key
   BROWSER_USE_PROFILE_ID         Browser Use profile UUID
@@ -4160,8 +4219,14 @@ Environment:
   AGENT_BROWSER_CONFIRM_ACTIONS  Action categories requiring confirmation
   AGENT_BROWSER_CONFIRM_INTERACTIVE Enable interactive confirmation prompts
   AGENT_BROWSER_NO_AUTO_DIALOG   Disable automatic dismissal of alert/beforeunload dialogs
-  AGENT_BROWSER_ENGINE           Browser engine: chrome (default), lightpanda
   AGENT_BROWSER_PLUGINS          JSON plugin registry override
+  AGENT_BROWSER_ENGINE           Browser engine: chrome (default), lightpanda, obscura (experimental)
+  OBSCURA_BIN                   Source E2E tests only: required executable path when explicitly
+                                running cargo test e2e_obscura -- --ignored --test-threads=1
+                                Tests clear AGENT_BROWSER_CDP, AGENT_BROWSER_AUTO_CONNECT,
+                                and AGENT_BROWSER_PROVIDER and require an owned Obscura process.
+  OBSCURA_ALLOW_PRIVATE_NETWORK Allow Obscura to access local/private pages (set before launch)
+  AGENT_BROWSER_OBSCURA_STEALTH  Run the Obscura engine in stealth mode (consistent fingerprint, tracker blocking)
   HTTP_PROXY / HTTPS_PROXY       Standard proxy env vars (fallback if AGENT_BROWSER_PROXY not set)
   ALL_PROXY                      SOCKS proxy (fallback for proxy)
   NO_PROXY                       Bypass proxy for hosts (fallback for proxy-bypass)
@@ -4180,6 +4245,7 @@ Install:
 
 Examples:
   agent-browser open example.com
+  agent-browser --engine obscura --executable-path /path/to/obscura open example.com
   agent-browser snapshot -i              # Interactive elements only
   agent-browser click @e2                # Click by ref from snapshot
   agent-browser fill @e3 "test@example.com"

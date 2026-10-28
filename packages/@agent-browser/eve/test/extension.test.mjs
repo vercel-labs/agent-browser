@@ -13,11 +13,10 @@ const tools = await import("../dist/tools/index.mjs");
 
 const OK = (data) => JSON.stringify({ success: true, data, error: null });
 
-function fakeSandbox({ id, respond } = {}) {
+function fakeSandbox({ respond } = {}) {
   const commands = [];
   return {
     commands,
-    id: id ?? `sbx-${Math.random().toString(36).slice(2)}`,
     async run({ command }) {
       commands.push(command);
       if (command.startsWith("command -v ")) {
@@ -66,10 +65,9 @@ test("exports the full tool set", () => {
   }
 });
 
-test("navigate builds an open command with a per-sandbox session", async () => {
+test("navigate builds an open command with the default session", async () => {
   resetConfig();
   const sandbox = fakeSandbox({
-    id: "abc",
     respond: () => ({ stdout: OK({ title: "Example", url: "https://example.com/" }) }),
   });
   const result = await tools.navigate.execute(
@@ -78,7 +76,7 @@ test("navigate builds an open command with a per-sandbox session", async () => {
   );
   assert.deepEqual(result, { title: "Example", url: "https://example.com/" });
   const command = sandbox.commands.at(-1);
-  assert.equal(command, "agent-browser --session eve-abc open https://example.com --json");
+  assert.equal(command, "agent-browser --session eve-default open https://example.com --json");
 });
 
 test("navigate requires a url for goto", async () => {
@@ -89,22 +87,10 @@ test("navigate requires a url for goto", async () => {
   );
 });
 
-test("probes for the binary once per sandbox and skips install when present", async () => {
-  resetConfig();
-  const sandbox = fakeSandbox({ id: "probe-once" });
-  const ctx = fakeCtx(sandbox);
-  await tools.close.execute({}, ctx);
-  await tools.close.execute({}, ctx);
-  const probes = sandbox.commands.filter((command) => command.startsWith("command -v "));
-  assert.equal(probes.length, 1);
-  assert.ok(!sandbox.commands.some((command) => command.includes("npm install")));
-});
-
 test("auto-installs when the binary is missing", async () => {
   resetConfig({ installSystemDependencies: false });
   const commands = [];
   const sandbox = {
-    id: "needs-install",
     async run({ command }) {
       commands.push(command);
       if (command.startsWith("command -v ")) {
@@ -120,7 +106,7 @@ test("auto-installs when the binary is missing", async () => {
 
 test("skips the install probe when autoInstall is false", async () => {
   resetConfig({ autoInstall: false });
-  const sandbox = fakeSandbox({ id: "no-auto" });
+  const sandbox = fakeSandbox();
   await tools.close.execute({}, fakeCtx(sandbox));
   assert.ok(!sandbox.commands.some((command) => command.startsWith("command -v ")));
   resetConfig();
@@ -131,14 +117,16 @@ test("applies config-level safety flags to every command", async () => {
     allowedDomains: ["example.com", "*.example.com"],
     caCert: "/etc/ssl/certs/proxy-ca.pem",
     clearCaCert: false,
+    useSystemCa: true,
     maxOutputChars: 5000,
     proxy: "http://proxy.example.com:8080",
   });
-  const sandbox = fakeSandbox({ id: "flags" });
+  const sandbox = fakeSandbox();
   await tools.close.execute({}, fakeCtx(sandbox));
   const command = sandbox.commands.at(-1);
   assert.ok(command.includes("--allowed-domains 'example.com,*.example.com'"), command);
   assert.ok(command.includes("--ca-cert /etc/ssl/certs/proxy-ca.pem"), command);
+  assert.ok(command.includes("--use-system-ca true"), command);
   assert.ok(command.includes("--max-output 5000"), command);
   assert.ok(command.includes("--proxy http://proxy.example.com:8080"), command);
   resetConfig();
@@ -146,7 +134,7 @@ test("applies config-level safety flags to every command", async () => {
 
 test("can explicitly clear retained CA trust", async () => {
   resetConfig({ clearCaCert: true });
-  const sandbox = fakeSandbox({ id: "clear-ca" });
+  const sandbox = fakeSandbox();
   await tools.close.execute({}, fakeCtx(sandbox));
   assert.ok(sandbox.commands.at(-1).includes("--no-ca-cert"));
   resetConfig();
@@ -154,7 +142,7 @@ test("can explicitly clear retained CA trust", async () => {
 
 test("rejects config CA selection with a simultaneous clear", async () => {
   resetConfig({ caCert: "/etc/ssl/certs/proxy-ca.pem", clearCaCert: true });
-  const sandbox = fakeSandbox({ id: "select-ca" });
+  const sandbox = fakeSandbox();
   await assert.rejects(
     tools.close.execute({}, fakeCtx(sandbox)),
     /Cannot use caCert with clearCaCert/,
@@ -162,9 +150,20 @@ test("rejects config CA selection with a simultaneous clear", async () => {
   resetConfig();
 });
 
+test("probes for agent-browser on every call and skips install when present", async () => {
+  resetConfig();
+  const sandbox = fakeSandbox();
+  const ctx = fakeCtx(sandbox);
+  await tools.navigate.execute({ action: "goto", url: "https://example.com" }, ctx);
+  await tools.navigate.execute({ action: "goto", url: "https://example.com" }, ctx);
+  const probes = sandbox.commands.filter((command) => command.startsWith("command -v "));
+  assert.equal(probes.length, 2);
+  assert.ok(!sandbox.commands.some((command) => command.includes("npm install")));
+});
+
 test("uses a fixed session name when configured", async () => {
   resetConfig({ session: "shared" });
-  const sandbox = fakeSandbox({ id: "fixed-session" });
+  const sandbox = fakeSandbox();
   await tools.close.execute({}, fakeCtx(sandbox));
   assert.ok(sandbox.commands.at(-1).startsWith("agent-browser --session shared "));
   resetConfig();
@@ -173,7 +172,6 @@ test("uses a fixed session name when configured", async () => {
 test("surfaces envelope errors even when the exit code is zero", async () => {
   resetConfig();
   const sandbox = fakeSandbox({
-    id: "envelope-error",
     respond: () => ({
       exitCode: 0,
       stdout: JSON.stringify({ success: false, data: null, error: "Element not found" }),
@@ -201,7 +199,7 @@ test("wait_for requires at least one condition", async () => {
 
 test("wait_for runs combined conditions sequentially, load state first", async () => {
   resetConfig();
-  const sandbox = fakeSandbox({ id: "combined-waits" });
+  const sandbox = fakeSandbox();
   await tools.wait_for.execute(
     { loadState: "networkidle", selector: "#app", timeMs: 100 },
     fakeCtx(sandbox),
@@ -215,7 +213,7 @@ test("wait_for runs combined conditions sequentially, load state first", async (
 
 test("wait_for builds each condition variant", async () => {
   resetConfig();
-  const sandbox = fakeSandbox({ id: "waits" });
+  const sandbox = fakeSandbox();
   const ctx = fakeCtx(sandbox);
   await tools.wait_for.execute({ selector: "#spinner" }, ctx);
   await tools.wait_for.execute({ text: "Welcome" }, ctx);
@@ -232,7 +230,7 @@ test("wait_for builds each condition variant", async () => {
 
 test("wait_for caps every condition with a timeout and reports outcomes", async () => {
   resetConfig();
-  const sandbox = fakeSandbox({ id: "capped-waits" });
+  const sandbox = fakeSandbox();
   const outcome = await tools.wait_for.execute({ selector: "#app" }, fakeCtx(sandbox));
   assert.ok(sandbox.commands.at(-1).includes("wait '#app' --timeout 10000"), sandbox.commands.at(-1));
   assert.equal(outcome.satisfied, true);
@@ -242,7 +240,6 @@ test("wait_for caps every condition with a timeout and reports outcomes", async 
 test("wait_for treats a timeout as an outcome, not an error", async () => {
   resetConfig();
   const sandbox = fakeSandbox({
-    id: "timeout-outcome",
     respond: () => ({
       exitCode: 1,
       stdout: JSON.stringify({
@@ -284,7 +281,7 @@ test("find requires a value for fill and type", async () => {
 
 test("tabs builds each action variant", async () => {
   resetConfig();
-  const sandbox = fakeSandbox({ id: "tabs" });
+  const sandbox = fakeSandbox();
   const ctx = fakeCtx(sandbox);
   await tools.tabs.execute({ action: "list" }, ctx);
   await tools.tabs.execute({ action: "new", label: "docs", url: "https://docs.example.com" }, ctx);
@@ -299,7 +296,7 @@ test("tabs builds each action variant", async () => {
 
 test("scroll picks scrollintoview when only a selector is given", async () => {
   resetConfig();
-  const sandbox = fakeSandbox({ id: "scrolls" });
+  const sandbox = fakeSandbox();
   const ctx = fakeCtx(sandbox);
   await tools.scroll.execute({ selector: "#footer" }, ctx);
   await tools.scroll.execute({ direction: "down", pixels: 300 }, ctx);
@@ -312,7 +309,6 @@ test("snapshot retries once on a transient CDP error", async () => {
   resetConfig();
   let attempts = 0;
   const sandbox = fakeSandbox({
-    id: "cdp-flake",
     respond: () => {
       attempts += 1;
       if (attempts === 1) {
@@ -338,7 +334,6 @@ test("snapshot retries once on a transient CDP error", async () => {
 test("snapshot drops ref selectors instead of failing", async () => {
   resetConfig();
   const sandbox = fakeSandbox({
-    id: "ref-selector",
     respond: () => ({ stdout: OK({ origin: "https://example.com/", snapshot: "- page" }) }),
   });
   const ctx = fakeCtx(sandbox);
@@ -358,7 +353,6 @@ test("snapshot drops ref selectors instead of failing", async () => {
 test("snapshot falls back to a whole-page snapshot when the scoped one fails", async () => {
   resetConfig();
   const sandbox = fakeSandbox({
-    id: "selector-fallback",
     respond: (command) =>
       command.includes("--selector")
         ? {
@@ -385,7 +379,6 @@ test("snapshot does not retry non-CDP errors", async () => {
   resetConfig();
   let attempts = 0;
   const sandbox = fakeSandbox({
-    id: "real-error",
     respond: () => {
       attempts += 1;
       return {
@@ -404,7 +397,6 @@ test("snapshot does not retry non-CDP errors", async () => {
 test("screenshot inlines the image and hides it from the model", async () => {
   resetConfig();
   const sandbox = fakeSandbox({
-    id: "shots",
     respond: () => ({ stdout: OK({ path: "/workspace/shot.png" }) }),
   });
   sandbox.readBinaryFile = async ({ path }) => {
@@ -429,7 +421,6 @@ test("screenshot inlines the image and hides it from the model", async () => {
 test("screenshot still works when the sandbox cannot read files back", async () => {
   resetConfig();
   const sandbox = fakeSandbox({
-    id: "no-file-io",
     respond: () => ({ stdout: OK({ path: "/workspace/shot.png" }) }),
   });
   const output = await tools.screenshot.execute(
@@ -447,7 +438,6 @@ test("screenshot still works when the sandbox cannot read files back", async () 
 test("screenshot skips inlining when disabled in config", async () => {
   resetConfig({ inlineScreenshots: false });
   const sandbox = fakeSandbox({
-    id: "inline-off",
     respond: () => ({ stdout: OK({ path: "/workspace/shot.png" }) }),
   });
   sandbox.readBinaryFile = async () => new Uint8Array([1]);
@@ -462,7 +452,7 @@ test("screenshot skips inlining when disabled in config", async () => {
 test("errors instead of hanging when the sandbox stops responding", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   resetConfig({ autoInstall: false });
-  const sandbox = { id: "wedged", run: () => new Promise(() => {}) };
+  const sandbox = { run: () => new Promise(() => {}) };
   const rejection = assert.rejects(
     () => tools.close.execute({}, fakeCtx(sandbox)),
     /did not respond within 180s/,
@@ -476,7 +466,7 @@ test("errors instead of hanging when the sandbox stops responding", async (t) =>
 test("errors instead of hanging when the install probe stops responding", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   resetConfig();
-  const sandbox = { id: "wedged-probe", run: () => new Promise(() => {}) };
+  const sandbox = { run: () => new Promise(() => {}) };
   const rejection = assert.rejects(
     () => tools.close.execute({}, fakeCtx(sandbox)),
     /The browser install probe did not respond within 180s/,
@@ -504,7 +494,7 @@ test("wait_for schema drops empty-string conditions", () => {
 
 test("wait_for runs only the conditions that are actually set", async () => {
   resetConfig();
-  const sandbox = fakeSandbox({ id: "wait-only-set" });
+  const sandbox = fakeSandbox();
   const input = tools.wait_for.inputSchema.parse({ selector: "", text: "Welcome", urlPattern: "" });
   const result = await tools.wait_for.execute(input, fakeCtx(sandbox));
   assert.deepEqual(result, { condition: 'text "Welcome"', satisfied: true, result: {} });
@@ -516,7 +506,6 @@ test("wait_for runs only the conditions that are actually set", async () => {
 test("wait_for reports load-state timeout as unsatisfied instead of throwing", async () => {
   resetConfig();
   const sandbox = fakeSandbox({
-    id: "wait-load-timeout",
     respond: (command) =>
       command.includes("--load")
         ? {

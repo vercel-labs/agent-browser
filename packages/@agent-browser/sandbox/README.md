@@ -34,6 +34,23 @@ The Vercel helpers install browser system dependencies by default. Pass `install
 
 Set `AGENT_BROWSER_SNAPSHOT_ID` to boot from a prebuilt Vercel Sandbox snapshot. Without a snapshot, the helper installs system dependencies, `agent-browser`, and Chrome on first boot.
 
+### One MCP server per sandbox
+
+`startAgentBrowserMcp` keeps one `agent-browser mcp` running over stdin, so tool calls reuse the same process instead of starting a command each time. It needs `@vercel/sandbox` 3.7 or later.
+
+```ts
+import { createAgentBrowserSandbox, startAgentBrowserMcp } from "@agent-browser/sandbox/vercel";
+
+const sandbox = await createAgentBrowserSandbox();
+const mcp = await startAgentBrowserMcp(sandbox, { timeout: 60_000 });
+await mcp.callTool("agent_browser_open", { url: "https://example.com" });
+const snapshot = await mcp.callTool("agent_browser_snapshot", { interactive: true });
+await mcp.close();
+await sandbox.stop();
+```
+
+`timeout` applies to each request and has no default. For another runtime, pass a process with `stdin` and `stdout` streams to `connectAgentBrowserMcp` from `@agent-browser/sandbox`.
+
 ## Version Pinning
 
 By default, this package installs the matching `agent-browser` version:

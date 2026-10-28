@@ -13,6 +13,7 @@ pub struct RefEntry {
     pub nth: Option<usize>,
     pub selector: Option<String>,
     pub frame_id: Option<String>,
+    allow_role_fallback: bool,
 }
 
 #[derive(Clone)]
@@ -67,6 +68,25 @@ impl RefMap {
                 nth,
                 selector: None,
                 frame_id: frame_id.map(|s| s.to_string()),
+                allow_role_fallback: true,
+            },
+        );
+    }
+
+    /// Add a ref that must keep resolving to this exact backend node. This is
+    /// used for actions that select a concrete DOM node before interacting;
+    /// falling back by role/name could silently target a different element.
+    pub fn add_exact_backend_node(&mut self, ref_id: String, backend_node_id: i64) {
+        self.map.insert(
+            ref_id,
+            RefEntry {
+                backend_node_id: Some(backend_node_id),
+                role: String::new(),
+                name: String::new(),
+                nth: None,
+                selector: None,
+                frame_id: None,
+                allow_role_fallback: false,
             },
         );
     }
@@ -88,6 +108,7 @@ impl RefMap {
                 nth,
                 selector: Some(selector),
                 frame_id: None,
+                allow_role_fallback: true,
             },
         );
     }
@@ -308,6 +329,7 @@ async fn resolve_center_in_same_process_frame(
     session_id: &str,
     frame_id: &str,
     selector: &str,
+    require_actionable: bool,
 ) -> Result<(f64, f64), String> {
     let owner_object_id = frame_owner_object_id(client, session_id, frame_id).await?;
     let find_expr = build_find_element_js_in("doc", selector);
@@ -330,8 +352,9 @@ async fn resolve_center_in_same_process_frame(
                 win = win.parent;
             }}
             const blockerAt = {BLOCKER_AT_JS};
+            const notActionable = {ACTIONABILITY_JS};
             const topDoc = win ? win.document : doc;
-            return {{ x: x, y: y, blocker: blockerAt(topDoc, el, x, y) }};
+            return {{ x: x, y: y, reason: notActionable(topDoc, el, x, y), blocker: blockerAt(topDoc, el, x, y) }};
         }}"#,
     );
     let result = client
@@ -346,6 +369,11 @@ async fn resolve_center_in_same_process_frame(
         )
         .await?;
     let value = result.get("result").and_then(|r| r.get("value"));
+    if require_actionable {
+        if let Some(reason) = value.and_then(|v| v.get("reason")).and_then(|v| v.as_str()) {
+            return Err(not_actionable_error(selector, reason));
+        }
+    }
     if let Some(blocker) = value
         .and_then(|v| v.get("blocker"))
         .and_then(|v| v.as_str())
@@ -400,6 +428,7 @@ pub async fn resolve_element_center(
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
+    require_actionable: bool,
 ) -> Result<(f64, f64, String), String> {
     if let Some(ref_id) = parse_ref(selector_or_ref) {
         let entry = ref_map
@@ -433,9 +462,13 @@ pub async fn resolve_element_center(
                     selector_or_ref,
                     x,
                     y,
+                    require_actionable,
                 )
                 .await?;
                 return Ok((x, y, effective_session_id.to_string()));
+            }
+            if !entry.allow_role_fallback {
+                return Err(format!("Element ref {ref_id} is stale"));
             }
             // backend_node_id is stale; re-query the accessibility tree below
         }
@@ -471,6 +504,7 @@ pub async fn resolve_element_center(
             selector_or_ref,
             x,
             y,
+            require_actionable,
         )
         .await?;
         return Ok((x, y, effective_session_id.to_string()));
@@ -481,15 +515,23 @@ pub async fn resolve_element_center(
         // Cross-process iframe: its dedicated session's main frame IS the
         // iframe, so plain document-rooted resolution works there.
         if let Some(frame_session) = iframe_sessions.get(&frame_id) {
-            let (x, y) = resolve_by_selector(client, frame_session, selector_or_ref).await?;
+            let (x, y) =
+                resolve_by_selector(client, frame_session, selector_or_ref, require_actionable)
+                    .await?;
             return Ok((x, y, frame_session.clone()));
         }
-        let (x, y) =
-            resolve_center_in_same_process_frame(client, session_id, &frame_id, selector_or_ref)
-                .await?;
+        let (x, y) = resolve_center_in_same_process_frame(
+            client,
+            session_id,
+            &frame_id,
+            selector_or_ref,
+            require_actionable,
+        )
+        .await?;
         return Ok((x, y, session_id.to_string()));
     }
-    let (x, y) = resolve_by_selector(client, session_id, selector_or_ref).await?;
+    let (x, y) =
+        resolve_by_selector(client, session_id, selector_or_ref, require_actionable).await?;
     Ok((x, y, session_id.to_string()))
 }
 
@@ -574,6 +616,7 @@ async fn check_node_interception(
     target: &str,
     x: f64,
     y: f64,
+    require_actionable: bool,
 ) -> Result<(), String> {
     let resolved: Result<DomResolveNodeResult, String> = client
         .send_command_typed(
@@ -603,7 +646,8 @@ async fn check_node_interception(
                 topDoc = topDoc.defaultView.frameElement.ownerDocument;
             }}
             const blockerAt = {BLOCKER_AT_JS};
-            return blockerAt(topDoc, this, x, y);
+            const notActionable = {ACTIONABILITY_JS};
+            return {{ blocker: blockerAt(topDoc, this, x, y), reason: notActionable(topDoc, this, x, y) }};
         }}"#,
     );
     let result = client
@@ -619,9 +663,14 @@ async fn check_node_interception(
         )
         .await;
     if let Ok(value) = result {
+        let value = value.get("result").and_then(|r| r.get("value"));
+        if require_actionable {
+            if let Some(reason) = value.and_then(|v| v.get("reason")).and_then(|v| v.as_str()) {
+                return Err(not_actionable_error(target, reason));
+            }
+        }
         if let Some(blocker) = value
-            .get("result")
-            .and_then(|r| r.get("value"))
+            .and_then(|v| v.get("blocker"))
             .and_then(|v| v.as_str())
         {
             return Err(intercepted_error(target, blocker));
@@ -675,8 +724,13 @@ pub async fn resolve_element_object_id(
 
             if let Ok(r) = result {
                 if let Some(object_id) = r.object.object_id {
-                    return Ok((object_id, effective_session_id.to_string()));
+                    if !is_detached(client, effective_session_id, &object_id).await {
+                        return Ok((object_id, effective_session_id.to_string()));
+                    }
                 }
+            }
+            if !entry.allow_role_fallback {
+                return Err(format!("Element ref {ref_id} is stale"));
             }
             // backend_node_id is stale; re-query the accessibility tree below
         }
@@ -757,6 +811,34 @@ pub async fn resolve_element_object_id(
     Ok((object_id, session_id.to_string()))
 }
 
+/// Reports whether a resolved node has been removed from its document, releasing it if so.
+async fn is_detached(client: &CdpClient, session_id: &str, object_id: &str) -> bool {
+    let result: Result<EvaluateResult, String> = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: "function() { return this.isConnected; }".to_string(),
+                object_id: Some(object_id.to_string()),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await;
+    let detached = matches!(result, Ok(r) if r.result.value == Some(Value::Bool(false)));
+    if detached {
+        let _ = client
+            .send_command(
+                "Runtime.releaseObject",
+                Some(serde_json::json!({ "objectId": object_id })),
+                Some(session_id),
+            )
+            .await;
+    }
+    detached
+}
+
 /// Determine which CDP session and parameters to use for an AX tree query.
 /// Cross-origin iframes have a dedicated session (no frameId needed);
 /// same-origin iframes use the parent session with a frameId parameter.
@@ -790,10 +872,7 @@ fn resolve_frame_session<'a>(
         .unwrap_or(session_id)
 }
 
-/// Re-query the accessibility tree to find a node matching role+name+nth,
-/// returning its fresh backendDOMNodeId. This uses the same data source
-/// (Accessibility.getFullAXTree) that built the ref map during snapshot,
-/// so role/name matching is guaranteed to be consistent.
+/// Finds a stale ref's replacement by role and name, refusing any match that could be ambiguous.
 async fn find_node_id_by_role_name(
     client: &CdpClient,
     session_id: &str,
@@ -803,6 +882,12 @@ async fn find_node_id_by_role_name(
     frame_id: Option<&str>,
     iframe_sessions: &HashMap<String, String>,
 ) -> Result<i64, String> {
+    if nth.is_some() {
+        return Err(format!(
+            "Stale ref for role={} name={} cannot be recovered: the snapshot had several matching elements. Run snapshot again and use a fresh ref.",
+            role, name
+        ));
+    }
     let (ax_params, effective_session_id) =
         resolve_ax_session(frame_id, session_id, iframe_sessions);
     let ax_tree: GetFullAXTreeResult = client
@@ -813,32 +898,40 @@ async fn find_node_id_by_role_name(
         )
         .await?;
 
-    let nth_index = nth.unwrap_or(0);
-    let mut match_count: usize = 0;
+    select_unique_node_id(&ax_tree.nodes, role, name)
+}
 
-    for node in &ax_tree.nodes {
+/// Returns the backendDOMNodeId of the only non-ignored node matching role and name.
+fn select_unique_node_id(nodes: &[AXNode], role: &str, name: &str) -> Result<i64, String> {
+    let mut found: Option<&AXNode> = None;
+
+    for node in nodes {
         if node.ignored.unwrap_or(false) {
             continue;
         }
-        let node_role = extract_ax_string(&node.role);
-        let node_name = extract_ax_string(&node.name);
-        if node_role == role && node_name == name {
-            if match_count == nth_index {
-                return node.backend_d_o_m_node_id.ok_or_else(|| {
-                    format!(
-                        "AX node has no backendDOMNodeId for role={} name={}",
-                        role, name
-                    )
-                });
+        if extract_ax_string(&node.role) == role && extract_ax_string(&node.name) == name {
+            if found.is_some() {
+                return Err(format!(
+                    "Stale ref for role={} name={} cannot be recovered: several elements now match. Run snapshot again and use a fresh ref.",
+                    role, name
+                ));
             }
-            match_count += 1;
+            found = Some(node);
         }
     }
 
-    Err(format!(
-        "Could not locate element with role={} name={}",
-        role, name
-    ))
+    match found {
+        Some(node) => node.backend_d_o_m_node_id.ok_or_else(|| {
+            format!(
+                "AX node has no backendDOMNodeId for role={} name={}",
+                role, name
+            )
+        }),
+        None => Err(format!(
+            "Could not locate element with role={} name={}",
+            role, name
+        )),
+    }
 }
 
 pub(super) fn extract_ax_string(value: &Option<AXValue>) -> String {
@@ -928,6 +1021,20 @@ const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
     return desc;
 }"#;
 
+/// Returns why a click at (x, y) cannot reach `el`, or null when it can.
+/// It fails open when the engine lacks an API it needs.
+const ACTIONABILITY_JS: &str = r#"(doc, el, x, y) => {
+    try {
+        const rect = el.getBoundingClientRect();
+        if ((rect.width <= 0 && rect.height <= 0) || ['hidden', 'collapse'].includes(el.ownerDocument.defaultView.getComputedStyle(el).visibility)) return 'not visible';
+        if (el.disabled || el.matches(':disabled')) return 'disabled';
+        const view = doc.defaultView;
+        const outside = x < 0 || y < 0 || x >= view.innerWidth || y >= view.innerHeight;
+        if (outside && !doc.elementFromPoint(x, y)) return 'outside the viewport';
+    } catch (e) {}
+    return null;
+}"#;
+
 fn build_selector_js(selector: &str) -> String {
     let find_expr = build_find_element_js(selector);
     // Input events dispatch at viewport coordinates, so an element outside the
@@ -950,7 +1057,8 @@ fn build_selector_js(selector: &str) -> String {
             const x = rect.x + rect.width / 2;
             const y = rect.y + rect.height / 2;
             const blockerAt = {BLOCKER_AT_JS};
-            return {{ x: x, y: y, blocker: blockerAt(document, el, x, y) }};
+            const notActionable = {ACTIONABILITY_JS};
+            return {{ x: x, y: y, reason: notActionable(document, el, x, y), blocker: blockerAt(document, el, x, y) }};
         }})()"#,
     )
 }
@@ -959,6 +1067,7 @@ async fn resolve_by_selector(
     client: &CdpClient,
     session_id: &str,
     selector: &str,
+    require_actionable: bool,
 ) -> Result<(f64, f64), String> {
     let js = build_selector_js(selector);
 
@@ -975,6 +1084,11 @@ async fn resolve_by_selector(
         .await?;
 
     let val = result.result.value.unwrap_or(Value::Null);
+    if require_actionable {
+        if let Some(reason) = val.get("reason").and_then(|v| v.as_str()) {
+            return Err(not_actionable_error(selector, reason));
+        }
+    }
     if let Some(blocker) = val.get("blocker").and_then(|v| v.as_str()) {
         return Err(intercepted_error(selector, blocker));
     }
@@ -991,6 +1105,13 @@ fn intercepted_error(target: &str, blocker: &str) -> String {
     format!(
         "Element '{}' is covered by <{}> at its click point, so the input would land on that element instead. Dismiss or interact with the covering element first (it is often a dialog, banner, or sticky header).",
         target, blocker
+    )
+}
+
+fn not_actionable_error(target: &str, reason: &str) -> String {
+    format!(
+        "Element '{}' is {}, so the click would not reach it",
+        target, reason
     )
 }
 
@@ -1145,7 +1266,7 @@ pub async fn is_element_enabled(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: "function() { return !this.disabled; }".to_string(),
+                function_declaration: "function() { return !this.disabled && !(this.matches && this.matches(':disabled')); }".to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1509,6 +1630,69 @@ pub async fn get_element_styles(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ax(role: &str, name: &str, id: Option<i64>, ignored: bool) -> AXNode {
+        let val = |t: &str, v: &str| AXValue {
+            value_type: t.into(),
+            value: Some(serde_json::json!(v)),
+        };
+        AXNode {
+            node_id: "1".into(),
+            role: Some(val("role", role)),
+            name: Some(val("computedString", name)),
+            value: None,
+            description: None,
+            properties: None,
+            child_ids: None,
+            backend_d_o_m_node_id: id,
+            ignored: Some(ignored),
+        }
+    }
+
+    #[test]
+    fn test_select_unique_node_id_returns_the_only_match() {
+        let nodes = vec![
+            ax("button", "Approve", Some(1), true),
+            ax("button", "Approve", Some(7), false),
+            ax("button", "Reject", Some(8), false),
+        ];
+        assert_eq!(select_unique_node_id(&nodes, "button", "Approve"), Ok(7));
+    }
+
+    #[test]
+    fn test_select_unique_node_id_rejects_multiple_matches() {
+        let ambiguous = "Stale ref for role=button name=Approve cannot be recovered: several elements now match. Run snapshot again and use a fresh ref.";
+        let two_valid = vec![
+            ax("button", "Approve", Some(1), false),
+            ax("button", "Approve", Some(2), false),
+        ];
+        assert_eq!(
+            select_unique_node_id(&two_valid, "button", "Approve"),
+            Err(ambiguous.to_string())
+        );
+        let one_without_id = vec![
+            ax("button", "Approve", None, false),
+            ax("button", "Approve", Some(2), false),
+        ];
+        assert_eq!(
+            select_unique_node_id(&one_without_id, "button", "Approve"),
+            Err(ambiguous.to_string())
+        );
+    }
+
+    #[test]
+    fn test_select_unique_node_id_keeps_not_found_and_missing_id_errors() {
+        let nodes = vec![ax("button", "Reject", Some(1), false)];
+        assert_eq!(
+            select_unique_node_id(&nodes, "button", "Approve"),
+            Err("Could not locate element with role=button name=Approve".to_string())
+        );
+        let nodes = vec![ax("button", "Approve", None, false)];
+        assert_eq!(
+            select_unique_node_id(&nodes, "button", "Approve"),
+            Err("AX node has no backendDOMNodeId for role=button name=Approve".to_string())
+        );
+    }
 
     #[test]
     fn test_parse_ref_at_prefix() {

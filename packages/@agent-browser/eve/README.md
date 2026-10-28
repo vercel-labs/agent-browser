@@ -43,7 +43,7 @@ export default defineSandbox({
 });
 ```
 
-`@agent-browser/eve/sandbox` also exports `runAgentBrowser` for calling agent-browser from a hand-written eve tool. It derives a short, stable session name from the eve sandbox id; pass `session` when multiple independent browser sessions should share one sandbox.
+`@agent-browser/eve/sandbox` also exports `runAgentBrowser` for calling agent-browser from a hand-written eve tool. It uses one default browser session per sandbox; pass `session` when multiple independent browser sessions should share one sandbox.
 
 ## Configuration
 
@@ -55,6 +55,7 @@ export default browser({
   allowedDomains: ["example.com", "*.example.com"], // restrict navigation and sub-resources
   caCert: "/etc/ssl/certs/proxy-ca.pem",
   clearCaCert: false,
+  useSystemCa: true, // OS trust store for the CLI's own HTTPS requests, such as read
   contentBoundaries: true, // wrap page output in markers the model can recognize
   maxOutputChars: 50_000, // truncate page output
 

@@ -1,7 +1,5 @@
-import { readFile } from "fs/promises";
-import { join } from "path";
 import { navigation } from "./docs-navigation";
-import { mdxToCleanMarkdown } from "./mdx-to-markdown";
+import { loadAllDocsSources } from "./docs-source";
 
 export type IndexEntry = {
   title: string;
@@ -24,43 +22,23 @@ function stripMarkdown(md: string): string {
     .trim();
 }
 
-function mdxFileForSlug(slug: string): string {
-  const docsRoot = join(process.cwd(), "src", "app");
-  if (slug === "/") {
-    return join(docsRoot, "page.mdx");
-  }
-  const rest = slug.replace(/^\//, "");
-  return join(docsRoot, ...rest.split("/"), "page.mdx");
-}
-
 export async function getSearchIndex(): Promise<IndexEntry[]> {
   if (cached) return cached;
-
-  const entries: IndexEntry[] = [];
-
-  for (const section of navigation) {
-    for (const item of section.items) {
-      try {
-        const raw = await readFile(mdxFileForSlug(item.href), "utf-8");
-        const md = mdxToCleanMarkdown(raw);
-        const content = stripMarkdown(md);
-        entries.push({
-          title: item.name,
-          href: item.href,
-          section: section.title ?? "",
-          content,
-        });
-      } catch {
-        entries.push({
-          title: item.name,
-          href: item.href,
-          section: section.title ?? "",
-          content: "",
-        });
-      }
-    }
-  }
-
+  const sources = new Map(
+    (await loadAllDocsSources()).map((source) => [source.href, source]),
+  );
+  const entries = navigation.flatMap((section) =>
+    section.items.map((item) => {
+      const source = sources.get(item.href);
+      if (!source) throw new Error(`Missing search source for ${item.href}`);
+      return {
+        title: item.name,
+        href: item.href,
+        section: section.title ?? "",
+        content: stripMarkdown(source.legacyMarkdown),
+      };
+    }),
+  );
   cached = entries;
   return entries;
 }

@@ -1967,8 +1967,14 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         // === Batch ===
         "batch" => {
             let bail = rest.contains(&"--bail");
-            let commands: Vec<&str> = rest.iter().filter(|a| **a != "--bail").copied().collect();
-            let mut cmd = json!({ "id": id, "action": "batch", "bail": bail });
+            let omit_command = rest.contains(&"--omit-command");
+            let commands: Vec<&str> = rest
+                .iter()
+                .filter(|a| **a != "--bail" && **a != "--omit-command")
+                .copied()
+                .collect();
+            let mut cmd =
+                json!({ "id": id, "action": "batch", "bail": bail, "omitCommand": omit_command });
             if !commands.is_empty() {
                 cmd["commands"] = json!(commands);
             }
@@ -3383,7 +3389,7 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         Some("route") => {
             let url = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "network route".to_string(),
-                usage: "network route <url> [--abort|--body <json>] [--resource-type <csv>]",
+                usage: "network route <url> [--abort|--body <json> [--allow-origin <origin>]] [--resource-type <csv>]",
             })?;
             let abort = rest.contains(&"--abort");
             let body_idx = rest.iter().position(|&s| s == "--body");
@@ -3392,9 +3398,22 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 .iter()
                 .position(|&s| s == "--resource-type" || s == "--resource-types");
             let resource_type = rt_idx.and_then(|i| rest.get(i + 1).copied());
+            let allow_origin = rest
+                .iter()
+                .position(|&s| s == "--allow-origin")
+                .and_then(|i| rest.get(i + 1).copied());
+            if allow_origin.is_some() && body.is_none() {
+                return Err(ParseError::MissingArguments {
+                    context: "network route --allow-origin".to_string(),
+                    usage: "network route <url> --body <json> --allow-origin <origin>",
+                });
+            }
             let mut cmd = json!({ "id": id, "action": "route", "url": url, "abort": abort });
             if let Some(body) = body {
                 cmd["response"] = json!({ "body": body });
+                if let Some(origin) = allow_origin {
+                    cmd["response"]["allowOrigin"] = json!(origin);
+                }
             }
             if let Some(rt) = resource_type {
                 cmd["resourceType"] = json!(rt);
@@ -3599,6 +3618,7 @@ mod tests {
             ignore_https_errors: false,
             ca_cert: None,
             clear_ca_cert: false,
+            use_system_ca: false,
             allow_file_access: false,
             hide_scrollbars: true,
             webgpu: false,
@@ -3626,6 +3646,7 @@ mod tests {
             cli_proxy: false,
             cli_proxy_bypass: false,
             cli_ca_cert: false,
+            cli_use_system_ca: false,
             cli_allow_file_access: false,
             cli_hide_scrollbars: false,
             cli_annotate: false,
@@ -3948,6 +3969,21 @@ mod tests {
         assert_eq!(cmd["url"], "**/api/users");
         assert_eq!(cmd["response"]["body"], "{\"users\":[]}");
         assert!(cmd.get("body").is_none());
+    }
+
+    #[test]
+    fn test_network_route_allow_origin_needs_body() {
+        let cmd = parse_command(
+            &args("network route https://api.example.com/* --body {} --allow-origin https://www.example.com"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["response"]["allowOrigin"], "https://www.example.com");
+        assert!(parse_command(
+            &args("network route https://api.example.com/* --allow-origin https://www.example.com"),
+            &default_flags(),
+        )
+        .is_err());
     }
 
     #[test]

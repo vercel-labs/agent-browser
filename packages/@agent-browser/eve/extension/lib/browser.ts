@@ -31,8 +31,6 @@ export const SELECTOR_HINT =
  */
 const SANDBOX_DEADLINE_MS = 180_000;
 
-const pendingInstalls = new Map<string, Promise<void>>();
-
 async function withDeadline<T>(work: PromiseLike<T>, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -68,7 +66,7 @@ export async function runBrowser<TData = unknown>(
   const config = extension.config;
   const command = buildAgentBrowserCommand([...args, ...configArgs()], {
     binary: config.binary,
-    session: config.session ?? defaultSessionName(config.sessionPrefix, sandbox.id),
+    session: config.session ?? defaultSessionName(config.sessionPrefix, "default"),
   });
   const raw = await withDeadline(
     sandbox.run({ abortSignal: ctx.abortSignal, command }),
@@ -102,17 +100,10 @@ async function requireSandbox(ctx: BrowserToolContext): Promise<EveSandboxSessio
 }
 
 async function ensureInstalled(sandbox: EveSandboxSession, abortSignal?: AbortSignal): Promise<void> {
-  if (!extension.config.autoInstall) {
-    return;
+  // eve sandbox sessions have no stable identity to cache by, so probe on every call.
+  if (extension.config.autoInstall) {
+    await installIfMissing(sandbox, abortSignal);
   }
-  let pending = pendingInstalls.get(sandbox.id);
-  if (pending === undefined) {
-    pending = installIfMissing(sandbox, abortSignal);
-    pendingInstalls.set(sandbox.id, pending);
-    // Let the next tool call retry a failed install instead of replaying the rejection.
-    pending.catch(() => pendingInstalls.delete(sandbox.id));
-  }
-  await pending;
 }
 
 async function installIfMissing(sandbox: EveSandboxSession, abortSignal?: AbortSignal): Promise<void> {
@@ -151,6 +142,9 @@ function configArgs(): string[] {
     args.push("--ca-cert", config.caCert);
   } else if (config.clearCaCert) {
     args.push("--no-ca-cert");
+  }
+  if (config.useSystemCa !== undefined) {
+    args.push("--use-system-ca", String(config.useSystemCa));
   }
   if (config.contentBoundaries) {
     args.push("--content-boundaries");

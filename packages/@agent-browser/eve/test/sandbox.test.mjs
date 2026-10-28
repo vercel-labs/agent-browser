@@ -29,7 +29,6 @@ test("builds Eve shell command", () => {
 test("installs agent-browser in an Eve sandbox", async () => {
   const commands = [];
   const sandbox = {
-    id: "sandbox-1",
     async run({ command }) {
       commands.push(command);
       return { exitCode: 0, stdout: "", stderr: "" };
@@ -53,7 +52,6 @@ test("installs agent-browser in an Eve sandbox", async () => {
 test("skips Eve system dependencies when explicitly disabled", async () => {
   const commands = [];
   const sandbox = {
-    id: "sandbox-1",
     async run({ command }) {
       commands.push(command);
       return { exitCode: 0, stdout: "", stderr: "" };
@@ -73,7 +71,6 @@ test("runs agent-browser through ctx.getSandbox", async () => {
   const ctx = {
     async getSandbox() {
       return {
-        id: "sandbox/id 1",
         async run({ command }) {
           commands.push(command);
           return { exitCode: 0, stdout: '{"ok":true}', stderr: "" };
@@ -85,28 +82,7 @@ test("runs agent-browser through ctx.getSandbox", async () => {
   const result = await runAgentBrowser(ctx, ["open", "https://example.com"]);
 
   assert.deepEqual(result.json, { ok: true });
-  assert.equal(commands[0], "agent-browser --session eve-sandbox-id-1 open https://example.com --json");
-});
-
-test("uses a short generated session for long Eve sandbox ids", async () => {
-  const commands = [];
-  const ctx = {
-    async getSandbox() {
-      return {
-        id: "eve-sbx-ses-vercel-1d940340bdba4563-wrun_01KVKDK1Z3GC3XEC86DGWRWRMH-__root__",
-        async run({ command }) {
-          commands.push(command);
-          return { exitCode: 0, stdout: '{"ok":true}', stderr: "" };
-        },
-      };
-    },
-  };
-
-  await runAgentBrowser(ctx, ["open", "https://example.com"]);
-
-  const session = commands[0].match(/--session ([^ ]+)/)?.[1];
-  assert.equal(session.length <= 48, true);
-  assert.match(commands[0], /^agent-browser --session eve-eve-sbx-ses-vercel-.+-[a-f0-9]{8} open/);
+  assert.equal(commands[0], "agent-browser --session eve-default open https://example.com --json");
 });
 
 test("accepts Eve promise-like sandbox methods", async () => {
@@ -118,7 +94,6 @@ test("accepts Eve promise-like sandbox methods", async () => {
   const ctx = {
     getSandbox() {
       return thenable({
-        id: "sandbox-1",
         run() {
           return thenable({ exitCode: 0, stdout: '{"ok":true}', stderr: "" });
         },
@@ -135,7 +110,6 @@ test("throws when Eve sandbox command fails", async () => {
   const ctx = {
     async getSandbox() {
       return {
-        id: "sandbox-1",
         async run() {
           return { exitCode: 2, stdout: "", stderr: "no chrome" };
         },

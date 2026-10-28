@@ -62,6 +62,8 @@ agent-browser open https://app.example.com/dashboard
 
 This works for any site, including those with complex OAuth flows, SSO, or 2FA, as long as Chrome already has valid session cookies.
 
+Saved localStorage and sessionStorage are written through Chrome DevTools, not page JavaScript, and only while the page is on the saved origin. If an origin redirects elsewhere or fails to load, its storage is skipped, the rest still loads, and `state load` lists it under `skippedOrigins`. For `--state` and `--restore` at launch, `session info` lists it under `restoreSkippedOrigins`.
+
 > **Security note:** State files contain session tokens in plaintext. Add them to `.gitignore`, delete when no longer needed, and set `AGENT_BROWSER_ENCRYPTION_KEY` for encryption at rest. See [Security Best Practices](#security-best-practices).
 
 **Tip:** Combine with `--session <id> --restore` so the imported auth auto-persists across restarts:
@@ -147,6 +149,8 @@ agent-browser get url  # Should be dashboard, not login
 
 After submitting, wait for the authenticated destination, a success message, or another app-specific condition. Do not use `networkidle` as a generic login wait because long-lived background connections can keep it from resolving.
 
+`auth login` filters matching controls by their layout size, computed visibility and opacity, and disabled/readonly state, including custom CSS selectors. If a selected credential field is replaced or redirects focus before entry, the command fails without submitting.
+
 For a form reached through an in-page click, challenge clearance, consent dismissal, or another stateful step, use the auth vault without discarding the prepared document:
 
 ```bash
@@ -165,9 +169,9 @@ agent-browser auth login work --no-navigate --url https://identity.example.com/l
 
 ## Plugins
 
-Use credential provider plugins when credentials live in external vault software. Plugins are configured in `agent-browser.json` and run as external executables over the `agent-browser.plugin.v1` stdio JSON protocol.
+Use credential provider plugins when credentials live in external vault software. Plugins are configured in `~/.agent-browser/config.json` and run as external executables over the `agent-browser.plugin.v1` stdio JSON protocol. The auto-discovered `./agent-browser.json` cannot set `plugins` (it is ignored with a warning); set them in `~/.agent-browser/config.json`, env vars or flags, or load the file explicitly with `--config ./agent-browser.json`.
 
-Add a plugin with `plugin add`. A plain `name` or `@scope/name` resolves from npm; `owner/repo` resolves from GitHub:
+Add a plugin with `plugin add`, which writes `~/.agent-browser/config.json` by default; use `--project` for `./agent-browser.json` (only used with `--config`). A plain `name` or `@scope/name` resolves from npm; `owner/repo` resolves from GitHub:
 
 ```bash
 agent-browser plugin add agent-browser-plugin-vault --name vault
