@@ -258,7 +258,7 @@ fn read_config_file(path: &Path) -> Option<Config> {
 
 /// Check if a boolean environment variable is set to a truthy value.
 /// Returns false when unset, empty, or set to "0", "false", or "no" (case-insensitive).
-fn env_var_is_truthy(name: &str) -> bool {
+pub(crate) fn env_var_is_truthy(name: &str) -> bool {
     match env::var(name) {
         Ok(val) => !matches!(val.to_lowercase().as_str(), "0" | "false" | "no" | ""),
         Err(_) => false,

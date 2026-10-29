@@ -594,6 +594,7 @@ Serves bundled skill content that always matches the installed CLI version. AI a
 agent-browser mcp
 agent-browser mcp --tools all
 agent-browser mcp --tools core,network,react
+agent-browser mcp --lock-launch
 ```
 
 Starts a Model Context Protocol server over stdio. MCP clients launch this command as a subprocess and exchange newline-delimited JSON-RPC on stdin and stdout. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization. A tool call with an argument its schema does not declare fails with an invalid-params error that names the unknown keys and lists the tool's own arguments.
@@ -655,6 +656,14 @@ Full parity MCP client config:
 ```
 
 Tool invocations use the same config files and environment variables as the CLI. Use `session` in the tool arguments, or set `AGENT_BROWSER_SESSION`, to isolate browser state.
+
+Start the server with `--lock-launch`, or set `AGENT_BROWSER_MCP_LOCK_LAUNCH=1`, when the host must own launch settings, for example many agents sharing one machine with a fixed namespace, idle timeout, and clean profile. Tool schemas then drop `namespace`, `idleTimeout`, `headed`, `webgpu`, `webmcp`, the `restore*` fields, `caCert`, `clearCaCert`, and `useSystemCa`, and calls that pass them are rejected. `extraArgs` also rejects `--namespace`, `--idle-timeout`, `--restore*`, `--headed`, `--webgpu`, `--no-webmcp`, and `--engine`, and `agent_browser_batch` rejects inner commands that run `connect` or carry those flags. `agent_browser_connect`, `agent_browser_plugin_add`, and `agent_browser_chat` are not available, because they can pick the browser or its launch options outside the tool arguments. These settings come only from the server's environment or config. `session` still works, so each agent can keep its own browser inside the host's namespace and idle timeout.
+
+Locked launch settings:
+
+```bash
+AGENT_BROWSER_NAMESPACE=agents AGENT_BROWSER_IDLE_TIMEOUT_MS=600000 agent-browser mcp --lock-launch
+```
 
 ## Authentication
 
@@ -895,6 +904,7 @@ agent-browser includes security features for safe AI agent deployments. All feat
 | `AGENT_BROWSER_CONFIRM_ACTIONS`     | Action categories requiring confirmation |
 | `AGENT_BROWSER_CONFIRM_INTERACTIVE` | Enable interactive confirmation prompts  |
 | `AGENT_BROWSER_PLUGINS`             | JSON plugin registry override            |
+| `AGENT_BROWSER_MCP_LOCK_LAUNCH`     | Keep MCP launch settings in the server's env/config (`mcp --lock-launch`) |
 
 See [Security documentation](https://agent-browser.dev/security) for details.
 

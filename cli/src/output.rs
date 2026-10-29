@@ -3650,7 +3650,7 @@ Examples:
             r##"
 agent-browser mcp - Start an MCP stdio server
 
-Usage: agent-browser mcp [--tools <profiles>]
+Usage: agent-browser mcp [--tools <profiles>] [--lock-launch]
 
 Starts a Model Context Protocol server over stdio. MCP clients launch this
 command as a subprocess and communicate with newline-delimited JSON-RPC.
@@ -3696,6 +3696,18 @@ Tool discovery is paginated and includes read-only/open-world annotations so
 modern MCP clients can load the large typed surface incrementally.
 Use agent_browser_snapshot after navigation to get fresh refs before clicking.
 
+Options:
+  --tools <profiles>   Comma-separated tool profiles (default: core)
+  --lock-launch        Keep launch settings in the server's environment and config
+                       (or AGENT_BROWSER_MCP_LOCK_LAUNCH=1). Tool schemas drop
+                       namespace, idleTimeout, headed, webgpu, webmcp, restore*,
+                       caCert, clearCaCert, and useSystemCa; extraArgs rejects
+                       --namespace, --idle-timeout, --restore*, --headed, --webgpu,
+                       --no-webmcp, and --engine, also inside agent_browser_batch
+                       commands, where connect is rejected too. agent_browser_connect,
+                       agent_browser_plugin_add, and agent_browser_chat are hidden.
+                       session still works.
+
 MCP client config example:
   {
     "mcpServers": {
@@ -3720,6 +3732,7 @@ Environment:
   AGENT_BROWSER_SESSION          Default browser session
   AGENT_BROWSER_SOCKET_DIR       Daemon socket directory
   AGENT_BROWSER_CONFIG           Config file loaded by tool invocations
+  AGENT_BROWSER_MCP_LOCK_LAUNCH  Same as --lock-launch
 "##
         }
 
@@ -4220,6 +4233,7 @@ Environment:
   AGENT_BROWSER_CONFIRM_INTERACTIVE Enable interactive confirmation prompts
   AGENT_BROWSER_NO_AUTO_DIALOG   Disable automatic dismissal of alert/beforeunload dialogs
   AGENT_BROWSER_PLUGINS          JSON plugin registry override
+  AGENT_BROWSER_MCP_LOCK_LAUNCH  Keep MCP launch settings in the server's env/config (mcp --lock-launch)
   AGENT_BROWSER_ENGINE           Browser engine: chrome (default), lightpanda, obscura (experimental)
   OBSCURA_BIN                   Source E2E tests only: required executable path when explicitly
                                 running cargo test e2e_obscura -- --ignored --test-threads=1

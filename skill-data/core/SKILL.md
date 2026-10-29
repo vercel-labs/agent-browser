@@ -78,9 +78,12 @@ For tools that support Model Context Protocol servers, start the stdio server:
 agent-browser mcp
 agent-browser mcp --tools all
 agent-browser mcp --tools core,network,react
+agent-browser mcp --lock-launch
 ```
 
 Configure the MCP client to launch `agent-browser` with `["mcp"]`. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization. The default tools profile is `core`, which keeps MCP context small for everyday browser automation. Use `--tools all` for the full typed CLI parity surface, or combine profiles with commas, such as `--tools core,network,react`. Profiles are `core`, `network`, `state`, `debug`, `tabs`, `react`, `mobile`, and `all`; the `debug` profile includes accessibility audits, plugin registry, and command.run tools. Each tool accepts typed arguments plus `extraArgs` for per-command options and display or emulation flags such as `--engine`; global flags that change network, file, policy, or host access (such as `--allowed-domains`, `--action-policy`, `--executable-path`, `--args`, and `--config`) are rejected in `extraArgs` and must be set in the MCP server's environment or config, and structured `allowedDomains` is rejected when the server already sets allowed domains. Undeclared argument keys are rejected with an invalid-params error that names them. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions, while `idleTimeout` maps to `--idle-timeout`. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the tool `session` argument or `AGENT_BROWSER_SESSION` to isolate browser sessions.
+
+Hosts that must own launch settings start the server with `--lock-launch` (or `AGENT_BROWSER_MCP_LOCK_LAUNCH=1`). Then tool schemas have no `namespace`, `idleTimeout`, `headed`, `webgpu`, `webmcp`, `restore*`, `caCert`, `clearCaCert`, or `useSystemCa`, `extraArgs` rejects `--namespace`, `--idle-timeout`, `--restore*`, `--headed`, `--webgpu`, `--no-webmcp`, and `--engine`, and `agent_browser_batch` rejects inner commands that run `connect` or carry those flags. `agent_browser_connect`, `agent_browser_plugin_add`, and `agent_browser_chat` are not available, because they can pick the browser or its launch options outside the tool arguments. Keep using `session` to separate your browser; the host's environment and config decide the rest.
 
 ## eve agent integration
 

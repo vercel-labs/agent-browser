@@ -216,6 +216,8 @@ struct CliRun {
 struct McpConfig {
     profiles: Vec<ToolProfile>,
     enabled_tools: Option<BTreeSet<&'static str>>,
+    /// `--lock-launch` or AGENT_BROWSER_MCP_LOCK_LAUNCH: launch settings come only from the server's environment and config.
+    lock_launch: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,6 +298,7 @@ impl McpConfig {
             return Self {
                 profiles: vec![ToolProfile::All],
                 enabled_tools: None,
+                lock_launch: false,
             };
         }
 
@@ -307,6 +310,7 @@ impl McpConfig {
         Self {
             profiles,
             enabled_tools: Some(enabled_tools),
+            lock_launch: false,
         }
     }
 
@@ -323,6 +327,22 @@ impl McpConfig {
         match &self.enabled_tools {
             Some(enabled_tools) => enabled_tools.contains(name),
             None => true,
+        }
+    }
+
+    /// `--lock-launch` also hides tools that pick the browser outside the tool arguments:
+    /// connect attaches to another browser, plugin_add writes launch.mutate or
+    /// browser.provider plugins into the config, and chat runs its own commands, connect included.
+    fn locks_tool(&self, name: &str) -> bool {
+        self.lock_launch && matches!(name, TOOL_CONNECT | TOOL_PLUGIN_ADD | TOOL_CHAT)
+    }
+
+    /// Suffix that keeps `--lock-launch` in restart hints.
+    fn lock_launch_suffix(&self) -> &'static str {
+        if self.lock_launch {
+            " --lock-launch"
+        } else {
+            ""
         }
     }
 
@@ -540,6 +560,7 @@ pub fn run_mcp(args: &[String]) -> Result<(), String> {
 
 fn parse_mcp_config(args: &[String]) -> Result<McpConfig, String> {
     let mut tools_arg: Option<String> = None;
+    let mut lock_launch = crate::flags::env_var_is_truthy("AGENT_BROWSER_MCP_LOCK_LAUNCH");
     let mut i = 0;
 
     while i < args.len() {
@@ -553,16 +574,22 @@ fn parse_mcp_config(args: &[String]) -> Result<McpConfig, String> {
         } else if let Some(value) = arg.strip_prefix("--tools=") {
             tools_arg = Some(value.to_string());
             i += 1;
+        } else if arg == "--lock-launch" {
+            lock_launch = true;
+            i += 1;
         } else {
             return Err(format!(
-                "Unknown mcp option: {}\nUsage: agent-browser mcp [--tools <profiles>]",
+                "Unknown mcp option: {}\nUsage: agent-browser mcp [--tools <profiles>] [--lock-launch]",
                 arg
             ));
         }
     }
 
     let Some(tools_arg) = tools_arg else {
-        return Ok(McpConfig::default());
+        return Ok(McpConfig {
+            lock_launch,
+            ..McpConfig::default()
+        });
     };
 
     let mut profiles = Vec::new();
@@ -585,7 +612,10 @@ fn parse_mcp_config(args: &[String]) -> Result<McpConfig, String> {
         return Err("Missing value for --tools".to_string());
     }
 
-    Ok(McpConfig::from_profiles(profiles))
+    Ok(McpConfig {
+        lock_launch,
+        ..McpConfig::from_profiles(profiles)
+    })
 }
 
 fn handle_line(line: &str, config: &McpConfig, exit_after_response: &mut bool) -> Option<Value> {
@@ -708,9 +738,137 @@ fn tools_for_config(config: &McpConfig) -> Vec<Value> {
         .filter(|tool| {
             tool.get("name")
                 .and_then(|name| name.as_str())
-                .is_some_and(|name| config.allows(name))
+                .is_some_and(|name| config.allows(name) && !config.locks_tool(name))
+        })
+        .map(|tool| {
+            if config.lock_launch {
+                lock_launch_schema(tool)
+            } else {
+                tool
+            }
         })
         .collect()
+}
+
+/// Tool arguments `mcp --lock-launch` removes: they choose the daemon namespace, idle lifetime,
+/// restored state, CA trust, or browser launch mode, so the server's environment and config own them.
+const LAUNCH_LOCKED_ARGUMENTS: &[&str] = &[
+    "namespace",
+    "idleTimeout",
+    "restore",
+    "restoreSave",
+    "restoreCheckUrl",
+    "restoreCheckText",
+    "restoreCheckFn",
+    "caCert",
+    "clearCaCert",
+    "useSystemCa",
+    "headed",
+    "webgpu",
+    "webmcp",
+];
+
+/// Global flags `mcp --lock-launch` also rejects in extraArgs and batch commands, on top of the ones MCP_EXTRA_ARGS_GLOBALS never allows in extraArgs.
+const LAUNCH_LOCKED_GLOBALS: &[&str] = &[
+    "--namespace",
+    "--idle-timeout",
+    "--restore",
+    "--restore-save",
+    "--restore-check-url",
+    "--restore-check-text",
+    "--restore-check-fn",
+    "--headed",
+    "--webgpu",
+    "--no-webmcp",
+    "--engine",
+];
+
+/// Drops the launch-locked arguments from a tool definition and says so in the extraArgs description.
+fn lock_launch_schema(mut tool: Value) -> Value {
+    if let Some(props) = tool
+        .pointer_mut("/inputSchema/properties")
+        .and_then(Value::as_object_mut)
+    {
+        for key in LAUNCH_LOCKED_ARGUMENTS {
+            props.remove(*key);
+        }
+        if let Some(extra_args) = props.get_mut("extraArgs") {
+            extra_args["description"] = json!("Advanced: extra CLI arguments for per-command options and display or emulation flags. This server runs with --lock-launch, so --namespace, --idle-timeout, --restore*, --headed, --webgpu, --no-webmcp, and --engine are rejected, like global flags that change network, file, policy, or host access.");
+        }
+    }
+    tool
+}
+
+/// With `mcp --lock-launch`, rejects launch-locked tool arguments and extraArgs flags.
+fn reject_locked_launch_arguments(arguments: &Value) -> Result<(), ProtocolError> {
+    if let Some(key) = LAUNCH_LOCKED_ARGUMENTS
+        .iter()
+        .find(|key| arguments.get(**key).is_some())
+    {
+        return Err(ProtocolError::invalid_params(format!(
+            "{} is locked by agent-browser mcp --lock-launch; set it in the MCP server's environment or config",
+            key
+        )));
+    }
+    for token in optional_string_array(arguments, "extraArgs")?.unwrap_or_default() {
+        let name = token.split('=').next().unwrap_or(&token);
+        if LAUNCH_LOCKED_GLOBALS.contains(&name) {
+            return Err(ProtocolError::invalid_params(format!(
+                "extraArgs may not set {} while agent-browser mcp runs with --lock-launch; set it in the MCP server's environment or config",
+                name
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// With `mcp --lock-launch`, batch may not run connect or carry launch-locked flags in its inner commands.
+/// Positional extraArgs count as inner commands too: the CLI runs `batch <command>...` arguments instead of stdin.
+fn reject_locked_batch_commands(arguments: &Value) -> Result<(), ProtocolError> {
+    let mut commands: Vec<(String, Vec<String>)> = Vec::new();
+    if let Some(typed) = arguments.get("commands").and_then(Value::as_array) {
+        for (i, command) in typed.iter().enumerate() {
+            let words = command
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            commands.push((format!("commands[{}]", i), words));
+        }
+    }
+    for (i, token) in optional_string_array(arguments, "extraArgs")?
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+    {
+        commands.push((
+            format!("extraArgs[{}]", i),
+            crate::commands::shell_words_split(token),
+        ));
+    }
+    for (label, words) in commands {
+        if words.first().map(String::as_str) == Some("connect") {
+            return Err(ProtocolError::invalid_params(format!(
+                "{} may not run connect while agent-browser mcp runs with --lock-launch",
+                label
+            )));
+        }
+        for word in &words {
+            let name = word.split('=').next().unwrap_or(word);
+            if LAUNCH_LOCKED_GLOBALS.contains(&name) {
+                return Err(ProtocolError::invalid_params(format!(
+                    "{} may not set {} while agent-browser mcp runs with --lock-launch",
+                    label, name
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn tool_profile_names() -> Vec<&'static str> {
@@ -730,7 +888,7 @@ fn tool_profile_names() -> Vec<&'static str> {
     .collect()
 }
 
-fn tool_profile_summaries() -> Vec<Value> {
+fn tool_profile_summaries(config: &McpConfig) -> Vec<Value> {
     [
         ToolProfile::Core,
         ToolProfile::Network,
@@ -745,15 +903,27 @@ fn tool_profile_summaries() -> Vec<Value> {
     .iter()
     .map(|profile| {
         let tool_count = if *profile == ToolProfile::All {
-            tools().len()
+            tools()
+                .iter()
+                .filter_map(|tool| tool["name"].as_str())
+                .filter(|name| !config.locks_tool(name))
+                .count()
         } else {
-            profile.tools().len()
+            profile
+                .tools()
+                .iter()
+                .filter(|name| !config.locks_tool(name))
+                .count()
         };
         json!({
             "name": profile.name(),
             "description": profile.description(),
             "toolCount": tool_count,
-            "usage": format!("agent-browser mcp --tools {}", profile.name()),
+            "usage": format!(
+                "agent-browser mcp --tools {}{}",
+                profile.name(),
+                config.lock_launch_suffix()
+            ),
         })
     })
     .collect()
@@ -2253,15 +2423,29 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         )));
     };
 
+    if config.locks_tool(name) {
+        return Err(ProtocolError::invalid_params(format!(
+            "Tool {} is not available while agent-browser mcp runs with --lock-launch",
+            name
+        )));
+    }
+
     if !config.allows(name) {
         return Err(ProtocolError::invalid_params(format!(
-            "Tool {} is not enabled by the active MCP tools profile(s): {}. Restart with `agent-browser mcp --tools all` or add a profile that includes it.",
+            "Tool {} is not enabled by the active MCP tools profile(s): {}. Restart with `agent-browser mcp --tools all{}` or add a profile that includes it.",
             name,
-            config.profile_names().join(", ")
+            config.profile_names().join(", "),
+            config.lock_launch_suffix()
         )));
     }
 
     reject_unknown_arguments(name, &tool_def, arguments)?;
+    if config.lock_launch {
+        reject_locked_launch_arguments(arguments)?;
+        if name == TOOL_BATCH {
+            reject_locked_batch_commands(arguments)?;
+        }
+    }
 
     match name {
         TOOL_TOOLS_PROFILES => call_tools_profiles(config),
@@ -2445,9 +2629,10 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
 }
 
 fn call_tools_profiles(config: &McpConfig) -> Result<Value, ProtocolError> {
-    let profiles = tool_profile_summaries();
+    let profiles = tool_profile_summaries(config);
+    let lock = config.lock_launch_suffix();
     let text = format!(
-        "Active MCP tools profile(s): {}\n\nAvailable profiles:\n{}\n\nRestart the MCP server with `agent-browser mcp --tools <profile>` or combine profiles with commas, for example `agent-browser mcp --tools core,network,react`. Use `agent-browser mcp --tools all` for the full typed CLI parity surface.",
+        "Active MCP tools profile(s): {}\n\nAvailable profiles:\n{}\n\nRestart the MCP server with `agent-browser mcp --tools <profile>{lock}` or combine profiles with commas, for example `agent-browser mcp --tools core,network,react{lock}`. Use `agent-browser mcp --tools all{lock}` for the full typed CLI parity surface.",
         config.profile_names().join(", "),
         profiles
             .iter()
@@ -2472,9 +2657,9 @@ fn call_tools_profiles(config: &McpConfig) -> Result<Value, ProtocolError> {
             "activeProfiles": config.profile_names(),
             "profiles": profiles,
             "usage": {
-                "default": "agent-browser mcp",
-                "compose": "agent-browser mcp --tools core,network,react",
-                "all": "agent-browser mcp --tools all",
+                "default": format!("agent-browser mcp{lock}"),
+                "compose": format!("agent-browser mcp --tools core,network,react{lock}"),
+                "all": format!("agent-browser mcp --tools all{lock}"),
             }
         },
         "isError": false,
@@ -4741,6 +4926,303 @@ mod tests {
     fn parse_mcp_config_rejects_unknown_profile() {
         let err = parse_mcp_config(&["--tools".into(), "bogus".into()]).unwrap_err();
         assert!(err.contains("Unknown MCP tools profile"));
+    }
+
+    #[test]
+    fn parse_mcp_config_reads_lock_launch_flag_and_env() {
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_MCP_LOCK_LAUNCH"]);
+        guard.remove("AGENT_BROWSER_MCP_LOCK_LAUNCH");
+        assert!(!parse_mcp_config(&[]).unwrap().lock_launch);
+        assert!(
+            parse_mcp_config(&["--lock-launch".into()])
+                .unwrap()
+                .lock_launch
+        );
+        let config = parse_mcp_config(&["--tools=all".into(), "--lock-launch".into()]).unwrap();
+        assert!(config.lock_launch);
+        assert!(config.allows(TOOL_REACT_TREE));
+
+        guard.set("AGENT_BROWSER_MCP_LOCK_LAUNCH", "1");
+        assert!(parse_mcp_config(&[]).unwrap().lock_launch);
+        guard.set("AGENT_BROWSER_MCP_LOCK_LAUNCH", "0");
+        assert!(
+            !parse_mcp_config(&["--tools".into(), "core".into()])
+                .unwrap()
+                .lock_launch
+        );
+    }
+
+    #[test]
+    fn lock_launch_removes_launch_arguments_from_tool_schemas() {
+        let unlocked = tools_for_config(&McpConfig::all());
+        let locked = tools_for_config(&McpConfig {
+            lock_launch: true,
+            ..McpConfig::all()
+        });
+        let find = |tools: &[Value], name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"].as_str() == Some(name))
+                .cloned()
+        };
+
+        let open = find(&unlocked, TOOL_OPEN).unwrap();
+        for key in LAUNCH_LOCKED_ARGUMENTS {
+            assert!(
+                open["inputSchema"]["properties"].get(*key).is_some(),
+                "{key}"
+            );
+        }
+        assert!(find(&unlocked, TOOL_CONNECT).is_some());
+
+        assert!(find(&locked, TOOL_CONNECT).is_none());
+        assert!(find(&locked, TOOL_PLUGIN_ADD).is_none());
+        assert!(find(&locked, TOOL_CHAT).is_none());
+        assert!(find(&locked, TOOL_BATCH).is_some());
+        for tool in &locked {
+            let props = &tool["inputSchema"]["properties"];
+            for key in LAUNCH_LOCKED_ARGUMENTS {
+                assert!(props.get(*key).is_none(), "{} {key}", tool["name"]);
+            }
+            assert!(props.get("session").is_some());
+            assert!(props.get("allowedDomains").is_some());
+            assert!(props["extraArgs"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("--lock-launch"));
+        }
+        let open = find(&locked, TOOL_OPEN).unwrap();
+        assert!(open["inputSchema"]["properties"].get("url").is_some());
+    }
+
+    #[test]
+    fn lock_launch_rejects_connect_and_launch_flags_inside_batch() {
+        let locked = McpConfig {
+            lock_launch: true,
+            ..McpConfig::all()
+        };
+        for (commands, expected) in [
+            (
+                json!([["connect", "9222"]]),
+                "commands[0] may not run connect",
+            ),
+            (
+                json!([
+                    ["open", "https://example.com"],
+                    ["connect", "ws://127.0.0.1:9222"]
+                ]),
+                "commands[1] may not run connect",
+            ),
+            (
+                json!([["--headed", "open"]]),
+                "commands[0] may not set --headed",
+            ),
+            (
+                json!([["snapshot", "--idle-timeout", "0"]]),
+                "commands[0] may not set --idle-timeout",
+            ),
+            (
+                json!([["open", "--namespace", "x"]]),
+                "commands[0] may not set --namespace",
+            ),
+            (
+                json!([["open", "--restore=login"]]),
+                "may not set --restore",
+            ),
+        ] {
+            let err = call_tool(
+                Some(&json!({ "name": TOOL_BATCH, "arguments": { "commands": commands } })),
+                &locked,
+            )
+            .unwrap_err();
+            assert_eq!(err.code, -32602);
+            assert!(err.message.contains(expected), "{}", err.message);
+        }
+        reject_locked_batch_commands(&json!({
+            "commands": [["open", "https://example.com"], ["snapshot", "-i"], ["get", "title"]]
+        }))
+        .unwrap();
+    }
+
+    #[test]
+    fn lock_launch_rejects_connect_in_batch_extra_args() {
+        // Positional batch arguments replace the stdin commands, so extraArgs can carry a whole command.
+        let arguments = json!({ "commands": [["get", "title"]], "extraArgs": ["connect 9222"] });
+        let args = cli_tool_args(&arguments, vec!["batch".to_string()], None).unwrap();
+        let clean = crate::flags::clean_args(&args);
+        let parsed =
+            crate::commands::parse_command(&clean, &crate::flags::parse_flags(&args)).unwrap();
+        assert_eq!(parsed["action"], "batch");
+        assert_eq!(parsed["commands"], json!(["connect 9222"]));
+
+        let locked = McpConfig {
+            lock_launch: true,
+            ..McpConfig::all()
+        };
+        for extra in [
+            vec!["connect 9222"],
+            vec!["--bail", "  connect ws://127.0.0.1:9222"],
+        ] {
+            let err = call_tool(
+                Some(&json!({
+                    "name": TOOL_BATCH,
+                    "arguments": { "commands": [["get", "title"]], "extraArgs": extra }
+                })),
+                &locked,
+            )
+            .unwrap_err();
+            assert_eq!(err.code, -32602);
+            assert!(
+                err.message.contains("may not run connect"),
+                "{}",
+                err.message
+            );
+            assert!(err.message.starts_with("extraArgs["), "{}", err.message);
+        }
+        reject_locked_batch_commands(&json!({
+            "commands": [["get", "title"]],
+            "extraArgs": ["--bail", "get url"]
+        }))
+        .unwrap();
+    }
+
+    #[test]
+    fn lock_launch_profile_summaries_skip_hidden_tools() {
+        let locked = McpConfig {
+            lock_launch: true,
+            ..McpConfig::default()
+        };
+        let hidden = [TOOL_CONNECT, TOOL_PLUGIN_ADD, TOOL_CHAT];
+        let count = |summaries: &[Value], name: &str| {
+            summaries
+                .iter()
+                .find(|profile| profile["name"] == name)
+                .and_then(|profile| profile["toolCount"].as_u64())
+                .unwrap() as usize
+        };
+
+        let unlocked = tool_profile_summaries(&McpConfig::default());
+        assert_eq!(count(&unlocked, "debug"), DEBUG_PROFILE_TOOLS.len());
+        assert_eq!(count(&unlocked, "all"), tools().len());
+
+        let summaries = tool_profile_summaries(&locked);
+        let debug_hidden = DEBUG_PROFILE_TOOLS
+            .iter()
+            .filter(|name| hidden.contains(name))
+            .count();
+        assert!(debug_hidden > 0);
+        assert_eq!(
+            count(&summaries, "debug"),
+            DEBUG_PROFILE_TOOLS.len() - debug_hidden
+        );
+        assert_eq!(count(&summaries, "all"), tools().len() - hidden.len());
+        assert_eq!(
+            count(&summaries, "all"),
+            tools_for_config(&McpConfig {
+                lock_launch: true,
+                ..McpConfig::all()
+            })
+            .len()
+        );
+        assert!(summaries.iter().all(|profile| profile["usage"]
+            .as_str()
+            .unwrap()
+            .ends_with(" --lock-launch")));
+
+        let result = call_tools_profiles(&locked).unwrap();
+        assert_eq!(
+            result["structuredContent"]["usage"]["all"],
+            "agent-browser mcp --tools all --lock-launch"
+        );
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("`agent-browser mcp --tools all --lock-launch`"));
+    }
+
+    #[test]
+    fn lock_launch_rejects_launch_arguments_and_extra_args() {
+        let locked = McpConfig {
+            lock_launch: true,
+            ..McpConfig::all()
+        };
+        for arguments in [
+            json!({ "idleTimeout": "0" }),
+            json!({ "namespace": "elsewhere" }),
+            json!({ "headed": true }),
+            json!({ "restore": "login" }),
+            json!({ "caCert": "/tmp/ca.pem" }),
+            json!({ "session": "a", "webmcp": true }),
+        ] {
+            let err = call_tool(
+                Some(&json!({ "name": TOOL_OPEN, "arguments": arguments })),
+                &locked,
+            )
+            .unwrap_err();
+            assert_eq!(err.code, -32602);
+            assert!(err.message.contains("locked by"), "{}", err.message);
+        }
+
+        for extra in [
+            vec!["--idle-timeout", "0"],
+            vec!["--namespace", "elsewhere"],
+            vec!["--restore=login"],
+            vec!["--headed"],
+            vec!["--engine", "lightpanda"],
+        ] {
+            let err = call_tool(
+                Some(&json!({
+                    "name": TOOL_SNAPSHOT,
+                    "arguments": { "extraArgs": extra }
+                })),
+                &locked,
+            )
+            .unwrap_err();
+            assert!(
+                err.message.contains("--lock-launch"),
+                "{:?}: {}",
+                extra,
+                err.message
+            );
+        }
+
+        for (name, arguments) in [
+            (TOOL_CONNECT, json!({ "target": "9222" })),
+            (
+                TOOL_PLUGIN_ADD,
+                json!({ "reference": "agent-browser-plugin-x" }),
+            ),
+            (TOOL_CHAT, json!({ "message": "connect to port 9222" })),
+        ] {
+            let err = call_tool(
+                Some(&json!({ "name": name, "arguments": arguments })),
+                &locked,
+            )
+            .unwrap_err();
+            assert!(err.message.contains("--lock-launch"), "{name}");
+        }
+        // The lock message wins over the profile message, so a restart hint never suggests a hidden tool.
+        let err = call_tool(
+            Some(&json!({ "name": TOOL_CONNECT, "arguments": { "target": "9222" } })),
+            &McpConfig {
+                lock_launch: true,
+                ..McpConfig::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.message.contains("not available while"),
+            "{}",
+            err.message
+        );
+
+        let allowed = json!({ "session": "agent-1", "extraArgs": ["-i", "--json"] });
+        reject_locked_launch_arguments(&allowed).unwrap();
+        let args = cli_tool_args(&allowed, vec!["snapshot".to_string()], Some("agent-1")).unwrap();
+        assert_eq!(
+            args,
+            vec!["--json", "--session", "agent-1", "snapshot", "-i", "--json"]
+        );
     }
 
     #[test]

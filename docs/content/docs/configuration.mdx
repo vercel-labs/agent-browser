@@ -320,6 +320,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_ENGINE</code></td><td>Browser engine to use: <code>chrome</code> (default), <code>lightpanda</code>, <code>obscura</code> (experimental).</td><td><code>chrome</code></td></tr>
     <tr><td><code>AGENT_BROWSER_NO_AUTO_DIALOG</code></td><td>Disable automatic dismissal of <code>alert</code>/<code>beforeunload</code> dialogs.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_PLUGINS</code></td><td>JSON plugin registry override.</td><td>(config discovery)</td></tr>
+    <tr><td><code>AGENT_BROWSER_MCP_LOCK_LAUNCH</code></td><td>Same as <code>agent-browser mcp --lock-launch</code>: MCP tool calls cannot set namespace, idle timeout, headed/WebGPU/WebMCP, restore, or CA options, launch flags in <code>extraArgs</code> and in <code>agent_browser_batch</code> commands are rejected, and <code>agent_browser_connect</code>, <code>agent_browser_plugin_add</code>, and <code>agent_browser_chat</code> are hidden.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_SCREENSHOT_DIR</code></td><td>Default screenshot output directory.</td><td>(temp directory)</td></tr>
     <tr><td><code>AGENT_BROWSER_SCREENSHOT_QUALITY</code></td><td>JPEG screenshot quality from 0 to 100.</td><td>(format default)</td></tr>
     <tr><td><code>AGENT_BROWSER_SCREENSHOT_FORMAT</code></td><td>Screenshot format: <code>png</code> or <code>jpeg</code>.</td><td><code>png</code></td></tr>
