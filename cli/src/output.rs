@@ -3656,8 +3656,9 @@ Usage: agent-browser mcp [--tools <profiles>]
 Starts a Model Context Protocol server over stdio. MCP clients launch this
 command as a subprocess and communicate with newline-delimited JSON-RPC.
 stdout is reserved for MCP protocol messages; logs and diagnostics use stderr.
-The server defaults to MCP protocol 2025-11-25 and accepts older supported
-client protocol versions during initialization.
+The server supports MCP protocol 2026-07-28 with per-request metadata and
+server/discover. Legacy clients continue to initialize with 2025-11-25 or
+older supported versions; their default remains 2025-11-25.
 
 mcp call runs one tool without a stdio session and prints its tools/call
 result as JSON, with the agent-browser version in _meta.agentBrowserVersion.

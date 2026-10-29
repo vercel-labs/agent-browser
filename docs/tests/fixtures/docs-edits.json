@@ -20,6 +20,14 @@
       {
         "from": "agent-browser network route <url> --body <json>  # Mock response",
         "to": "agent-browser network route <url> --body <json>  # Mock response\nagent-browser network route <url> --body <json> --allow-origin <origin>  # Mock readable cross-origin"
+      },
+      {
+        "from": "Starts a Model Context Protocol server over stdio. MCP clients launch this command as a subprocess and exchange newline-delimited JSON-RPC on stdin and stdout. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization.\n\nThe default tools profile is `core`",
+        "to": "Starts a Model Context Protocol server over stdio. MCP clients launch this command as a subprocess and exchange newline-delimited JSON-RPC on stdin and stdout. The server supports MCP protocol 2026-07-28 through per-request metadata and `server/discover`. Legacy clients continue to use `initialize` with 2025-11-25 or older supported versions; their default remains 2025-11-25. Discovery advertises all supported versions, and unsupported modern versions return an error listing them. Modern `tools/list` results retain pagination and include cache hints. A tool call with an argument its schema does not declare fails with an invalid-params error that names the unknown keys and lists the tool's own arguments.\n\nThe default tools profile is `core`"
+      },
+      {
+        "from": "Starts a Model Context Protocol server over stdio. MCP clients launch this command as a subprocess and exchange newline-delimited JSON-RPC on stdin and stdout. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization.",
+        "to": "Starts a Model Context Protocol server over stdio. MCP clients launch this command as a subprocess and exchange newline-delimited JSON-RPC on stdin and stdout. The server supports MCP protocol 2026-07-28 through per-request metadata and server/discover. Legacy clients continue to use initialize with 2025-11-25 or older supported versions; their default remains 2025-11-25. Discovery advertises all supported versions, and unsupported modern versions return an error listing them. Modern tools/list results retain pagination and include cache hints. A tool call with an argument its schema does not declare fails with an invalid-params error that names the unknown keys and lists the tool's own arguments."
       }
     ],
     "/configuration": [
