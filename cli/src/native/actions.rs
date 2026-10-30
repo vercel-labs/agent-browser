@@ -35,6 +35,7 @@ use super::policy::{ActionPolicy, ConfirmActions, PolicyResult};
 use super::providers;
 use super::react;
 use super::recording::{self, RecordingState};
+use super::replay::{self, ReplayState};
 use super::screenshot::{self, ScreenshotOptions};
 use super::snapshot::{self, SnapshotOptions};
 use super::state;
@@ -658,6 +659,7 @@ pub struct DaemonState {
     pub session_id: String,
     pub tracing_state: TracingState,
     pub recording_state: RecordingState,
+    pub replay_state: ReplayState,
     event_rx: Option<broadcast::Receiver<CdpEvent>>,
     /// Downloads seen on the attached browser, for `wait --download`.
     downloads: DownloadLedger,
@@ -834,6 +836,7 @@ impl DaemonState {
             session_id,
             tracing_state: TracingState::new(),
             recording_state: RecordingState::new(),
+            replay_state: ReplayState::new(),
             event_rx: None,
             downloads: DownloadLedger::default(),
             webmcp: webmcp::RuntimeState::default(),
@@ -3242,6 +3245,9 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "recording_start" => handle_recording_start(cmd, state).await,
         "recording_stop" => handle_recording_stop(state).await,
         "recording_restart" => handle_recording_restart(cmd, state).await,
+        "replay_start" => handle_replay_start(state).await,
+        "replay_stop" => handle_replay_stop(cmd, state).await,
+        "replay_status" => handle_replay_status(state).await,
         "pdf" => handle_pdf(cmd, state).await,
         "tab_list" => handle_tab_list(state).await,
         "tab_new" => handle_tab_new(cmd, state).await,
@@ -8497,6 +8503,29 @@ async fn handle_recording_restart(cmd: &Value, state: &mut DaemonState) -> Resul
         "contactSheet": state.recording_state.contact_sheet,
         "contactSheetPath": state.recording_state.contact_sheet_path,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Replay (rrweb DOM recording)
+// ---------------------------------------------------------------------------
+
+async fn handle_replay_start(state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    replay::replay_start(&mut state.replay_state, mgr).await
+}
+
+async fn handle_replay_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let path = cmd
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("/tmp/replay");
+    replay::replay_stop(&mut state.replay_state, mgr, path).await
+}
+
+async fn handle_replay_status(state: &DaemonState) -> Result<Value, String> {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    replay::replay_status(&state.replay_state, mgr).await
 }
 
 async fn handle_pdf(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
