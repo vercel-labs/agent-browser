@@ -3656,8 +3656,9 @@ Examples:
             r##"
 agent-browser mcp - Start an MCP stdio server
 
-Usage: agent-browser mcp [--tools <profiles>]
-       agent-browser mcp call <tool> [<arguments-json> | -] [--tools <profiles>]
+Usage: agent-browser mcp [--tools <profiles>] [--config <trusted-path>]
+       agent-browser mcp call <tool> [<arguments-json> | -]
+         [--tools <profiles>] [--config <trusted-path>]
 
 Starts a Model Context Protocol server over stdio. MCP clients launch this
 command as a subprocess and communicate with newline-delimited JSON-RPC.
@@ -3670,6 +3671,12 @@ result as JSON, with the agent-browser version in _meta.agentBrowserVersion.
 Pass the arguments as a JSON object, or - to read them from stdin. Every tool
 is available unless --tools limits the call. Exit code: 0 on success, 1 when
 the tool reports an error, 2 for an unknown tool or invalid arguments.
+
+Pass --config <trusted-path> to agent-browser mcp or agent-browser mcp call to
+select one trusted config file. MCP tool child processes load only that file,
+replacing default user/project discovery. Put required safety policy in it.
+Environment variables and accepted per-tool CLI arguments still override its
+values.
 
 The default tools profile is core, which keeps MCP context small for everyday
 browser automation. Use --tools all for the full typed CLI parity surface, or
@@ -3700,11 +3707,10 @@ Common tools include:
 
 Each tool has typed fields such as url, selector, text, key, and session.
 Each tool also accepts extraArgs for per-command options and display or emulation
-flags such as --engine. Global flags that change network, file, policy, or host
-access (such as --allowed-domains, --action-policy, --executable-path, --args,
-and --config) are rejected in extraArgs and must be set in the MCP server's
-environment or config, and structured allowedDomains is rejected when the server
-already sets allowed domains.
+flags such as --engine. extraArgs cannot set --config or global flags that change
+network, file, policy, or host access. Set host-wide options in the MCP server's
+environment or selected config. Structured allowedDomains is rejected when the
+server already sets allowed domains.
 Tool discovery is paginated and includes read-only/open-world annotations so
 modern MCP clients can load the large typed surface incrementally.
 Use agent_browser_snapshot after navigation to get fresh refs before clicking.
@@ -4147,31 +4153,40 @@ Options:
   --version, -V              Show version
 
 Configuration:
-  agent-browser looks for agent-browser.json in these locations (lowest to highest priority):
+  Default discovery loads config from these locations (lowest to highest priority):
     1. ~/.agent-browser/config.json      User-level defaults
-    2. ./agent-browser.json              Project-level overrides
+    2. ./agent-browser.json              Allowlisted project defaults
     3. Environment variables             Override config file values
     4. CLI flags                         Override everything
 
-  Use --config <path> to load a specific config file instead of the defaults.
+  Use --config <path> to load only that config file instead of default discovery.
+  AGENT_BROWSER_CONFIG has the same effect. Environment variables and CLI flags
+  still override values from the selected config file.
   If --config points to a missing or invalid file, agent-browser exits with an error.
-  The auto-discovered ./agent-browser.json cannot set executablePath, args or plugins (they are ignored with a warning); set them in ~/.agent-browser/config.json, env vars or flags, or load the file explicitly with --config ./agent-browser.json.
+  The auto-discovered ./agent-browser.json accepts only headed, json, debug,
+  userAgent, hideScrollbars, annotate, colorScheme, maxOutput, screenshotQuality,
+  screenshotFormat, and idleTimeout. Other runtime keys, including extensions,
+  initScripts, state, trust, policy, session, connection, and path settings, are
+  ignored with a warning. The $schema metadata key is ignored silently.
+  Put advanced settings in ~/.agent-browser/config.json or load a trusted file
+  with --config or AGENT_BROWSER_CONFIG.
 
   Boolean flags accept an optional true/false value to override config:
     --headed           (same as --headed true)
     --headed false     (disables "headed": true from config)
     --hide-scrollbars false (keeps native scrollbars visible in headless Chromium screenshots)
 
-  Extensions from user and project configs are merged (not replaced).
+  The auto-discovered project config ignores extensions. Use the user config, an
+  explicitly loaded config file, AGENT_BROWSER_EXTENSIONS, or --extension.
 
   On Windows, headless Chrome runs on a private desktop to prevent stray desktop
   rectangles. Owned Chrome processes close with their daemon, even if it is killed.
   Headed browsers use the interactive desktop; externally connected browsers are not owned.
 
-  Example agent-browser.json:
-    {{"headed": true, "hideScrollbars": false, "proxy": "http://localhost:8080"}}
+  Example auto-discovered agent-browser.json:
+    {{"headed": true, "hideScrollbars": false, "userAgent": "my-agent/1.0", "colorScheme": "dark"}}
 
-  Plugin example:
+  Trusted config example (user config or a file loaded with --config):
     {{"plugins":[{{"name":"vault","command":"agent-browser-plugin-vault","capabilities":["credential.read"]}},{{"name":"stealth","command":"agent-browser-plugin-stealth","capabilities":["launch.mutate"]}}]}}
 
 Environment:

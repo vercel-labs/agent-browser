@@ -1582,6 +1582,9 @@ fn main() {
     // Handle MCP stdio server mode. This must never share stdout with normal
     // CLI output because stdout is reserved for JSON-RPC protocol messages.
     if clean.first().map(|s| s.as_str()) == Some("mcp") {
+        if let Some(Some(path)) = flags::extract_config_path(&args) {
+            env::set_var("AGENT_BROWSER_CONFIG", path);
+        }
         if clean.get(1).map(|s| s.as_str()) == Some("call") {
             exit(mcp::run_mcp_call(&clean[2..]));
         }

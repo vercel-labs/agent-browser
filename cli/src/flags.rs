@@ -253,9 +253,50 @@ impl Config {
     }
 }
 
-fn read_config_file(path: &Path) -> Option<Config> {
+/// Read configuration, applying the preference allowlist to automatic project files.
+fn read_config_file(path: &Path, is_auto_project_config: bool) -> Option<Config> {
     let content = fs::read_to_string(path).ok()?;
-    match serde_json::from_str::<Config>(&content) {
+    let parsed = if is_auto_project_config {
+        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&content).and_then(
+            |mut object| {
+                let mut ignored = 0;
+                object.retain(|key, value| {
+                    let allowed = matches!(
+                        key.as_str(),
+                        "headed"
+                            | "json"
+                            | "debug"
+                            | "userAgent"
+                            | "hideScrollbars"
+                            | "annotate"
+                            | "colorScheme"
+                            | "maxOutput"
+                            | "screenshotQuality"
+                            | "screenshotFormat"
+                            | "idleTimeout"
+                    );
+                    if !allowed && key != "$schema" && !value.is_null() {
+                        ignored += 1;
+                    }
+                    allowed
+                });
+                if ignored > 0 {
+                    eprintln!(
+                        "{} ignoring {} unsupported settings from ./{} (automatic project config is untrusted). Set required settings in ~/{}/{} or select a trusted file with --config or AGENT_BROWSER_CONFIG when starting the CLI or MCP server. An explicitly selected file replaces default config discovery.",
+                        color::warning_indicator(),
+                        ignored,
+                        PROJECT_CONFIG_FILENAME,
+                        CONFIG_DIR,
+                        CONFIG_FILENAME
+                    );
+                }
+                serde_json::from_value::<Config>(serde_json::Value::Object(object))
+            },
+        )
+    } else {
+        serde_json::from_str::<Config>(&content)
+    };
+    match parsed {
         Ok(mut config) => {
             config.idle_timeout = parse_idle_timeout_value(
                 config.idle_timeout.take(),
@@ -264,12 +305,20 @@ fn read_config_file(path: &Path) -> Option<Config> {
             Some(config)
         }
         Err(e) => {
-            eprintln!(
-                "{} invalid config file {}: {}",
-                color::warning_indicator(),
-                path.display(),
-                e
-            );
+            if is_auto_project_config {
+                eprintln!(
+                    "{} invalid config file ./{}: expected a JSON object with correctly typed preferences",
+                    color::warning_indicator(),
+                    PROJECT_CONFIG_FILENAME
+                );
+            } else {
+                eprintln!(
+                    "{} invalid config file {}: {}",
+                    color::warning_indicator(),
+                    path.display(),
+                    e
+                );
+            }
             None
         }
     }
@@ -332,7 +381,7 @@ fn parse_bool_arg(args: &[String], i: usize) -> (bool, bool) {
 /// Boolean flags (--content-boundaries, --confirm-interactive, etc.) are
 /// intentionally absent -- they don't take a value, so they can't cause
 /// the next argument to be mis-consumed.
-fn extract_config_path(args: &[String]) -> Option<Option<String>> {
+pub(crate) fn extract_config_path(args: &[String]) -> Option<Option<String>> {
     const FLAGS_WITH_VALUE: &[&str] = &[
         "--session",
         "--restore-save",
@@ -384,7 +433,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
     None
 }
 
-/// Load merged configuration; the auto-discovered project file cannot set executablePath, args or plugins.
+/// Load trusted configuration and allowed preferences from the automatic project file.
 pub fn load_config(args: &[String]) -> Result<Config, String> {
     let explicit = extract_config_path(args)
         .map(|p| ("--config", p))
@@ -400,46 +449,21 @@ pub fn load_config(args: &[String]) -> Result<Config, String> {
         if !path.exists() {
             return Err(format!("config file not found: {}", path_str));
         }
-        return read_config_file(&path)
+        return read_config_file(&path, false)
             .ok_or_else(|| format!("failed to load config from {}", path_str));
     }
 
     let user_config = dirs::home_dir()
         .map(|d| d.join(CONFIG_DIR).join(CONFIG_FILENAME))
-        .and_then(|p| read_config_file(&p))
+        .and_then(|p| read_config_file(&p, false))
         .unwrap_or_default();
 
-    let project_config = read_config_file(&PathBuf::from(PROJECT_CONFIG_FILENAME));
+    let project_config = read_config_file(Path::new(PROJECT_CONFIG_FILENAME), true);
 
     Ok(match project_config {
-        Some(project) => merge_project_config(user_config, project),
+        Some(project) => user_config.merge(project),
         None => user_config,
     })
-}
-
-fn merge_project_config(user: Config, mut project: Config) -> Config {
-    let mut ignored = Vec::new();
-    if project.executable_path.take().is_some() {
-        ignored.push("executablePath");
-    }
-    if project.args.take().is_some() {
-        ignored.push("args");
-    }
-    if project.plugins.take().is_some_and(|p| !p.is_empty()) {
-        ignored.push("plugins");
-    }
-    if !ignored.is_empty() {
-        eprintln!(
-            "{} ignoring {} from ./{} (a project file cannot set what runs programs). Set them in ~/{}/{}, env vars such as AGENT_BROWSER_ARGS, CLI flags, or trust the file with --config ./{}",
-            color::warning_indicator(),
-            ignored.join(", "),
-            PROJECT_CONFIG_FILENAME,
-            CONFIG_DIR,
-            CONFIG_FILENAME,
-            PROJECT_CONFIG_FILENAME
-        );
-    }
-    user.merge(project)
 }
 
 pub struct Flags {
@@ -1831,7 +1855,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_merge_project_overrides_user() {
+    fn test_config_merge_overrides_values() {
         let user = Config {
             headed: Some(true),
             proxy: Some("http://user-proxy:8080".to_string()),
@@ -1851,27 +1875,141 @@ mod tests {
     }
 
     #[test]
-    fn test_project_config_cannot_set_executable_path_args_or_plugins() {
-        let user = Config {
-            executable_path: Some("/user/chrome".to_string()),
-            ..Config::default()
-        };
-        let project = Config {
-            executable_path: Some("/project/chrome".to_string()),
-            args: Some("--no-sandbox".to_string()),
-            plugins: Some(vec![PluginConfig {
-                name: "captcha".to_string(),
-                command: "npx".to_string(),
-                ..PluginConfig::default()
-            }]),
-            headed: Some(true),
-            ..Config::default()
-        };
-        let merged = merge_project_config(user, project);
-        assert_eq!(merged.executable_path.as_deref(), Some("/user/chrome"));
-        assert!(merged.args.is_none());
-        assert!(merged.plugins.is_none());
-        assert_eq!(merged.headed, Some(true));
+    fn test_project_config_only_applies_allowed_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        fs::write(
+            &config_path,
+            r#"{
+                "$schema": "https://example.com/config.schema.json",
+                "headed": false,
+                "json": true,
+                "debug": true,
+                "userAgent": "test-agent",
+                "hideScrollbars": false,
+                "annotate": true,
+                "colorScheme": "dark",
+                "maxOutput": 500,
+                "screenshotQuality": 80,
+                "screenshotFormat": "jpeg",
+                "idleTimeout": "10s",
+                "session": "test-session",
+                "executablePath": "/test/chrome",
+                "args": "test-argument",
+                "plugins": [{"name": "test", "command": "test-plugin"}],
+                "extensions": ["/test/extension"],
+                "profile": "/test/profile",
+                "proxy": "http://test:1234",
+                "allowedDomains": ["example.com"],
+                "clearCaCert": true,
+                "unknownFutureKey": "value"
+            }"#,
+        )
+        .unwrap();
+
+        let project = read_config_file(&config_path, true).unwrap();
+        assert_eq!(project.headed, Some(false));
+        assert_eq!(project.json, Some(true));
+        assert_eq!(project.debug, Some(true));
+        assert_eq!(project.user_agent.as_deref(), Some("test-agent"));
+        assert_eq!(project.hide_scrollbars, Some(false));
+        assert_eq!(project.annotate, Some(true));
+        assert_eq!(project.color_scheme.as_deref(), Some("dark"));
+        assert_eq!(project.max_output, Some(500));
+        assert_eq!(project.screenshot_quality, Some(80));
+        assert_eq!(project.screenshot_format.as_deref(), Some("jpeg"));
+        assert_eq!(project.idle_timeout.as_deref(), Some("10000"));
+        assert!(project.session.is_none());
+        assert!(project.executable_path.is_none());
+        assert!(project.args.is_none());
+        assert!(project.plugins.is_none());
+        assert!(project.extensions.is_none());
+        assert!(project.profile.is_none());
+        assert!(project.proxy.is_none());
+        assert!(project.allowed_domains.is_none());
+        assert!(project.clear_ca_cert.is_none());
+
+        let mut user = read_config_file(&config_path, false).unwrap();
+        assert_eq!(user.session.as_deref(), Some("test-session"));
+        assert_eq!(user.executable_path.as_deref(), Some("/test/chrome"));
+        assert_eq!(user.args.as_deref(), Some("test-argument"));
+        assert_eq!(user.plugins.as_ref().unwrap()[0].command, "test-plugin");
+        assert_eq!(user.extensions, Some(vec!["/test/extension".to_string()]));
+        assert_eq!(user.profile.as_deref(), Some("/test/profile"));
+        assert_eq!(user.proxy.as_deref(), Some("http://test:1234"));
+        assert_eq!(user.allowed_domains, Some(vec!["example.com".to_string()]));
+        assert_eq!(user.clear_ca_cert, Some(true));
+        user.headed = Some(true);
+        let merged = user.merge(project);
+        assert_eq!(merged.headed, Some(false));
+        assert_eq!(merged.executable_path.as_deref(), Some("/test/chrome"));
+        assert_eq!(merged.args.as_deref(), Some("test-argument"));
+        assert_eq!(merged.plugins.as_ref().unwrap()[0].command, "test-plugin");
+        assert_eq!(merged.proxy.as_deref(), Some("http://test:1234"));
+        assert_eq!(
+            merged.allowed_domains,
+            Some(vec!["example.com".to_string()])
+        );
+        assert_eq!(merged.clear_ca_cert, Some(true));
+    }
+
+    #[test]
+    fn test_project_config_ignores_disallowed_fields_before_deserialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        for key in [
+            "session",
+            "sessionName",
+            "restore",
+            "restoreSave",
+            "restoreCheckUrl",
+            "restoreCheckText",
+            "restoreCheckFn",
+            "namespace",
+            "executablePath",
+            "extensions",
+            "initScripts",
+            "enable",
+            "profile",
+            "state",
+            "proxy",
+            "proxyBypass",
+            "args",
+            "provider",
+            "device",
+            "webgpu",
+            "noWebmcp",
+            "ignoreHttpsErrors",
+            "caCert",
+            "clearCaCert",
+            "useSystemCa",
+            "allowFileAccess",
+            "cdp",
+            "autoConnect",
+            "pinTab",
+            "headers",
+            "downloadPath",
+            "contentBoundaries",
+            "allowedDomains",
+            "actionPolicy",
+            "confirmActions",
+            "confirmInteractive",
+            "engine",
+            "screenshotDir",
+            "noAutoDialog",
+            "model",
+            "plugins",
+            "unknownFutureKey",
+            "$schema",
+        ] {
+            fs::write(
+                &config_path,
+                serde_json::json!({"headed": true, key: {}}).to_string(),
+            )
+            .unwrap();
+            let config = read_config_file(&config_path, true).unwrap();
+            assert_eq!(config.headed, Some(true), "{key}");
+        }
     }
 
     #[test]
@@ -1896,7 +2034,7 @@ mod tests {
         let mut f = fs::File::create(&config_path).unwrap();
         writeln!(f, r#"{{"headed": true, "proxy": "http://test:1234"}}"#).unwrap();
 
-        let config = read_config_file(&config_path).unwrap();
+        let config = read_config_file(&config_path, false).unwrap();
         assert_eq!(config.headed, Some(true));
         assert_eq!(config.proxy.as_deref(), Some("http://test:1234"));
 
@@ -1913,8 +2051,10 @@ mod tests {
         let mut f = fs::File::create(&config_path).unwrap();
         writeln!(f, r#"{{"idleTimeout": "10s"}}"#).unwrap();
 
-        let config = read_config_file(&config_path).unwrap();
-        assert_eq!(config.idle_timeout.as_deref(), Some("10000"));
+        for is_auto_project_config in [false, true] {
+            let config = read_config_file(&config_path, is_auto_project_config).unwrap();
+            assert_eq!(config.idle_timeout.as_deref(), Some("10000"));
+        }
 
         let _ = fs::remove_file(&config_path);
         let _ = fs::remove_dir(&dir);
@@ -1922,7 +2062,7 @@ mod tests {
 
     #[test]
     fn test_load_config_missing_file_returns_none() {
-        let result = read_config_file(&PathBuf::from("/nonexistent/agent-browser.json"));
+        let result = read_config_file(Path::new("/nonexistent/agent-browser.json"), false);
         assert!(result.is_none());
     }
 
@@ -1935,11 +2075,57 @@ mod tests {
         let mut f = fs::File::create(&config_path).unwrap();
         writeln!(f, "{{not valid json}}").unwrap();
 
-        let result = read_config_file(&config_path);
-        assert!(result.is_none());
+        for is_auto_project_config in [false, true] {
+            assert!(read_config_file(&config_path, is_auto_project_config).is_none());
+        }
 
         let _ = fs::remove_file(&config_path);
         let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_load_config_rejects_invalid_allowed_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        for content in [
+            r#"{"headed": "true"}"#,
+            r#"{"maxOutput": -1}"#,
+            r#"{"idleTimeout": 10}"#,
+            "null",
+        ] {
+            fs::write(&config_path, content).unwrap();
+            for is_auto_project_config in [false, true] {
+                assert!(read_config_file(&config_path, is_auto_project_config).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn test_project_config_requires_an_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        for content in ["[]", "[true]", "true", "1", r#""config""#] {
+            fs::write(&config_path, content).unwrap();
+            assert!(read_config_file(&config_path, true).is_none());
+        }
+    }
+
+    #[test]
+    fn test_load_config_discards_invalid_idle_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(PROJECT_CONFIG_FILENAME);
+        for timeout in ["", "1d", "18446744073709551615h"] {
+            fs::write(
+                &config_path,
+                serde_json::json!({"headed": true, "idleTimeout": timeout}).to_string(),
+            )
+            .unwrap();
+            for is_auto_project_config in [false, true] {
+                let config = read_config_file(&config_path, is_auto_project_config).unwrap();
+                assert_eq!(config.headed, Some(true));
+                assert!(config.idle_timeout.is_none());
+            }
+        }
     }
 
     #[test]

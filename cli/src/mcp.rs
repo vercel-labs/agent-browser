@@ -4209,6 +4209,7 @@ fn run_command(
     })
 }
 
+/// Run tools through the CLI, including its trust restrictions on automatically discovered project config.
 fn run_cli(args: &[String], stdin_body: Option<String>, timeout_ms: u64) -> Result<CliRun, String> {
     let exe = env::current_exe().map_err(|e| e.to_string())?;
     let mut command = Command::new(exe);
