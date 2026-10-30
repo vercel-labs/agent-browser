@@ -2261,8 +2261,9 @@ fn send_command_for_command(
         || (cmd.get("action").and_then(|value| value.as_str()) == Some("requests")
             && cmd.get("clear").and_then(|value| value.as_bool()) == Some(true))
     {
-        // A timeout can leave a mutating control applied without its reply.
-        // Do not replay it against a newly started daemon.
+        // Capture controls do not initiate daemon recovery in the startup
+        // race. A missing daemon is reported to the caller. Lost replies
+        // already return outcome_unknown from send_command without replay.
         send_command(cmd, session)
     } else {
         send_command_with_respawn(cmd, session, daemon_opts)
