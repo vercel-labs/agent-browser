@@ -260,11 +260,7 @@ fn explicitly_selected_config_remains_trusted_for_cli_and_mcp() {
         .to_string(),
     )
     .unwrap();
-    std::fs::write(
-        &fallback,
-        json!({"session": "other-session", "json": true}).to_string(),
-    )
-    .unwrap();
+    std::fs::write(&fallback, json!({"session": "other-session"}).to_string()).unwrap();
 
     for args in [
         &["session"][..],
@@ -321,6 +317,19 @@ fn explicitly_selected_config_remains_trusted_for_cli_and_mcp() {
             "{:?}",
             calls[1]
         );
+    }
+
+    for use_flag in [false, true] {
+        let mut cmd = command(&home);
+        if use_flag {
+            cmd.arg("--config").arg(&fallback);
+        } else {
+            cmd.env("AGENT_BROWSER_CONFIG", &fallback);
+        }
+        let output = run(cmd.arg("session"), "");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"other-session\n", "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
     }
 
     std::fs::create_dir(home.path().join(".agent-browser")).unwrap();
