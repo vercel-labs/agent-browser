@@ -502,10 +502,11 @@ fn spawn_background_tick_if_idle(
             .browser
             .as_mut()
             .map(|mgr| mgr.has_process_exited())
+            .or_else(|| state.firefox.as_mut().map(|ff| ff.has_exited()))
             .unwrap_or(false);
         if process_exited {
             let _ = close_current_browser(&mut state).await;
-        } else if state.browser.is_some() {
+        } else if state.browser.is_some() || state.firefox.is_some() {
             if let Err(error) = state.drain_cdp_events_background().await {
                 let _ = writeln!(
                     std::io::stderr(),

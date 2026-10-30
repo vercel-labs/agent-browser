@@ -1333,7 +1333,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_COOKIES_GET,
             "Cookies get",
-            "Get cookies.",
+            "Get cookies. When URLs are omitted, Firefox filters to the active page and its frames.",
             json!({}),
             &[],
         ),
@@ -1610,7 +1610,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_STATE_SAVE,
             "State save",
-            "Save cookies and storage state.",
+            "Save cookies and storage state, overwriting the target file.",
             json!({ "path": { "type": "string" } }),
             &["path"],
         ),
@@ -2047,7 +2047,7 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
                 { "type": "boolean" },
                 { "type": "string" }
             ],
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key."
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read."
         }),
     );
     props.insert(

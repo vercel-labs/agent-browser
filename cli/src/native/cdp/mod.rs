@@ -5,4 +5,4 @@ pub mod lightpanda;
 pub mod obscura;
 pub mod types;
 #[cfg(windows)]
-mod windows_process;
+pub(crate) mod windows_process;

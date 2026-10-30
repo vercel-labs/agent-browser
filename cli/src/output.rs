@@ -2624,7 +2624,7 @@ Usage: agent-browser cookies [operation] [args]
 Manage browser cookies for the current context.
 
 Operations:
-  get                                Get all cookies (default)
+  get                                Get cookies (Firefox defaults to active page and frames)
   set <name> <value> [options]       Set a cookie with optional properties
   clear                              Clear all cookies
 
@@ -2660,7 +2660,7 @@ Examples:
   # Set cookie with expiration (Unix timestamp)
   agent-browser cookies set temp_token "temp123" --expires 1735689600
 
-  # Get all cookies
+  # Get cookies for the active context
   agent-browser cookies
 
   # Clear all cookies
@@ -3107,7 +3107,7 @@ Usage: agent-browser state <operation> [args]
 Save, restore, list, and manage browser state (cookies, localStorage, sessionStorage).
 
 Operations:
-  save <path>                        Save current state to file
+  save <path>                        Save current state, overwriting the file
   load <path>                        Load state from file (origins that redirect
                                      elsewhere are skipped and listed)
   list                               List saved state files
@@ -3120,6 +3120,7 @@ Automatic State Persistence:
   Use --restore to auto-save/restore state across restarts:
   agent-browser --session myapp --restore open https://example.com
   Or set AGENT_BROWSER_RESTORE environment variable.
+  Firefox auto-save collects active iframe origins and preserves saved origins it cannot read.
 
 State Encryption:
   Set AGENT_BROWSER_ENCRYPTION_KEY (64-char hex) for AES-256-GCM encryption.

@@ -28,6 +28,7 @@ use super::cookies;
 use super::diff;
 use super::downloads::{DownloadLedger, DownloadState};
 use super::element::RefMap;
+use super::firefox;
 use super::inspect_server::InspectServer;
 use super::interaction;
 use super::network::{self, DomainFilter, EventTracker};
@@ -627,6 +628,7 @@ pub struct DaemonState {
     pub appium: Option<AppiumManager>,
     pub safari_driver: Option<safari::SafariDriverProcess>,
     pub webdriver_backend: Option<super::webdriver::backend::WebDriverBackend>,
+    pub firefox: Option<firefox::session::FirefoxSession>,
     pub backend_type: BackendType,
     pub ref_map: RefMap,
     /// Last delta snapshot per page session. Bounded to the currently tracked tabs.
@@ -803,6 +805,7 @@ impl DaemonState {
             appium: None,
             safari_driver: None,
             webdriver_backend: None,
+            firefox: None,
             backend_type: BackendType::Cdp,
             ref_map: RefMap::new(),
             snapshot_revisions: HashMap::new(),
@@ -903,7 +906,8 @@ impl DaemonState {
             self.active_provider_connection,
             self.browser
                 .as_ref()
-                .is_some_and(BrowserManager::blocks_default_idle_shutdown),
+                .is_some_and(BrowserManager::blocks_default_idle_shutdown)
+                || self.firefox.as_ref().is_some_and(|ff| !ff.headless),
         )
     }
 
@@ -1339,6 +1343,9 @@ impl DaemonState {
     }
 
     pub async fn drain_cdp_events_background(&mut self) -> Result<(), String> {
+        if let Some(ff) = self.firefox.as_mut() {
+            ff.drain_events(&mut self.pending_dialog);
+        }
         let drained = self.drain_cdp_events();
         self.apply_drained_events(drained).await
     }
@@ -2542,7 +2549,7 @@ fn command_changes_restore_key(cmd: &Value, state: &DaemonState) -> bool {
 }
 
 fn has_active_browser_session(state: &DaemonState) -> bool {
-    state.browser.is_some() || state.active_provider_session.is_some()
+    state.browser.is_some() || state.firefox.is_some() || state.active_provider_session.is_some()
 }
 
 async fn close_before_implicit_relaunch(state: &mut DaemonState) -> Result<(), String> {
@@ -2652,6 +2659,10 @@ async fn close_active_provider_session(state: &mut DaemonState) -> Result<(), St
 }
 
 pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(), String> {
+    if let Some(ff) = state.firefox.take() {
+        state.pending_dialog = None;
+        ff.close().await;
+    }
     let browser = state.browser.take();
     state.launch_hash = None;
     state.webmcp_enabled = false;
@@ -2837,345 +2848,14 @@ fn append_launch_policy_actions(
     }
 }
 
-pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
-    let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
-    // Unlike normal auth login, no-navigation mode must never launch a
-    // browser or manufacture an about:blank page to satisfy the command.
-    let auth_login_no_navigate = action == "auth_login"
-        && cmd
-            .get("noNavigate")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-    if let Some(mode @ ("instant" | "smooth" | "human")) =
-        cmd.get("defaultInputMode").and_then(Value::as_str)
-    {
-        // Only an explicit session setting persists. inputMode is an override
-        // for this command, including --human and MCP's human argument.
-        state.input_mode = mode.to_string();
-    }
-    let id = cmd
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let cmd_start = std::time::Instant::now();
-
-    // A retry of the request that wedged the tab must not run on its blank
-    // replacement: `url` would report about:blank as a success.
-    if let Some((_, report)) = state
-        .undelivered_wedge
-        .as_ref()
-        .filter(|(wedged_id, _)| *wedged_id == id)
-    {
-        let mut resp = error_response(&id, &report.error_message());
-        resp["data"] = report.data();
-        return resp;
-    }
-
-    if let Err(err) = validate_restore_config_from_command(cmd) {
-        return error_response(&id, &err);
-    }
-
-    // Invalid inputs are rejected before expensive setup: an unsupported
-    // `find` action must fail here, not after a browser launch and a locator
-    // resolution that can mask it with "element not found".
-    if let Err(err) = validate_find_subaction(action, cmd) {
-        return error_response(&id, &err);
-    }
-
-    if action == INTERNAL_DAEMON_SHUTDOWN_ACTION {
-        let mut resp = match handle_close(state).await {
-            Ok(data) => success_response(&id, data),
-            Err(e) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
-        };
-        inject_lifecycle(&mut resp, state, false, false, false);
-        return resp;
-    }
-
-    if let Some(ref server) = state.stream_server {
-        let mut broadcast_cmd;
-        let has_internal_fields = cmd.get("plugins").is_some()
-            || cmd.get("pinTab").is_some()
-            || cmd.get("restoreKey").is_some()
-            || cmd.get("restoreSave").is_some()
-            || cmd.get("restoreCheckUrl").is_some()
-            || cmd.get("restoreCheckText").is_some()
-            || cmd.get("restoreCheckFn").is_some();
-        let cmd_for_broadcast = if has_internal_fields {
-            broadcast_cmd = cmd.clone();
-            if let Some(obj) = broadcast_cmd.as_object_mut() {
-                obj.remove("plugins");
-                obj.remove("pinTab");
-                obj.remove("restoreKey");
-                obj.remove("restoreSave");
-                obj.remove("restoreCheckUrl");
-                obj.remove("restoreCheckText");
-                obj.remove("restoreCheckFn");
-            }
-            &broadcast_cmd
-        } else {
-            cmd
-        };
-        server.broadcast_command(action, &id, cmd_for_broadcast);
-    }
-
-    // Drain and apply pending CDP events (console, errors, screencast frames, target lifecycle)
-    if let Err(e) = state.drain_cdp_events_background().await {
-        return error_response(&id, &super::browser::to_ai_friendly_error(&e));
-    }
-
-    // Keep element resolution in sync with the `frame` selection (see
-    // element::set_active_frame for why this is mirrored).
-    super::element::set_active_frame(state.active_frame_id.as_deref());
-
-    // `--pin-tab` from the client enables strict tab binding even when the
-    // daemon was started without the flag, and `--no-pin-tab` (pinTab: false)
-    // disables a sticky pin restored from disk or enabled earlier. Both are
-    // persisted with the binding so the setting survives daemon restarts;
-    // absence of the field leaves the current state untouched.
-    match cmd.get("pinTab").and_then(|v| v.as_bool()) {
-        Some(pin) if pin != state.pin_tab => {
-            // Persist the pinned state before committing it to live state, so a
-            // load/save failure leaves the daemon exactly as it was instead of
-            // reporting an error while the isolation mode already flipped.
-            match tab_binding::load(&state.session_id) {
-                Ok(Some(mut binding)) => {
-                    if binding.pinned != pin {
-                        binding.pinned = pin;
-                        if let Err(e) = tab_binding::save(&state.session_id, &binding) {
-                            return error_response(
-                                &id,
-                                &format!(
-                                    "cannot persist the pin-tab setting: {} — the change was \
-                                     not applied",
-                                    e
-                                ),
-                            );
-                        }
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    return error_response(
-                        &id,
-                        &format!(
-                            "cannot read the session tab binding to update the pin state: {} \
-                             — delete the binding file to reset the session",
-                            e
-                        ),
-                    );
-                }
-            }
-            // Persistence succeeded (or there was nothing to write): commit the
-            // live state, and force a re-persist from the snapshot next time.
-            state.pin_tab = pin;
-            if let Some(ref mut mgr) = state.browser {
-                mgr.set_pin_tab(pin);
-            }
-            state.last_persisted_binding = None;
-        }
-        _ => {}
-    }
-
-    let skip_launch = skip_launch_action(action);
-    let restore_key_change_needs_launch = !skip_launch
-        && command_changes_restore_key(cmd, state)
-        && has_active_browser_session(state);
-    let needs_launch = if !skip_launch && !auth_login_no_navigate {
-        // Check if existing connection is stale and needs re-launch.
-        // This must happen before policy evaluation so plugin capability
-        // actions are gated when recovery relaunches would invoke plugins.
-        if restore_key_change_needs_launch {
-            true
-        } else if let Some(ref mut mgr) = state.browser {
-            mgr.has_process_exited() || !mgr.is_connection_alive().await
-        } else {
-            true
-        }
-    } else {
-        false
-    };
-    let mut lifecycle_reused = false;
-    let mut lifecycle_launched = false;
-    let mut lifecycle_relaunched_browser = false;
-    let policy_actions =
-        policy_actions_for_command(cmd, action, needs_launch, state.attached_target.as_ref());
-
-    // Hot-reload and check action policy
-    if let Some(ref mut policy) = state.policy {
-        policy.reload();
-        let mut confirmation_required: Option<String> = None;
-        for policy_action in &policy_actions {
-            match policy.check(policy_action) {
-                PolicyResult::Allow => {}
-                PolicyResult::Deny(reason) => {
-                    return error_response(
-                        &id,
-                        &format!("Action '{}' denied by policy: {}", policy_action, reason),
-                    );
-                }
-                PolicyResult::RequiresConfirmation => {
-                    if !state.confirmed_policy_actions.contains(policy_action)
-                        && confirmation_required.is_none()
-                    {
-                        confirmation_required = Some(policy_action.to_string());
-                    }
-                }
-            }
-        }
-        if let Some(policy_action) = confirmation_required {
-            state.pending_confirmation = Some(PendingConfirmation {
-                action: policy_action.clone(),
-                cmd: cmd.clone(),
-                approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
-            });
-            return json!({
-                "id": id,
-                "success": true,
-                "data": {
-                    "confirmation_required": true,
-                    "confirmation_id": id,
-                    "action": policy_action
-                },
-            });
-        }
-    }
-
-    // Check AGENT_BROWSER_CONFIRM_ACTIONS (category-based, independent of policy file)
-    if action != "confirm" && action != "deny" {
-        if let Some(ref ca) = state.confirm_actions {
-            for policy_action in &policy_actions {
-                if state.confirmed_policy_actions.contains(policy_action) {
-                    continue;
-                }
-                if ca.requires_confirmation(policy_action) {
-                    state.pending_confirmation = Some(PendingConfirmation {
-                        action: policy_action.to_string(),
-                        cmd: cmd.clone(),
-                        approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
-                    });
-                    return json!({
-                        "id": id,
-                        "success": true,
-                        "data": {
-                            "confirmation_required": true,
-                            "confirmation_id": id,
-                            "action": policy_action,
-                        },
-                    });
-                }
-            }
-        }
-    }
-
-    let restore_transition_closed_browser = match async {
-        if auth_login_no_navigate && command_changes_restore_key(cmd, state) {
-            return Err(
-                "auth login --no-navigate cannot switch restore sessions; select the session containing the active login page"
-                    .to_string(),
-            );
-        }
-        apply_restore_config_after_confirmation(cmd, state).await
-    }
-    .await
-    {
-        Ok(closed_browser) => closed_browser,
-        Err(err) => return error_response(&id, &err),
-    };
-
-    if !skip_launch {
-        if needs_launch {
-            lifecycle_relaunched_browser = restore_transition_closed_browser
-                || state.browser.is_some()
-                || state.active_provider_session.is_some();
-            if state.browser.is_some() || state.active_provider_session.is_some() {
-                let _ = auto_save_restore_state(state).await;
-            }
-            if let Err(e) = auto_launch(state, plugins_from_command_or_env(cmd)).await {
-                let context = auto_launch_error_context(env::var("AGENT_BROWSER_CDP").is_ok());
-                return error_response(&id, &format!("{}: {}", context, e));
-            }
-            state.webmcp_enabled = launch_options_from_env().webmcp;
-            lifecycle_launched = true;
-        } else {
-            lifecycle_reused = true;
-        }
-
-        if !auth_login_no_navigate {
-            if let Some(ref mut mgr) = state.browser {
-                if mgr.page_count() == 0 {
-                    // ensure_page itself skips creation for a pinned tab_gone
-                    // session, so a closed sole tab stays tab_gone instead of
-                    // silently recovering onto a fresh blank page.
-                    let _ = mgr.ensure_page().await;
-                }
-            }
-        }
-    }
-
-    // WebDriver backend: reject unsupported CDP-only actions
-    if matches!(state.backend_type, BackendType::WebDriver)
-        && WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&action)
-    {
-        return error_response(
-            &id,
-            &format!(
-                "Action '{}' is not supported on the WebDriver backend",
-                action
-            ),
-        );
-    }
-
-    // A pending confirm/prompt dialog blocks the renderer's main thread, so
-    // any command that touches the page would hang until the client read
-    // timeout. Fail fast with instructions instead. Actions in skip_launch
-    // never touch the page; dialog/screenshot/url/title are browser-side.
-    // Only a dialog on the ACTIVE tab blocks: one on a background tab leaves
-    // the active tab's renderer responsive.
-    if let Some(ref dialog) = state.pending_dialog {
-        let active_session = state
-            .browser
-            .as_ref()
-            .and_then(|m| m.active_session_id().ok().map(|s| s.to_string()));
-        let on_active_tab = match (&dialog.session_id, &active_session) {
-            (Some(dialog_sid), Some(active_sid)) => dialog_sid == active_sid,
-            // No session on the event = top-level page dialog; no browser = be safe.
-            _ => true,
-        };
-        // Tab and session management must stay usable: switching or closing
-        // tabs is exactly how an agent escapes a tab blocked by a dialog.
-        let read_touches_active_tab = action == "read"
-            && cmd.get("url").is_none()
-            && cmd.get("llms").is_none()
-            && !cmd
-                .get("requireMd")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-        let safe_during_dialog = (skip_launch && !read_touches_active_tab)
-            || matches!(
-                action,
-                "dialog"
-                    | "screenshot"
-                    | "url"
-                    | "title"
-                    | "tab_list"
-                    | "tab_new"
-                    | "tab_switch"
-                    | "tab_close"
-            );
-        if on_active_tab && !safe_during_dialog {
-            return error_response(
-                &id,
-                &format!(
-                    "A JavaScript {} dialog is blocking the page: \"{}\". Resolve it with `dialog accept` or `dialog dismiss`, then retry `{}`.",
-                    dialog.dialog_type, dialog.message, action
-                ),
-            );
-        }
-    }
-
-    let mut result = match action {
+async fn dispatch(
+    action: &str,
+    cmd: &Value,
+    state: &mut DaemonState,
+    firefox_routed: bool,
+) -> Result<Value, String> {
+    match action {
+        _ if firefox_routed => Box::pin(firefox::actions::execute(action, cmd, state)).await,
         "launch" => {
             let webmcp_enabled = cmd
                 .get("webmcp")
@@ -3342,7 +3022,6 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "auth_list" => handle_credentials_list().await,
         "auth_delete" => handle_credentials_delete(cmd).await,
         "auth_show" => handle_auth_show(cmd).await,
-        "confirm" => handle_confirm(cmd, state).await,
         "deny" => handle_deny(cmd, state).await,
         "swipe" => handle_swipe(cmd, state).await,
         "device_list" => handle_device_list().await,
@@ -3356,6 +3035,357 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "mousedown" => handle_mousedown(cmd, state).await,
         "mouseup" => handle_mouseup(cmd, state).await,
         _ => Err(format!("Not yet implemented: {}", action)),
+    }
+}
+
+pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
+    let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    // Unlike normal auth login, no-navigation mode must never launch a
+    // browser or manufacture an about:blank page to satisfy the command.
+    let auth_login_no_navigate = action == "auth_login"
+        && cmd
+            .get("noNavigate")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+    if let Some(mode @ ("instant" | "smooth" | "human")) =
+        cmd.get("defaultInputMode").and_then(Value::as_str)
+    {
+        // Only an explicit session setting persists. inputMode is an override
+        // for this command, including --human and MCP's human argument.
+        state.input_mode = mode.to_string();
+    }
+    let id = cmd
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let cmd_start = std::time::Instant::now();
+
+    // A retry of the request that wedged the tab must not run on its blank
+    // replacement: `url` would report about:blank as a success.
+    if let Some((_, report)) = state
+        .undelivered_wedge
+        .as_ref()
+        .filter(|(wedged_id, _)| *wedged_id == id)
+    {
+        let mut resp = error_response(&id, &report.error_message());
+        resp["data"] = report.data();
+        return resp;
+    }
+
+    if let Err(err) = validate_restore_config_from_command(cmd) {
+        return error_response(&id, &err);
+    }
+
+    // Invalid inputs are rejected before expensive setup: an unsupported
+    // `find` action must fail here, not after a browser launch and a locator
+    // resolution that can mask it with "element not found".
+    if let Err(err) = validate_find_subaction(action, cmd) {
+        return error_response(&id, &err);
+    }
+
+    if action == INTERNAL_DAEMON_SHUTDOWN_ACTION {
+        let mut resp = match handle_close(state).await {
+            Ok(data) => success_response(&id, data),
+            Err(e) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
+        };
+        inject_lifecycle(&mut resp, state, false, false, false);
+        return resp;
+    }
+
+    if let Some(ref server) = state.stream_server {
+        let mut broadcast_cmd;
+        let has_internal_fields = cmd.get("plugins").is_some()
+            || cmd.get("pinTab").is_some()
+            || cmd.get("restoreKey").is_some()
+            || cmd.get("restoreSave").is_some()
+            || cmd.get("restoreCheckUrl").is_some()
+            || cmd.get("restoreCheckText").is_some()
+            || cmd.get("restoreCheckFn").is_some();
+        let cmd_for_broadcast = if has_internal_fields {
+            broadcast_cmd = cmd.clone();
+            if let Some(obj) = broadcast_cmd.as_object_mut() {
+                obj.remove("plugins");
+                obj.remove("pinTab");
+                obj.remove("restoreKey");
+                obj.remove("restoreSave");
+                obj.remove("restoreCheckUrl");
+                obj.remove("restoreCheckText");
+                obj.remove("restoreCheckFn");
+            }
+            &broadcast_cmd
+        } else {
+            cmd
+        };
+        server.broadcast_command(action, &id, cmd_for_broadcast);
+    }
+
+    // Drain and apply pending CDP events (console, errors, screencast frames, target lifecycle)
+    if let Err(e) = state.drain_cdp_events_background().await {
+        return error_response(&id, &super::browser::to_ai_friendly_error(&e));
+    }
+
+    // Keep element resolution in sync with the `frame` selection (see
+    // element::set_active_frame for why this is mirrored).
+    super::element::set_active_frame(state.active_frame_id.as_deref());
+
+    // `--pin-tab` from the client enables strict tab binding even when the
+    // daemon was started without the flag, and `--no-pin-tab` (pinTab: false)
+    // disables a sticky pin restored from disk or enabled earlier. Both are
+    // persisted with the binding so the setting survives daemon restarts;
+    // absence of the field leaves the current state untouched.
+    match cmd.get("pinTab").and_then(|v| v.as_bool()) {
+        Some(pin) if pin != state.pin_tab => {
+            // Persist the pinned state before committing it to live state, so a
+            // load/save failure leaves the daemon exactly as it was instead of
+            // reporting an error while the isolation mode already flipped.
+            match tab_binding::load(&state.session_id) {
+                Ok(Some(mut binding)) => {
+                    if binding.pinned != pin {
+                        binding.pinned = pin;
+                        if let Err(e) = tab_binding::save(&state.session_id, &binding) {
+                            return error_response(
+                                &id,
+                                &format!(
+                                    "cannot persist the pin-tab setting: {} — the change was \
+                                     not applied",
+                                    e
+                                ),
+                            );
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    return error_response(
+                        &id,
+                        &format!(
+                            "cannot read the session tab binding to update the pin state: {} \
+                             — delete the binding file to reset the session",
+                            e
+                        ),
+                    );
+                }
+            }
+            // Persistence succeeded (or there was nothing to write): commit the
+            // live state, and force a re-persist from the snapshot next time.
+            state.pin_tab = pin;
+            if let Some(ref mut mgr) = state.browser {
+                mgr.set_pin_tab(pin);
+            }
+            state.last_persisted_binding = None;
+        }
+        _ => {}
+    }
+
+    let skip_launch = skip_launch_action(action);
+    let restore_key_change_needs_launch = !skip_launch
+        && command_changes_restore_key(cmd, state)
+        && has_active_browser_session(state);
+    let needs_launch = if !skip_launch && !auth_login_no_navigate {
+        // Check if existing connection is stale and needs re-launch.
+        // This must happen before policy evaluation so plugin capability
+        // actions are gated when recovery relaunches would invoke plugins.
+        if restore_key_change_needs_launch {
+            true
+        } else if state.engine == "firefox" {
+            state.firefox.as_mut().is_none_or(|ff| ff.has_exited())
+        } else if let Some(ref mut mgr) = state.browser {
+            mgr.has_process_exited() || !mgr.is_connection_alive().await
+        } else {
+            true
+        }
+    } else {
+        false
+    };
+    let mut lifecycle_reused = false;
+    let mut lifecycle_launched = false;
+    let mut lifecycle_relaunched_browser = false;
+    let policy_actions =
+        policy_actions_for_command(cmd, action, needs_launch, state.attached_target.as_ref());
+
+    // Hot-reload and check action policy
+    if let Some(ref mut policy) = state.policy {
+        policy.reload();
+        let mut confirmation_required: Option<String> = None;
+        for policy_action in &policy_actions {
+            match policy.check(policy_action) {
+                PolicyResult::Allow => {}
+                PolicyResult::Deny(reason) => {
+                    return error_response(
+                        &id,
+                        &format!("Action '{}' denied by policy: {}", policy_action, reason),
+                    );
+                }
+                PolicyResult::RequiresConfirmation => {
+                    if !state.confirmed_policy_actions.contains(policy_action)
+                        && confirmation_required.is_none()
+                    {
+                        confirmation_required = Some(policy_action.to_string());
+                    }
+                }
+            }
+        }
+        if let Some(policy_action) = confirmation_required {
+            state.pending_confirmation = Some(PendingConfirmation {
+                action: policy_action.clone(),
+                cmd: cmd.clone(),
+                approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
+            });
+            return json!({
+                "id": id,
+                "success": true,
+                "data": {
+                    "confirmation_required": true,
+                    "confirmation_id": id,
+                    "action": policy_action
+                },
+            });
+        }
+    }
+
+    // Check AGENT_BROWSER_CONFIRM_ACTIONS (category-based, independent of policy file)
+    if action != "confirm" && action != "deny" {
+        if let Some(ref ca) = state.confirm_actions {
+            for policy_action in &policy_actions {
+                if state.confirmed_policy_actions.contains(policy_action) {
+                    continue;
+                }
+                if ca.requires_confirmation(policy_action) {
+                    state.pending_confirmation = Some(PendingConfirmation {
+                        action: policy_action.to_string(),
+                        cmd: cmd.clone(),
+                        approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
+                    });
+                    return json!({
+                        "id": id,
+                        "success": true,
+                        "data": {
+                            "confirmation_required": true,
+                            "confirmation_id": id,
+                            "action": policy_action,
+                        },
+                    });
+                }
+            }
+        }
+    }
+
+    let restore_transition_closed_browser = match async {
+        if auth_login_no_navigate && command_changes_restore_key(cmd, state) {
+            return Err(
+                "auth login --no-navigate cannot switch restore sessions; select the session containing the active login page"
+                    .to_string(),
+            );
+        }
+        apply_restore_config_after_confirmation(cmd, state).await
+    }
+    .await
+    {
+        Ok(closed_browser) => closed_browser,
+        Err(err) => return error_response(&id, &err),
+    };
+
+    if !skip_launch {
+        if needs_launch {
+            lifecycle_relaunched_browser =
+                restore_transition_closed_browser || has_active_browser_session(state);
+            if has_active_browser_session(state) {
+                let _ = auto_save_restore_state(state).await;
+            }
+            if let Err(e) = auto_launch(state, plugins_from_command_or_env(cmd)).await {
+                let context = auto_launch_error_context(env::var("AGENT_BROWSER_CDP").is_ok());
+                return error_response(&id, &format!("{}: {}", context, e));
+            }
+            state.webmcp_enabled = launch_options_from_env().webmcp;
+            lifecycle_launched = true;
+        } else {
+            lifecycle_reused = true;
+        }
+
+        if !auth_login_no_navigate {
+            if let Some(ref mut mgr) = state.browser {
+                if mgr.page_count() == 0 {
+                    // ensure_page itself skips creation for a pinned tab_gone
+                    // session, so a closed sole tab stays tab_gone instead of
+                    // silently recovering onto a fresh blank page.
+                    let _ = mgr.ensure_page().await;
+                }
+            }
+        }
+    }
+
+    let firefox_routed = state.engine == "firefox"
+        && action != "launch"
+        && (!skip_launch || firefox::actions::handles(action));
+
+    // WebDriver backend: reject unsupported CDP-only actions
+    if !firefox_routed
+        && matches!(state.backend_type, BackendType::WebDriver)
+        && WEBDRIVER_UNSUPPORTED_ACTIONS.contains(&action)
+    {
+        return error_response(
+            &id,
+            &format!(
+                "Action '{}' is not supported on the WebDriver backend",
+                action
+            ),
+        );
+    }
+
+    // A pending confirm/prompt dialog blocks the renderer's main thread, so
+    // any command that touches the page would hang until the client read
+    // timeout. Fail fast with instructions instead. Actions in skip_launch
+    // never touch the page; dialog/screenshot/url/title are browser-side.
+    // Only a dialog on the ACTIVE tab blocks: one on a background tab leaves
+    // the active tab's renderer responsive.
+    if let Some(dialog) = state.pending_dialog.as_ref().filter(|_| !firefox_routed) {
+        let active_session = state
+            .browser
+            .as_ref()
+            .and_then(|m| m.active_session_id().ok().map(|s| s.to_string()));
+        let on_active_tab = match (&dialog.session_id, &active_session) {
+            (Some(dialog_sid), Some(active_sid)) => dialog_sid == active_sid,
+            // No session on the event = top-level page dialog; no browser = be safe.
+            _ => true,
+        };
+        // Tab and session management must stay usable: switching or closing
+        // tabs is exactly how an agent escapes a tab blocked by a dialog.
+        let read_touches_active_tab = action == "read"
+            && cmd.get("url").is_none()
+            && cmd.get("llms").is_none()
+            && !cmd
+                .get("requireMd")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+        let safe_during_dialog = (skip_launch && !read_touches_active_tab)
+            || matches!(
+                action,
+                "dialog"
+                    | "screenshot"
+                    | "url"
+                    | "title"
+                    | "tab_list"
+                    | "tab_new"
+                    | "tab_switch"
+                    | "tab_close"
+            );
+        if on_active_tab && !safe_during_dialog {
+            return error_response(
+                &id,
+                &format!(
+                    "A JavaScript {} dialog is blocking the page: \"{}\". Resolve it with `dialog accept` or `dialog dismiss`, then retry `{}`.",
+                    dialog.dialog_type, dialog.message, action
+                ),
+            );
+        }
+    }
+
+    let mut result = if action == "confirm" {
+        handle_confirm(cmd, state).await
+    } else {
+        Box::pin(dispatch(action, cmd, state, firefox_routed)).await
     };
 
     if result.is_ok() && should_validate_restore_after_action(action) {
@@ -4370,10 +4400,25 @@ async fn auto_launch_inner(
     if let Some(ref server) = state.stream_server {
         options.viewport_size = Some(server.viewport().await);
     }
-    let engine = env::var("AGENT_BROWSER_ENGINE").ok();
+    let engine = if state.engine == "firefox" {
+        Some("firefox".to_string())
+    } else {
+        env::var("AGENT_BROWSER_ENGINE").ok()
+    };
     let cdp = env::var("AGENT_BROWSER_CDP").ok();
     let auto_connect = env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok();
     let provider = env::var("AGENT_BROWSER_PROVIDER").ok();
+    if engine.as_deref() == Some("firefox") {
+        reject_firefox_launch_extras(
+            &launch_enable_features_from_env(),
+            &launch_init_script_paths_from_env(),
+            &plugins,
+        )?;
+        let allowed = !current_allowed_domains(state).await.is_empty();
+        return launch_firefox(state, options, cdp, auto_connect, provider, allowed)
+            .await
+            .map(|_| ());
+    }
     validate_ca_cert_launch_mode(
         &options,
         engine.as_deref(),
@@ -4847,6 +4892,22 @@ fn no_xvfb_from_launch_cmd(cmd: &Value) -> bool {
         .unwrap_or_else(no_xvfb_from_env)
 }
 
+/// Loads a `state.rs` file into whichever browser engine owns this session.
+async fn load_state_path_for_engine(
+    state: &mut DaemonState,
+    path: &str,
+) -> Option<Result<Vec<String>, String>> {
+    if let Some(ff) = state.firefox.as_mut() {
+        return Some(firefox::storage::load_state_path(ff, path).await);
+    }
+    if let Some(mgr) = state.browser.as_ref() {
+        if let Ok(session_id) = mgr.active_session_id() {
+            return Some(state::load_state(&mgr.client, session_id, path).await);
+        }
+    }
+    None
+}
+
 async fn try_auto_restore_state(state: &mut DaemonState) {
     state.restore_skipped_origins.clear();
     let session_name = match state.session_name.as_deref() {
@@ -4861,26 +4922,24 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
         }
     };
     if let Some(path) = state::find_auto_state_file(&session_name) {
-        if let Some(ref mgr) = state.browser {
-            if let Ok(session_id) = mgr.active_session_id() {
-                match state::load_state(&mgr.client, session_id, &path).await {
-                    Ok(skipped) => {
-                        state.restore_status = "loaded".to_string();
-                        state.restore_status_detail = None;
-                        state.restore_skipped_origins = skipped;
-                        state.restore_loaded_path = Some(path.clone());
-                        state.restore_load_failed = false;
-                        state.restore_validation_pending = state.restore_check_url.is_some()
-                            || state.restore_check_text.is_some()
-                            || state.restore_check_fn.is_some();
-                    }
-                    Err(err) => {
-                        state.restore_status = "load_failed".to_string();
-                        state.restore_status_detail = Some(err);
-                        state.restore_loaded_path = Some(path);
-                        state.restore_load_failed = true;
-                        state.restore_validation_pending = false;
-                    }
+        if let Some(result) = load_state_path_for_engine(state, &path).await {
+            match result {
+                Ok(skipped) => {
+                    state.restore_status = "loaded".to_string();
+                    state.restore_status_detail = None;
+                    state.restore_skipped_origins = skipped;
+                    state.restore_loaded_path = Some(path.clone());
+                    state.restore_load_failed = false;
+                    state.restore_validation_pending = state.restore_check_url.is_some()
+                        || state.restore_check_text.is_some()
+                        || state.restore_check_fn.is_some();
+                }
+                Err(err) => {
+                    state.restore_status = "load_failed".to_string();
+                    state.restore_status_detail = Some(err);
+                    state.restore_loaded_path = Some(path);
+                    state.restore_load_failed = true;
+                    state.restore_validation_pending = false;
                 }
             }
         }
@@ -4914,11 +4973,21 @@ async fn validate_restore_if_pending(state: &mut DaemonState) {
 }
 
 async fn validate_restored_state(state: &DaemonState) -> Result<(), String> {
+    let timeout_ms = state.default_timeout_ms.min(2_000);
+    if let Some(ref ff) = state.firefox {
+        return firefox::storage::validate_restore(
+            ff,
+            state.restore_check_url.as_deref(),
+            state.restore_check_text.as_deref(),
+            state.restore_check_fn.as_deref(),
+            timeout_ms,
+        )
+        .await;
+    }
     let Some(ref mgr) = state.browser else {
         return Ok(());
     };
     let session_id = mgr.active_session_id()?.to_string();
-    let timeout_ms = state.default_timeout_ms.min(2_000);
 
     if let Some(ref pattern) = state.restore_check_url {
         let url = mgr.get_url().await.unwrap_or_default();
@@ -5005,7 +5074,7 @@ pub(crate) async fn maybe_autosave_restore_state(state: &mut DaemonState, interv
         return;
     }
     // No browser means nothing to collect from.
-    if state.browser.is_none() {
+    if state.browser.is_none() && state.firefox.is_none() {
         return;
     }
     state.last_autosave_attempt = Some(std::time::Instant::now());
@@ -5043,6 +5112,23 @@ pub(crate) async fn auto_save_restore_state(
                 other
             ));
         }
+    }
+
+    let session_id = state.session_id.clone();
+    if let Some(ff) = state.firefox.as_ref() {
+        return match firefox::storage::save_auto_state(ff, &session_name, &session_id).await {
+            Ok(path) => {
+                state.restore_save_status = "saved".to_string();
+                state.restore_saved_path = Some(path.clone());
+                state.last_autosave_attempt = Some(std::time::Instant::now());
+                Ok(Some(path))
+            }
+            Err(err) => {
+                state.restore_save_status = "error".to_string();
+                state.restore_saved_path = None;
+                Err(err)
+            }
+        };
     }
 
     let Some(ref mgr) = state.browser else {
@@ -5086,10 +5172,8 @@ async fn load_storage_state(state: &mut DaemonState, path: &Option<String>) -> R
         ensure_state_replay_supported_by_active_domain_filter(state, "--state/storageState")
             .await?;
         let mut skipped = None;
-        if let Some(ref mgr) = state.browser {
-            if let Ok(session_id) = mgr.active_session_id() {
-                skipped = Some(state::load_state(&mgr.client, session_id, path).await?);
-            }
+        if let Some(result) = load_state_path_for_engine(state, path).await {
+            skipped = Some(result?);
         }
         if let Some(skipped) = skipped {
             mark_explicit_storage_state_loaded(state, path);
@@ -5180,6 +5264,78 @@ async fn handle_launch_for_target(
         state.session_setup = setup;
     }
     result
+}
+
+/// Rejects init scripts, launch features and launch-mutator plugins, which Firefox does not apply.
+fn reject_firefox_launch_extras(
+    enable_features: &[String],
+    init_scripts: &[String],
+    plugins: &[crate::plugins::PluginConfig],
+) -> Result<(), String> {
+    let unsupported = |flag: &str| Err(format!("{flag} is not supported with --engine firefox"));
+    if !enable_features.is_empty() {
+        return unsupported("--enable");
+    }
+    if !init_scripts.is_empty() {
+        return unsupported("--init-script");
+    }
+    if !crate::plugins::resolved_plugins_with_capability(
+        plugins,
+        crate::plugins::CAPABILITY_LAUNCH_MUTATE,
+    )
+    .is_empty()
+    {
+        return unsupported("launch-mutator plugins");
+    }
+    Ok(())
+}
+
+/// Validates the options and launches (or reuses) an owned Firefox for both launch paths.
+async fn launch_firefox(
+    state: &mut DaemonState,
+    options: LaunchOptions,
+    cdp: Option<String>,
+    auto_connect: bool,
+    provider: Option<String>,
+    allowed_domains: bool,
+) -> Result<Value, String> {
+    firefox::process::validate_firefox_options(
+        &options,
+        cdp.as_deref(),
+        auto_connect,
+        provider.as_deref(),
+        allowed_domains,
+    )?;
+    let hash = launch_hash(
+        &options,
+        &[],
+        &[],
+        &[],
+        &[],
+        Some("firefox"),
+        "launch",
+        None,
+    );
+    let storage_state = options.storage_state.clone();
+    let reuse_session = state.firefox.as_mut().is_some_and(|ff| !ff.has_exited());
+    if reuse_session && state.launch_hash == Some(hash) && storage_state.is_none() {
+        return Ok(json!({ "launched": true, "reused": true, "relaunchedBrowser": false }));
+    }
+    let had_browser = has_active_browser_session(state);
+    if had_browser {
+        let _ = auto_save_restore_state(state).await;
+        close_current_browser(state).await?;
+    }
+    state.ref_map.invalidate_all_documents();
+    state.reset_input_state();
+    let session = firefox::session::FirefoxSession::launch(&options, state.auto_dialog).await?;
+    state.engine = "firefox".to_string();
+    write_engine_file(&state.session_id, &state.engine);
+    state.launch_hash = Some(hash);
+    state.firefox = Some(session);
+    try_auto_restore_state(state).await;
+    load_storage_state_or_rollback(state, &storage_state).await?;
+    Ok(json!({ "launched": true, "relaunchedBrowser": had_browser }))
 }
 
 async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -5337,6 +5493,24 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
     }
     apply_effective_ca_cert(&mut launch_options, &effective_ca_cert);
 
+    if engine.as_deref() == Some("firefox") {
+        let cdp = cdp_url
+            .map(String::from)
+            .or_else(|| cdp_port.map(|p| p.to_string()))
+            .or_else(|| env::var("AGENT_BROWSER_CDP").ok());
+        let auto_connect = auto_connect || env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok();
+        let provider = provider_name
+            .map(String::from)
+            .or_else(|| env::var("AGENT_BROWSER_PROVIDER").ok());
+        let allowed = !allowed_domains.is_empty();
+        reject_firefox_launch_extras(
+            &enable_features,
+            &init_script_paths,
+            &plugins_from_command_or_env(cmd),
+        )?;
+        return launch_firefox(state, launch_options, cdp, auto_connect, provider, allowed).await;
+    }
+
     let external_launch =
         cdp_url.is_some() || cdp_port.is_some() || auto_connect || provider_name.is_some();
     validate_ca_cert_launch_mode(&launch_options, engine.as_deref(), external_launch)?;
@@ -5401,8 +5575,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         true
     };
 
-    let had_browser_before_launch =
-        state.browser.is_some() || state.active_provider_session.is_some();
+    let had_browser_before_launch = has_active_browser_session(state);
 
     if needs_relaunch {
         if local_launch {
@@ -6007,7 +6180,7 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
     Ok(json!({ "result": result, "origin": url }))
 }
 
-async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
+pub(crate) async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     let save_result = auto_save_restore_state(state).await;
     close_all_browser_backends(state).await?;
     state.attached_target = None;
@@ -7539,13 +7712,13 @@ async fn handle_session_info(state: &DaemonState) -> Result<Value, String> {
         "namespace": env::var("AGENT_BROWSER_NAMESPACE").ok(),
         "socketDir": get_socket_dir().to_string_lossy(),
         "backgroundPid": std::process::id(),
-        "browserLaunched": state.browser.is_some(),
+        "browserLaunched": has_active_browser_session(state),
         "pageCount": state.browser.as_ref().map(|mgr| mgr.page_count()).unwrap_or(0),
         "engine": state.engine,
         "launchHash": state.launch_hash,
         "compatibilityStatus": "current",
         "effectiveLaunch": {
-            "browserLaunched": state.browser.is_some(),
+            "browserLaunched": has_active_browser_session(state),
             "engine": state.engine,
             "launchHash": state.launch_hash,
         },
@@ -12238,7 +12411,7 @@ fn mocked_response(
     (status, headers, encoded)
 }
 
-fn route_url_matches(pattern: &str, url: &str) -> bool {
+pub(crate) fn route_url_matches(pattern: &str, url: &str) -> bool {
     if pattern == "*" {
         return true;
     }
@@ -13432,7 +13605,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
 // Confirmation handlers (stub)
 // ---------------------------------------------------------------------------
 
-async fn handle_confirm(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+pub(crate) async fn handle_confirm(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let pending = state
         .pending_confirmation
         .take()
@@ -13452,7 +13625,7 @@ async fn handle_confirm(_cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     Ok(json!({ "confirmed": true, "action": pending.action, "result": result }))
 }
 
-async fn handle_deny(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+pub(crate) async fn handle_deny(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let pending = state
         .pending_confirmation
         .take()
@@ -14185,7 +14358,7 @@ fn inject_lifecycle(
             "restoreStatus": state.restore_status,
             "saveStatus": state.restore_save_status,
             "effectiveLaunch": {
-                "browserLaunched": state.browser.is_some(),
+                "browserLaunched": has_active_browser_session(state),
                 "engine": state.engine,
                 "launchHash": state.launch_hash,
             }
@@ -18788,6 +18961,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_execute_unknown_command() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_CDP"]);
+        guard.remove("AGENT_BROWSER_CDP");
         let mut state = DaemonState::new();
         let cmd = json!({ "action": "unknown_action_xyz", "id": "test-1" });
         let result = execute_command(&cmd, &mut state).await;
@@ -19470,5 +19645,215 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             let auto_handled = auto_dialog && matches!(*dialog_type, "beforeunload" | "alert");
             assert!(!auto_handled, "{dialog_type} should NOT be auto-handled");
         }
+    }
+}
+
+#[cfg(test)]
+mod firefox_routing_tests {
+    use super::*;
+    use crate::native::firefox::session::tests::fake_session;
+    use crate::test_utils::EnvGuard;
+
+    const ENV: &[&str] = &[
+        "AGENT_BROWSER_ENGINE",
+        "AGENT_BROWSER_CDP",
+        "AGENT_BROWSER_AUTO_CONNECT",
+        "AGENT_BROWSER_PROVIDER",
+        "AGENT_BROWSER_PROFILE",
+        "AGENT_BROWSER_ARGS",
+        "AGENT_BROWSER_ALLOWED_DOMAINS",
+        "AGENT_BROWSER_CONFIRM_ACTIONS",
+        "AGENT_BROWSER_EXECUTABLE_PATH",
+        "AGENT_BROWSER_ACTION_POLICY",
+        "AGENT_BROWSER_POLICY",
+    ];
+
+    fn clean_env() -> EnvGuard<'static> {
+        let guard = EnvGuard::new(ENV);
+        for name in ENV {
+            guard.remove(name);
+        }
+        guard.set("AGENT_BROWSER_ENGINE", "firefox");
+        guard
+    }
+
+    async fn firefox_state() -> (DaemonState, Arc<std::sync::Mutex<Vec<String>>>) {
+        let mut state = DaemonState::new();
+        let (ff, tx, calls) = fake_session().await;
+        std::mem::forget(tx);
+        state.firefox = Some(ff);
+        (state, calls)
+    }
+
+    fn navigations(calls: &Arc<std::sync::Mutex<Vec<String>>>) -> usize {
+        let calls = calls.lock().unwrap();
+        calls
+            .iter()
+            .filter(|m| *m == "browsingContext.navigate")
+            .count()
+    }
+
+    #[tokio::test]
+    async fn implicit_launch_rejects_cdp_from_env_before_launching() {
+        let guard = clean_env();
+        guard.set("AGENT_BROWSER_CDP", "ws://127.0.0.1:9222");
+        let mut state = DaemonState::new();
+        let resp = execute_command(
+            &json!({"id":"1","action":"navigate","url":"https://a.test"}),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false);
+        let error = resp["error"].as_str().unwrap();
+        assert!(
+            error.contains("--cdp is not supported with --engine firefox"),
+            "{error}"
+        );
+        assert!(state.firefox.is_none());
+    }
+
+    #[tokio::test]
+    async fn explicit_launch_rejects_unsupported_options() {
+        let guard = clean_env();
+        guard.set("AGENT_BROWSER_PROVIDER", "browserbase");
+        let mut state = DaemonState::new();
+        let launch = |extra: Value| {
+            let mut cmd = json!({"action":"launch","engine":"firefox"});
+            cmd.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            cmd
+        };
+        let e = handle_launch(&launch(json!({})), &mut state)
+            .await
+            .unwrap_err();
+        assert!(e.contains("--provider"), "{e}");
+        guard.remove("AGENT_BROWSER_PROVIDER");
+        let e = handle_launch(&launch(json!({"profile":"/tmp/p"})), &mut state)
+            .await
+            .unwrap_err();
+        assert!(e.contains("--profile"), "{e}");
+        let e = handle_launch(&launch(json!({"args":["--x"]})), &mut state)
+            .await
+            .unwrap_err();
+        assert!(e.contains("--args"), "{e}");
+        let e = handle_launch(&launch(json!({"allowedDomains":"a.test"})), &mut state)
+            .await
+            .unwrap_err();
+        assert!(e.contains("allowed-domains"), "{e}");
+        assert!(state.firefox.is_none());
+    }
+
+    #[tokio::test]
+    async fn implicit_launch_uses_the_firefox_branch_and_a_live_session_is_reused() {
+        let guard = clean_env();
+        guard.set("AGENT_BROWSER_EXECUTABLE_PATH", "/nonexistent/firefox");
+        let mut state = DaemonState::new();
+        let resp = execute_command(&json!({"id":"1","action":"url"}), &mut state).await;
+        let error = resp["error"].as_str().unwrap();
+        assert!(error.contains("Firefox executable not found"), "{error}");
+
+        let (mut state, _calls) = firefox_state().await;
+        let resp = execute_command(&json!({"id":"2","action":"tab_list"}), &mut state).await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert_eq!(resp["data"]["lifecycle"]["reused"], true);
+        assert_eq!(resp["data"]["lifecycle"]["launched"], false);
+    }
+
+    #[tokio::test]
+    async fn explicit_launch_reuses_a_live_session_with_the_same_options() {
+        let _guard = clean_env();
+        let (mut state, _calls) = firefox_state().await;
+        let mut options = launch_options_from_env();
+        options.executable_path = Some("/nonexistent/firefox".to_string());
+        let hash = launch_hash(
+            &options,
+            &[],
+            &[],
+            &[],
+            &[],
+            Some("firefox"),
+            "launch",
+            None,
+        );
+        state.launch_hash = Some(hash);
+        let r = launch_firefox(&mut state, options.clone(), None, false, None, false)
+            .await
+            .unwrap();
+        assert_eq!(r["reused"], true);
+        options.storage_state = Some("{}".into());
+        let error = launch_firefox(&mut state, options, None, false, None, false)
+            .await
+            .unwrap_err();
+        assert!(error.contains("Firefox executable not found"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn chrome_only_action_errors_without_touching_the_browser_and_before_other_gates() {
+        let _guard = clean_env();
+        let (mut state, calls) = firefox_state().await;
+        state.backend_type = BackendType::WebDriver;
+        state.pending_dialog = Some(PendingDialog {
+            dialog_type: "alert".into(),
+            message: "hi".into(),
+            session_id: Some("ctx-active".into()),
+            ..Default::default()
+        });
+        let resp = execute_command(&json!({"id":"1","action":"trace_start"}), &mut state).await;
+        let error = resp["error"].as_str().unwrap();
+        assert!(error.contains("`trace_start` is Chrome-only"), "{error}");
+        assert!(!error.contains("WebDriver backend"), "{error}");
+        let resp = execute_command(&json!({"id":"2","action":"snapshot"}), &mut state).await;
+        assert!(resp["error"]
+            .as_str()
+            .unwrap()
+            .contains("not supported on Firefox"));
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dialog_on_a_background_tab_does_not_block_the_active_tab() {
+        let _guard = clean_env();
+        let (mut state, calls) = firefox_state().await;
+        state.pending_dialog = Some(PendingDialog {
+            dialog_type: "confirm".into(),
+            message: "sure?".into(),
+            session_id: Some("ctx-background".into()),
+            ..Default::default()
+        });
+        let nav = json!({"id":"1","action":"navigate","url":"https://a.test"});
+        let resp = execute_command(&nav, &mut state).await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert_eq!(navigations(&calls), 1);
+
+        state.pending_dialog.as_mut().unwrap().session_id = Some("ctx-active".into());
+        let resp = execute_command(&nav, &mut state).await;
+        assert_eq!(resp["success"], false);
+        assert!(resp["error"]
+            .as_str()
+            .unwrap()
+            .contains("confirm dialog is blocking the page"));
+        assert_eq!(navigations(&calls), 1);
+    }
+
+    #[tokio::test]
+    async fn confirm_runs_the_command_once_and_deny_never() {
+        let guard = clean_env();
+        guard.set("AGENT_BROWSER_CONFIRM_ACTIONS", "navigate");
+        let (mut state, calls) = firefox_state().await;
+        state.confirm_actions = ConfirmActions::from_env();
+        let nav = json!({"id":"1","action":"navigate","url":"https://a.test"});
+
+        let resp = execute_command(&nav, &mut state).await;
+        assert_eq!(resp["data"]["confirmation_required"], true);
+        assert_eq!(navigations(&calls), 0);
+        let resp = execute_command(&json!({"id":"2","action":"confirm"}), &mut state).await;
+        assert_eq!(resp["data"]["result"]["success"], true, "{resp}");
+        assert_eq!(navigations(&calls), 1);
+
+        execute_command(&nav, &mut state).await;
+        let resp = execute_command(&json!({"id":"3","action":"deny"}), &mut state).await;
+        assert_eq!(resp["data"]["denied"], true);
+        assert_eq!(navigations(&calls), 1);
     }
 }

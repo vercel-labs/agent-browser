@@ -344,7 +344,7 @@ agent-browser set media [dark|light]  # Emulate color scheme
 ### Cookies & Storage
 
 ```bash
-agent-browser cookies                 # Get all cookies
+agent-browser cookies                 # Get cookies (Firefox defaults to active page and frames)
 agent-browser cookies set <name> <val> # Set cookie
 agent-browser cookies set --curl <file> # Import cookies from a Copy-as-cURL dump,
                                         # JSON array, or bare Cookie header (auto-detected)
@@ -855,7 +855,7 @@ agent-browser --session "$SESSION" --restore open twitter.com
 agent-browser --session "$SESSION" --restore --restore-check-text Dashboard open twitter.com
 ```
 
-State is saved when the browser closes (explicit `close`, idle timeout, or daemon shutdown) and also periodically while the browser is open, so a browser window you close by hand still leaves a recent save behind. Periodic autosave waits for commands to settle, then saves at most once per `AGENT_BROWSER_AUTOSAVE_INTERVAL_MS` (default 30000; set to `0` to save only on close). Idle sessions keep saving on the same interval, so changes the page makes on its own (token refreshes, background requests) are captured too. It respects the `--restore-save` policy.
+State is saved when the browser closes (explicit `close`, idle timeout, or daemon shutdown) and also periodically while the browser is open, so a browser window you close by hand still leaves a recent save behind. Periodic autosave waits for commands to settle, then saves at most once per `AGENT_BROWSER_AUTOSAVE_INTERVAL_MS` (default 30000; set to `0` to save only on close). Idle sessions keep saving on the same interval, so changes the page makes on its own (token refreshes, background requests) are captured too. It respects the `--restore-save` policy. Firefox auto-saves include active iframe origins and retain earlier saved origins they cannot read. Explicit `state save` overwrites its file.
 
 ### State Encryption
 

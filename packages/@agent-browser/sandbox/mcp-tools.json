@@ -44,7 +44,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -150,7 +150,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -247,7 +247,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -349,7 +349,7 @@
             "type": "boolean"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -456,7 +456,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -571,7 +571,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -668,7 +668,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -781,7 +781,7 @@
             "type": "boolean"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -887,7 +887,7 @@
             "type": "boolean"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -987,7 +987,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -1098,7 +1098,7 @@
             "type": "boolean"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -1199,7 +1199,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -1293,7 +1293,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -1387,7 +1387,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -1481,7 +1481,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -1586,7 +1586,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -1683,7 +1683,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -1784,7 +1784,7 @@
             "type": "boolean"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -1888,7 +1888,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -1982,7 +1982,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -2041,7 +2041,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Get cookies.",
+      "description": "Get cookies. When URLs are omitted, Firefox filters to the active page and its frames.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -2076,7 +2076,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -2185,7 +2185,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -2306,7 +2306,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -2416,7 +2416,7 @@
             "type": "integer"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -2510,7 +2510,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -2604,7 +2604,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -2706,7 +2706,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -2810,7 +2810,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -2904,7 +2904,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -3001,7 +3001,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -3095,7 +3095,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -3198,7 +3198,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -3307,7 +3307,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -3413,7 +3413,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -3543,7 +3543,7 @@
             "type": "boolean"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -3644,7 +3644,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -3751,7 +3751,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -3858,7 +3858,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -3952,7 +3952,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -4053,7 +4053,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -4191,7 +4191,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -4295,7 +4295,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -4394,7 +4394,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -4489,7 +4489,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -4586,7 +4586,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -4686,7 +4686,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -4786,7 +4786,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -4885,7 +4885,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -4977,7 +4977,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -5076,7 +5076,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -5175,7 +5175,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -5274,7 +5274,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -5375,7 +5375,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -5469,7 +5469,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -5563,7 +5563,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -5662,7 +5662,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -5763,7 +5763,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -5862,7 +5862,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -5956,7 +5956,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -6053,7 +6053,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -6152,7 +6152,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -6251,7 +6251,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -6350,7 +6350,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -6450,7 +6450,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -6554,7 +6554,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -6655,7 +6655,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -6761,7 +6761,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -6865,7 +6865,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -6989,7 +6989,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -7089,7 +7089,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -7194,7 +7194,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -7291,7 +7291,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -7388,7 +7388,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -7494,7 +7494,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -7608,7 +7608,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -7708,7 +7708,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -7809,7 +7809,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -7918,7 +7918,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -8041,7 +8041,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -8138,7 +8138,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -8245,7 +8245,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -8346,7 +8346,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -8447,7 +8447,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -8547,7 +8547,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -8644,7 +8644,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -8738,7 +8738,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -8832,7 +8832,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -8939,7 +8939,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -9039,7 +9039,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -9136,7 +9136,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -9236,7 +9236,7 @@
             "type": "boolean"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -9333,7 +9333,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -9455,7 +9455,7 @@
             "type": "boolean"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -9577,7 +9577,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -9701,7 +9701,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -9802,7 +9802,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -9896,7 +9896,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -9994,7 +9994,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -10123,7 +10123,7 @@
             "type": "integer"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -10246,7 +10246,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -10344,7 +10344,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -10443,7 +10443,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -10553,7 +10553,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -10651,7 +10651,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -10754,7 +10754,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -10848,7 +10848,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -10945,7 +10945,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -11049,7 +11049,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -11152,7 +11152,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -11256,7 +11256,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -11368,7 +11368,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -11465,7 +11465,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -11565,7 +11565,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -11683,7 +11683,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -11777,7 +11777,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -11874,7 +11874,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -11998,7 +11998,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -12100,7 +12100,7 @@
             "type": "integer"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -12203,7 +12203,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -12297,7 +12297,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -12394,7 +12394,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -12497,7 +12497,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -12560,7 +12560,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Save cookies and storage state.",
+      "description": "Save cookies and storage state, overwriting the target file.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -12598,7 +12598,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -12698,7 +12698,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -12795,7 +12795,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -12902,7 +12902,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -13009,7 +13009,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -13118,7 +13118,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -13215,7 +13215,7 @@
             "type": "integer"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -13309,7 +13309,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -13415,7 +13415,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -13512,7 +13512,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -13611,7 +13611,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -13709,7 +13709,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -13807,7 +13807,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -13909,7 +13909,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -14010,7 +14010,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -14104,7 +14104,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -14201,7 +14201,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -14305,7 +14305,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -14411,7 +14411,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -14512,7 +14512,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -14614,7 +14614,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -14719,7 +14719,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -14820,7 +14820,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -14922,7 +14922,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -15022,7 +15022,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -15132,7 +15132,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -15238,7 +15238,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -15343,7 +15343,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -15451,7 +15451,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -15551,7 +15551,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -15657,7 +15657,7 @@
             "type": "object"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -15764,7 +15764,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -15864,7 +15864,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"
@@ -15965,7 +15965,7 @@
             "type": "string"
           },
           "restore": {
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key. Firefox auto-save includes active iframe origins and preserves saved origins it cannot read.",
             "oneOf": [
               {
                 "type": "boolean"

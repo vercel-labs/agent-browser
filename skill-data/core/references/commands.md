@@ -206,7 +206,7 @@ agent-browser set media light reduced-motion  # Light mode + reduced motion
 ## Cookies and Storage
 
 ```bash
-agent-browser cookies                     # Get all cookies
+agent-browser cookies                     # Get cookies (Firefox defaults to active page and frames)
 agent-browser cookies set name value      # Set cookie
 agent-browser cookies clear               # Clear cookies
 agent-browser storage local               # Get all localStorage
