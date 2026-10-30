@@ -19,6 +19,7 @@ use super::cdp::client::CdpClient;
 use super::state;
 use super::stream::{IdleActivity, StreamServer};
 use crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION;
+use crate::session_files::{owns_session, remove_daemon_files, SessionFile};
 
 pub async fn run_daemon(session: &str) {
     let socket_dir = get_daemon_socket_dir();
@@ -31,7 +32,7 @@ pub async fn run_daemon(session: &str) {
     // parent which drops the read end after startup).
     #[cfg(unix)]
     if env::var("AGENT_BROWSER_DEBUG").is_ok() {
-        let log_path = socket_dir.join(format!("{}.log", session));
+        let log_path = SessionFile::Log.path_in(&socket_dir, session);
         if let Ok(file) = fs::File::create(&log_path) {
             use std::os::unix::io::IntoRawFd;
             let fd = file.into_raw_fd();
@@ -63,15 +64,15 @@ pub async fn run_daemon(session: &str) {
         }
     }
 
-    let pid_path = socket_dir.join(format!("{}.pid", session));
+    let pid_path = SessionFile::Pid.path_in(&socket_dir, session);
     let _ = fs::write(&pid_path, process::id().to_string());
 
-    let version_path = socket_dir.join(format!("{}.version", session));
+    let version_path = SessionFile::Version.path_in(&socket_dir, session);
     let _ = fs::write(&version_path, env!("CARGO_PKG_VERSION"));
 
     // On Unix the daemon listens on a Unix domain socket; on Windows it uses
     // TCP, so there is no .sock file — only a .port file written by the server.
-    let socket_path = socket_dir.join(format!("{}.sock", session));
+    let socket_path = SessionFile::Socket.path_in(&socket_dir, session);
 
     #[cfg(unix)]
     if socket_path.exists() {
@@ -80,14 +81,14 @@ pub async fn run_daemon(session: &str) {
 
     #[cfg(windows)]
     {
-        let _ = fs::remove_file(socket_dir.join(format!("{}.port", session)));
+        let _ = fs::remove_file(SessionFile::Port.path_in(&socket_dir, session));
     }
 
-    let stream_path = socket_dir.join(format!("{}.stream", session));
+    let stream_path = SessionFile::Stream.path_in(&socket_dir, session);
     let _ = fs::remove_file(&stream_path);
-    let _ = fs::remove_file(socket_dir.join(format!("{}.engine", session)));
-    let _ = fs::remove_file(socket_dir.join(format!("{}.provider", session)));
-    let _ = fs::remove_file(socket_dir.join(format!("{}.extensions", session)));
+    let _ = fs::remove_file(SessionFile::Engine.path_in(&socket_dir, session));
+    let _ = fs::remove_file(SessionFile::Provider.path_in(&socket_dir, session));
+    let _ = fs::remove_file(SessionFile::Extensions.path_in(&socket_dir, session));
 
     if let Ok(days_str) = env::var("AGENT_BROWSER_STATE_EXPIRE_DAYS") {
         if let Ok(days) = days_str.parse::<u64>() {
@@ -143,20 +144,11 @@ pub async fn run_daemon(session: &str) {
     )
     .await;
 
-    #[cfg(unix)]
-    {
-        let _ = fs::remove_file(&socket_path);
+    // Leave the files alone if a replacement daemon for this session has
+    // already taken over.
+    if owns_session(&socket_dir, session, process::id()) {
+        remove_daemon_files(&socket_dir, session);
     }
-    #[cfg(windows)]
-    {
-        let _ = fs::remove_file(socket_dir.join(format!("{}.port", session)));
-    }
-    let _ = fs::remove_file(&pid_path);
-    let _ = fs::remove_file(&version_path);
-    let _ = fs::remove_file(&stream_path);
-    let _ = fs::remove_file(socket_dir.join(format!("{}.engine", session)));
-    let _ = fs::remove_file(socket_dir.join(format!("{}.provider", session)));
-    let _ = fs::remove_file(socket_dir.join(format!("{}.extensions", session)));
 
     if let Err(e) = result {
         let _ = writeln!(std::io::stderr(), "Daemon error: {}", e);
@@ -219,7 +211,7 @@ fn autosave_interval_ms_from_env() -> u64 {
 #[cfg(unix)]
 async fn run_socket_server(
     socket_path: &PathBuf,
-    session: &str,
+    _session: &str,
     stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     stream_server: Option<Arc<StreamServer>>,
     idle_activity: Arc<IdleActivity>,
@@ -233,12 +225,6 @@ async fn run_socket_server(
     let listener =
         UnixListener::bind(socket_path).map_err(|e| format!("Failed to bind socket: {}", e))?;
 
-    let stream_file: Option<PathBuf> = if stream_server.is_some() {
-        let dir = socket_path.parent().unwrap_or(std::path::Path::new("."));
-        Some(dir.join(format!("{}.stream", session)))
-    } else {
-        None
-    };
     let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(DaemonState::new_with_stream(
             stream_client,
@@ -246,10 +232,11 @@ async fn run_socket_server(
             idle_activity.clone(),
         )));
 
-    // Notifier used by handle_connection to signal the daemon loop to exit
-    // after a "close" command, instead of calling process::exit() which skips
-    // destructors and can leave Chrome processes orphaned (issue #1113).
-    let close_notify = Arc::new(Notify::new());
+    // Lets handle_connection end the daemon loop after a "close" command,
+    // instead of calling process::exit() which skips destructors and can
+    // leave Chrome processes orphaned (issue #1113).
+    let close = Arc::new(CloseHandshake::default());
+    let mut closed_by_command = false;
 
     let mut drain_interval = tokio::time::interval(Duration::from_millis(100));
     drain_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -265,10 +252,9 @@ async fn run_socket_server(
                     Ok((stream, _)) => {
                         let state = state.clone();
                         let idle_activity = idle_activity.clone();
-                        let sf = stream_file.clone();
-                        let cn = close_notify.clone();
+                        let close = close.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, idle_activity, sf, cn).await;
+                            handle_connection(stream, state, idle_activity, close).await;
                         });
                     }
                     Err(e) => {
@@ -327,10 +313,11 @@ async fn run_socket_server(
                     .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
                 continue;
             }
-            _ = close_notify.notified() => {
+            _ = close.requested.notified() => {
                 // "close" command was handled; browser already closed by
                 // handle_close(). Break to run cleanup and exit gracefully
                 // so destructors fire.
+                closed_by_command = true;
                 break;
             }
             _ = shutdown_signal() => {
@@ -345,6 +332,10 @@ async fn run_socket_server(
                 break;
             }
         }
+    }
+
+    if closed_by_command {
+        close.finish(listener).await;
     }
 
     Ok(())
@@ -379,14 +370,9 @@ async fn run_socket_server(
         .port();
 
     let socket_dir = socket_path.parent().unwrap_or(std::path::Path::new("."));
-    let port_path = socket_dir.join(format!("{}.port", session));
+    let port_path = SessionFile::Port.path_in(socket_dir, session);
     let _ = fs::write(&port_path, actual_port.to_string());
 
-    let stream_file: Option<PathBuf> = if stream_server.is_some() {
-        Some(socket_dir.join(format!("{}.stream", session)))
-    } else {
-        None
-    };
     let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(DaemonState::new_with_stream(
             stream_client,
@@ -394,7 +380,8 @@ async fn run_socket_server(
             idle_activity.clone(),
         )));
 
-    let close_notify = Arc::new(Notify::new());
+    let close = Arc::new(CloseHandshake::default());
+    let mut closed_by_command = false;
 
     let idle_sleep = idle_timeout_ms.map(|ms| tokio::time::sleep(Duration::from_millis(ms)));
     let mut idle_sleep_pin = idle_sleep.map(Box::pin);
@@ -413,10 +400,9 @@ async fn run_socket_server(
                     Ok((stream, _)) => {
                         let state = state.clone();
                         let idle_activity = idle_activity.clone();
-                        let sf = stream_file.clone();
-                        let cn = close_notify.clone();
+                        let close = close.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, idle_activity, sf, cn).await;
+                            handle_connection(stream, state, idle_activity, close).await;
                         });
                     }
                     Err(e) => {
@@ -465,7 +451,6 @@ async fn run_socket_server(
                 }
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_all_browser_backends(&mut s).await;
-                let _ = fs::remove_file(&port_path);
                 break;
             }
             _ = idle_activity.notified(), if idle_timeout_ms.is_some() => {
@@ -473,8 +458,8 @@ async fn run_socket_server(
                     .map(|ms| Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
                 continue;
             }
-            _ = close_notify.notified() => {
-                let _ = fs::remove_file(&port_path);
+            _ = close.requested.notified() => {
+                closed_by_command = true;
                 break;
             }
             _ = shutdown_signal() => {
@@ -486,10 +471,13 @@ async fn run_socket_server(
                 };
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_all_browser_backends(&mut s).await;
-                let _ = fs::remove_file(&port_path);
                 break;
             }
         }
+    }
+
+    if closed_by_command {
+        close.finish(listener).await;
     }
 
     Ok(())
@@ -532,12 +520,30 @@ fn spawn_background_tick_if_idle(
     true
 }
 
+/// Orders a `close` between the connection that handled it and the accept
+/// loop: the loop stops listening first and only then is the reply sent, so a
+/// command issued right after `close` returns is refused and starts a fresh
+/// daemon instead of reaching this exiting one (issue #2134).
+#[derive(Default)]
+struct CloseHandshake {
+    requested: Notify,
+    listener_closed: Notify,
+    replied: Notify,
+}
+
+impl CloseHandshake {
+    async fn finish<L>(&self, listener: L) {
+        drop(listener);
+        self.listener_closed.notify_one();
+        let _ = tokio::time::timeout(Duration::from_secs(1), self.replied.notified()).await;
+    }
+}
+
 async fn handle_connection<S>(
     stream: S,
     state: std::sync::Arc<tokio::sync::Mutex<DaemonState>>,
     idle_activity: Arc<IdleActivity>,
-    stream_file_cleanup: Option<PathBuf>,
-    close_notify: Arc<Notify>,
+    close: Arc<CloseHandshake>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -591,22 +597,27 @@ async fn handle_connection<S>(
                     response
                 };
 
-                let mut resp = serde_json::to_string(&response).unwrap_or_default();
-                resp.push('\n');
-                if writer.write_all(resp.as_bytes()).await.is_err() {
-                    break;
+                let closing = close_completed_response(&action, &response);
+                if closing {
+                    close.requested.notify_one();
+                    close.listener_closed.notified().await;
+                }
+                if response.get("code").and_then(Value::as_str) == Some("page_wedged") {
+                    if let Some(id) = response.get("id").and_then(Value::as_str) {
+                        state.lock().await.wedge_report_delivered(id);
+                    }
                 }
 
-                if close_completed_response(&action, &response) {
-                    if let Some(ref path) = stream_file_cleanup {
-                        let _ = fs::remove_file(path);
-                    }
-                    // Signal the daemon loop to exit gracefully instead of
-                    // calling process::exit(), which skips destructors and
-                    // can leave Chrome processes orphaned (issue #1113).
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    close_notify.notify_one();
+                let mut resp = serde_json::to_string(&response).unwrap_or_default();
+                resp.push('\n');
+                let written = writer.write_all(resp.as_bytes()).await.is_ok();
+                if closing {
+                    let _ = writer.flush().await;
+                    close.replied.notify_one();
                     return;
+                }
+                if !written {
+                    break;
                 }
             }
             Err(_) => break,

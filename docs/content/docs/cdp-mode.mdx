@@ -18,6 +18,10 @@ agent-browser close
 agent-browser --cdp 9222 snapshot
 ```
 
+The session stays attached until `agent-browser close`. Later commands without a connection flag run against the same browser, as if you passed `--cdp` again. If that browser goes away, commands fail instead of launching a local one.
+
+If the debugging port is not open yet, `connect` and `--cdp` wait up to 2 seconds for it before failing.
+
 ## Remote WebSocket URLs
 
 Connect to remote browser services via WebSocket URL:
@@ -81,8 +85,9 @@ With `--pin-tab`:
 - If the bound tab is closed, commands fail with a `tab_gone` error instead of silently acting on another tab. JSON responses carry <code>"code": "tab_gone"</code>, <code>data.targetId</code>, and optional <code>data.lastUrl</code>
 - `tab list`, `tab new`, and `tab <ref>` still work in that state, so an agent can recover by binding a new tab
 - Tabs opened by other sessions or the user never steal the pinned session's active tab
+- Another session cannot take a pinned tab with `tab <ref>` while the pinning session is running; the switch fails with `tab_locked` naming the owner
 
-The flag is sticky per session: pass it once and later commands and daemon restarts keep the strict semantics. Pass `--no-pin-tab` to explicitly turn the pin off again. See [Sessions](/sessions) for the multi-session workflow and [Commands](/commands) for tab refs by CDP target id.
+The flag is sticky per session: pass it once and later commands keep the strict semantics. Daemon restarts keep the pin; an explicit close releases it so other sessions can take the tab, and the next pinned command pins again. Pass `--no-pin-tab` to explicitly turn the pin off again. See [Sessions](/sessions) for the multi-session workflow and [Commands](/commands) for tab refs by CDP target id.
 
 The structured <code>lastUrl</code> is emitted only for sanitized HTTP(S) URLs and <code>about:blank</code>. Credentials, query strings, and fragments are removed from HTTP(S) URLs, while opaque URLs such as <code>data:</code> are omitted. Batch JSON exposes the recovery object under <code>result</code>.
 
@@ -125,7 +130,7 @@ This enables control of:
     <tr><td><code>-p &lt;provider&gt;</code></td><td>Browser provider (<code>browserbase</code>, <code>browseruse</code>, <code>kernel</code>, <code>browserless</code>, <code>agentcore</code>, or a configured <code>browser.provider</code> plugin)</td></tr>
     <tr><td><code>--headers &lt;json&gt;</code></td><td>HTTP headers scoped to origin</td></tr>
     <tr><td><code>--executable-path</code></td><td>Custom browser executable</td></tr>
-    <tr><td><code>--args &lt;args&gt;</code></td><td>Browser launch args (comma-separated)</td></tr>
+    <tr><td><code>--args &lt;args&gt;</code></td><td>Browser launch args. Commas inside a value are kept.</td></tr>
     <tr><td><code>--user-agent &lt;ua&gt;</code></td><td>Custom User-Agent string</td></tr>
     <tr><td><code>--proxy &lt;url&gt;</code></td><td>Proxy server URL</td></tr>
     <tr><td><code>--proxy-bypass &lt;hosts&gt;</code></td><td>Hosts to bypass proxy</td></tr>

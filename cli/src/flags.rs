@@ -9,8 +9,42 @@ const CONFIG_DIR: &str = ".agent-browser";
 const CONFIG_FILENAME: &str = "config.json";
 const PROJECT_CONFIG_FILENAME: &str = "agent-browser.json";
 
-/// Parse idle timeout from user-friendly format.
-/// Supports: "10s" (seconds), "3m" (minutes), "1h" (hours), or raw milliseconds.
+/// Split `--args` into launch args. Newlines always separate args; commas separate
+/// only before another `--` flag, so values like `--disable-features=A,B` and
+/// `--window-position=-32000,-32000` stay whole.
+pub fn split_launch_args(input: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let ends_arg = match ch {
+            '\n' | '\r' => true,
+            ',' => {
+                let mut rest = chars.clone().skip_while(|c| *c == ' ' || *c == '\t');
+                rest.next() == Some('-') && rest.next() == Some('-')
+            }
+            _ => false,
+        };
+        if ends_arg {
+            push_launch_arg(&mut args, &mut current);
+        } else {
+            current.push(ch);
+        }
+    }
+    push_launch_arg(&mut args, &mut current);
+    args
+}
+
+fn push_launch_arg(args: &mut Vec<String>, current: &mut String) {
+    let arg = current.trim_matches(|c: char| c == ',' || c.is_whitespace());
+    if !arg.is_empty() {
+        args.push(arg.to_string());
+    }
+    current.clear();
+}
+
+/// Parse idle timeout from user-friendly format, returning an error on conversion overflow.
+/// Supports "10s" (seconds), "3m" (minutes), "1h" (hours), or raw milliseconds.
 fn parse_idle_timeout(s: &str) -> Result<String, String> {
     let s = s.trim();
     if s.is_empty() {
@@ -22,12 +56,15 @@ fn parse_idle_timeout(s: &str) -> Result<String, String> {
         let (num_str, unit) = s.split_at(s.len() - 1);
         let num: u64 = num_str.parse().map_err(|_| "Invalid number")?;
 
-        let ms = match unit {
-            "s" => num * 1000,
-            "m" => num * 60 * 1000,
-            "h" => num * 60 * 60 * 1000,
+        let multiplier: u64 = match unit {
+            "s" => 1000,
+            "m" => 60 * 1000,
+            "h" => 60 * 60 * 1000,
             _ => return Err("Invalid idle timeout unit (use s, m, h, or raw ms)".to_string()),
         };
+        let ms = num
+            .checked_mul(multiplier)
+            .ok_or("Idle timeout too large")?;
         return Ok(ms.to_string());
     }
 
@@ -49,6 +86,22 @@ fn parse_idle_timeout_value(value: Option<String>, source: &str) -> Option<Strin
             None
         }
     })
+}
+
+/// Parse max-output with usize's existing syntax and warn when the value is invalid.
+fn parse_max_output_value(value: &str, source: &str) -> Option<usize> {
+    match value.parse::<usize>() {
+        Ok(limit) => Some(limit),
+        Err(_) => {
+            eprintln!(
+                "{} Invalid {} value: {}",
+                color::warning_indicator(),
+                source,
+                value
+            );
+            None
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -331,6 +384,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
     None
 }
 
+/// Load merged configuration; the auto-discovered project file cannot set executablePath, args or plugins.
 pub fn load_config(args: &[String]) -> Result<Config, String> {
     let explicit = extract_config_path(args)
         .map(|p| ("--config", p))
@@ -358,9 +412,34 @@ pub fn load_config(args: &[String]) -> Result<Config, String> {
     let project_config = read_config_file(&PathBuf::from(PROJECT_CONFIG_FILENAME));
 
     Ok(match project_config {
-        Some(project) => user_config.merge(project),
+        Some(project) => merge_project_config(user_config, project),
         None => user_config,
     })
+}
+
+fn merge_project_config(user: Config, mut project: Config) -> Config {
+    let mut ignored = Vec::new();
+    if project.executable_path.take().is_some() {
+        ignored.push("executablePath");
+    }
+    if project.args.take().is_some() {
+        ignored.push("args");
+    }
+    if project.plugins.take().is_some_and(|p| !p.is_empty()) {
+        ignored.push("plugins");
+    }
+    if !ignored.is_empty() {
+        eprintln!(
+            "{} ignoring {} from ./{} (a project file cannot set what runs programs). Set them in ~/{}/{}, env vars such as AGENT_BROWSER_ARGS, CLI flags, or trust the file with --config ./{}",
+            color::warning_indicator(),
+            ignored.join(", "),
+            PROJECT_CONFIG_FILENAME,
+            CONFIG_DIR,
+            CONFIG_FILENAME,
+            PROJECT_CONFIG_FILENAME
+        );
+    }
+    user.merge(project)
 }
 
 pub struct Flags {
@@ -622,7 +701,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             || config.content_boundaries.unwrap_or(false),
         max_output: env::var("AGENT_BROWSER_MAX_OUTPUT")
             .ok()
-            .and_then(|s| s.parse().ok())
+            .and_then(|value| parse_max_output_value(&value, "AGENT_BROWSER_MAX_OUTPUT"))
             .or(config.max_output),
         allowed_domains: env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
             .ok()
@@ -1024,7 +1103,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             }
             "--max-output" => {
                 if let Some(s) = args.get(i + 1) {
-                    if let Ok(n) = s.parse::<usize>() {
+                    if let Some(n) = parse_max_output_value(s, "--max-output") {
                         flags.max_output = Some(n);
                     }
                     i += 1;
@@ -1281,6 +1360,63 @@ mod tests {
     }
 
     #[test]
+    fn test_split_launch_args_splits_flags_on_commas() {
+        assert_eq!(
+            split_launch_args("--no-sandbox,--disable-gpu"),
+            vec!["--no-sandbox", "--disable-gpu"]
+        );
+    }
+
+    #[test]
+    fn test_split_launch_args_keeps_commas_inside_values() {
+        assert_eq!(
+            split_launch_args("--disable-features=HttpsUpgrades,HttpsFirstModeV2,Translate"),
+            vec!["--disable-features=HttpsUpgrades,HttpsFirstModeV2,Translate"]
+        );
+        assert_eq!(
+            split_launch_args("--window-size=1280,720,--no-sandbox"),
+            vec!["--window-size=1280,720", "--no-sandbox"]
+        );
+    }
+
+    #[test]
+    fn test_split_launch_args_keeps_negative_numbers_inside_values() {
+        assert_eq!(
+            split_launch_args("--window-position=-32000,-32000"),
+            vec!["--window-position=-32000,-32000"]
+        );
+        assert_eq!(
+            split_launch_args("--window-position=-30, -40,--no-sandbox"),
+            vec!["--window-position=-30, -40", "--no-sandbox"]
+        );
+    }
+
+    #[test]
+    fn test_split_launch_args_mixed_values_and_flags() {
+        assert_eq!(
+            split_launch_args("--disable-features=A,B,C, --no-sandbox"),
+            vec!["--disable-features=A,B,C", "--no-sandbox"]
+        );
+    }
+
+    #[test]
+    fn test_split_launch_args_newlines_always_split() {
+        assert_eq!(
+            split_launch_args("--disable-features=A,B\r\n--enable-features=C,D\nplain"),
+            vec!["--disable-features=A,B", "--enable-features=C,D", "plain"]
+        );
+    }
+
+    #[test]
+    fn test_split_launch_args_ignores_empty_and_trailing_separators() {
+        assert_eq!(
+            split_launch_args("  --no-sandbox  ,   --disable-gpu,  \n\n"),
+            vec!["--no-sandbox", "--disable-gpu"]
+        );
+        assert!(split_launch_args(" , \n").is_empty());
+    }
+
+    #[test]
     fn test_parse_headers_flag() {
         let flags = parse_flags(&args(r#"open example.com --headers {"Auth":"token"}"#));
         assert_eq!(flags.headers, Some(r#"{"Auth":"token"}"#.to_string()));
@@ -1304,6 +1440,19 @@ mod tests {
     #[test]
     fn test_parse_idle_timeout_hours() {
         assert_eq!(parse_idle_timeout("1h").unwrap(), "3600000");
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_rejects_overflow_and_accepts_boundary() {
+        assert!(parse_idle_timeout("2305843009213693957s").is_err());
+        assert!(parse_idle_timeout(&format!("{}m", u64::MAX)).is_err());
+        assert!(parse_idle_timeout("144115188075855872h").is_err());
+
+        let max_seconds = u64::MAX / 1000;
+        assert_eq!(
+            parse_idle_timeout(&format!("{}s", max_seconds)).unwrap(),
+            (max_seconds * 1000).to_string()
+        );
     }
 
     #[test]
@@ -1699,6 +1848,30 @@ mod tests {
         assert_eq!(merged.proxy.as_deref(), Some("http://project-proxy:9090")); // overridden by project
         assert_eq!(merged.profile.as_deref(), Some("/user/profile")); // kept from user
         assert_eq!(merged.debug, Some(true)); // added by project
+    }
+
+    #[test]
+    fn test_project_config_cannot_set_executable_path_args_or_plugins() {
+        let user = Config {
+            executable_path: Some("/user/chrome".to_string()),
+            ..Config::default()
+        };
+        let project = Config {
+            executable_path: Some("/project/chrome".to_string()),
+            args: Some("--no-sandbox".to_string()),
+            plugins: Some(vec![PluginConfig {
+                name: "captcha".to_string(),
+                command: "npx".to_string(),
+                ..PluginConfig::default()
+            }]),
+            headed: Some(true),
+            ..Config::default()
+        };
+        let merged = merge_project_config(user, project);
+        assert_eq!(merged.executable_path.as_deref(), Some("/user/chrome"));
+        assert!(merged.args.is_none());
+        assert!(merged.plugins.is_none());
+        assert_eq!(merged.headed, Some(true));
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use crate::session_files::{remove_daemon_files, SessionFile};
 use crate::validation::sanitize_session_component;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -17,7 +18,9 @@ use std::os::unix::net::UnixStream;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::CloseHandle;
 #[cfg(windows)]
-use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows_sys::Win32::System::Threading::{
+    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 pub(crate) const INTERNAL_DAEMON_SHUTDOWN_ACTION: &str = "__agent_browser_internal_shutdown";
 
@@ -142,43 +145,24 @@ pub fn get_socket_dir() -> PathBuf {
 
 #[cfg(unix)]
 fn get_socket_path(session: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.sock", session))
+    SessionFile::Socket.path(session)
 }
 
 fn get_pid_path(session: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.pid", session))
+    SessionFile::Pid.path(session)
 }
 
 fn get_version_path(session: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.version", session))
+    SessionFile::Version.path(session)
 }
 
 fn get_config_path(session: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.config", session))
+    SessionFile::Config.path(session)
 }
 
-/// Clean up stale socket and PID files for a session
+/// Clean up the stale daemon files of a session
 pub fn cleanup_stale_files(session: &str) {
-    let pid_path = get_pid_path(session);
-    let _ = fs::remove_file(&pid_path);
-    let version_path = get_version_path(session);
-    let _ = fs::remove_file(&version_path);
-    let config_path = get_config_path(session);
-    let _ = fs::remove_file(&config_path);
-    let stream_path = get_socket_dir().join(format!("{}.stream", session));
-    let _ = fs::remove_file(&stream_path);
-
-    #[cfg(unix)]
-    {
-        let socket_path = get_socket_path(session);
-        let _ = fs::remove_file(&socket_path);
-    }
-
-    #[cfg(windows)]
-    {
-        let port_path = get_port_path(session);
-        let _ = fs::remove_file(&port_path);
-    }
+    remove_daemon_files(&get_socket_dir(), session);
 }
 
 /// Returns whether a process with the given PID is currently alive.
@@ -196,14 +180,71 @@ pub fn is_pid_alive(pid: u32) -> bool {
     }
     #[cfg(windows)]
     unsafe {
+        // An exited process can still be opened while any handle to it is
+        // open, so check that it has not exited.
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle != 0 {
-            CloseHandle(handle);
-            true
-        } else {
-            false
+        if handle == 0 {
+            return false;
         }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code) != 0;
+        CloseHandle(handle);
+        ok && code == windows_sys::Win32::Foundation::STILL_ACTIVE as u32
     }
+}
+
+/// Returns true only when the process image name starts with "agent-browser" (case-insensitive), and false when it cannot be determined.
+/// Another agent-browser process that reuses the PID still passes.
+pub fn is_agent_browser_process(pid: u32) -> bool {
+    let path: Option<String>;
+    #[cfg(target_os = "linux")]
+    {
+        path = fs::read_link(format!("/proc/{}/exe", pid))
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut buf = vec![0u8; 4096];
+        let n =
+            unsafe { libc::proc_pidpath(pid as i32, buf.as_mut_ptr() as *mut libc::c_void, 4096) };
+        path = if n > 0 {
+            Some(String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+        } else {
+            None
+        };
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::QueryFullProcessImageNameW;
+        path = unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle == 0 {
+                None
+            } else {
+                let mut buf = [0u16; 1024];
+                let mut len = buf.len() as u32;
+                let ok = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut len);
+                CloseHandle(handle);
+                if ok != 0 {
+                    Some(String::from_utf16_lossy(&buf[..len as usize]))
+                } else {
+                    None
+                }
+            }
+        };
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = pid;
+        path = None;
+    }
+    path.and_then(|p| {
+        p.rsplit(['/', '\\'])
+            .next()
+            .map(|n| n.to_ascii_lowercase().starts_with("agent-browser"))
+    })
+    .unwrap_or(false)
 }
 
 /// A currently-running daemon session discovered by [`walk_daemons`].
@@ -253,7 +294,7 @@ pub struct DaemonInventory {
 
 /// Read the session's `.version` sidecar if present and non-empty.
 pub fn read_session_version(session: &str) -> Option<String> {
-    let path = get_socket_dir().join(format!("{}.version", session));
+    let path = SessionFile::Version.path(session);
     fs::read_to_string(&path)
         .ok()
         .map(|s| s.trim().to_string())
@@ -347,7 +388,7 @@ pub fn walk_daemons() -> DaemonInventory {
                 if session_name.is_empty() {
                     continue;
                 }
-                let pid_path = socket_dir.join(format!("{}.pid", session_name));
+                let pid_path = SessionFile::Pid.path_in(&socket_dir, session_name);
                 if !pid_path.exists() {
                     cleanup_stale_files(session_name);
                     inventory.cleaned.push(CleanedSession {
@@ -364,7 +405,7 @@ pub fn walk_daemons() -> DaemonInventory {
 
 #[cfg(windows)]
 fn get_port_path(session: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.port", session))
+    SessionFile::Port.path(session)
 }
 
 #[cfg(windows)]
@@ -390,15 +431,14 @@ pub fn get_port_for_session(session: &str) -> u16 {
 }
 
 /// Read the actual daemon port from the `.port` file written by the daemon.
-/// Falls back to the hash-derived port if the file does not exist or is
-/// unreadable (e.g. daemon has not started yet).
+/// There is no hash-derived fallback: the hash ignores the socket directory,
+/// so before this session's daemon writes its file that port can belong to
+/// another daemon with the same session name.
 #[cfg(windows)]
-pub fn resolve_port(session: &str) -> u16 {
-    let port_path = get_port_path(session);
-    fs::read_to_string(&port_path)
+pub fn resolve_port(session: &str) -> Option<u16> {
+    fs::read_to_string(get_port_path(session))
         .ok()
         .and_then(|s| s.trim().parse::<u16>().ok())
-        .unwrap_or_else(|| get_port_for_session(session))
 }
 
 pub fn daemon_ready(session: &str) -> bool {
@@ -409,12 +449,13 @@ pub fn daemon_ready(session: &str) -> bool {
     }
     #[cfg(windows)]
     {
-        let port = resolve_port(session);
-        TcpStream::connect_timeout(
-            &format!("127.0.0.1:{}", port).parse().unwrap(),
-            Duration::from_millis(50),
-        )
-        .is_ok()
+        resolve_port(session).is_some_and(|port| {
+            TcpStream::connect_timeout(
+                &format!("127.0.0.1:{}", port).parse().unwrap(),
+                Duration::from_millis(50),
+            )
+            .is_ok()
+        })
     }
 }
 
@@ -723,7 +764,12 @@ fn kill_stale_daemon(session: &str) {
 
     let pid_path = get_pid_path(session);
     if let Ok(pid_str) = fs::read_to_string(&pid_path) {
-        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+        if let Some(pid) = pid_str
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|p| is_agent_browser_process(*p))
+        {
             #[cfg(unix)]
             {
                 unsafe {
@@ -786,6 +832,22 @@ fn request_graceful_daemon_shutdown(session: &str) -> bool {
 fn stop_existing_daemon_for_restart(session: &str) {
     if !request_graceful_daemon_shutdown(session) {
         kill_stale_daemon(session);
+    }
+}
+
+/// Marks this process's stdout and stderr non-inheritable so a detached child cannot hold a reader's pipes open.
+#[cfg(windows)]
+pub(crate) fn prevent_stdio_handle_inheritance() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+
+    for handle in [
+        std::io::stdout().as_raw_handle(),
+        std::io::stderr().as_raw_handle(),
+    ] {
+        if !handle.is_null() {
+            unsafe { SetHandleInformation(handle as HANDLE, HANDLE_FLAG_INHERIT, 0) };
+        }
     }
 }
 
@@ -898,6 +960,8 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     {
         use std::os::windows::process::CommandExt;
 
+        prevent_stdio_handle_inheritance();
+
         let mut cmd = Command::new(&exe_path);
         cmd.env("AGENT_BROWSER_DAEMON", "1");
         apply_daemon_env(&mut cmd, session, opts);
@@ -983,12 +1047,12 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     }
 
     #[cfg(unix)]
-    let endpoint_info = format!(
-        "socket: {}",
-        get_socket_dir().join(format!("{}.sock", session)).display()
-    );
+    let endpoint_info = format!("socket: {}", SessionFile::Socket.path(session).display());
     #[cfg(windows)]
-    let endpoint_info = format!("port: 127.0.0.1:{}", resolve_port(session));
+    let endpoint_info = match resolve_port(session) {
+        Some(port) => format!("port: 127.0.0.1:{}", port),
+        None => format!("no port file in {}", get_socket_dir().display()),
+    };
 
     Err(format!("Daemon failed to start ({})", endpoint_info))
 }
@@ -1003,7 +1067,8 @@ fn connect(session: &str) -> Result<Connection, String> {
     }
     #[cfg(windows)]
     {
-        let port = resolve_port(session);
+        let port = resolve_port(session)
+            .ok_or_else(|| "Failed to connect: daemon has not written its port".to_string())?;
         TcpStream::connect(format!("127.0.0.1:{}", port))
             .map(Connection::Tcp)
             .map_err(|e| format!("Failed to connect: {}", e))
@@ -1211,6 +1276,18 @@ fn exchange<S: Read + Write>(mut stream: S, request: &[u8]) -> Result<Response, 
 mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
+
+    #[cfg(unix)]
+    #[test]
+    fn unrelated_process_is_not_agent_browser() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let unrelated = is_agent_browser_process(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(!unrelated);
+        assert!(!is_agent_browser_process(0));
+        assert!(!is_agent_browser_process(u32::MAX));
+    }
 
     /// Repro for #2032: a daemon that reads the request and closes without
     /// replying must see the request once.

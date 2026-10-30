@@ -9,13 +9,15 @@ This project uses **pnpm**. Always use `pnpm` instead of `npm` or `yarn` for ins
 ## Code Style
 
 - Do not use emojis in code, output, or documentation. Unicode symbols (✓, ✗, →, ⚠) are acceptable.
-- In documentation and markdown, never use double hyphens (`--`) as a dash. Use an emdash (—) sparingly when needed. Prefer rewriting the sentence to avoid dashes entirely.
+- In documentation and markdown, never use double hyphens (`--`) or em dashes as dashes. Rephrase the sentence instead.
 - CLI colored output uses `cli/src/color.rs`. This module respects the `NO_COLOR` environment variable. Never use hardcoded ANSI color codes.
 - CLI flags must always use kebab-case (e.g., `--auto-connect`, `--allow-file-access`). Never use camelCase for flags (e.g., `--autoConnect` is wrong).
 
 ## Documentation
 
 Do not hard-wrap prose in documentation files such as Markdown, MDX, and READMEs; let the editor or renderer wrap text naturally.
+
+Use the `technical-writer` skill (`.agents/skills/technical-writer/SKILL.md`) when you write or edit prose for this repo, including docs pages, READMEs, changelog entries, commit messages, PR descriptions, and issues.
 
 When adding or changing user-facing features (new flags, commands, behaviors, environment variables, etc.), update **all** of the following:
 

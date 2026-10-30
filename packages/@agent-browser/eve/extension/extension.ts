@@ -17,7 +17,7 @@ export default defineExtension({
     contentBoundaries: z.boolean().default(false),
     /** Download Chromium during auto-install. */
     installBrowser: z.boolean().default(true),
-    /** npm spec for auto-install, e.g. `agent-browser@0.31.2`. Defaults to the version matching this package. */
+    /** npm spec for auto-install, e.g. a tarball or mirror. Must install this package's agent-browser minor. Defaults to the matching version. */
     installSpec: z.string().optional(),
     /** Install Chromium system libraries during auto-install. */
     installSystemDependencies: z.boolean().default(true),

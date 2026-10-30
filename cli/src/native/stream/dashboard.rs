@@ -6,6 +6,7 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::connection::get_socket_dir;
+use crate::session_files::{owns_session, remove_daemon_files, SessionFile};
 
 use super::chat::{chat_status_json, handle_chat_request, handle_models_request};
 use super::discovery::discover_sessions;
@@ -949,7 +950,7 @@ async fn kill_session(body: &str) -> Result<String, String> {
     }
 
     let dir = get_socket_dir();
-    let pid_path = dir.join(format!("{}.pid", session));
+    let pid_path = SessionFile::Pid.path_in(&dir, session);
 
     let pid_str = std::fs::read_to_string(&pid_path)
         .map_err(|_| format!("No PID file for session '{}'", session))?;
@@ -975,8 +976,10 @@ async fn kill_session(body: &str) -> Result<String, String> {
         }
     }
 
-    for ext in &["pid", "sock", "stream", "engine", "extensions"] {
-        let _ = std::fs::remove_file(dir.join(format!("{}.{}", session, ext)));
+    // A daemon that exited on SIGTERM already cleaned up after itself; one
+    // that had to be killed left its files behind.
+    if owns_session(&dir, session, pid) {
+        remove_daemon_files(&dir, session);
     }
 
     Ok(json!({ "success": true, "killed_pid": pid }).to_string())

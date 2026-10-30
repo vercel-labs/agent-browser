@@ -328,6 +328,7 @@ fn parse_cookie_header(header: &str) -> Result<Vec<Value>, String> {
     Ok(out)
 }
 
+/// Parses command arguments into normalized command data.
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
     let mut result = parse_command_inner(args, flags)?;
 
@@ -1402,6 +1403,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         // === Cookies ===
         "cookies" => {
+            const COOKIES_SET_USAGE: &str = "cookies set <name> <value> [--url <url>] [--domain <domain>] [--path <path>] [--http-only] [--secure] [--same-site <Strict|Lax|None>] [--expires <timestamp>]\n  or:  cookies set --curl <file> [--domain <domain>] [--url <url>]";
             let op = rest.first().unwrap_or(&"get");
             match *op {
                 "set" => {
@@ -1454,11 +1456,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
                     let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                         context: "cookies set".to_string(),
-                        usage: "cookies set <name> <value> [--url <url>] [--domain <domain>] [--path <path>] [--httpOnly] [--secure] [--sameSite <Strict|Lax|None>] [--expires <timestamp>]\n  or:  cookies set --curl <file> [--domain <domain>] [--url <url>]",
+                        usage: COOKIES_SET_USAGE,
                     })?;
                     let value = rest.get(2).ok_or_else(|| ParseError::MissingArguments {
                         context: "cookies set".to_string(),
-                        usage: "cookies set <name> <value> [--url <url>] [--domain <domain>] [--path <path>] [--httpOnly] [--secure] [--sameSite <Strict|Lax|None>] [--expires <timestamp>]\n  or:  cookies set --curl <file> [--domain <domain>] [--url <url>]",
+                        usage: COOKIES_SET_USAGE,
                     })?;
 
                     let mut cookie = json!({ "name": name, "value": value });
@@ -1500,7 +1502,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                     });
                                 }
                             }
-                            "--httpOnly" => {
+                            "--http-only" | "--httpOnly" => {
                                 cookie["httpOnly"] = json!(true);
                                 i += 1;
                             }
@@ -1508,7 +1510,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                 cookie["secure"] = json!(true);
                                 i += 1;
                             }
-                            "--sameSite" => {
+                            "--same-site" | "--sameSite" => {
                                 if let Some(same_site) = rest.get(i + 1) {
                                     // Validate sameSite value
                                     if *same_site == "Strict"
@@ -1519,14 +1521,14 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                         i += 2;
                                     } else {
                                         return Err(ParseError::MissingArguments {
-                                            context: "cookies set --sameSite".to_string(),
-                                            usage: "--sameSite <Strict|Lax|None>",
+                                            context: "cookies set --same-site".to_string(),
+                                            usage: "--same-site <Strict|Lax|None>",
                                         });
                                     }
                                 } else {
                                     return Err(ParseError::MissingArguments {
-                                        context: "cookies set --sameSite".to_string(),
-                                        usage: "--sameSite <Strict|Lax|None>",
+                                        context: "cookies set --same-site".to_string(),
+                                        usage: "--same-site <Strict|Lax|None>",
                                     });
                                 }
                             }
@@ -1548,9 +1550,16 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                                     });
                                 }
                             }
-                            _ => {
-                                // Unknown flag, skip it (or could error)
-                                i += 1;
+                            other => {
+                                let message = if other.starts_with("--") {
+                                    format!("cookies set: unknown flag '{}'", other)
+                                } else {
+                                    "cookies set: unexpected argument".to_string()
+                                };
+                                return Err(ParseError::InvalidValue {
+                                    message,
+                                    usage: COOKIES_SET_USAGE,
+                                });
                             }
                         }
                     }
@@ -1967,8 +1976,14 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         // === Batch ===
         "batch" => {
             let bail = rest.contains(&"--bail");
-            let commands: Vec<&str> = rest.iter().filter(|a| **a != "--bail").copied().collect();
-            let mut cmd = json!({ "id": id, "action": "batch", "bail": bail });
+            let omit_command = rest.contains(&"--omit-command");
+            let commands: Vec<&str> = rest
+                .iter()
+                .filter(|a| **a != "--bail" && **a != "--omit-command")
+                .copied()
+                .collect();
+            let mut cmd =
+                json!({ "id": id, "action": "batch", "bail": bail, "omitCommand": omit_command });
             if !commands.is_empty() {
                 cmd["commands"] = json!(commands);
             }
@@ -3383,7 +3398,7 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         Some("route") => {
             let url = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
                 context: "network route".to_string(),
-                usage: "network route <url> [--abort|--body <json>] [--resource-type <csv>]",
+                usage: "network route <url> [--abort|--body <json> [--allow-origin <origin>]] [--resource-type <csv>]",
             })?;
             let abort = rest.contains(&"--abort");
             let body_idx = rest.iter().position(|&s| s == "--body");
@@ -3392,9 +3407,22 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 .iter()
                 .position(|&s| s == "--resource-type" || s == "--resource-types");
             let resource_type = rt_idx.and_then(|i| rest.get(i + 1).copied());
+            let allow_origin = rest
+                .iter()
+                .position(|&s| s == "--allow-origin")
+                .and_then(|i| rest.get(i + 1).copied());
+            if allow_origin.is_some() && body.is_none() {
+                return Err(ParseError::MissingArguments {
+                    context: "network route --allow-origin".to_string(),
+                    usage: "network route <url> --body <json> --allow-origin <origin>",
+                });
+            }
             let mut cmd = json!({ "id": id, "action": "route", "url": url, "abort": abort });
             if let Some(body) = body {
                 cmd["response"] = json!({ "body": body });
+                if let Some(origin) = allow_origin {
+                    cmd["response"]["allowOrigin"] = json!(origin);
+                }
             }
             if let Some(rt) = resource_type {
                 cmd["resourceType"] = json!(rt);
@@ -3953,6 +3981,21 @@ mod tests {
     }
 
     #[test]
+    fn test_network_route_allow_origin_needs_body() {
+        let cmd = parse_command(
+            &args("network route https://api.example.com/* --body {} --allow-origin https://www.example.com"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["response"]["allowOrigin"], "https://www.example.com");
+        assert!(parse_command(
+            &args("network route https://api.example.com/* --allow-origin https://www.example.com"),
+            &default_flags(),
+        )
+        .is_err());
+    }
+
+    #[test]
     fn test_cookies_set_with_url() {
         let cmd = parse_command(
             &args("cookies set mycookie myvalue --url https://example.com"),
@@ -4077,6 +4120,40 @@ mod tests {
             &default_flags(),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cookies_set_aliases_and_rejects_unknown_arguments() {
+        let kebab = parse_command(
+            &args("cookies set session value --http-only --same-site Strict"),
+            &default_flags(),
+        )
+        .unwrap();
+        let camel = parse_command(
+            &args("cookies set session value --httpOnly --sameSite Strict"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(kebab["cookies"], camel["cookies"]);
+        assert_eq!(kebab["cookies"][0]["httpOnly"], true);
+        assert_eq!(kebab["cookies"][0]["sameSite"], "Strict");
+
+        let unknown_flag = parse_command(
+            &args("cookies set session value --unknown-cookie-flag"),
+            &default_flags(),
+        )
+        .unwrap_err()
+        .format();
+        assert!(unknown_flag.contains("--unknown-cookie-flag"));
+
+        let unexpected = parse_command(
+            &args("cookies set session value private-cookie-value"),
+            &default_flags(),
+        )
+        .unwrap_err()
+        .format();
+        assert!(unexpected.contains("unexpected argument"));
+        assert!(!unexpected.contains("private-cookie-value"));
     }
 
     // === Storage Tests ===

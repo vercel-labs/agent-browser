@@ -11,6 +11,7 @@ mod native;
 mod output;
 mod plugins;
 mod read;
+mod session_files;
 mod skills;
 #[cfg(test)]
 mod test_utils;
@@ -34,10 +35,10 @@ use windows_sys::Win32::System::Threading::OpenProcess;
 
 use commands::{attach_ca_cert_to_launch_command, gen_id, parse_command, ParseError};
 use connection::{
-    cleanup_stale_files, daemon_unreachable, ensure_daemon, get_socket_dir, is_pid_alive,
-    send_command, walk_daemons, DaemonOptions, Response,
+    cleanup_stale_files, daemon_unreachable, ensure_daemon, get_socket_dir,
+    is_agent_browser_process, is_pid_alive, send_command, walk_daemons, DaemonOptions, Response,
 };
-use flags::{clean_args, parse_flags, Flags};
+use flags::{clean_args, parse_flags, split_launch_args, Flags};
 use install::run_install;
 use output::{
     print_command_help, print_help, print_response_with_opts, print_version, OutputOptions,
@@ -1160,6 +1161,7 @@ fn run_dashboard_start(port: u16, allowed_origins: Vec<String>, json_mode: bool)
         use std::os::windows::process::CommandExt;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
         const DETACHED_PROCESS: u32 = 0x00000008;
+        connection::prevent_stdio_handle_inheritance();
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
     }
 
@@ -1269,6 +1271,18 @@ fn run_dashboard_stop(json_mode: bool) {
         }
     };
 
+    if !is_agent_browser_process(pid) {
+        remove_dashboard_sidecars();
+        if json_mode {
+            print_json_value(
+                json!({ "success": true, "data": { "stopped": false, "reason": "not running" } }),
+            );
+        } else {
+            println!("Dashboard is not running");
+        }
+        return;
+    }
+
     #[cfg(unix)]
     {
         unsafe {
@@ -1345,16 +1359,18 @@ fn run_close_all(flags: &Flags) {
                 // Daemon is unreachable despite its process existing.
                 // Force-kill the process and clean up stale files so future
                 // sessions are not poisoned.
-                #[cfg(unix)]
-                unsafe {
-                    libc::kill(*pid as i32, libc::SIGKILL);
-                }
-                #[cfg(windows)]
-                unsafe {
-                    let handle = OpenProcess(1, 0, *pid); // PROCESS_TERMINATE = 1
-                    if handle != 0 {
-                        windows_sys::Win32::System::Threading::TerminateProcess(handle, 1);
-                        CloseHandle(handle);
+                if is_agent_browser_process(*pid) {
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::kill(*pid as i32, libc::SIGKILL);
+                    }
+                    #[cfg(windows)]
+                    unsafe {
+                        let handle = OpenProcess(1, 0, *pid); // PROCESS_TERMINATE = 1
+                        if handle != 0 {
+                            windows_sys::Win32::System::Threading::TerminateProcess(handle, 1);
+                            CloseHandle(handle);
+                        }
                     }
                 }
                 cleanup_stale_files(session);
@@ -1566,6 +1582,9 @@ fn main() {
     // Handle MCP stdio server mode. This must never share stdout with normal
     // CLI output because stdout is reserved for JSON-RPC protocol messages.
     if clean.first().map(|s| s.as_str()) == Some("mcp") {
+        if clean.get(1).map(|s| s.as_str()) == Some("call") {
+            exit(mcp::run_mcp_call(&clean[2..]));
+        }
         if let Err(err) = mcp::run_mcp(&clean[1..]) {
             eprintln!("{} {}", color::error_indicator(), err);
             exit(1);
@@ -2056,13 +2075,7 @@ fn main() {
         }
 
         if let Some(ref a) = flags.args {
-            // Parse args (comma or newline separated)
-            let args_vec: Vec<String> = a
-                .split(&[',', '\n'][..])
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            cmd_obj.insert("args".to_string(), json!(args_vec));
+            cmd_obj.insert("args".to_string(), json!(split_launch_args(a)));
         }
 
         if !flags.extensions.is_empty() {
@@ -2152,6 +2165,10 @@ fn main() {
     // Handle batch command: from args or stdin
     if cmd.get("action").and_then(|v| v.as_str()) == Some("batch") {
         let bail = cmd.get("bail").and_then(|v| v.as_bool()).unwrap_or(false);
+        let omit_command = cmd
+            .get("omitCommand")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let arg_commands = cmd
             .get("commands")
             .and_then(|v| v.as_array())
@@ -2162,7 +2179,7 @@ fn main() {
                     .collect::<Vec<Vec<String>>>()
             })
             .or_else(|| serde_json::from_value(cmd.get("argv")?.clone()).ok());
-        run_batch(&flags, &daemon_opts, bail, arg_commands);
+        run_batch(&flags, &daemon_opts, bail, omit_command, arg_commands);
         return;
     }
 
@@ -2255,10 +2272,12 @@ fn read_batch_stdin(flags: &Flags) -> Vec<Vec<String>> {
     }
 }
 
+/// Runs a batch, optionally omitting command arrays without redacting errors or response data.
 fn run_batch(
     flags: &Flags,
     daemon_opts: &DaemonOptions,
     bail: bool,
+    omit_command: bool,
     arg_commands: Option<Vec<Vec<String>>>,
 ) {
     let commands: Vec<Vec<String>> = arg_commands.unwrap_or_else(|| read_batch_stdin(flags));
@@ -2285,11 +2304,10 @@ fn run_batch(
             Err(e) => {
                 had_error = true;
                 if flags.json {
-                    results.push(json!({
-                        "command": cmd_args,
-                        "success": false,
-                        "error": e.format(),
-                    }));
+                    let mut result = batch_result_identity(i, cmd_args, omit_command);
+                    result["success"] = json!(false);
+                    result["error"] = json!(e.format());
+                    results.push(result);
                     if bail {
                         break;
                     }
@@ -2326,12 +2344,10 @@ fn run_batch(
         match send_command_with_respawn(parsed, &flags.session, daemon_opts) {
             Ok(resp) => {
                 if flags.json {
-                    let mut result = json!({
-                        "command": cmd_args,
-                        "success": resp.success,
-                        "result": resp.data,
-                        "error": resp.error,
-                    });
+                    let mut result = batch_result_identity(i, cmd_args, omit_command);
+                    result["success"] = json!(resp.success);
+                    result["result"] = json!(resp.data);
+                    result["error"] = json!(resp.error);
                     // Match the single-command `Response` serialization,
                     // which only emits `code` when set (e.g. `tab_gone`).
                     // Without this, machine-readable error codes are
@@ -2364,11 +2380,10 @@ fn run_batch(
             Err(e) => {
                 had_error = true;
                 if flags.json {
-                    results.push(json!({
-                        "command": cmd_args,
-                        "success": false,
-                        "error": e.to_string(),
-                    }));
+                    let mut result = batch_result_identity(i, cmd_args, omit_command);
+                    result["success"] = json!(false);
+                    result["error"] = json!(e.to_string());
+                    results.push(result);
                     if bail {
                         break;
                     }
@@ -2391,6 +2406,18 @@ fn run_batch(
 
     if had_error {
         exit(1);
+    }
+}
+
+fn batch_result_identity(
+    index: usize,
+    command: &[String],
+    omit_command: bool,
+) -> serde_json::Value {
+    if omit_command {
+        json!({ "index": index })
+    } else {
+        json!({ "command": command })
     }
 }
 
