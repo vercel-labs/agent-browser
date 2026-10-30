@@ -2564,36 +2564,28 @@ fn call_cli_tool(
 ) -> Result<Value, ProtocolError> {
     validate_arguments_object(arguments)?;
     let session = optional_string(arguments, "session")?;
-    if let Some(session) = session.as_deref() {
-        if !crate::validation::is_valid_session_name(session) {
+    let timeout_ms = optional_timeout(arguments)?;
+    let uses_session = !matches!(
+        command_args.first().map(String::as_str),
+        Some(
+            "install"
+                | "upgrade"
+                | "doctor"
+                | "dashboard"
+                | "profiles"
+                | "skills"
+                | "plugin"
+                | "plugins"
+        )
+    );
+    let cli_args = cli_tool_args(arguments, command_args, session.as_deref())?;
+    if uses_session {
+        let flags = crate::flags::parse_flags(&cli_args);
+        if !crate::validation::is_valid_session_name(&flags.session) {
             return Err(ProtocolError::invalid_params(
-                crate::validation::session_name_error(session),
+                crate::validation::session_name_error(&flags.session),
             ));
         }
-    }
-    let timeout_ms = optional_timeout(arguments)?;
-    let cli_args = cli_tool_args(arguments, command_args, session.as_deref())?;
-    let mut cli_session = None;
-    let mut args = cli_args.iter();
-    while let Some(arg) = args.next() {
-        if arg == "--session" {
-            if let Some(value) = args.next() {
-                cli_session = Some(value.clone());
-            }
-        }
-    }
-    let effective_session = cli_session
-        .or_else(|| env::var("AGENT_BROWSER_SESSION").ok())
-        .or_else(|| {
-            crate::flags::load_config(&cli_args)
-                .ok()
-                .and_then(|c| c.session)
-        })
-        .unwrap_or_else(|| "default".to_string());
-    if !crate::validation::is_valid_session_name(&effective_session) {
-        return Err(ProtocolError::invalid_params(
-            crate::validation::session_name_error(&effective_session),
-        ));
     }
 
     let run = run_cli(&cli_args, stdin_body, timeout_ms).map_err(|e| {

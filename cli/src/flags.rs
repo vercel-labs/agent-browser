@@ -447,6 +447,7 @@ pub struct Flags {
     pub headed: bool,
     pub debug: bool,
     pub session: String,
+    pub session_source: &'static str,
     pub restore: Option<String>,
     pub restore_save: Option<String>,
     pub restore_check_url: Option<String>,
@@ -613,14 +614,22 @@ pub fn parse_flags(args: &[String]) -> Flags {
         env_var_bool("AGENT_BROWSER_CLEAR_CA_CERT"),
     );
 
+    let session_env = env::var("AGENT_BROWSER_SESSION").ok();
+    let session_source = if session_env.is_some() {
+        "AGENT_BROWSER_SESSION"
+    } else if config.session.is_some() {
+        "config session"
+    } else {
+        "default"
+    };
     let mut flags = Flags {
         json: env_var_is_truthy("AGENT_BROWSER_JSON") || config.json.unwrap_or(false),
         headed: env_var_is_truthy("AGENT_BROWSER_HEADED") || config.headed.unwrap_or(false),
         debug: env_var_is_truthy("AGENT_BROWSER_DEBUG") || config.debug.unwrap_or(false),
-        session: env::var("AGENT_BROWSER_SESSION")
-            .ok()
+        session: session_env
             .or(config.session)
             .unwrap_or_else(|| "default".to_string()),
+        session_source,
         restore: env::var("AGENT_BROWSER_RESTORE").ok().or(config.restore),
         restore_save: env::var("AGENT_BROWSER_RESTORE_SAVE")
             .ok()
@@ -830,6 +839,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             "--session" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.session = s.clone();
+                    flags.session_source = "--session";
                     i += 1;
                 }
             }

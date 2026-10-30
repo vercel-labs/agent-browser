@@ -57,7 +57,7 @@ fn build_json_error_body(error: &str) -> String {
 
 fn validate_dashboard_session_name(session: &str) -> Result<(), String> {
     if session.is_empty() || session.len() > 64 {
-        return Err("Session name must be 1-64 characters".to_string());
+        return Err("Session name must be 1-64 UTF-8 bytes".to_string());
     }
     if !crate::validation::is_valid_session_name(session) {
         return Err(crate::validation::session_name_error(session));
@@ -1051,9 +1051,12 @@ mod tests {
             );
         }
 
+        assert!(validate_dashboard_session_name(&"é".repeat(32)).is_ok());
+        assert!(validate_dashboard_session_name(&"é".repeat(33)).is_err());
+
         assert_eq!(
             validate_dashboard_session_name(&"a".repeat(65)),
-            Err("Session name must be 1-64 characters".to_string())
+            Err("Session name must be 1-64 UTF-8 bytes".to_string())
         );
     }
 

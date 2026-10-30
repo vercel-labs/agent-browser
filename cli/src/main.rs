@@ -1452,15 +1452,6 @@ fn main() {
 
     let args: Vec<String> = env::args().skip(1).collect();
     let mut flags = parse_flags(&args);
-    if !validation::is_valid_session_name(&flags.session) {
-        let msg = validation::session_name_error(&flags.session);
-        if flags.json {
-            print_json_error_with_type(msg, "invalid_session_name");
-        } else {
-            eprintln!("{} {}", color::error_indicator(), msg);
-        }
-        exit(1);
-    }
     if flags.restore_uses_session {
         flags.restore = Some(flags.session.clone());
     }
@@ -1604,6 +1595,20 @@ fn main() {
             exit(1);
         }
         return;
+    }
+
+    if !validation::is_valid_session_name(&flags.session) {
+        let msg = format!(
+            "{} Source: {}.",
+            validation::session_name_error(&flags.session),
+            flags.session_source
+        );
+        if flags.json {
+            print_json_error_with_type(msg, "invalid_session_name");
+        } else {
+            eprintln!("{} {}", color::error_indicator(), msg);
+        }
+        exit(1);
     }
 
     // Handle session separately (doesn't need daemon)
