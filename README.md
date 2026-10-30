@@ -126,7 +126,7 @@ agent-browser fill <sel> <text>       # Clear and fill
 agent-browser press <key>             # Press key (Enter, Tab, Control+a) (alias: key)
 agent-browser keyboard type <text>    # Type with real keystrokes (no selector, current focus)
 agent-browser keyboard inserttext <text>  # Insert text without key events (no selector)
-agent-browser keydown <key>           # Hold key down
+agent-browser keydown <key>           # Hold key down (held modifiers apply to mouse commands)
 agent-browser keyup <key>             # Release key
 agent-browser hover <sel>             # Hover element
 agent-browser select <sel> <val>      # Select dropdown by value or visible label
