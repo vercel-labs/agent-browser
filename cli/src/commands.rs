@@ -729,7 +729,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 if !matches!(*raw, "visible" | "hidden" | "attached" | "detached") {
                     return Err(ParseError::InvalidValue {
                         message: format!(
-                            "--state expects visible, hidden, attached, or detached, got '{}'",
+                            "--state expects visible, hidden, attached, or detached, got '{}'. To load a state file, put --state <path> before wait.",
                             raw
                         ),
                         usage: "wait <selector> --state <visible|hidden|attached|detached>",
@@ -5092,10 +5092,15 @@ mod tests {
 
     #[test]
     fn test_wait_selector_state_rejects_unknown_value() {
-        assert!(matches!(
-            parse_command(&args("wait #spinner --state gone"), &default_flags()),
-            Err(ParseError::InvalidValue { .. })
-        ));
+        for state in ["gone", "/tmp/auth.json"] {
+            let error = parse_command(
+                &args(&format!("wait #spinner --state {state}")),
+                &default_flags(),
+            )
+            .unwrap_err();
+            assert!(matches!(error, ParseError::InvalidValue { .. }));
+            assert!(error.format().contains("put --state <path> before wait"));
+        }
     }
 
     #[test]

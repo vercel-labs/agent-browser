@@ -2992,6 +2992,15 @@ fn wait_selector_command_args(arguments: &Value) -> Result<Vec<String>, Protocol
     }
     let mut args = vec!["wait".to_string(), selector];
     if let Some(state) = optional_string(arguments, "state")? {
+        if !matches!(
+            state.as_str(),
+            "visible" | "hidden" | "attached" | "detached"
+        ) {
+            return Err(ProtocolError::invalid_params(format!(
+                "state expects visible, hidden, attached, or detached, got '{}'",
+                state
+            )));
+        }
         args.extend(["--state".to_string(), state]);
     }
     if let Some(timeout) = optional_u64(arguments, "waitTimeoutMs")? {
@@ -4622,6 +4631,25 @@ mod tests {
         assert!(names.contains(&TOOL_SESSION_INFO));
         assert!(!names.contains(&"agent_browser_frame_list"));
         assert!(names.iter().all(|name| name.starts_with("agent_browser_")));
+    }
+
+    #[test]
+    fn wait_for_selector_rejects_invalid_state_at_mcp_boundary() {
+        for state in ["gone", "/tmp/auth.json", "", "Visible"] {
+            let error = call_tool(
+                Some(&json!({
+                    "name": TOOL_WAIT_FOR_SELECTOR,
+                    "arguments": { "selector": "#spinner", "state": state }
+                })),
+                &McpConfig::all(),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, -32602);
+            assert!(error
+                .message
+                .contains("state expects visible, hidden, attached, or detached"));
+            assert!(error.message.contains(&format!("got '{}'", state)));
+        }
     }
 
     #[test]
