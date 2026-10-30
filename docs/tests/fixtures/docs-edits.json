@@ -20,6 +20,10 @@
       {
         "from": "--cdp <port|url>         # Connect via CDP; root WebSocket query slash is optional\n--auto-connect",
         "to": "--cdp <port|url>         # Connect via CDP; root WebSocket query slash is optional\n--cdp-headers <json>     # Headers for --cdp discovery and WebSocket handshake (or AGENT_BROWSER_CDP_HEADERS env)\n--auto-connect"
+      },
+      {
+        "from": "agent-browser network route <url> --body <json>  # Mock response",
+        "to": "agent-browser network route <url> --body <json>  # Mock response\nagent-browser network route <url> --body <json> --allow-origin <origin>  # Mock readable cross-origin"
       }
     ],
     "/configuration": [
@@ -101,9 +105,22 @@
         "from": "MCP tools use the same provider through extraArgs: [\"--engine\", \"obscura\", \"--executable-path\", \"/path/to/obscura\"].",
         "to": "MCP tools use the same provider: set AGENT_BROWSER_EXECUTABLE_PATH in the MCP server's environment and pass extraArgs: [\"--engine\", \"obscura\"], because --executable-path is rejected in extraArgs."
       }
+    ],
+    "/eve": [
+      {
+        "from": "The agent gets namespaced tools such as `browser__navigate`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, `browser__screenshot`, `browser__console`, and `browser__network_requests`.",
+        "to": "The agent gets namespaced tools such as `browser__open`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, `browser__screenshot`, `browser__console`, and `browser__network_requests`."
+      },
+      {
+        "from": "The agent gets namespaced tools such as browser__navigate, browser__snapshot, browser__click, browser__fill, browser__find, browser__screenshot, browser__console, and browser__network_requests.",
+        "to": "The agent gets namespaced tools such as browser__open, browser__snapshot, browser__click, browser__fill, browser__find, browser__screenshot, browser__console, and browser__network_requests."
+      }
     ]
   },
   "resources": {
-    "/schema.json": { "size": 9427, "sha256": "eecb6f5aa3f6c7f0a4f0fb1176923c5b7d005065fea101ff90394c2845b97468" }
+    "/schema.json": {
+      "size": 9427,
+      "sha256": "eecb6f5aa3f6c7f0a4f0fb1176923c5b7d005065fea101ff90394c2845b97468"
+    }
   }
 }

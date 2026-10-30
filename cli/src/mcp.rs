@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -506,6 +506,76 @@ const MOBILE_PROFILE_TOOLS: &[&str] = &[
     TOOL_DEVICE,
 ];
 
+/// Run one MCP tool call without the stdio session, print its `tools/call`
+/// result as JSON, and return the process exit code: 0 on success, 1 when the
+/// tool reports an error, 2 when the call itself is invalid.
+pub fn run_mcp_call(args: &[String]) -> i32 {
+    let mut stdout = io::stdout();
+    let output = match parse_mcp_call(args) {
+        Ok((name, arguments, config)) => {
+            match call_tool(
+                Some(&json!({ "name": name, "arguments": arguments })),
+                &config,
+            ) {
+                Ok(mut result) => {
+                    result["_meta"] = json!({ "agentBrowserVersion": env!("CARGO_PKG_VERSION") });
+                    Ok(result)
+                }
+                Err(err) => Err((err.code, err.message)),
+            }
+        }
+        Err(message) => Err((-32602, message)),
+    };
+    let (value, code) = match output {
+        Ok(result) => {
+            let failed = result["isError"].as_bool().unwrap_or(false);
+            (result, if failed { 1 } else { 0 })
+        }
+        Err((code, message)) => (
+            json!({
+                "error": { "code": code, "message": message },
+                "_meta": { "agentBrowserVersion": env!("CARGO_PKG_VERSION") },
+            }),
+            2,
+        ),
+    };
+    if write_json_line(&mut stdout, &value).is_err() {
+        return 2;
+    }
+    code
+}
+
+fn parse_mcp_call(args: &[String]) -> Result<(String, Value, McpConfig), String> {
+    const USAGE: &str =
+        "Usage: agent-browser mcp call <tool> [<arguments-json> | -] [--tools <profiles>]";
+    let Some(name) = args.first().filter(|name| !name.starts_with('-')) else {
+        return Err(format!("Missing tool name\n{}", USAGE));
+    };
+    let (raw, rest) = match args.get(1) {
+        Some(value) if value == "-" => {
+            let mut input = String::new();
+            io::stdin()
+                .read_to_string(&mut input)
+                .map_err(|e| format!("Failed to read arguments from stdin: {}", e))?;
+            (Some(input), &args[2..])
+        }
+        Some(value) if !value.starts_with("--") => (Some(value.clone()), &args[2..]),
+        _ => (None, &args[1..]),
+    };
+    let arguments = match raw {
+        Some(raw) => serde_json::from_str(&raw)
+            .map_err(|e| format!("Tool arguments must be a JSON object: {}", e))?,
+        None => json!({}),
+    };
+    // Profiles only bound the size of `tools/list`, which a single call never sends.
+    let config = if rest.is_empty() {
+        McpConfig::from_profiles(vec![ToolProfile::All])
+    } else {
+        parse_mcp_config(rest)?
+    };
+    Ok((name.clone(), arguments, config))
+}
+
 /// Run the MCP stdio server until stdin closes or a `shutdown` request is
 /// received.
 pub fn run_mcp(args: &[String]) -> Result<(), String> {
@@ -771,7 +841,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_OPEN,
             "Open page",
-            "Launch the browser and optionally navigate to a URL. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools.",
+            "Launch the browser and optionally navigate to a URL. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
             json!({
                 "url": { "type": "string", "description": "URL to open. Omit to launch about:blank." },
                 "headed": { "type": "boolean", "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults." },
@@ -923,7 +993,13 @@ fn tools() -> Vec<Value> {
         ),
         tool(TOOL_SCROLL_INTO_VIEW, "Scroll into view", "Scroll an element into view.", json!({ "selector": selector_schema() }), &["selector"]),
         tool(TOOL_WAIT_MS, "Wait milliseconds", "Wait for a fixed time.", json!({ "ms": { "type": "integer", "minimum": 0 } }), &["ms"]),
-        wait_tool(TOOL_WAIT_FOR_SELECTOR, "Wait for selector", "Wait for an element to appear.", json!({ "selector": selector_schema() }), &["selector"]),
+        wait_tool(
+            TOOL_WAIT_FOR_SELECTOR,
+            "Wait for selector",
+            "Wait for an element with a CSS selector or @ref. Bare integers are rejected because they are treated as millisecond waits; use CSS selector syntax for numeric IDs.",
+            json!({ "selector": selector_schema() }),
+            &["selector"],
+        ),
         wait_tool(TOOL_WAIT_FOR_TEXT, "Wait for text", "Wait for text to appear.", json!({ "text": { "type": "string" } }), &["text"]),
         wait_tool(TOOL_WAIT_FOR_URL, "Wait for URL", "Wait for the current URL to match a pattern.", json!({ "url": { "type": "string", "description": "URL glob or pattern." } }), &["url"]),
         wait_tool(TOOL_WAIT_FOR_LOAD, "Wait for load state", "Wait for a page load state.", json!({ "state": { "type": "string", "enum": ["load", "domcontentloaded", "networkidle"] } }), &["state"]),
@@ -1201,7 +1277,7 @@ fn parity_tools() -> Vec<Value> {
             TOOL_NETWORK_ROUTE,
             "Network route",
             "Route matching requests.",
-            json!({ "url": { "type": "string" }, "abort": { "type": "boolean" }, "body": { "type": "string" }, "resourceType": { "type": "string", "description": "Comma-separated resource types." } }),
+            json!({ "url": { "type": "string" }, "abort": { "type": "boolean" }, "body": { "type": "string" }, "allowOrigin": { "type": "string", "description": "Origin allowed to read the mocked body cross-origin." }, "resourceType": { "type": "string", "description": "Comma-separated resource types." } }),
             &["url"],
         ),
         tool(
@@ -1441,7 +1517,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_ERRORS,
             "Page errors",
-            "Read page errors.",
+            "Read captured page errors. Set `clear` to delete the captured error log.",
             json!({ "clear": { "type": "boolean" } }),
             &[],
         ),
@@ -1505,7 +1581,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_AUTH_LOGIN,
             "Auth login",
-            "Log in with a saved auth profile. Control selection checks layout size, computed visibility and opacity, and disabled/readonly state. Replaced or focus-redirected credential fields fail without submitting.",
+            "Log in with a saved auth profile. Control selection checks layout size, computed visibility and opacity, and disabled/readonly state. Replaced or focus-redirected credential fields fail without submitting. Credential-provider errors omit response error text and unsupported protocol values.",
             json!({
                 "name": { "type": "string" },
                 "noNavigate": {
@@ -2042,7 +2118,7 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         "idleTimeout".to_string(),
         json!({
             "type": "string",
-            "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Defaults to 1h; 0 disables idle shutdown."
+            "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Values too large to convert to milliseconds produce a warning and are ignored. Defaults to 1h; 0 disables idle shutdown."
         }),
     );
     props.insert(
@@ -2531,27 +2607,50 @@ const MCP_EXTRA_ARGS_GLOBALS: &[&str] = &[
     "--screenshot-format",
 ];
 
+/// Global flags that tools set from their own typed arguments (screenshot's
+/// screenshotDir, doctor's fix, chat's model).
+const MCP_TOOL_GLOBALS: &[&str] = &["--screenshot-dir", "--fix", "--model"];
+
 fn cli_tool_args(
     arguments: &Value,
     command_args: Vec<String>,
     session: Option<&str>,
 ) -> Result<Vec<String>, ProtocolError> {
     let extra_args = optional_string_array(arguments, "extraArgs")?.unwrap_or_default();
-    for token in &extra_args {
-        let name = token.split('=').next().unwrap_or(token);
-        let global = crate::flags::clean_args(&[name.to_string()]).is_empty();
-        if global && !MCP_EXTRA_ARGS_GLOBALS.contains(&name) {
+    let mut args = vec!["--json".to_string()];
+    append_common_global_args(&mut args, arguments, session)?;
+    // The CLI reads global flags anywhere in argv, so a tool argument such as
+    // a selector could otherwise carry its own --allowed-domains or --session.
+    let trusted: Vec<&str> = args.iter().map(|a| global_flag_name(a)).collect();
+    let tokens = command_args
+        .iter()
+        .map(|t| (t, MCP_TOOL_GLOBALS))
+        .chain(extra_args.iter().map(|t| (t, &[][..])));
+    for (token, tool_globals) in tokens {
+        let name = global_flag_name(token);
+        if !crate::flags::clean_args(&[name.to_string()]).is_empty() {
+            continue;
+        }
+        if !MCP_EXTRA_ARGS_GLOBALS.contains(&name) && !tool_globals.contains(&name) {
             return Err(ProtocolError::invalid_params(format!(
-                "extraArgs may not set {}; configure it in the MCP server's environment or config",
+                "Tool arguments may not set {}; configure it in the MCP server's environment or config",
+                name
+            )));
+        }
+        if name != "--json" && trusted.contains(&name) {
+            return Err(ProtocolError::invalid_params(format!(
+                "Tool arguments may not set {}; it is already set for this call",
                 name
             )));
         }
     }
-    let mut args = vec!["--json".to_string()];
-    append_common_global_args(&mut args, arguments, session)?;
     args.extend(command_args);
     args.extend(extra_args);
     Ok(args)
+}
+
+fn global_flag_name(token: &str) -> &str {
+    token.split('=').next().unwrap_or(token)
 }
 
 fn command_parts(command: &str) -> Vec<String> {
@@ -2862,6 +2961,11 @@ fn call_wait_flag(
     value_key: &str,
 ) -> Result<Value, ProtocolError> {
     let value = required_string(arguments, value_key)?;
+    if flag.is_none() && value.parse::<u64>().is_ok() {
+        return Err(ProtocolError::invalid_params(
+            "A bare integer selector is treated as a millisecond wait. Use CSS selector syntax for numeric IDs or agent_browser_wait_ms for a delay.",
+        ));
+    }
     let mut args = vec!["wait".to_string()];
     if let Some(flag) = flag {
         args.push(flag.to_string());
@@ -3137,6 +3241,10 @@ fn call_network_route(arguments: &Value) -> Result<Value, ProtocolError> {
         args.push("--body".to_string());
         args.push(body);
     }
+    if let Some(origin) = optional_string(arguments, "allowOrigin")? {
+        args.push("--allow-origin".to_string());
+        args.push(origin);
+    }
     if let Some(resource_type) = optional_string(arguments, "resourceType")? {
         args.push("--resource-type".to_string());
         args.push(resource_type);
@@ -3206,7 +3314,7 @@ fn call_cookies_set(arguments: &Value) -> Result<Value, ProtocolError> {
         ("url", "--url"),
         ("domain", "--domain"),
         ("path", "--path"),
-        ("sameSite", "--sameSite"),
+        ("sameSite", "--same-site"),
     ] {
         if let Some(value) = optional_string(arguments, key)? {
             args.push(flag.to_string());
@@ -3218,7 +3326,7 @@ fn call_cookies_set(arguments: &Value) -> Result<Value, ProtocolError> {
         args.push(value.to_string());
     }
     if optional_bool(arguments, "httpOnly")?.unwrap_or(false) {
-        args.push("--httpOnly".to_string());
+        args.push("--http-only".to_string());
     }
     if optional_bool(arguments, "secure")?.unwrap_or(false) {
         args.push("--secure".to_string());
@@ -4420,6 +4528,20 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn wait_for_selector_rejects_integer_at_mcp_boundary() {
+        let error = call_tool(
+            Some(&json!({
+                "name": TOOL_WAIT_FOR_SELECTOR,
+                "arguments": { "selector": "7", "waitTimeoutMs": 100 }
+            })),
+            &McpConfig::all(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains("millisecond wait"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn run_command_returns_when_a_grandchild_holds_the_pipe() {
@@ -4733,6 +4855,82 @@ mod tests {
         assert!(config.allows(TOOL_REACT_TREE));
     }
 
+    /// Every tool with its startup profiles, in the shape `tools/list` returns, for clients that ship the catalog.
+    fn tool_catalog() -> Value {
+        let profiles = [
+            ToolProfile::Core,
+            ToolProfile::Network,
+            ToolProfile::State,
+            ToolProfile::Debug,
+            ToolProfile::Tabs,
+            ToolProfile::React,
+            ToolProfile::Mobile,
+            ToolProfile::Webmcp,
+        ];
+        let mut tools = tools();
+        tools.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        for tool in &mut tools {
+            let name = tool["name"].as_str().unwrap_or_default().to_string();
+            tool["profiles"] = json!(profiles
+                .iter()
+                .filter(|profile| profile.tools().contains(&name.as_str()))
+                .map(|profile| profile.name())
+                .collect::<Vec<_>>());
+        }
+        json!({ "protocolVersion": PROTOCOL_VERSION, "tools": tools })
+    }
+
+    #[test]
+    fn mcp_tool_catalog_snapshot_is_current() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../packages/@agent-browser/sandbox/mcp-tools.json");
+        let expected = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&tool_catalog()).unwrap()
+        );
+        if std::env::var_os("AGENT_BROWSER_UPDATE_MCP_TOOLS").is_some() {
+            std::fs::write(&path, &expected).unwrap();
+        }
+        let actual = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            actual == expected,
+            "{} is out of date. Run `pnpm mcp-tools:sync`.",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn parse_mcp_call_defaults_to_every_tool() {
+        let (name, arguments, config) =
+            parse_mcp_call(&[TOOL_OPEN.into(), r#"{"url":"https://example.com"}"#.into()]).unwrap();
+        assert_eq!(name, TOOL_OPEN);
+        assert_eq!(arguments["url"], "https://example.com");
+        assert!(config.allows(TOOL_NETWORK_HAR_START));
+        assert!(config.allows(TOOL_REACT_TREE));
+    }
+
+    #[test]
+    fn parse_mcp_call_limits_tools_to_requested_profiles() {
+        let (_, arguments, config) =
+            parse_mcp_call(&[TOOL_OPEN.into(), "--tools".into(), "core".into()]).unwrap();
+        assert_eq!(arguments, json!({}));
+        assert!(config.allows(TOOL_OPEN));
+        assert!(!config.allows(TOOL_NETWORK_HAR_START));
+    }
+
+    #[test]
+    fn parse_mcp_call_rejects_missing_tool_and_bad_json() {
+        assert!(parse_mcp_call(&[])
+            .unwrap_err()
+            .contains("Missing tool name"));
+        assert!(parse_mcp_call(&["--tools".into()])
+            .unwrap_err()
+            .contains("Missing tool name"));
+        assert!(parse_mcp_call(&[TOOL_OPEN.into(), "{".into()])
+            .unwrap_err()
+            .contains("JSON object"));
+    }
+
     #[test]
     fn parse_mcp_config_rejects_unknown_profile() {
         let err = parse_mcp_config(&["--tools".into(), "bogus".into()]).unwrap_err();
@@ -4978,6 +5176,48 @@ mod tests {
     }
 
     #[test]
+    fn tool_arguments_cannot_carry_global_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_CONFIG",
+            "HOME",
+        ]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        guard.remove("AGENT_BROWSER_CONFIG");
+        guard.set("HOME", dir.path().to_str().unwrap());
+        let arguments = json!({ "session": "app", "allowedDomains": ["example.com"] });
+        for command in [
+            vec!["fill", "--allowed-domains", "evil.com"],
+            vec!["open", "--allowed-domains=evil.com"],
+            vec!["fill", "--session", "other"],
+            vec!["fill", "--init-script", "/x.js"],
+        ] {
+            let command = command.into_iter().map(String::from).collect();
+            let error = cli_tool_args(&arguments, command, Some("app")).unwrap_err();
+            assert!(error.message.contains("may not set"), "{}", error.message);
+        }
+        let open = cli_tool_args(
+            &arguments,
+            open_args(&json!({ "headed": true, "url": "https://example.com" })).unwrap(),
+            Some("app"),
+        );
+        assert!(open.is_ok());
+        let screenshot = cli_tool_args(
+            &arguments,
+            vec![
+                "--screenshot-dir".into(),
+                "/tmp".into(),
+                "screenshot".into(),
+            ],
+            Some("app"),
+        );
+        assert!(screenshot.is_ok());
+        let extra = json!({ "extraArgs": ["--screenshot-dir", "/tmp"] });
+        assert!(cli_tool_args(&extra, vec!["open".to_string()], None).is_err());
+    }
+
+    #[test]
     fn extra_args_reject_operator_owned_globals() {
         let dir = tempfile::tempdir().unwrap();
         let guard = crate::test_utils::EnvGuard::new(&[
@@ -4999,7 +5239,7 @@ mod tests {
         ] {
             let arguments = json!({ "extraArgs": bad });
             let error = cli_tool_args(&arguments, vec!["open".to_string()], None).unwrap_err();
-            assert!(error.message.contains("extraArgs may not set"), "{:?}", bad);
+            assert!(error.message.contains("may not set"), "{:?}", bad);
         }
         for ok in [vec!["--engine", "obscura"], vec!["--full"], vec!["-i"]] {
             let arguments = json!({ "extraArgs": ok });
@@ -5057,18 +5297,21 @@ mod tests {
 
     #[test]
     fn common_global_args_include_idle_timeout() {
-        let mut args = Vec::new();
+        for (idle_timeout, normalized) in [
+            ("0", Some("0")),
+            ("30s", Some("30000")),
+            ("2305843009213693957s", None),
+        ] {
+            let mut args = Vec::new();
+            append_common_global_args(&mut args, &json!({ "idleTimeout": idle_timeout }), None)
+                .unwrap();
 
-        append_common_global_args(
-            &mut args,
-            &json!({
-                "idleTimeout": "0"
-            }),
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(args, vec!["--idle-timeout", "0"]);
+            assert_eq!(args, vec!["--idle-timeout", idle_timeout]);
+            assert_eq!(
+                crate::flags::parse_flags(&args).idle_timeout.as_deref(),
+                normalized
+            );
+        }
     }
 
     #[test]

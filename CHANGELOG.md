@@ -1,8 +1,84 @@
 # agent-browser
 
-## 0.39.4
+## 0.41.1
 
 <!-- release:start -->
+
+### Bug Fixes
+
+- Fixed **cookie attributes** so `cookies set` honors `--http-only` and `--same-site`, preserves the existing aliases, and rejects unknown arguments (#2256)
+- Fixed **page error clearing** so `errors --clear` removes captured errors (#2253)
+- Fixed **MCP selector waits** so bare integer selectors return an error instead of becoming timed waits (#2254)
+- Fixed **plugin error redaction** so sensitive operations omit unsupported protocol values (#2255)
+- Fixed **invalid limit handling** so overflowing idle timeouts and invalid output limits produce warnings instead of overflowing or being silently ignored (#2250, #2258)
+- Removed **unpinned npx execution permission** from the installed agent skill (#2249)
+
+### Documentation
+
+- Documented **stdin MCP connections** that reuse one server process in Vercel Sandbox (#2248)
+- Configured **desktop documentation routes** and the desktop sitemap for the docs site (#2278)
+
+### Contributors
+
+- @Railly
+- @lahfir
+
+<!-- release:end -->
+
+## 0.41.0
+
+### Breaking Changes
+
+- **`@agent-browser/eve` tools now come from the MCP tool catalog.** The extension exposes the CLI's MCP tools instead of 21 hand-written ones, so tool names and inputs change: `navigate` is `open`, `evaluate` is `eval`, `press_key` is `press`, `select_option` is `select`, `set_checked` is `check` and `uncheck`, `get` is `get_text`, `get_url` and the other `get_*` tools, `tabs` is the `tab_*` tools, and `wait_for` is the `wait_*` tools. The same names apply to `@agent-browser/eve/tools` overrides. The sandbox needs agent-browser 0.41, which the extension installs by default (#2241)
+
+### New Features
+
+- Added **`agent-browser mcp call <tool> '<json>'`** to run one MCP tool without a stdio session and print its result as JSON with the agent-browser version, for runtimes that cannot keep a process open between tool calls (#2238)
+- Added **`@agent-browser/sandbox/mcp-tools.json`**, every MCP tool with its title, description, input schema, annotations and profiles, generated from the CLI and checked by a test (#2240)
+
+### Improvements
+
+- **`@agent-browser/eve` runs each tool as its own short-lived process**, so no `agent-browser` process outlives a tool call. The 28 `core` tools are listed to the model and the other 14 are deferred, found with `eve__search`, which keeps the listed tool context at its previous size (#2241)
+
+### Bug Fixes
+
+- **MCP tool arguments can no longer set global flags.** The CLI reads global flags anywhere in its arguments, so a value such as a selector or `extraArgs` entry could carry its own `--allowed-domains` and override the server or caller allowlist. Tool calls that try are now rejected (#2238)
+
+### Contributors
+
+- @Railly
+- @lahfir
+
+## 0.40.0
+
+
+### Breaking Changes
+
+- **`@agent-browser/eve` now requires eve 0.84.0 or later.** eve 0.84.0 rejects extensions built by earlier releases, so the extension is now built with it. Apps on older eve should stay on `@agent-browser/eve@0.39` (#2226)
+
+### New Features
+
+- Added **one MCP server per Vercel Sandbox** with `startAgentBrowserMcp` in `@agent-browser/sandbox/vercel`, which keeps a single `agent-browser mcp` running over Sandbox stdin, and `connectAgentBrowserMcp` for any runtime that exposes stdin and stdout streams (#2228)
+- Added **`--omit-command`** to `batch` and `omitCommand` to the MCP batch tool, replacing repeated raw command arrays in JSON output with zero-based indexes (#2216)
+
+### Bug Fixes
+
+- Fixed **`state load` and launch-time storage restores** exposing saved tokens to page scripts and writing one origin's storage into another after a redirect; storage is now written through DevTools only while the page is on the saved origin, and skipped origins are reported (#2212)
+- Fixed **`<session>.config` files** piling up in the socket directory after daemons exit (#2128)
+- Fixed **mocked cross-origin responses** failing CORS: `network route --body` now takes `--allow-origin <origin>` (also in the MCP `network_route` tool) to answer preflights and send CORS headers to that origin, and sends a JSON body as `application/json` when no content type is set (#2229)
+- Fixed **Windows sessions** where a dead daemon could keep holding a pinned tab, and where two sessions with the same name in different socket directories could connect to each other's daemon (#2223)
+
+### Contributors
+
+- @OwenKephart
+- @Railly
+- @lahfir
+- @hichipli
+- @jomatsu
+
+
+## 0.39.4
+
 
 ### Bug Fixes
 
@@ -21,7 +97,6 @@
 - @aamirhullur
 - @zyz619963502zyz
 
-<!-- release:end -->
 
 ## 0.39.3
 

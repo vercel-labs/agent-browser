@@ -116,6 +116,8 @@ Global launch, output, provider, and chat options can be set in the config file 
   </tbody>
 </table>
 
+Values too large to convert to milliseconds produce a warning and are ignored.
+
 ## Common Configurations
 
 ### Local Development
@@ -333,6 +335,8 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AI_GATEWAY_MODEL</code></td><td>Default AI model for dashboard chat.</td><td><code>anthropic/claude-sonnet-4.6</code></td></tr>
   </tbody>
 </table>
+
+Invalid `--max-output` and `AGENT_BROWSER_MAX_OUTPUT` values emit a warning and leave the existing output limit unchanged.
 
 ## Error Handling
 

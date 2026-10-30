@@ -1,1 +1,1 @@
-export const AGENT_BROWSER_SANDBOX_VERSION = "0.39.4";
+export const AGENT_BROWSER_SANDBOX_VERSION = "0.41.1";

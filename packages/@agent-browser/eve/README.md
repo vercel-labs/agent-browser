@@ -2,7 +2,7 @@
 
 An [eve](https://eve.dev) extension that gives your agent a full browser automation tool set, backed by [agent-browser](https://agent-browser.dev) running inside the agent's sandbox.
 
-Mount it once and the agent gets ~20 namespaced tools — navigation, accessibility snapshots with stable element refs, clicking, form filling, semantic element finding, waiting, screenshots, JavaScript evaluation, tab management, network and console inspection — without writing a single tool by hand.
+Mount it once and the agent gets 42 namespaced tools for navigation, accessibility snapshots with stable element refs, clicking, form filling, semantic element finding, waiting, screenshots, JavaScript evaluation, tab management, and network and console inspection. Their names, descriptions, and input schemas come from the `agent-browser mcp` tool catalog of the matching CLI version, so they stay in sync with the CLI.
 
 ## Install
 
@@ -23,7 +23,7 @@ import browser from "@agent-browser/eve";
 export default browser({});
 ```
 
-That's it. The agent now has `browser__navigate`, `browser__snapshot`, `browser__click`, and the rest, plus an instructions fragment teaching the model the snapshot-refs workflow.
+That's it. The agent now has `browser__open`, `browser__snapshot`, `browser__click`, and the rest, plus an instructions fragment teaching the model the snapshot-refs workflow.
 
 On first tool use in a fresh sandbox, the extension installs agent-browser (and Chromium plus its system libraries) automatically. For production, pre-install in your sandbox bootstrap instead so sessions start from a warm template:
 
@@ -64,8 +64,8 @@ export default browser({
   // (hidden from the model via toModelOutput; capped at 4 MB per image)
 
   // Install behavior
-  autoInstall: true, // install agent-browser on first use when missing
-  installSpec: "agent-browser@0.31.2", // defaults to the version matching this package
+  autoInstall: true, // install agent-browser on first use, or replace an older default install
+  installSpec: undefined, // npm spec; must install this package's agent-browser minor (default: the matching version)
   installBrowser: true, // download Chromium during auto-install
   installSystemDependencies: true, // apt/dnf Chromium libraries during auto-install
 
@@ -79,29 +79,52 @@ export default browser({
 
 ## Tools
 
+The 28 tools in the CLI's `core` MCP profile are listed to the model every turn. The other 14, marked *deferred*, stay out of the list and the model finds them with `eve__search`, so they add no context until used.
+
 | Tool | Purpose |
 | --- | --- |
-| `navigate` | Open a URL, or go back/forward/reload |
-| `snapshot` | Accessibility tree with `@eN` element refs (the primary way to see a page) |
-| `read` | Page as agent-friendly text/markdown, `llms.txt` aware |
-| `click` | Click or double-click an element |
-| `fill` | Type into an input (clearing first by default) |
-| `press_key` | Press a key or combination (`Enter`, `Control+a`) |
-| `hover` | Hover an element |
-| `select_option` | Pick a `<select>` option |
-| `set_checked` | Check/uncheck a checkbox or radio |
-| `scroll` | Scroll the page, a container, or an element into view |
-| `drag` | Drag and drop |
-| `upload` | Attach sandbox files to a file input |
-| `wait_for` | Wait for an element, text, URL pattern, load state, JS condition, or delay |
-| `get` | Read text/html/value/attribute/title/url/count/box/styles |
-| `find` | Semantic locator: act on an element by role, label, text, placeholder, or test id |
-| `screenshot` | Capture the page (full-page and annotated modes); output includes an inline data URL for UIs |
-| `evaluate` | Run JavaScript in the page |
-| `tabs` | List/open/switch/close tabs (stable ids and labels) |
-| `console` | Read console messages and uncaught page errors |
-| `network_requests` | List tracked requests or fetch one request's full detail |
-| `close` | Close the browser session |
+| `back` | Back |
+| `check` | Check element |
+| `click` | Click element |
+| `close` | Close browser |
+| `console` | Console logs (deferred) |
+| `dblclick` | Double-click element (deferred) |
+| `drag` | Drag and drop (deferred) |
+| `errors` | Page errors (deferred) |
+| `eval` | Evaluate JavaScript |
+| `fill` | Fill input |
+| `find` | Find element (deferred) |
+| `forward` | Forward |
+| `get_attr` | Get attribute (deferred) |
+| `get_box` | Get box (deferred) |
+| `get_count` | Get count (deferred) |
+| `get_html` | Get HTML (deferred) |
+| `get_styles` | Get styles (deferred) |
+| `get_text` | Get text |
+| `get_title` | Get title |
+| `get_url` | Get URL |
+| `get_value` | Get value (deferred) |
+| `hover` | Hover element (deferred) |
+| `network_requests` | Network requests (deferred) |
+| `open` | Open page |
+| `press` | Press key |
+| `read` | Read URL |
+| `reload` | Reload |
+| `screenshot` | Take screenshot |
+| `scroll` | Scroll page |
+| `select` | Select options |
+| `snapshot` | Snapshot page |
+| `tab_close` | Tab close |
+| `tab_list` | Tab list |
+| `tab_new` | Tab new |
+| `tab_switch` | Tab switch |
+| `type` | Type text |
+| `uncheck` | Uncheck element |
+| `upload` | Upload files (deferred) |
+| `wait_for_load` | Wait for load state |
+| `wait_for_selector` | Wait for selector |
+| `wait_for_text` | Wait for text |
+| `wait_ms` | Wait milliseconds |
 
 Cookie, storage, and saved-auth-state commands are intentionally not exposed as tools — they make credential material visible to the model. If you need them, add a scoped tool in your own agent (or an [override](#overrides)) with the guardrails your app requires.
 
@@ -117,8 +140,8 @@ export default browser({});
 ```
 
 ```ts
-// agent/extensions/browser/tools/evaluate.ts — require approval for raw JS
-import { evaluate } from "@agent-browser/eve/tools";
+// agent/extensions/browser/tools/eval.ts — require approval for raw JS
+import { eval as evaluate } from "@agent-browser/eve/tools";
 import { defineTool } from "eve/tools";
 import { always } from "eve/tools/approval";
 
@@ -134,7 +157,7 @@ export default disableTool();
 
 ## How it works
 
-Each tool shells out to the `agent-browser` CLI inside the sandbox from `ctx.getSandbox()`, using an isolated browser session named after the sandbox id, and returns the parsed `--json` payload. The browser and its state live entirely in the sandbox; the app runtime only relays commands.
+Each tool runs `agent-browser mcp call <tool> '<arguments>'` inside the sandbox from `ctx.getSandbox()`, using an isolated browser session named after the sandbox id, and returns the `data` payload of the CLI response. Every call is its own short-lived process, so nothing outlives the tool call; the browser and its state live in the session daemon inside the sandbox. The extension sets `session`, `allowedDomains`, and the CA options from its config and hides them from the model. If the sandbox runs a different agent-browser minor version than this package, tools fail with an install hint instead of sending arguments the CLI may not accept.
 
 ## Example
 

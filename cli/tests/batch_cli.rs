@@ -243,9 +243,13 @@ fn batch_send_error_preserves_identity_without_a_daemon_response() {
         let mut requests = 0;
         while requests < 2 {
             let (mut stream, _) = listener.accept().unwrap();
-            stream
+            // macOS rejects the timeout with EINVAL once a probe connection has already closed.
+            if stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
+                .is_err()
+            {
+                continue;
+            }
             let mut line = String::new();
             BufReader::new(&stream).read_line(&mut line).unwrap();
             if line.is_empty() {
