@@ -1796,6 +1796,53 @@ async fn e2e_snapshot_refs_invalidate_iframe_navigation() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_stale_presentational_iframe_ref_recovers_for_read_and_hover() {
+    let mut state = DaemonState::new();
+    for command in [
+        json!({"action": "launch", "headless": true}),
+        json!({"action": "navigate", "url": "about:blank"}),
+        json!({"action": "setcontent", "html": "<iframe role='none' data-version='original'></iframe>"}),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+    let snapshot = execute_command(&json!({"action": "snapshot"}), &mut state).await;
+    assert_success(&snapshot);
+    let refs = get_data(&snapshot)["refs"].as_object().unwrap();
+    let reference = refs
+        .iter()
+        .find(|(_, node)| node["role"] == "Iframe")
+        .unwrap()
+        .0
+        .clone();
+    let selector = format!("@{reference}");
+    for role in ["presentation", "none"] {
+        assert_success(
+            &execute_command(
+                &json!({"action": "evaluate", "script": format!("document.querySelector('iframe').outerHTML = \"<iframe role='{role}' data-version='{role}'></iframe>\"; true")}),
+                &mut state,
+            )
+            .await,
+        );
+        let attribute = execute_command(
+            &json!({"action": "getattribute", "selector": selector, "attribute": "data-version"}),
+            &mut state,
+        )
+        .await;
+        assert_success(&attribute);
+        assert_eq!(get_data(&attribute)["value"], role);
+        assert_success(
+            &execute_command(
+                &json!({"action": "hover", "selector": selector}),
+                &mut state,
+            )
+            .await,
+        );
+    }
+    assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_presentational_cross_origin_iframe_refs_support_fill_and_inputvalue() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();

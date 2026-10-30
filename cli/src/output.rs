@@ -2252,6 +2252,7 @@ references (like @e1, @e2) that can be used in subsequent commands.
 Refs can be reused across snapshots. Take a fresh snapshot after navigation.
 If a ref's element was replaced, the action uses the one element with the same
 role and name. If that is ambiguous, it fails: run snapshot again.
+Presentational iframes use the Iframe role for snapshots and stale-ref recovery.
 
 Options:
   -i, --interactive    Only include interactive elements

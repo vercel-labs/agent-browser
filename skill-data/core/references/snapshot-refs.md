@@ -166,6 +166,8 @@ agent-browser snapshot @e9
 
 ## Iframes
 
+Presentational iframes use the same `Iframe` role for snapshots and stale-ref recovery.
+
 Snapshots automatically detect and inline iframe content. When the main-frame snapshot runs, each `Iframe` node is resolved and its child accessibility tree is included directly beneath it in the output. Refs assigned to elements inside iframes carry frame context, so interactions like `click`, `fill`, and `type` work without manually switching frames.
 
 ```bash

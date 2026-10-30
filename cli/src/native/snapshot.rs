@@ -6,7 +6,7 @@ use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AXNode, AXProperty, AXValue, EvaluateParams, EvaluateResult, GetFullAXTreeResult,
 };
-use super::element::{resolve_ax_session, RefMap};
+use super::element::{normalize_ax_role, resolve_ax_session, RefMap};
 
 #[cfg(test)]
 mod document_identity_regressions {
@@ -1091,10 +1091,7 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
     let mut id_to_idx: HashMap<String, usize> = HashMap::new();
 
     for (i, node) in nodes.iter().enumerate() {
-        let mut role = extract_ax_string(&node.role);
-        if role == "IframePresentational" {
-            role = "Iframe".to_string();
-        }
+        let role = normalize_ax_role(extract_ax_string(&node.role));
         let name = extract_ax_string(&node.name);
         let value_text = extract_ax_string_opt(&node.value);
 
