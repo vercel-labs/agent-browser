@@ -6,6 +6,6 @@ export default function robots(): MetadataRoute.Robots {
     rules: isPreviewDeployment()
       ? { userAgent: "*", disallow: "/" }
       : { userAgent: "*", allow: "/" },
-    sitemap: [`${siteUrl}/sitemap.xml`, "https://agent-browser.dev/desktop/sitemap.xml"],
+    sitemap: [`${siteUrl}/sitemap.xml`, `${siteUrl}/desktop/sitemap.xml`],
   };
 }
