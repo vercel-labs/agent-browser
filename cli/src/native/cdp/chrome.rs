@@ -331,7 +331,7 @@ fn maybe_start_xvfb(options: &LaunchOptions) -> Option<XvfbServer> {
 pub struct LaunchOptions {
     pub headless: bool,
     pub executable_path: Option<String>,
-    /// Chrome proxy address; trailing slashes are removed when launching.
+    /// Chrome proxy address; trailing slashes are removed except for scheme delimiters.
     pub proxy: Option<String>,
     pub proxy_bypass: Option<String>,
     pub proxy_username: Option<String>,
@@ -524,7 +524,7 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
 
     if let Some(ref proxy) = options.proxy {
         let trimmed = proxy.trim_end_matches('/');
-        let server = if trimmed.is_empty() {
+        let server = if trimmed.is_empty() || proxy.ends_with("://") {
             proxy.as_str()
         } else {
             trimmed
@@ -2087,6 +2087,11 @@ exec sleep 60
             ("/", "--proxy-server=/"),
             ("///", "--proxy-server=///"),
             ("", "--proxy-server="),
+            ("direct://", "--proxy-server=direct://"),
+            (
+                "http://proxy.example:8080,direct://",
+                "--proxy-server=http://proxy.example:8080,direct://",
+            ),
             (
                 "http://proxy.example:8080",
                 "--proxy-server=http://proxy.example:8080",
