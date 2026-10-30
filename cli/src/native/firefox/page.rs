@@ -5,12 +5,56 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use super::actions::session;
+use super::network;
 use super::session::FirefoxSession;
 use crate::native::actions::{route_url_matches, DaemonState};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Turns an `about:neterror?e=...&d=...` URL into the message Firefox shows for the failure.
+/// Firefox net-error codes and `about:neterror` names, mapped to the Chromium code Chrome
+/// reports for the same failure.
+const NET_ERRORS: &[(&str, &str)] = &[
+    ("NS_ERROR_ABORT", "net::ERR_FAILED"),
+    ("NS_ERROR_UNKNOWN_HOST", "net::ERR_NAME_NOT_RESOLVED"),
+    ("NS_ERROR_CONNECTION_REFUSED", "net::ERR_CONNECTION_REFUSED"),
+    ("NS_ERROR_NET_TIMEOUT", "net::ERR_TIMED_OUT"),
+    ("NS_ERROR_NET_TIMEOUT_EXTERNAL", "net::ERR_TIMED_OUT"),
+    ("NS_ERROR_OFFLINE", "net::ERR_INTERNET_DISCONNECTED"),
+    (
+        "NS_ERROR_UNKNOWN_PROXY_HOST",
+        "net::ERR_PROXY_CONNECTION_FAILED",
+    ),
+    ("dnsNotFound", "net::ERR_NAME_NOT_RESOLVED"),
+    ("connectionFailure", "net::ERR_CONNECTION_REFUSED"),
+    ("netTimeout", "net::ERR_TIMED_OUT"),
+    ("offline", "net::ERR_INTERNET_DISCONNECTED"),
+    ("proxyConnectFailure", "net::ERR_PROXY_CONNECTION_FAILED"),
+];
+
+/// The Chromium code for an exact Firefox net-error name or Gecko error code.
+fn chromium_net_error(code: &str) -> Option<&'static str> {
+    NET_ERRORS
+        .iter()
+        .find(|(gecko, _)| *gecko == code)
+        .map(|(_, chromium)| *chromium)
+}
+
+/// Finds the first known net-error token in free-form Firefox text such as `Error: NS_ERROR_ABORT`.
+/// Firefox omits the `e` name for failures it has no neterror page for, which is how a route abort
+/// arrives, and a BiDi command error carries the Gecko code in its message instead of a URL.
+fn net_error_token(text: &str) -> Option<&'static str> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .find_map(chromium_net_error)
+}
+
+/// Rewrites the Gecko net-error token in a Firefox error message to the Chromium code Chrome
+/// reports for the same failure. Messages without a known code are returned unchanged.
+pub(super) fn normalize_net_error_text(text: &str) -> String {
+    net_error_token(text).map_or_else(|| text.to_string(), str::to_string)
+}
+
+/// Turns an `about:neterror?e=...&d=...` URL into the failure message, using Chrome's
+/// `net::ERR_*` text when the Firefox code has a known Chromium equivalent.
 fn neterror_message(url: &str) -> Option<String> {
     if !url.starts_with("about:neterror") {
         return None;
@@ -24,7 +68,13 @@ fn neterror_message(url: &str) -> Option<String> {
             .filter(|v| !v.is_empty())
     };
     let code = pair("e").unwrap_or_else(|| "unknown error".to_string());
-    Some(match pair("d") {
+    let detail = pair("d");
+    if let Some(chromium) =
+        chromium_net_error(&code).or_else(|| detail.as_deref().and_then(net_error_token))
+    {
+        return Some(chromium.to_string());
+    }
+    Some(match detail {
         Some(detail) => format!("{code}: {detail}"),
         None => code,
     })
@@ -43,11 +93,15 @@ pub async fn navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
         .get("url")
         .and_then(Value::as_str)
         .ok_or("Missing 'url' parameter")?;
+    if let Some(filter) = state.domain_filter.read().await.as_ref() {
+        filter.check_url(url)?;
+    }
     let wait = match cmd.get("waitUntil").and_then(Value::as_str) {
         Some("domcontentloaded") => "interactive",
         Some("none") => "none",
         _ => "complete",
     };
+    network::set_origin_headers(cmd, url, state).await?;
     reset_page_state(state);
     let ff = session(state)?;
     let context = ff.top_context.clone();
@@ -60,7 +114,7 @@ pub async fn navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             ),
         )
         .await
-        .map_err(|e| format!("Navigation failed: {e}"))?;
+        .map_err(|e| format!("Navigation failed: {}", normalize_net_error_text(&e)))?;
     let Some(nav) = nav else {
         let url = ff.url().await.unwrap_or_default();
         return Ok(json!({ "url": url, "targetId": context, "dialogOpened": true }));
@@ -85,7 +139,12 @@ async fn traverse_history(delta: i64, state: &mut DaemonState) -> Result<Value, 
         ),
     )
     .await
-    .map_err(|e| format!("History navigation failed: {e}"))?;
+    .map_err(|e| {
+        format!(
+            "History navigation failed: {}",
+            normalize_net_error_text(&e)
+        )
+    })?;
     reset_page_state(state);
     let url = session(state)?.url().await.unwrap_or_default();
     Ok(json!({ "url": url }))
@@ -113,7 +172,7 @@ pub async fn reload(_cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         ),
     )
     .await
-    .map_err(|e| format!("Reload failed: {e}"))?;
+    .map_err(|e| format!("Reload failed: {}", normalize_net_error_text(&e)))?;
     reset_page_state(state);
     let url = session(state)?.url().await.unwrap_or_default();
     Ok(json!({ "url": url }))
@@ -270,7 +329,11 @@ pub async fn wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
     }
 
     if let Some(load_state) = cmd.get("loadState").and_then(Value::as_str) {
-        if let Some(check) = load_state_check(load_state) {
+        if load_state == "networkidle" {
+            network::wait_idle(state, timeout_ms)
+                .await
+                .map_err(|_| format!("Wait timed out after {timeout_ms}ms"))?;
+        } else if let Some(check) = load_state_check(load_state) {
             poll_until_true(ff, check, timeout_ms).await?;
         }
         return Ok(json!({ "waited": "load", "state": load_state }));
@@ -305,7 +368,11 @@ pub async fn waitforloadstate(cmd: &Value, state: &mut DaemonState) -> Result<Va
         .get("timeout")
         .and_then(Value::as_u64)
         .unwrap_or(state.default_timeout_ms);
-    if let Some(check) = load_state_check(load_state) {
+    if load_state == "networkidle" {
+        network::wait_idle(state, timeout_ms)
+            .await
+            .map_err(|_| "Timeout waiting for networkidle".to_string())?;
+    } else if let Some(check) = load_state_check(load_state) {
         let ff = session(state)?;
         poll_until_true_or_timeout(
             ff,
@@ -338,20 +405,143 @@ pub async fn waitforfunction(cmd: &Value, state: &mut DaemonState) -> Result<Val
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::fake_session;
+    use crate::native::firefox::session::tests::{
+        fake_session, fake_session_with, fake_session_with_replies, FakeReply,
+    };
 
     #[test]
-    fn neterror_url_becomes_a_message() {
-        let url = "about:neterror?e=dnsNotFound&u=https%3A//nope.invalid/&d=We%20can%27t%20connect";
+    fn neterror_codes_map_to_chromium_net_errors() {
+        let cases = [
+            (
+                "about:neterror?d=Error%3A%20NS_ERROR_ABORT",
+                "net::ERR_FAILED",
+            ),
+            (
+                "about:neterror?e=NS_ERROR_UNKNOWN_HOST",
+                "net::ERR_NAME_NOT_RESOLVED",
+            ),
+            (
+                "about:neterror?e=NS_ERROR_CONNECTION_REFUSED",
+                "net::ERR_CONNECTION_REFUSED",
+            ),
+            (
+                "about:neterror?e=NS_ERROR_NET_TIMEOUT",
+                "net::ERR_TIMED_OUT",
+            ),
+            (
+                "about:neterror?d=Error%3A%20NS_ERROR_NET_TIMEOUT_EXTERNAL",
+                "net::ERR_TIMED_OUT",
+            ),
+            (
+                "about:neterror?e=NS_ERROR_OFFLINE",
+                "net::ERR_INTERNET_DISCONNECTED",
+            ),
+            (
+                "about:neterror?d=Error%3A%20NS_ERROR_UNKNOWN_PROXY_HOST",
+                "net::ERR_PROXY_CONNECTION_FAILED",
+            ),
+            (
+                "about:neterror?e=dnsNotFound&u=https%3A//nope.invalid/&d=We%20can%27t%20connect",
+                "net::ERR_NAME_NOT_RESOLVED",
+            ),
+            (
+                "about:neterror?e=connectionFailure",
+                "net::ERR_CONNECTION_REFUSED",
+            ),
+        ];
+        for (url, expected) in cases {
+            assert_eq!(neterror_message(url).unwrap(), expected, "{url}");
+        }
+    }
+
+    #[test]
+    fn unknown_neterror_codes_keep_the_firefox_text() {
         assert_eq!(
-            neterror_message(url).unwrap(),
-            "dnsNotFound: We can't connect"
+            neterror_message("about:neterror?e=corruptedContentErrorv2&d=Bad%20content").unwrap(),
+            "corruptedContentErrorv2: Bad content"
         );
         assert_eq!(
-            neterror_message("about:neterror?e=connectionFailure").unwrap(),
-            "connectionFailure"
+            neterror_message("about:neterror?d=Error%3A%20NS_ERROR_NOT_IMPLEMENTED").unwrap(),
+            "unknown error: Error: NS_ERROR_NOT_IMPLEMENTED"
         );
         assert!(neterror_message("https://example.com").is_none());
+    }
+
+    #[tokio::test]
+    async fn navigate_rejects_about_blank_under_an_allowlist_like_chrome() {
+        let mut state = DaemonState::new();
+        *state.domain_filter.write().await =
+            Some(crate::native::network::DomainFilter::new("allowed.example"));
+        let error = navigate(&json!({ "url": "about:blank" }), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "No hostname in URL: about:blank");
+    }
+
+    #[tokio::test]
+    async fn aborted_navigation_reports_chromes_net_error() {
+        let mut state = DaemonState::new();
+        let (ff, _tx, _) = fake_session_with(|cmd: &Value| {
+            if cmd["method"] == "browsingContext.navigate" {
+                json!({"navigation": null, "url": "about:neterror?d=Error%3A%20NS_ERROR_ABORT"})
+            } else {
+                json!({})
+            }
+        })
+        .await;
+        state.firefox = Some(ff);
+        let error = navigate(&json!({"url": "http://blocked.test/"}), &mut state)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "Navigation failed: net::ERR_FAILED");
+    }
+
+    #[tokio::test]
+    async fn aborted_navigation_bidi_error_reports_chromes_net_error() {
+        let mut state = DaemonState::new();
+        let (ff, _tx, _) = fake_session_with_replies(|cmd: &Value| {
+            if cmd["method"] == "browsingContext.navigate" {
+                FakeReply::Error {
+                    error: "unknown error",
+                    message: "Error: NS_ERROR_ABORT",
+                }
+            } else {
+                FakeReply::Result(json!({}))
+            }
+        })
+        .await;
+        state.firefox = Some(ff);
+        let error = navigate(
+            &json!({"url": "http://blocked.test/blocked.html"}),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "Navigation failed: net::ERR_FAILED");
+    }
+
+    #[test]
+    fn error_text_maps_gecko_codes_and_keeps_unknown_ones() {
+        assert_eq!(
+            normalize_net_error_text("unknown error: Error: NS_ERROR_ABORT"),
+            "net::ERR_FAILED"
+        );
+        assert_eq!(
+            normalize_net_error_text("unknown error: Error: NS_ERROR_UNKNOWN_HOST"),
+            "net::ERR_NAME_NOT_RESOLVED"
+        );
+        assert_eq!(
+            normalize_net_error_text("unknown error: Error: dnsNotFound"),
+            "net::ERR_NAME_NOT_RESOLVED"
+        );
+        assert_eq!(
+            normalize_net_error_text("unknown error: Error: NS_ERROR_NOT_IMPLEMENTED"),
+            "unknown error: Error: NS_ERROR_NOT_IMPLEMENTED"
+        );
+        assert_eq!(
+            normalize_net_error_text("no such frame: gone"),
+            "no such frame: gone"
+        );
     }
 
     #[tokio::test]

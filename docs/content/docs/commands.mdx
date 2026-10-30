@@ -195,6 +195,8 @@ agent-browser set credentials <u> <p> # HTTP basic auth for current and future t
 agent-browser set media [dark|light]  # Emulate color scheme (persists for session)
 ```
 
+Firefox does not support mobile viewport mode, `set device`, or `reduced-motion` media emulation. Use `set viewport` plus the `--user-agent` launch flag (or `AGENT_BROWSER_USER_AGENT`) instead of `set device`.
+
 Use `--color-scheme` for persistent dark/light mode across all commands:
 
 ```bash

@@ -17,6 +17,8 @@ pub struct DownloadRecord {
     /// Where the browser saved the file. Chrome only reports it on the
     /// completed `Browser.downloadProgress` event when `eventsEnabled` is set.
     pub file_path: Option<String>,
+    pub context: Option<String>,
+    pub suggested_filename: Option<String>,
     /// Set once any `Browser.*` event arrives for this download. From then on
     /// only `Browser.downloadProgress` finishes it: `Page.downloadProgress`
     /// reports completion first, before the path is known.
@@ -39,16 +41,26 @@ impl DownloadLedger {
     /// Record a download event. `Page.*` and `Browser.*` events for one
     /// download share a guid; only `Browser.downloadProgress` carries the file
     /// path, and only when `eventsEnabled` is set. Provider connections that
-    /// never enable it still report completion through `Page.*`.
+    /// never enable it still report completion through `Page.*`. Firefox BiDi
+    /// events use `download` (falling back to `navigation`) in place of `guid`.
     /// Returns false for any other method.
     pub fn observe(&mut self, method: &str, params: &Value) -> bool {
-        let Some(guid) = params.get("guid").and_then(|v| v.as_str()) else {
+        let Some(guid) = params
+            .get("guid")
+            .or_else(|| params.get("download"))
+            .or_else(|| params.get("navigation"))
+            .and_then(|v| v.as_str())
+        else {
             return false;
         };
         match method {
-            "Browser.downloadWillBegin" | "Page.downloadWillBegin" => {
+            "Browser.downloadWillBegin"
+            | "Page.downloadWillBegin"
+            | "browsingContext.downloadWillBegin" => {
                 let record = self.record_mut(guid);
                 record.browser_events |= method.starts_with("Browser.");
+                record.context = params["context"].as_str().map(String::from);
+                record.suggested_filename = params["suggestedFilename"].as_str().map(String::from);
                 true
             }
             "Browser.downloadProgress" | "Page.downloadProgress" => {
@@ -70,16 +82,42 @@ impl DownloadLedger {
                 }
                 true
             }
+            "browsingContext.downloadEnd" => {
+                let record = self.record_mut(guid);
+                match params.get("status").and_then(|v| v.as_str()) {
+                    Some("complete") => record.state = DownloadState::Completed,
+                    Some("canceled") => record.state = DownloadState::Canceled,
+                    _ => {}
+                }
+                if let Some(path) = params.get("filepath").and_then(|v| v.as_str()) {
+                    record.file_path = Some(path.to_string());
+                }
+                true
+            }
             _ => false,
         }
     }
 
     /// Claim the oldest finished download that no earlier wait has claimed.
     pub fn claim_finished(&mut self) -> Option<DownloadRecord> {
-        let record = self
-            .records
-            .iter_mut()
-            .find(|r| !r.claimed && r.state != DownloadState::InProgress)?;
+        self.claim_finished_since(0, &[])
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.records.len()
+    }
+
+    pub fn claim_finished_since(
+        &mut self,
+        cursor: usize,
+        contexts: &[&str],
+    ) -> Option<DownloadRecord> {
+        let record = self.records.iter_mut().skip(cursor).find(|record| {
+            !record.claimed
+                && record.state != DownloadState::InProgress
+                && (contexts.is_empty()
+                    || contexts.contains(&record.context.as_deref().unwrap_or_default()))
+        })?;
         record.claimed = true;
         Some(record.clone())
     }
@@ -106,6 +144,8 @@ impl DownloadLedger {
             guid: guid.to_string(),
             state: DownloadState::InProgress,
             file_path: None,
+            context: None,
+            suggested_filename: None,
             browser_events: false,
             claimed: false,
         });

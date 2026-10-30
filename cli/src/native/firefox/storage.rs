@@ -5,8 +5,9 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 
 use super::actions::session;
+use super::page::normalize_net_error_text;
 use super::session::FirefoxSession;
-use crate::native::actions::DaemonState;
+use crate::native::actions::{self as chrome, DaemonState};
 use crate::native::cookies::Cookie;
 use crate::native::state::{self, OriginStorage, StorageState};
 use crate::validation::{is_valid_session_name, session_name_error};
@@ -523,7 +524,8 @@ pub async fn load_state_path(ff: &mut FirefoxSession, path: &str) -> Result<Vec<
                 "browsingContext.navigate",
                 json!({ "context": context, "url": nav_url, "wait": "complete" }),
             )
-            .await?;
+            .await
+            .map_err(|e| normalize_net_error_text(&e))?;
         ff.refs.clear();
 
         let payload = serde_json::to_string(origin).map_err(|e| e.to_string())?;
@@ -552,6 +554,7 @@ pub async fn state_load(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         .get("path")
         .and_then(Value::as_str)
         .ok_or("Missing 'path' parameter")?;
+    chrome::ensure_state_replay_supported_by_active_domain_filter(state, "state load").await?;
     let ff = session(state)?;
     let skipped = load_state_path(ff, path).await?;
     Ok(json!({ "loaded": true, "path": path, "skippedOrigins": skipped }))

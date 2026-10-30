@@ -11,7 +11,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -117,7 +117,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -217,7 +217,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -311,7 +311,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -416,7 +416,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -538,7 +538,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -638,7 +638,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -733,7 +733,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -848,7 +848,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -957,7 +957,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -1058,7 +1058,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -1169,7 +1169,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -1263,7 +1263,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -1357,7 +1357,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -1451,7 +1451,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -1556,7 +1556,7 @@
             "type": "boolean"
           },
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -1650,7 +1650,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -1750,7 +1750,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -1855,7 +1855,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -1952,7 +1952,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -2046,7 +2046,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -2140,7 +2140,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -2270,7 +2270,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -2376,7 +2376,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -2480,7 +2480,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -2574,7 +2574,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -2673,7 +2673,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -2780,7 +2780,7 @@
             "type": "string"
           },
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -2874,7 +2874,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -2971,7 +2971,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -3065,7 +3065,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -3159,7 +3159,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -3268,7 +3268,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -3374,7 +3374,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -3496,7 +3496,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -3611,7 +3611,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -3716,7 +3716,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -3825,7 +3825,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -3922,7 +3922,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -4023,7 +4023,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -4133,7 +4133,7 @@
             "type": "string"
           },
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -4265,7 +4265,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -4364,7 +4364,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -4459,7 +4459,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -4553,7 +4553,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -4653,7 +4653,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -4756,7 +4756,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -4855,7 +4855,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -4947,7 +4947,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -5046,7 +5046,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -5145,7 +5145,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -5244,7 +5244,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -5345,7 +5345,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -5439,7 +5439,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -5533,7 +5533,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -5632,7 +5632,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -5733,7 +5733,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -5832,7 +5832,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -5926,7 +5926,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -6023,7 +6023,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -6122,7 +6122,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -6221,7 +6221,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -6320,7 +6320,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -6420,7 +6420,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -6520,7 +6520,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -6621,7 +6621,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -6722,7 +6722,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -6825,7 +6825,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -6950,7 +6950,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -7053,7 +7053,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -7156,7 +7156,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -7258,7 +7258,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -7355,7 +7355,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -7455,7 +7455,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -7571,7 +7571,7 @@
             "type": "string"
           },
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -7678,7 +7678,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -7775,7 +7775,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -7885,7 +7885,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -7985,7 +7985,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -8108,7 +8108,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -8202,7 +8202,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -8313,7 +8313,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -8413,7 +8413,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -8514,7 +8514,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -8611,7 +8611,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -8708,7 +8708,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -8802,7 +8802,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -8902,7 +8902,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -9006,7 +9006,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -9103,7 +9103,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -9200,7 +9200,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -9300,7 +9300,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -9397,7 +9397,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -9523,7 +9523,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -9647,7 +9647,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -9772,7 +9772,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -9866,7 +9866,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -9961,7 +9961,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -10061,7 +10061,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -10201,7 +10201,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -10314,7 +10314,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -10413,7 +10413,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -10523,7 +10523,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -10617,7 +10617,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -10724,7 +10724,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -10818,7 +10818,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -10912,7 +10912,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -11011,12 +11011,12 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Emulate a device by name.",
+      "description": "Emulate a device by name. Firefox does not support set device; use set viewport plus the --user-agent launch flag or AGENT_BROWSER_USER_AGENT instead of set device.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -11116,7 +11116,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -11220,7 +11220,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -11318,12 +11318,12 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Set media emulation.",
+      "description": "Set media emulation. Firefox does not support reduced motion.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -11432,7 +11432,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -11527,12 +11527,12 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Set viewport size.",
+      "description": "Set viewport size. Firefox does not support mobile mode.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -11642,7 +11642,7 @@
             "type": "boolean"
           },
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -11747,7 +11747,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -11841,7 +11841,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -11938,7 +11938,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -12066,7 +12066,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -12170,7 +12170,7 @@
             "type": "boolean"
           },
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -12267,7 +12267,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -12361,7 +12361,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -12461,7 +12461,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -12565,7 +12565,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -12665,7 +12665,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -12765,7 +12765,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -12869,7 +12869,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -12976,7 +12976,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -13088,7 +13088,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -13182,7 +13182,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -13279,7 +13279,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -13373,7 +13373,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -13482,7 +13482,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -13581,7 +13581,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -13676,7 +13676,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -13777,7 +13777,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -13879,7 +13879,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -13980,7 +13980,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -14074,7 +14074,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -14168,7 +14168,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -14265,7 +14265,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -14381,7 +14381,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -14482,7 +14482,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -14576,7 +14576,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -14686,7 +14686,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -14786,7 +14786,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -14889,7 +14889,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -14992,7 +14992,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -15102,7 +15102,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -15208,7 +15208,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -15313,7 +15313,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -15417,7 +15417,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -15518,7 +15518,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -15618,7 +15618,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -15731,7 +15731,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -15831,7 +15831,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
@@ -15935,7 +15935,7 @@
         "additionalProperties": false,
         "properties": {
           "allowedDomains": {
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "description": "Restrict browser and read traffic to these domain patterns, including non-HTTP document navigations. Chromium sessions also disable RTCPeerConnection while this is active.",
             "items": {
               "type": "string"
             },
