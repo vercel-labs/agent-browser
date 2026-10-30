@@ -34,6 +34,8 @@ agent-browser screenshot --threshold 0.01 # Ignore changes affecting at most 1% 
 agent-browser screenshot --screenshot-dir ./shots    # Save to custom directory
 agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
 agent-browser pdf <path>              # Save page as PDF
+agent-browser pdf <path> --css-page-size     # Use the page's CSS @page size
+agent-browser pdf <path> --width 8.27 --height 11.69  # Paper size in inches
 agent-browser snapshot                # Accessibility tree with refs
 agent-browser eval <js>               # Run JavaScript
 agent-browser connect <port|url>      # Connect to browser via CDP

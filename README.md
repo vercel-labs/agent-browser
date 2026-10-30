@@ -142,7 +142,10 @@ agent-browser screenshot --if-changed # Recommended: skip unchanged images to sa
 agent-browser screenshot --threshold 0.01 # Ignore changes affecting at most 1% of pixels
 agent-browser screenshot --screenshot-dir ./shots    # Save to custom directory
 agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
-agent-browser pdf <path>              # Save as PDF
+agent-browser pdf <path>              # Save as PDF (Letter, portrait, backgrounds on)
+agent-browser pdf <path> --css-page-size     # Use the page's CSS @page size (slides, A4 layouts)
+agent-browser pdf <path> --width 8.27 --height 11.69  # Paper size in inches
+agent-browser pdf <path> --landscape --no-background  # Orientation; omit background graphics
 agent-browser snapshot                # Accessibility tree with refs (best for AI)
 agent-browser eval <js>               # Run JavaScript (-b for base64, --stdin for piped input)
 agent-browser connect <port>          # Connect to browser via CDP
