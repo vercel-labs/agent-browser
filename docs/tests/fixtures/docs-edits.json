@@ -1,5 +1,15 @@
 {
   "pages": {
+    "/installation": [
+      {
+        "from": "git clone https://github.com/vercel-labs/agent-browser cd agent-browser pnpm install pnpm build pnpm build:native ./bin/agent-browser install pnpm link --global",
+        "to": "git clone https://github.com/vercel-labs/agent-browser cd agent-browser pnpm install --ignore-scripts pnpm build:native pnpm add --global . agent-browser install"
+      },
+      {
+        "from": "```bash\ngit clone https://github.com/vercel-labs/agent-browser\ncd agent-browser\npnpm install\npnpm build\npnpm build:native\n./bin/agent-browser install\npnpm link --global\n```",
+        "to": "```bash\ngit clone https://github.com/vercel-labs/agent-browser\ncd agent-browser\npnpm install --ignore-scripts\npnpm build:native\npnpm add --global .\nagent-browser install\n```"
+      }
+    ],
     "/commands": [
       {
         "from": "# Trust a CA for locally launched Chromium on Linux",
