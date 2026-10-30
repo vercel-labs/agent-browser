@@ -910,7 +910,7 @@ fn tools() -> Vec<Value> {
             "Return an accessibility-tree snapshot with reusable element refs. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref.",
             json!({
                 "interactive": { "type": "boolean", "default": true, "description": "Only include interactive elements." },
-                "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements. With interactive:false, retain visible text." },
+                "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements, retaining only matching content and its direct ancestors. With interactive:false, retain visible text." },
                 "depth": { "type": "integer", "minimum": 0, "description": "Limit tree depth." },
                 "selector": { "type": "string", "description": "Scope the snapshot to a CSS selector." },
                 "includeUrls": { "type": "boolean", "default": false, "description": "Include href URLs on links." },

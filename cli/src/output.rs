@@ -2263,8 +2263,8 @@ Options:
                        Deltas include ref changes and an exact treeChange line splice
       --full           Force full state and update the delta baseline
 
-Compact snapshots keep visible text and status text. Interactive snapshots filter
-out noninteractive content. MCP snapshots default to interactive; set
+Compact snapshots keep visible text, status text, and their direct ancestors.
+Empty sibling branches are removed. Interactive snapshots filter out noninteractive content. MCP snapshots default to interactive; set
 interactive to false to retain visible text and status text.
 
 Global Options:

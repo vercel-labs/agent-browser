@@ -36,7 +36,7 @@ agent-browser snapshot
 agent-browser snapshot -i
 ```
 
-Compact snapshots (`-c`) keep visible text and status text. Interactive snapshots (`-i`) filter out noninteractive content. MCP snapshots default to interactive; set `interactive: false` to retain visible text and status text.
+Compact snapshots (`-c`) keep visible text, status text, and their direct ancestors. Empty sibling branches are removed. Interactive snapshots (`-i`) filter out noninteractive content. MCP snapshots default to interactive; set `interactive: false` to retain visible text and status text.
 
 ### Snapshot Output Format
 

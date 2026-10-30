@@ -1352,7 +1352,7 @@ fn render_tree(
     }
 }
 
-/// Remove empty structure while retaining visible text in noninteractive snapshots.
+/// Retain matching content and its direct ancestor chain, including visible text in noninteractive snapshots.
 fn compact_tree(tree: &str, interactive: bool) -> String {
     let lines: Vec<&str> = tree.lines().collect();
     if lines.is_empty() {
@@ -1365,11 +1365,12 @@ fn compact_tree(tree: &str, interactive: bool) -> String {
         if line.contains("ref=") || line.contains(": ") || (!interactive && line.contains(" \"")) {
             keep[i] = true;
             // Mark ancestors
-            let my_indent = count_indent(line);
+            let mut my_indent = count_indent(line);
             for j in (0..i).rev() {
                 let ancestor_indent = count_indent(lines[j]);
                 if ancestor_indent < my_indent {
                     keep[j] = true;
+                    my_indent = ancestor_indent;
                     if ancestor_indent == 0 {
                         break;
                     }
@@ -1546,6 +1547,22 @@ mod tests {
         assert!(!interactive.contains("Saved successfully"));
         assert!(interactive.contains("[ref=e1]"));
         assert!(interactive.contains("Hello"));
+    }
+
+    #[test]
+    fn test_compact_tree_keeps_only_direct_ancestors() {
+        for (interactive, content) in [
+            (false, "StaticText \"Saved successfully\""),
+            (true, "button \"Save\" [ref=e1]"),
+        ] {
+            let tree = format!(
+                "- main\n  - empty-section\n    - empty-paragraph\n  - section\n    - empty-paragraph\n    - paragraph\n      - {content}\n  - trailing-section\n- empty-root\n"
+            );
+            assert_eq!(
+                compact_tree(&tree, interactive),
+                format!("- main\n  - section\n    - paragraph\n      - {content}")
+            );
+        }
     }
 
     #[test]
