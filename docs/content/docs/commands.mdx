@@ -69,7 +69,7 @@ agent-browser get box <sel>           # Get bounding box
 agent-browser get styles <sel>        # Get computed styles
 ```
 
-`get cdp-url` reports the CDP WebSocket URL of a browser that is already running. It requires a running browser and never launches one.
+`get cdp-url` reports the CDP WebSocket URL of a browser that is already running. It requires a running browser and never launches one. A batch containing only `get cdp-url` commands also skips browser launch. A mixed batch can launch a browser for its other commands.
 
 ## Read agent-friendly text
 

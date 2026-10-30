@@ -179,6 +179,33 @@ fn command_is_browserless(cmd: &serde_json::Value) -> bool {
     }
 }
 
+/// Identifies CDP metadata requests, including batches containing only those requests.
+fn command_is_cdp_url_metadata(cmd: &serde_json::Value) -> bool {
+    match cmd.get("action").and_then(|value| value.as_str()) {
+        Some("cdp_url") => true,
+        Some("batch") => {
+            if let Some(commands) = cmd.get("commands").and_then(|value| value.as_array()) {
+                !commands.is_empty()
+                    && commands.iter().all(|command| {
+                        command.as_str().is_some_and(|command| {
+                            commands::shell_words_split(command)
+                                .starts_with(&["get".into(), "cdp-url".into()])
+                        })
+                    })
+            } else if let Some(argv) = cmd.get("argv").and_then(|value| value.as_array()) {
+                !argv.is_empty()
+                    && argv.iter().all(|args| {
+                        args.as_array()
+                            .is_some_and(|args| args.starts_with(&[json!("get"), json!("cdp-url")]))
+                    })
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
 fn build_provider_launch_command(provider: &str, flags: &Flags) -> serde_json::Value {
     let mut launch_cmd = json!({
         "id": gen_id(),
@@ -320,7 +347,7 @@ fn should_send_local_launch_config(flags: &Flags, command: &serde_json::Value) -
         && flags.cdp.is_none()
         && flags.provider.is_none()
         && !flags.auto_connect
-        && command.get("action").and_then(|value| value.as_str()) != Some("cdp_url")
+        && !command_is_cdp_url_metadata(command)
         && !command_is_external_launch(command)
 }
 
@@ -1999,7 +2026,7 @@ fn main() {
     if let Some(provider) = flags
         .provider
         .as_ref()
-        .filter(|_| cmd.get("action").and_then(|value| value.as_str()) != Some("cdp_url"))
+        .filter(|_| !command_is_cdp_url_metadata(&cmd))
     {
         let launch_cmd = build_provider_launch_command(provider, &flags);
 
@@ -2836,6 +2863,31 @@ mod tests {
             &flags,
             &json!({ "action": "snapshot" })
         ));
+    }
+
+    #[test]
+    fn test_cdp_url_metadata_batches_ignore_launch_configuration() {
+        let mut flags = neutral_launch_config_flags();
+        flags.headed = true;
+        for command in [
+            json!({ "action": "batch", "commands": ["get cdp-url", "get 'cdp-url' ignored"] }),
+            json!({ "action": "batch", "argv": [["get", "cdp-url"]] }),
+        ] {
+            assert!(command_is_cdp_url_metadata(&command), "{command}");
+            assert!(!should_send_local_launch_config(&flags, &command));
+        }
+        for command in [
+            json!({ "action": "batch", "commands": ["get cdp-url", "open about:blank"] }),
+            json!({ "action": "batch", "argv": [["get", "cdp-url"], ["snapshot"]] }),
+            json!({ "action": "batch", "commands": ["batch 'get cdp-url'"] }),
+            json!({ "action": "batch", "argv": [["batch", "get cdp-url"]] }),
+            json!({ "action": "batch", "commands": [] }),
+            json!({ "action": "batch", "argv": [[]] }),
+            json!({ "action": "batch" }),
+        ] {
+            assert!(!command_is_cdp_url_metadata(&command), "{command}");
+            assert!(should_send_local_launch_config(&flags, &command));
+        }
     }
 
     #[test]

@@ -203,6 +203,8 @@ agent-browser get box <sel>           # Get bounding box
 agent-browser get styles <sel>        # Get computed styles
 ```
 
+A batch containing only `get cdp-url` commands also skips browser launch. A mixed batch can launch a browser for its other commands.
+
 ### Read Agent-Friendly Text
 
 ```bash

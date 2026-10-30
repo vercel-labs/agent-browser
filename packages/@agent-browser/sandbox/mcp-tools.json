@@ -728,7 +728,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Run multiple commands sequentially.",
+      "description": "Run multiple commands sequentially. A batch containing only get cdp-url commands never launches a browser.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

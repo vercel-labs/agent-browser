@@ -2373,7 +2373,7 @@ Subcommands:
   box <selector>             Get bounding box (x, y, width, height)
   styles <selector>          Get computed styles of elements
   cdp-url                    Get CDP WebSocket URL of a running browser
-                             Never launches a browser
+                             Never launches a browser, including metadata-only batches
 
 Global Options:
   --json               Output as JSON

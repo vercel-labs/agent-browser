@@ -1707,7 +1707,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_BATCH,
             "Batch",
-            "Run multiple commands sequentially.",
+            "Run multiple commands sequentially. A batch containing only get cdp-url commands never launches a browser.",
             json!({ "commands": { "type": "array", "items": { "type": "array", "items": { "type": "string" }, "minItems": 1 }, "minItems": 1 }, "bail": { "type": "boolean" }, "omitCommand": { "type": "boolean", "description": "Replace only command arrays with a stable zero-based input index. Does not make output safe for secrets: errors and response data are unchanged; type echoes typed text, and get value/eval may return input values." } }),
             &["commands"],
         ),
