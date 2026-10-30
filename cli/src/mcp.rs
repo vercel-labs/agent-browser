@@ -1992,7 +1992,7 @@ fn string_array_schema(description: &str) -> Value {
 fn key_schema() -> Value {
     json!({
         "type": "string",
-        "description": "Key name such as Enter, Tab, or Control+a."
+        "description": "Key name such as Enter, Tab, w, Shift, or KeyW."
     })
 }
 

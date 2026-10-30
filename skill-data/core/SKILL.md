@@ -152,6 +152,7 @@ agent-browser fill @e2 "hello"            # clear then type
 agent-browser type @e2 " world"           # type without clearing
 agent-browser press Enter                 # press a key at current focus
 agent-browser press Control+a             # key combination
+agent-browser keydown w                   # hold a key (games/canvas see code KeyW); release with keyup w
 agent-browser check @e3                   # check checkbox
 agent-browser uncheck @e3                 # uncheck
 agent-browser select @e4 "option-value"   # select by value or visible label

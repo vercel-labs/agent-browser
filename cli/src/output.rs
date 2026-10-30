@@ -2020,7 +2020,14 @@ agent-browser keydown - Press a key down (without release)
 Usage: agent-browser keydown <key>
 
 Presses a key down without releasing it. Use keyup to release.
-Useful for holding modifier keys.
+Useful for holding modifier keys, or keys a game or canvas app polls.
+
+Sends the same key, code and keyCode as press (keydown w gives
+code KeyW, keyCode 87). A printable key also types into the
+focused field. Accepts key names (w, Shift, ArrowUp, Enter) and
+code names (KeyW, Digit1, ShiftRight). Modifier names map to the
+left-hand key (Shift is ShiftLeft) and set their own flag, so
+keydown Shift has shiftKey true.
 
 Global Options:
   --json               Output as JSON
@@ -2029,6 +2036,7 @@ Global Options:
 Examples:
   agent-browser keydown Shift
   agent-browser keydown Control
+  agent-browser keydown w && sleep 2 && agent-browser keyup w
 "##
         }
         "keyup" => {
@@ -2037,7 +2045,8 @@ agent-browser keyup - Release a key
 
 Usage: agent-browser keyup <key>
 
-Releases a key that was pressed with keydown.
+Releases a key that was pressed with keydown. Accepts the same key
+names as keydown and sends the same code and keyCode.
 
 Global Options:
   --json               Output as JSON
@@ -2046,6 +2055,7 @@ Global Options:
 Examples:
   agent-browser keyup Shift
   agent-browser keyup Control
+  agent-browser keyup w
 "##
         }
         "keyboard" => {
