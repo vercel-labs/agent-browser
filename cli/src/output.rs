@@ -2255,8 +2255,15 @@ Refs can be reused across snapshots. Take a fresh snapshot after navigation.
 If a ref's element was replaced, the action uses the one element with the same
 role and name. If that is ambiguous, it fails: run snapshot again.
 
+Use -F to include iframe content. When the main-frame snapshot runs with
+-F, each Iframe node is resolved and its child accessibility tree is
+appended beneath it in the output. Element refs inside iframes carry frame
+context, so click/fill/type work without manually switching frames.
+Use 'frame <sel|@ref>' then 'snapshot -i' to scope to one iframe.
+
 Options:
   -i, --interactive    Only include interactive elements
+  -F, --frames         Include elements from all iframes (refs work transparently)
   -u, --urls           Include href URLs for link elements
   -c, --compact        Remove empty structural elements
   -d, --depth <n>      Limit tree depth
@@ -3901,6 +3908,7 @@ Navigation:
   back                       Go back
   forward                    Go forward
   reload                     Reload page
+  frame <sel|main>           Switch into an iframe (or 'main' to return)
 
 Get Info:  agent-browser get <what> [selector]
   text, html, value, attr <name>, title, url, count, box, styles, cdp-url
@@ -4047,6 +4055,7 @@ Setup:
 
 Snapshot Options:
   -i, --interactive          Only interactive elements
+  -F, --frames               Include elements from all iframes (refs work transparently)
   -c, --compact              Remove empty structural elements
   -d, --depth <n>            Limit tree depth
   -s, --selector <sel>       Scope to CSS selector
