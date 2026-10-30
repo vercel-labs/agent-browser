@@ -149,6 +149,8 @@ agent-browser connect <port>          # Connect to browser via CDP
 agent-browser stream enable [--port <port>]  # Start runtime WebSocket streaming
 agent-browser webmcp list                     # List experimental page tools
 agent-browser webmcp invoke <tool> --params @input.json
+agent-browser flow start <name>               # Record a task once (experimental)
+agent-browser flow run <name> --param k=v     # Replay it without driving the page
 agent-browser stream status           # Show runtime streaming state and bound port
 agent-browser stream disable          # Stop runtime WebSocket streaming
 agent-browser close                   # Close browser (aliases: quit, exit)

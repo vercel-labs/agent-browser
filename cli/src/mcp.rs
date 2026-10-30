@@ -155,6 +155,10 @@ const TOOL_STREAM_ENABLE: &str = "agent_browser_stream_enable";
 const TOOL_STREAM_DISABLE: &str = "agent_browser_stream_disable";
 const TOOL_STREAM_STATUS: &str = "agent_browser_stream_status";
 const TOOL_WEBMCP_LIST: &str = "agent_browser_webmcp_list";
+const TOOL_FLOW_START: &str = "agent_browser_flow_start";
+const TOOL_FLOW_SAVE: &str = "agent_browser_flow_save";
+const TOOL_FLOW_RUN: &str = "agent_browser_flow_run";
+const TOOL_FLOW_LIST: &str = "agent_browser_flow_list";
 const TOOL_WEBMCP_INVOKE: &str = "agent_browser_webmcp_invoke";
 const TOOL_WEBMCP_RESULT: &str = "agent_browser_webmcp_result";
 const TOOL_WEBMCP_CANCEL: &str = "agent_browser_webmcp_cancel";
@@ -340,6 +344,10 @@ impl Default for McpConfig {
 const CORE_PROFILE_TOOLS: &[&str] = &[
     TOOL_TOOLS_PROFILES,
     TOOL_OPEN,
+    TOOL_FLOW_LIST,
+    TOOL_FLOW_RUN,
+    TOOL_FLOW_START,
+    TOOL_FLOW_SAVE,
     TOOL_READ,
     TOOL_SNAPSHOT,
     TOOL_BACK,
@@ -766,7 +774,7 @@ fn initialize_result(params: Option<&Value>, config: &McpConfig) -> Value {
             "version": env!("CARGO_PKG_VERSION")
         },
         "instructions": format!(
-            "Use the typed agent_browser_* tools to control a browser. Active MCP tools profile(s): {}. Prefer agent_browser_snapshot after navigation to obtain stable element refs before clicking or typing. Use agent_browser_tools_profiles to see available startup profiles.",
+            "Use the typed agent_browser_* tools to control a browser. Active MCP tools profile(s): {}. Prefer agent_browser_snapshot after navigation to obtain stable element refs before clicking or typing. When a navigation result lists saved flows that match the task, call agent_browser_flow_run instead of driving the page. Use agent_browser_tools_profiles to see available startup profiles.",
             config.profile_names().join(", ")
         )
     })
@@ -847,6 +855,45 @@ fn tools() -> Vec<Value> {
                 "headed": { "type": "boolean", "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults." },
                 "webgpu": { "type": "boolean", "description": "Enable WebGPU (SwiftShader software Vulkan on Linux; no GPU required). Explicit true/false overrides AGENT_BROWSER_WEBGPU and config; omit to use those defaults." }
                 ,"webmcp": { "type": "boolean", "description": "Enable experimental WebMCP support. Defaults to true for locally launched Chrome; set false to pass --no-webmcp." }
+            }),
+            &[],
+        ),
+        tool(
+            TOOL_FLOW_LIST,
+            "List saved flows",
+            "List tasks saved with flow start and flow save, with their params and whether their last run verified.",
+            json!({ "origin": { "type": "string", "description": "Only flows for this host's site." } }),
+            &[],
+        ),
+        tool(
+            TOOL_FLOW_RUN,
+            "Run saved flow",
+            "Run a saved task directly over HTTP, without driving the page. Prefer this over snapshot and click when a saved flow covers the task. Fails and marks the flow unverified when the site changed.",
+            json!({
+                "name": { "type": "string" },
+                "params": { "type": "object", "additionalProperties": { "type": "string" } },
+                "where": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Keep list items whose field contains the value, case-insensitive." },
+                "fields": { "type": "string", "description": "Comma-separated fields to return per item, dotted paths allowed." },
+                "limit": { "type": "integer", "minimum": 1 },
+                "origin": { "type": "string" },
+                "allowWrite": { "type": "boolean", "description": "Required when the flow sends a non-GET request." }
+            }),
+            &["name"],
+        ),
+        tool(
+            TOOL_FLOW_START,
+            "Start recording flow",
+            "Start recording a task so later runs can skip the browser. Do the task with the usual tools, then call flow save.",
+            json!({ "name": { "type": "string" } }),
+            &["name"],
+        ),
+        tool(
+            TOOL_FLOW_SAVE,
+            "Save flow",
+            "Save the recorded task. params maps a param name to the value you typed, so later runs can change it.",
+            json!({
+                "params": { "type": "object", "additionalProperties": { "type": "string" } },
+                "output": { "type": "string", "description": "Request id whose response the flow returns." }
             }),
             &[],
         ),
@@ -2205,6 +2252,7 @@ fn is_read_only_tool(name: &str) -> bool {
             | TOOL_VITALS
             | TOOL_STREAM_STATUS
             | TOOL_WEBMCP_LIST
+            | TOOL_FLOW_LIST
             | TOOL_WEBMCP_RESULT
             | TOOL_SESSION
             | TOOL_SESSION_LIST
@@ -2493,6 +2541,10 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_STREAM_DISABLE => call_literal(arguments, &["stream", "disable"]),
         TOOL_STREAM_STATUS => call_literal(arguments, &["stream", "status"]),
         TOOL_WEBMCP_LIST => call_cli_tool(arguments, webmcp_list_args(arguments)?, None),
+        TOOL_FLOW_LIST => call_cli_tool(arguments, flow_args(arguments, "list")?, None),
+        TOOL_FLOW_RUN => call_cli_tool(arguments, flow_args(arguments, "run")?, None),
+        TOOL_FLOW_START => call_cli_tool(arguments, flow_args(arguments, "start")?, None),
+        TOOL_FLOW_SAVE => call_cli_tool(arguments, flow_args(arguments, "save")?, None),
         TOOL_WEBMCP_INVOKE => call_webmcp_invoke(arguments),
         TOOL_WEBMCP_RESULT => call_webmcp_result(arguments),
         TOOL_WEBMCP_CANCEL => call_one_string(arguments, "webmcp cancel", "invocationId"),
@@ -2739,6 +2791,48 @@ fn open_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
 fn call_open(arguments: &Value) -> Result<Value, ProtocolError> {
     let args = open_args(arguments)?;
     call_cli_tool(arguments, args, None)
+}
+
+fn flow_args(arguments: &Value, sub: &str) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec!["flow".to_string(), sub.to_string()];
+    if matches!(sub, "run" | "start") {
+        args.push(required_string(arguments, "name")?);
+    }
+    let pairs = |key: &str, flag: &str, args: &mut Vec<String>| -> Result<(), ProtocolError> {
+        if let Some(map) = arguments.get(key) {
+            let map = map.as_object().ok_or_else(|| {
+                ProtocolError::invalid_params(format!("{} must be an object", key))
+            })?;
+            for (k, v) in map {
+                let v = v.as_str().ok_or_else(|| {
+                    ProtocolError::invalid_params(format!("{}.{} must be a string", key, k))
+                })?;
+                args.push(flag.to_string());
+                args.push(format!("{}={}", k, v));
+            }
+        }
+        Ok(())
+    };
+    pairs("params", "--param", &mut args)?;
+    pairs("where", "--where", &mut args)?;
+    for (key, flag) in [
+        ("fields", "--fields"),
+        ("origin", "--origin"),
+        ("output", "--output"),
+    ] {
+        if let Some(v) = optional_string(arguments, key)? {
+            args.push(flag.to_string());
+            args.push(v);
+        }
+    }
+    if let Some(limit) = arguments.get("limit").and_then(Value::as_u64) {
+        args.push("--limit".to_string());
+        args.push(limit.to_string());
+    }
+    if optional_bool(arguments, "allowWrite")? == Some(true) {
+        args.push("--allow-write".to_string());
+    }
+    Ok(args)
 }
 
 fn webmcp_list_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
@@ -4262,6 +4356,14 @@ fn tool_text(parsed: Option<&Value>, stdout: &str, stderr: &str) -> String {
             // Render changed summaries once, through the same untrusted formatter as
             // CLI text, including when the primary result falls back to JSON.
             let mut primary = value.clone();
+            // Before the WebMCP context is taken out: the hint ranks flows after
+            // the page's declared tools.
+            let flow_hint = primary.get_mut("data").and_then(|data| {
+                data.get("url")?;
+                let hint = crate::output::format_flow_hint(data);
+                data.as_object_mut().map(|d| d.remove("flows"));
+                hint
+            });
             let contexts: Vec<String> = if let Some(results) = primary.as_array_mut() {
                 // Batch commands store each response's data under `result`.
                 results
@@ -4279,6 +4381,7 @@ fn tool_text(parsed: Option<&Value>, stdout: &str, stderr: &str) -> String {
                     .into_iter()
                     .collect()
             };
+
             let mut text = response_text(&primary).unwrap_or_else(|| {
                 serde_json::to_string_pretty(&primary).unwrap_or_else(|_| stdout.trim().to_string())
             });
@@ -4288,7 +4391,7 @@ fn tool_text(parsed: Option<&Value>, stdout: &str, stderr: &str) -> String {
                 text.push_str("\n\nwarning: ");
                 text.push_str(warning);
             }
-            for context in contexts {
+            for context in contexts.into_iter().chain(flow_hint) {
                 text.push_str("\n\n");
                 text.push_str(&context);
             }
@@ -4346,6 +4449,15 @@ fn response_text(value: &Value) -> Option<String> {
                     .is_some()
             {
                 return Some(crate::output::format_a11y_text(data));
+            }
+            if data.get("verified").is_some() && data.get("steps").is_some() {
+                return crate::output::format_flow_text(Some("flow_run"), data);
+            }
+            if data.get("gaps").is_some() && data.get("requests").is_some() {
+                return crate::output::format_flow_text(Some("flow_save"), data);
+            }
+            if data.get("flows").is_some() && data.get("url").is_none() {
+                return crate::output::format_flow_text(Some("flow_list"), data);
             }
             if let Some(skipped) = data
                 .get("skippedOrigins")

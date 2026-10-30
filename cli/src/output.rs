@@ -193,6 +193,296 @@ fn format_webmcp_text(action: Option<&str>, data: &serde_json::Value) -> Option<
     }
 }
 
+/// Quote a value for a POSIX shell. Recorded param values come from the
+/// site, so a suggested command must never let them run as shell syntax.
+pub(crate) fn shell_quote(value: &str) -> String {
+    let plain = !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-./:@%+=,".contains(c));
+    if plain {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+/// Saved flows announced after navigating to a site that has them.
+pub(crate) fn format_flow_hint(data: &serde_json::Value) -> Option<String> {
+    let flows = data.get("flows")?.as_array()?;
+    if flows.is_empty() {
+        return None;
+    }
+    let declared = data["webmcp"]["toolCount"].as_u64().unwrap_or(0) > 0
+        || data["webmcp"]["tools"]
+            .as_array()
+            .is_some_and(|t| !t.is_empty());
+    let mut lines = vec![if declared {
+        format!(
+            "Saved flows for this site ({}), observed by agent-browser. Prefer a WebMCP tool above when one covers the task; otherwise calling a flow is faster than driving the page:",
+            flows.len()
+        )
+    } else {
+        format!(
+            "Saved flows for this site ({}). Calling one is faster than driving the page:",
+            flows.len()
+        )
+    }];
+    for f in flows {
+        let params: Vec<String> = f["examples"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| {
+                        format!(
+                            "--param {}",
+                            shell_quote(&format!("{}={}", k, v.as_str().unwrap_or("")))
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        lines.push(format!(
+            "  agent-browser flow run {} {}{}",
+            f["name"].as_str().unwrap_or(""),
+            params.join(" "),
+            if f["verifiedAt"].is_null() {
+                "  (unverified)"
+            } else {
+                ""
+            }
+        ));
+        if let Some(page) = f["recordedOn"].as_str() {
+            lines.push(format!("    recorded on {}", page));
+        }
+        if let Some(sources) = f["paramSources"].as_object() {
+            for (name, source) in sources {
+                let list = source
+                    .as_str()
+                    .unwrap_or("")
+                    .split_once(' ')
+                    .map(|(_, l)| l);
+                if let Some(list) = list {
+                    lines.push(format!("    {}: one of the site's {} values", name, list));
+                }
+            }
+        }
+        if let Some(fields) = f["itemFields"].as_array().filter(|a| !a.is_empty()) {
+            let names: Vec<&str> = fields.iter().filter_map(|x| x.as_str()).collect();
+            lines.push(format!("    item fields: {}", names.join(", ")));
+        }
+    }
+    lines.push("Param values above are the recorded ones; keep or replace them with values of the same kind. Add --where field=value, --fields a,b and --limit n to return only what the task needs.".to_string());
+    Some(lines.join("\n"))
+}
+
+pub(crate) fn format_flow_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
+    let str_list = |v: &serde_json::Value| {
+        v.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default()
+    };
+    match action {
+        Some("flow_start") => Some(format!(
+            "Recording flow '{}'. Do the task, then run `flow save`.",
+            data.get("name")?.as_str()?
+        )),
+        Some("flow_save") => {
+            let mut out = format!(
+                "Saved flow '{}' for {} to {}\n",
+                data.get("name")?.as_str()?,
+                data.get("origin")?.as_str()?,
+                data.get("path")?.as_str()?
+            );
+            let output = data.get("output").and_then(|v| v.as_str()).unwrap_or("");
+            for r in data.get("requests")?.as_array()? {
+                let id = r["id"].as_str().unwrap_or("");
+                out.push_str(&format!(
+                    "  {} {} {} {} ({} bytes)\n",
+                    if id == output { "*" } else { " " },
+                    id,
+                    r["method"].as_str().unwrap_or(""),
+                    r["url"].as_str().unwrap_or(""),
+                    r["bytes"].as_u64().unwrap_or(0)
+                ));
+            }
+            out.push_str(
+                "  * = output. Change it with `flow save --output <id>`.
+",
+            );
+            let params = str_list(&data["params"]);
+            out.push_str(&format!(
+                "Params: {}\n",
+                if params.is_empty() {
+                    "none".to_string()
+                } else {
+                    params
+                }
+            ));
+            if let Some(gaps) = data
+                .get("gaps")
+                .and_then(|g| g.as_array())
+                .filter(|g| !g.is_empty())
+            {
+                out.push_str("Not captured:\n");
+                for g in gaps {
+                    out.push_str(&format!(
+                        "  step {} `{}`: {}\n",
+                        g["step"],
+                        g["command"].as_str().unwrap_or(""),
+                        g["reason"].as_str().unwrap_or("")
+                    ));
+                }
+            }
+            let dropped = str_list(&data["droppedHeaders"]);
+            if !dropped.is_empty() {
+                out.push_str(&format!(
+                    "Not saved (taken from the live session at run time): {}\n",
+                    dropped
+                ));
+            }
+            out.push_str("Unverified until the first successful `flow run`.");
+            Some(out)
+        }
+        Some("flow_run") => {
+            let tiers: Vec<String> = data
+                .get("steps")?
+                .as_array()?
+                .iter()
+                .map(|s| {
+                    let fell_back: Vec<String> = s["fellBack"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|f| {
+                            format!(
+                                "{}: {}",
+                                f["tier"].as_str().unwrap_or("-"),
+                                f["error"].as_str().unwrap_or("")
+                            )
+                        })
+                        .collect();
+                    let mut line = format!(
+                        "{} via {} in {}ms",
+                        s["id"].as_str().unwrap_or(""),
+                        s["tier"].as_str().unwrap_or("-"),
+                        s["ms"]
+                    );
+                    if !fell_back.is_empty() {
+                        line.push_str(&format!(" after {}", fell_back.join("; ")));
+                    }
+                    line
+                })
+                .collect();
+            let body = data.get("data").cloned().unwrap_or(serde_json::Value::Null);
+            let status = match data.get("drift") {
+                Some(d) => format!(
+                    "unverified: {} on the {} tier",
+                    d["reason"].as_str().unwrap_or("response changed"),
+                    d["tier"].as_str().unwrap_or("-")
+                ),
+                None if data.get("empty") == Some(&serde_json::Value::Bool(true)) => {
+                    "no results, so the flow's verified state is unchanged".to_string()
+                }
+                None => "verified".to_string(),
+            };
+            Some(format!(
+                "Flow '{}' ran in {}ms ({}), {}\n{}",
+                data.get("name")?.as_str()?,
+                data.get("ms")?,
+                tiers.join(", "),
+                status,
+                serde_json::to_string_pretty(&body).unwrap_or_default()
+            ))
+        }
+        Some("flow_list") => {
+            let flows = data.get("flows")?.as_array()?;
+            if flows.is_empty() {
+                return Some("No saved flows. Record one with `flow start <name>`.".to_string());
+            }
+            Some(
+                flows
+                    .iter()
+                    .map(|f| {
+                        let params = str_list(&f["params"]);
+                        format!(
+                            "{} ({}) params: {} {}",
+                            f["name"].as_str().unwrap_or(""),
+                            f["origin"].as_str().unwrap_or(""),
+                            if params.is_empty() {
+                                "none".to_string()
+                            } else {
+                                params
+                            },
+                            if f["verifiedAt"].is_null() {
+                                "unverified"
+                            } else {
+                                "verified"
+                            }
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// Saved flows for the page's site, listed after the tools the page declares
+/// and in the same shape: name, description and input schema.
+fn format_observed_flows(data: &serde_json::Value) -> Option<String> {
+    let flows = data.get("observed")?.as_array().filter(|f| !f.is_empty())?;
+    let mut lines =
+        vec!["Observed by agent-browser (saved flows, not declared by the page):".to_string()];
+    for f in flows {
+        let name = f["name"].as_str().unwrap_or("");
+        let props = f["inputSchema"]["properties"].as_object();
+        let inputs: Vec<String> = props
+            .into_iter()
+            .flatten()
+            .map(|(k, v)| {
+                format!(
+                    "{} ({}): {}",
+                    k,
+                    v["type"].as_str().unwrap_or("string"),
+                    v["description"].as_str().unwrap_or("")
+                )
+            })
+            .collect();
+        let example: Vec<String> = props
+            .into_iter()
+            .flatten()
+            .map(|(k, _)| format!("--param {}", shell_quote(&format!("{}=<value>", k))))
+            .collect();
+        lines.push(format!(
+            "{} [{}]\n  {}",
+            name,
+            if f["verifiedAt"].is_null() {
+                "unverified"
+            } else {
+                "verified"
+            },
+            f["description"].as_str().unwrap_or("")
+        ));
+        for input in &inputs {
+            lines.push(format!("  input {}", input));
+        }
+        lines.push(format!(
+            "  run: agent-browser flow run {}{}{}",
+            name,
+            if example.is_empty() { "" } else { " " },
+            example.join(" ")
+        ));
+    }
+    Some(lines.join("\n"))
+}
+
 fn format_webmcp_tool_text(tool: &serde_json::Value) -> String {
     let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("?");
     let description = tool
@@ -493,6 +783,7 @@ fn recording_fps_suffix(data: &serde_json::Value) -> String {
 
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     print_primary_response(resp, action, opts);
+    // Tools the page declares come first; saved flows are the fallback.
     if !opts.json {
         if let Some(context) = resp
             .data
@@ -500,6 +791,11 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             .and_then(|data| format_webmcp_context(data, opts))
         {
             println!("{context}");
+        }
+    }
+    if !opts.json && action != Some("flow_list") {
+        if let Some(hint) = resp.data.as_ref().and_then(format_flow_hint) {
+            println!("{hint}");
         }
     }
 }
@@ -586,14 +882,20 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             };
             if tools.is_empty() {
                 println!("No WebMCP tools registered on the current page");
-                return;
             }
             for tool in tools {
                 print_with_boundaries(&format_webmcp_tool_text(tool), boundary_origin(tool), opts);
             }
+            if let Some(observed) = format_observed_flows(data) {
+                println!("{}", observed);
+            }
             return;
         }
         if let Some(output) = format_webmcp_text(action, data) {
+            print_with_boundaries(&output, boundary_origin(data), opts);
+            return;
+        }
+        if let Some(output) = format_flow_text(action, data) {
             print_with_boundaries(&output, boundary_origin(data), opts);
             return;
         }
@@ -4694,6 +4996,19 @@ hydration: -  phases: 0  hydratedComponents: 0"
         );
         assert!(rendered.contains("origin=https://example.com"));
         assert!(rendered.contains("\"message\": \"untrusted\""));
+    }
+
+    #[test]
+    fn test_flow_hint_quotes_recorded_values_for_the_shell() {
+        let data = json!({ "flows": [{
+            "name": "search",
+            "examples": { "q": "kettle; rm -rf ~", "id": "401" },
+            "verifiedAt": "now",
+        }] });
+        let hint = super::format_flow_hint(&data).unwrap();
+        assert!(hint.contains("--param 'q=kettle; rm -rf ~'"));
+        assert!(hint.contains("--param id=401"));
+        assert_eq!(super::shell_quote("it's"), "'it'\\''s'");
     }
 
     #[test]

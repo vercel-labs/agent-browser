@@ -176,6 +176,7 @@ pub fn is_top_level_command(value: &str) -> bool {
             | "plugins"
             | "chat"
             | "webmcp"
+            | "flow"
     )
 }
 
@@ -428,6 +429,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         "reload" => Ok(json!({ "id": id, "action": "reload" })),
         "read" => parse_read(&rest, &id, flags),
         "webmcp" => parse_webmcp(&rest, &id),
+        "flow" => parse_flow(&rest, &id),
 
         // === Core Actions ===
         "click" => {
@@ -2085,6 +2087,132 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 
         _ => Err(ParseError::UnknownCommand {
             command: cmd.to_string(),
+        }),
+    }
+}
+
+/// Parse `flow <start|save|run|list>`: record a task once, replay it over HTTP.
+fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
+    const VALID: &[&str] = &["start", "save", "run", "list"];
+    const USAGE: &str = "flow <start <name>|save [--param k=v]... [--output <id>]|run <name> [--param k=v]... [--origin <host>] [--allow-write]|list [--origin <host>]>";
+
+    fn params(args: &[&str], usage: &'static str) -> Result<Value, ParseError> {
+        let mut out = serde_json::Map::new();
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--param" {
+                let pair = args
+                    .get(i + 1)
+                    .ok_or_else(|| ParseError::MissingArguments {
+                        context: "flow --param".to_string(),
+                        usage,
+                    })?;
+                let (k, v) = pair
+                    .split_once('=')
+                    .ok_or_else(|| ParseError::InvalidValue {
+                        message: format!("Invalid --param '{}': expected name=value", pair),
+                        usage,
+                    })?;
+                out.insert(k.to_string(), json!(v));
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        Ok(Value::Object(out))
+    }
+
+    fn flag_value<'a>(args: &[&'a str], flag: &str) -> Option<&'a str> {
+        args.iter()
+            .position(|a| *a == flag)
+            .and_then(|i| args.get(i + 1).copied())
+    }
+
+    match rest.first().copied() {
+        Some("start") => {
+            let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
+                context: "flow start".to_string(),
+                usage: "flow start <name>",
+            })?;
+            Ok(json!({ "id": id, "action": "flow_start", "name": name }))
+        }
+        Some("save") => {
+            let mut cmd = json!({
+                "id": id,
+                "action": "flow_save",
+                "params": params(&rest[1..], "flow save [--param name=value]... [--output <request-id>]")?,
+            });
+            if let Some(output) = flag_value(rest, "--output") {
+                cmd["output"] = json!(output);
+            }
+            Ok(cmd)
+        }
+        Some("run") => {
+            let name = rest
+                .get(1)
+                .filter(|n| !n.starts_with("--"))
+                .ok_or_else(|| ParseError::MissingArguments {
+                    context: "flow run".to_string(),
+                    usage:
+                        "flow run <name> [--param name=value]... [--origin <host>] [--allow-write]",
+                })?;
+            let mut cmd = json!({
+                "id": id,
+                "action": "flow_run",
+                "name": name,
+                "params": params(&rest[2..], "flow run <name> [--param name=value]...")?,
+                "allowWrite": rest.contains(&"--allow-write"),
+            });
+            if let Some(origin) = flag_value(rest, "--origin") {
+                cmd["origin"] = json!(origin);
+            }
+            let mut filters = serde_json::Map::new();
+            for (i, a) in rest.iter().enumerate() {
+                if *a == "--where" {
+                    let pair = rest
+                        .get(i + 1)
+                        .ok_or_else(|| ParseError::MissingArguments {
+                            context: "flow run --where".to_string(),
+                            usage: "flow run <name> --where field=value",
+                        })?;
+                    let (k, v) = pair
+                        .split_once('=')
+                        .ok_or_else(|| ParseError::InvalidValue {
+                            message: format!("Invalid --where '{}': expected field=value", pair),
+                            usage: "flow run <name> --where field=value",
+                        })?;
+                    filters.insert(k.to_string(), json!(v));
+                }
+            }
+            if !filters.is_empty() {
+                cmd["where"] = Value::Object(filters);
+            }
+            if let Some(fields) = flag_value(rest, "--fields") {
+                cmd["fields"] = json!(fields);
+            }
+            if let Some(limit) = flag_value(rest, "--limit") {
+                let n: u64 = limit.parse().map_err(|_| ParseError::InvalidValue {
+                    message: format!("Invalid --limit '{}'", limit),
+                    usage: "flow run <name> --limit <n>",
+                })?;
+                cmd["limit"] = json!(n);
+            }
+            Ok(cmd)
+        }
+        Some("list") => {
+            let mut cmd = json!({ "id": id, "action": "flow_list" });
+            if let Some(origin) = flag_value(rest, "--origin") {
+                cmd["origin"] = json!(origin);
+            }
+            Ok(cmd)
+        }
+        Some(sub) => Err(ParseError::UnknownSubcommand {
+            subcommand: sub.to_string(),
+            valid_options: VALID,
+        }),
+        None => Err(ParseError::MissingArguments {
+            context: "flow".to_string(),
+            usage: USAGE,
         }),
     }
 }

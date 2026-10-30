@@ -98,3 +98,71 @@ agent-browser batch \
 ```
 
 Launching with `open` and no URL leaves the browser on `about:blank`, which gives routes time to register before the first real navigation.
+
+## Saved flows
+
+Saved flows are experimental. Record a browser task once, and agent-browser keeps the requests behind it. Later runs replay those requests and return only the data the task needs, without driving the page.
+
+```bash
+agent-browser flow start search
+agent-browser open "https://shop.example.com/search?q=kettle"
+agent-browser flow save
+agent-browser close
+
+agent-browser flow run search --param q="toaster" --fields title,price --limit 3
+```
+
+### Recording
+
+`flow start <name>` tags every request with the command that caused it. Run the task with ordinary commands, then `flow save`. A flow can also start on a page that is already open, such as one where you are signed in.
+
+`flow save` keeps:
+
+- first-party JSON responses
+- JSON that server-rendered pages embed in their HTML: `<script type="application/json">`, `__NEXT_DATA__`, JSON-LD and `window.x = {...}` state
+
+It never saves cookies, `authorization`, or token and CSRF headers. Each run reads cookies from the live session.
+
+The save report lists the requests it kept, the params, and any step it could not turn into a request, with the reason. When the recording stops at a sign-in form, the report says so.
+
+### Params
+
+Pass params explicitly with `flow save --param name=value`, using a value you typed during the task. `flow save` also finds params on its own:
+
+- a query value of the page URL that the requests also sent, such as `?q=`
+- a value the task picked from a list in an earlier response, such as an id from a list of stores
+- a value copied from a single field of an earlier response, such as a session key, which is filled from that response on every run
+
+```bash
+agent-browser flow list   # Params, recorded values, item fields and verified state
+```
+
+### Running
+
+```bash
+agent-browser flow run <name> [--param k=v]... [--where field=value] [--fields a,b.c] [--limit n]
+```
+
+`--where` keeps items whose field contains the value, case-insensitively. `--fields` returns only those fields. Use them to keep large responses out of the agent's context. Unknown field names fail with the list of valid ones.
+
+A run tries, in order:
+
+1. direct HTTP, with cookies from the live session
+2. the same request sent from the page, which adds the browser's own headers
+3. a replay of the recorded commands, which reads the request the page sends
+
+The next run starts at the tier that worked. Every tier checks the response against the shape that was recorded. If the shape changed, the run fails, the flow is marked unverified, and the agent continues in the UI. A response that only lacks its lists and counts is treated as no results and leaves the verified state as it was.
+
+Requests other than GET and GraphQL queries are writes and need `--allow-write`. A write the site accepted is never sent again by a lower tier.
+
+### Discovery
+
+After `open`, `back`, `forward`, `reload` or a tab switch, the response lists the saved flows for that site once per session, with their params, the recorded values and the item fields. When the page also declares WebMCP tools, those come first and the hint suggests them when one covers the task.
+
+Saved flows use the shape of a WebMCP tool: a name, a description and an `inputSchema` built from the params. `flow list --json` returns that shape, and `webmcp list` shows saved flows in it, after the tools the page declares. Run them with `flow run`; `webmcp invoke` only calls the page's own tools.
+
+The MCP server exposes `agent_browser_flow_list`, `agent_browser_flow_run`, `agent_browser_flow_start` and `agent_browser_flow_save` in the core profile.
+
+### Storage
+
+Flows live in `~/.agent-browser/flows/<origin>/<name>.json`. Set `AGENT_BROWSER_FLOWS_DIR` to use another directory.

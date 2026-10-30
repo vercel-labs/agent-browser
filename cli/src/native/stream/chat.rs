@@ -457,6 +457,7 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "clipboard",
     "session",
     "webmcp",
+    "flow",
     "read",
     "a11y",
     "react",
