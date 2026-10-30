@@ -396,6 +396,8 @@ See [references/video-recording.md](references/video-recording.md) for frame rat
 
 Iframes are auto-inlined in the snapshot — their refs work transparently:
 
+When an iframe has no accessibility name, its HTML `name` is shown as a display fallback. This label does not change the ref's accessibility name, and iframe URLs are not shown.
+
 ```bash
 agent-browser snapshot -i
 # @e3 [Iframe] "payment-frame"
