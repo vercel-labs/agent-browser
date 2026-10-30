@@ -475,11 +475,6 @@ pub async fn take_snapshot(
         root_indices
     };
 
-    let mut tracker = RoleNameTracker::new();
-    let mut next_ref: usize = ref_map.next_ref_num();
-
-    let mut nodes_with_refs: Vec<(usize, usize)> = Vec::new();
-
     // Pre-collect cursor-interactive elements so we can mark them with refs during tree building
     let cursor_elements: HashMap<i64, CursorElementInfo> =
         find_cursor_interactive_elements(client, session_id)
@@ -488,82 +483,14 @@ pub async fn take_snapshot(
 
     promote_hidden_inputs(&mut tree_nodes, &cursor_elements);
 
-    for (idx, node) in tree_nodes.iter().enumerate() {
-        let role = node.role.as_str();
-        let mut should_ref = if INTERACTIVE_ROLES.contains(&role) {
-            true
-        } else if CONTENT_ROLES.contains(&role) {
-            !node.name.is_empty()
-        } else {
-            false
-        };
-
-        if node
-            .backend_node_id
-            .is_some_and(|bid| cursor_elements.contains_key(&bid))
-        {
-            // ref elements that are cursor-interactive
-            should_ref = true;
-        }
-
-        if should_ref {
-            let nth = tracker.track(role, &node.name, idx);
-            nodes_with_refs.push((idx, nth));
-        }
-    }
-
-    let duplicates = tracker.get_duplicates();
-
-    for (idx, nth) in &nodes_with_refs {
-        let node = &tree_nodes[*idx];
-        let key = format!("{}:{}", node.role, node.name);
-        let actual_nth = if duplicates.contains_key(&key) {
-            Some(*nth)
-        } else {
-            None
-        };
-
-        let ref_id = if let Some(backend_node_id) = tree_nodes[*idx]
-            .backend_node_id
-            .filter(|_| document_is_known)
-        {
-            if let Some(existing) = ref_map.durable_ref(session_id, frame_id, backend_node_id) {
-                existing.to_string()
-            } else {
-                let allocated = format!("e{}", next_ref);
-                next_ref += 1;
-                ref_map.remember_durable_ref(session_id, frame_id, backend_node_id, &allocated);
-                allocated
-            }
-        } else {
-            let allocated = format!("e{}", next_ref);
-            next_ref += 1;
-            allocated
-        };
-
-        ref_map.add_with_frame(
-            ref_id.clone(),
-            tree_nodes[*idx].backend_node_id,
-            &tree_nodes[*idx].role,
-            &tree_nodes[*idx].name,
-            actual_nth,
-            frame_id,
-        );
-
-        tree_nodes[*idx].has_ref = true;
-        tree_nodes[*idx].ref_id = Some(ref_id);
-    }
-
-    // Populate cursor_info for ref-bearing nodes
-    for (idx, _) in &nodes_with_refs {
-        if let Some(bid) = tree_nodes[*idx].backend_node_id {
-            if let Some(cursor_info) = cursor_elements.get(&bid) {
-                tree_nodes[*idx].cursor_info = Some((*cursor_info).clone());
-            }
-        }
-    }
-
-    ref_map.set_next_ref_num(next_ref);
+    assign_refs(
+        &mut tree_nodes,
+        &cursor_elements,
+        ref_map,
+        session_id,
+        frame_id,
+        document_is_known,
+    );
 
     if options.urls {
         let link_nodes: Vec<(usize, i64)> = tree_nodes
@@ -708,6 +635,103 @@ pub async fn take_snapshot(
         }
     }
 
+    Ok(finish_output(output, options))
+}
+
+/// Allocates or reuses refs for interactive and named content nodes and records them in `ref_map`.
+fn assign_refs(
+    tree_nodes: &mut [TreeNode],
+    cursor_elements: &HashMap<i64, CursorElementInfo>,
+    ref_map: &mut RefMap,
+    session_id: &str,
+    frame_id: Option<&str>,
+    document_is_known: bool,
+) {
+    let mut tracker = RoleNameTracker::new();
+    let mut next_ref: usize = ref_map.next_ref_num();
+
+    let mut nodes_with_refs: Vec<(usize, usize)> = Vec::new();
+
+    for (idx, node) in tree_nodes.iter().enumerate() {
+        let role = node.role.as_str();
+        let mut should_ref = if INTERACTIVE_ROLES.contains(&role) {
+            true
+        } else if CONTENT_ROLES.contains(&role) {
+            !node.name.is_empty()
+        } else {
+            false
+        };
+
+        if node
+            .backend_node_id
+            .is_some_and(|bid| cursor_elements.contains_key(&bid))
+        {
+            // ref elements that are cursor-interactive
+            should_ref = true;
+        }
+
+        if should_ref {
+            let nth = tracker.track(role, &node.name, idx);
+            nodes_with_refs.push((idx, nth));
+        }
+    }
+
+    let duplicates = tracker.get_duplicates();
+
+    for (idx, nth) in &nodes_with_refs {
+        let node = &tree_nodes[*idx];
+        let key = format!("{}:{}", node.role, node.name);
+        let actual_nth = if duplicates.contains_key(&key) {
+            Some(*nth)
+        } else {
+            None
+        };
+
+        let ref_id = if let Some(backend_node_id) = tree_nodes[*idx]
+            .backend_node_id
+            .filter(|_| document_is_known)
+        {
+            if let Some(existing) = ref_map.durable_ref(session_id, frame_id, backend_node_id) {
+                existing.to_string()
+            } else {
+                let allocated = format!("e{}", next_ref);
+                next_ref += 1;
+                ref_map.remember_durable_ref(session_id, frame_id, backend_node_id, &allocated);
+                allocated
+            }
+        } else {
+            let allocated = format!("e{}", next_ref);
+            next_ref += 1;
+            allocated
+        };
+
+        ref_map.add_with_frame(
+            ref_id.clone(),
+            tree_nodes[*idx].backend_node_id,
+            &tree_nodes[*idx].role,
+            &tree_nodes[*idx].name,
+            actual_nth,
+            frame_id,
+        );
+
+        tree_nodes[*idx].has_ref = true;
+        tree_nodes[*idx].ref_id = Some(ref_id);
+    }
+
+    // Populate cursor_info for ref-bearing nodes
+    for (idx, _) in &nodes_with_refs {
+        if let Some(bid) = tree_nodes[*idx].backend_node_id {
+            if let Some(cursor_info) = cursor_elements.get(&bid) {
+                tree_nodes[*idx].cursor_info = Some((*cursor_info).clone());
+            }
+        }
+    }
+
+    ref_map.set_next_ref_num(next_ref);
+}
+
+/// Compacts the rendered tree when asked and substitutes the empty-page messages.
+fn finish_output(mut output: String, options: &SnapshotOptions) -> String {
     if options.compact {
         output = compact_tree(&output, options.interactive);
     }
@@ -716,12 +740,47 @@ pub async fn take_snapshot(
 
     if trimmed.is_empty() {
         if options.interactive {
-            return Ok("(no interactive elements)".to_string());
+            return "(no interactive elements)".to_string();
         }
-        return Ok("(empty page)".to_string());
+        return "(empty page)".to_string();
     }
 
-    Ok(trimmed)
+    trimmed
+}
+
+/// Runs the shared tree, ref and render pipeline on prebuilt accessibility nodes.
+/// `urls` maps a node's `backend_d_o_m_node_id` to its link target and is used when `options.urls` is set.
+pub fn snapshot_from_ax_nodes(
+    nodes: &[AXNode],
+    urls: &HashMap<i64, String>,
+    options: &SnapshotOptions,
+    ref_map: &mut RefMap,
+    session_id: &str,
+    frame_id: Option<&str>,
+    document_is_known: bool,
+) -> String {
+    let (mut tree_nodes, roots) = build_tree(nodes);
+    assign_refs(
+        &mut tree_nodes,
+        &HashMap::new(),
+        ref_map,
+        session_id,
+        frame_id,
+        document_is_known,
+    );
+    if options.urls {
+        for node in tree_nodes
+            .iter_mut()
+            .filter(|n| n.role == "link" && n.has_ref)
+        {
+            node.url = node.backend_node_id.and_then(|id| urls.get(&id).cloned());
+        }
+    }
+    let mut output = String::new();
+    for &root in &roots {
+        render_tree(&tree_nodes, root, 0, &mut output, options);
+    }
+    finish_output(output, options)
 }
 
 /// Resolve the child frame ID for an iframe element given its backendNodeId.

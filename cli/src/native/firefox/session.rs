@@ -16,7 +16,9 @@ use crate::native::cdp::chrome::LaunchOptions;
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 const DEVTOOLS_CONNECT_WINDOW: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
-const SUBSCRIBED_EVENTS: [&str; 2] = [
+const SUBSCRIBED_EVENTS: [&str; 4] = [
+    "browsingContext.contextCreated",
+    "browsingContext.contextDestroyed",
     "browsingContext.userPromptOpened",
     "browsingContext.userPromptClosed",
 ];
@@ -28,14 +30,25 @@ pub struct FirefoxSession {
     pub bidi: BidiClient,
     pub rdp: RdpClient,
     pub accessibility_actor: String,
-    /// Active top-level browsing context (tab) id.
+    /// Active browsing context id: a top-level tab, or a frame after `frame <sel>`.
     pub context: String,
+    /// Active top-level browsing context id (tab), restored by `frame main`.
+    pub top_context: String,
     /// Stable `t<N>` ids keyed by BiDi context; assigned on first sight and never reused.
     pub tab_ids: HashMap<String, u32>,
+    context_parents: HashMap<String, String>,
     next_tab_id: u32,
     /// Durable ref ids keyed by `(context, sharedId)`; reset when a document changes.
     pub refs: HashMap<(String, String), i64>,
+    pub next_node_id: i64,
+    pub frames: Option<super::snapshot::FrameWatch>,
+    /// Document node `sharedId` last snapshotted per context, used to reset `refs` on a new document.
+    pub documents: HashMap<String, String>,
     pub tab_labels: HashMap<String, String>,
+    /// Touch points of the active touch sequence, released by a later `input_touch` end.
+    pub touches: Vec<(f64, f64)>,
+    /// Durable ids of nodes inside open shadow roots, which a stale ref must never recover by role and name.
+    pub shadow_ids: std::collections::HashSet<i64>,
     events: broadcast::Receiver<Value>,
 }
 
@@ -150,10 +163,17 @@ impl FirefoxSession {
             rdp,
             accessibility_actor,
             tab_ids: HashMap::from([(context.clone(), 1)]),
+            context_parents: HashMap::new(),
             next_tab_id: 2,
+            top_context: context.clone(),
             context,
             refs: HashMap::new(),
+            next_node_id: 0,
+            frames: None,
+            documents: HashMap::new(),
             tab_labels: HashMap::new(),
+            touches: Vec::new(),
+            shadow_ids: Default::default(),
             events,
         })
     }
@@ -189,19 +209,28 @@ impl FirefoxSession {
     pub fn drain_events(&mut self, dialog: &mut Option<PendingDialog>) {
         loop {
             match self.events.try_recv() {
-                Ok(e) => apply_event(&e, dialog),
+                Ok(e) => {
+                    if e["method"] == "browsingContext.contextDestroyed"
+                        && e["params"]["context"] == self.top_context
+                    {
+                        self.top_context.clear();
+                    }
+                    apply_event(&e, dialog, &mut self.context_parents);
+                }
                 Err(TryRecvError::Lagged(_)) => continue,
                 Err(_) => break,
             }
         }
     }
 
-    /// Runs `fut` until it finishes or a prompt opens on the active context. Returns `None` for the prompt.
+    /// Runs `fut` until it finishes or a prompt opens in `context` or its owning tab. Returns `None` for the prompt.
     pub async fn race_prompt<T>(
         &self,
+        context: &str,
         fut: impl Future<Output = Result<T, String>>,
     ) -> Result<Option<T>, String> {
         let mut events = self.bidi.subscribe();
+        let mut parents = self.context_parents.clone();
         tokio::pin!(fut);
         loop {
             tokio::select! {
@@ -209,7 +238,11 @@ impl FirefoxSession {
                 e = events.recv() => match e {
                     Ok(e) if e["method"] == "browsingContext.userPromptOpened"
                         && e["params"]["handler"] != "accept"
-                        && e["params"]["context"] == self.context.as_str() => return Ok(None),
+                        && [context, &self.context, &self.top_context].iter().any(|active|
+                            owner_context(active, &parents)
+                                == owner_context(e["params"]["context"].as_str().unwrap_or_default(), &parents)
+                        ) => return Ok(None),
+                    Ok(e) => apply_event(&e, &mut None, &mut parents),
                     Err(broadcast::error::RecvError::Closed) => return fut.await.map(Some),
                     _ => {}
                 },
@@ -267,16 +300,33 @@ impl FirefoxSession {
     }
 }
 
-fn apply_event(e: &Value, dialog: &mut Option<PendingDialog>) {
+fn apply_event(
+    e: &Value,
+    dialog: &mut Option<PendingDialog>,
+    context_parents: &mut HashMap<String, String>,
+) {
     let p = &e["params"];
     match e["method"].as_str() {
+        Some("browsingContext.contextCreated") => {
+            if let (Some(context), Some(parent)) = (p["context"].as_str(), p["parent"].as_str()) {
+                context_parents.insert(context.to_string(), parent.to_string());
+            }
+        }
+        Some("browsingContext.contextDestroyed") => {
+            if let Some(context) = p["context"].as_str() {
+                context_parents.remove(context);
+            }
+        }
         Some("browsingContext.userPromptOpened") if p["handler"] != "accept" => {
+            let context = p["context"].as_str();
             *dialog = Some(PendingDialog {
                 dialog_type: p["type"].as_str().unwrap_or("alert").to_string(),
                 message: p["message"].as_str().unwrap_or("").to_string(),
                 url: String::new(),
                 default_prompt: p["defaultValue"].as_str().map(String::from),
-                session_id: p["context"].as_str().map(String::from),
+                session_id: context.map(String::from),
+                owner_context: context
+                    .map(|context| owner_context(context, context_parents).to_string()),
             });
         }
         Some("browsingContext.userPromptClosed")
@@ -286,6 +336,13 @@ fn apply_event(e: &Value, dialog: &mut Option<PendingDialog>) {
         }
         _ => {}
     }
+}
+
+fn owner_context<'a>(mut context: &'a str, parents: &'a HashMap<String, String>) -> &'a str {
+    while let Some(parent) = parents.get(context).filter(|parent| !parent.is_empty()) {
+        context = parent;
+    }
+    context
 }
 
 #[cfg(test)]
@@ -305,6 +362,38 @@ pub(crate) mod tests {
         tokio::sync::mpsc::UnboundedSender<Value>,
         Calls,
     ) {
+        fake_session_with(|_: &Value| json!({})).await
+    }
+
+    /// Like `fake_session`, but `script` supplies the raw result of each `script.callFunction`.
+    pub(crate) async fn fake_session_with_script<F>(
+        script: F,
+    ) -> (
+        FirefoxSession,
+        tokio::sync::mpsc::UnboundedSender<Value>,
+        Calls,
+    )
+    where
+        F: Fn(&Value) -> Value + Send + 'static,
+    {
+        fake_session_with(move |v: &Value| {
+            if v["method"] == "script.callFunction" {
+                script(&v["params"])
+            } else {
+                json!({})
+            }
+        })
+        .await
+    }
+
+    /// Same as `fake_session`, with `responder` deciding each command's `result`.
+    pub(crate) async fn fake_session_with(
+        responder: impl Fn(&Value) -> Value + Send + 'static,
+    ) -> (
+        FirefoxSession,
+        tokio::sync::mpsc::UnboundedSender<Value>,
+        Calls,
+    ) {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", l.local_addr().unwrap());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
@@ -319,7 +408,8 @@ pub(crate) mod tests {
                         let Some(Ok(Message::Text(t))) = m else { break };
                         let v: Value = serde_json::from_str(&t).unwrap();
                         log.lock().unwrap().push(v["method"].as_str().unwrap().to_string());
-                        let reply = json!({"type":"success","id":v["id"],"result":{}});
+                        let reply =
+                            json!({"type":"success","id":v["id"],"result":responder(&v)});
                         ws.send(Message::Text(reply.to_string())).await.unwrap();
                     }
                     Some(ev) = rx.recv() => {
@@ -345,9 +435,16 @@ pub(crate) mod tests {
             accessibility_actor: "acc".into(),
             context: "ctx-active".into(),
             tab_ids: HashMap::from([("ctx-active".into(), 1)]),
+            context_parents: HashMap::new(),
             next_tab_id: 2,
+            top_context: "ctx-active".into(),
             refs: HashMap::new(),
+            next_node_id: 0,
+            frames: None,
+            documents: HashMap::new(),
             tab_labels: HashMap::new(),
+            touches: Vec::new(),
+            shadow_ids: Default::default(),
             events,
         };
         (session, tx, calls)
@@ -377,23 +474,31 @@ pub(crate) mod tests {
     #[test]
     fn prompt_events_set_and_clear_the_dialog() {
         let mut d = None;
-        let open = json!({"method":"browsingContext.userPromptOpened","params":{"context":"c1","type":"confirm","message":"sure?"}});
-        apply_event(&open, &mut d);
+        let mut context_parents = HashMap::new();
+        let frame = json!({"method":"browsingContext.contextCreated","params":{"context":"frame","parent":"top"}});
+        apply_event(&frame, &mut d, &mut context_parents);
+        let open = json!({"method":"browsingContext.userPromptOpened","params":{"context":"frame","type":"confirm","message":"sure?"}});
+        apply_event(&open, &mut d, &mut context_parents);
         assert_eq!(d.as_ref().unwrap().dialog_type, "confirm");
-        assert_eq!(d.as_ref().unwrap().session_id.as_deref(), Some("c1"));
-        let other = json!({"method":"browsingContext.userPromptClosed","params":{"context":"c2"}});
-        apply_event(&other, &mut d);
+        assert_eq!(d.as_ref().unwrap().session_id.as_deref(), Some("frame"));
+        assert_eq!(d.as_ref().unwrap().owner_context.as_deref(), Some("top"));
+        let other =
+            json!({"method":"browsingContext.userPromptClosed","params":{"context":"other"}});
+        apply_event(&other, &mut d, &mut context_parents);
         assert!(d.is_some());
-        let close = json!({"method":"browsingContext.userPromptClosed","params":{"context":"c1"}});
-        apply_event(&close, &mut d);
+        let close =
+            json!({"method":"browsingContext.userPromptClosed","params":{"context":"frame"}});
+        apply_event(&close, &mut d, &mut context_parents);
         assert!(d.is_none());
     }
 
     #[tokio::test]
     async fn race_prompt_returns_none_when_a_prompt_opens_on_the_active_context() {
-        let (s, tx, _) = fake_session().await;
+        let (mut s, tx, _) = fake_session().await;
+        s.context_parents
+            .insert("frame-parent".into(), "ctx-active".into());
         let hang = std::future::pending::<Result<(), String>>();
-        let racer = s.race_prompt(hang);
+        let racer = s.race_prompt("ctx-active", hang);
         tokio::pin!(racer);
         assert!(tokio::time::timeout(Duration::from_millis(50), &mut racer)
             .await
@@ -403,7 +508,8 @@ pub(crate) mod tests {
         assert!(tokio::time::timeout(Duration::from_millis(100), &mut racer)
             .await
             .is_err());
-        let ours = json!({"type":"event","method":"browsingContext.userPromptOpened","params":{"context":"ctx-active"}});
+        tx.send(json!({"type":"event","method":"browsingContext.contextCreated","params":{"context":"frame-child","parent":"frame-parent"}})).unwrap();
+        let ours = json!({"type":"event","method":"browsingContext.userPromptOpened","params":{"context":"frame-child"}});
         tx.send(ours).unwrap();
         assert!(racer.await.unwrap().is_none());
     }

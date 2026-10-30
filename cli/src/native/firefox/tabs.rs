@@ -46,6 +46,7 @@ pub async fn tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
             .send("browsingContext.activate", json!({"context": context}))
             .await?;
         ff.context = context.clone();
+        ff.top_context = context.clone();
         ff.refs.clear();
         if let Some(label) = label {
             ff.tab_labels.insert(context.clone(), label.to_string());
@@ -94,7 +95,7 @@ pub async fn tab_list(state: &mut DaemonState) -> Result<Value, String> {
             .unwrap_or(Value::Null);
         let ff = session(state)?;
         let label = ff.tab_labels.get(&context).cloned();
-        let active = context == ff.context;
+        let active = context == ff.top_context;
         tabs.push(json!({
             "tabId": format_tab_id(tab_id),
             "targetId": context,
@@ -129,8 +130,7 @@ pub async fn tab_switch(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
         ff.bidi
             .send("browsingContext.activate", json!({"context": context}))
             .await?;
-        ff.context = context.clone();
-        ff.refs.clear();
+        ff.top_context = context.clone();
     }
     reset_refs(state);
 
@@ -152,7 +152,7 @@ pub async fn tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     if list.len() <= 1 {
         return Err("Cannot close the last tab".to_string());
     }
-    let active = session(state)?.context.clone();
+    let active = session(state)?.top_context.clone();
     let context = match requested {
         Some(input) => resolve_tab_ref(&list, input)?,
         None => active.clone(),
@@ -179,13 +179,12 @@ pub async fn tab_close(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
             .bidi
             .send("browsingContext.activate", json!({"context": successor}))
             .await;
-        ff.context = successor;
-        ff.refs.clear();
+        ff.top_context = successor;
     }
     if state
         .pending_dialog
         .as_ref()
-        .and_then(|d| d.session_id.as_deref())
+        .and_then(|d| d.owner_context.as_deref().or(d.session_id.as_deref()))
         == Some(context.as_str())
     {
         state.pending_dialog = None;
@@ -217,8 +216,7 @@ pub async fn window_new(_cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         ff.bidi
             .send("browsingContext.activate", json!({"context": context}))
             .await?;
-        ff.context = context.clone();
-        ff.refs.clear();
+        ff.top_context = context.clone();
     }
     reset_refs(state);
     let total = tab_count(state).await?;
@@ -230,10 +228,14 @@ pub async fn window_new(_cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 }
 
 /// Drops refs and frame scope for the tab whose context just became active.
-fn reset_refs(state: &mut DaemonState) {
+pub(crate) fn reset_refs(state: &mut DaemonState) {
     state.ref_map.begin_snapshot();
     state.active_iframe_sessions.clear();
     state.active_frame_id = None;
+    if let Some(ff) = state.firefox.as_mut() {
+        ff.context = ff.top_context.clone();
+        ff.refs.clear();
+    }
 }
 
 /// Number of top-level browsing contexts (tabs and windows).
@@ -325,6 +327,7 @@ fn successor_tab(tabs: &[Value], closed_index: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::firefox::session::tests::fake_session;
 
     fn tab(tab_id: u32, context: &str, label: Option<&str>) -> Value {
         json!({
@@ -391,5 +394,37 @@ mod tests {
         assert_eq!(successor_tab(&tabs, 1).as_deref(), Some("c"));
         assert_eq!(successor_tab(&tabs, 2).as_deref(), Some("b"));
         assert_eq!(successor_tab(&tabs[..1], 0), None);
+    }
+
+    #[tokio::test]
+    async fn reset_refs_clears_tab_refs_and_keeps_monotonic_ids() {
+        let (mut ff, _, _) = fake_session().await;
+        ff.context = "ctx-frame".into();
+        ff.next_node_id = 42;
+        ff.refs.insert(("ctx-frame".into(), "node".into()), 17);
+        let mut state = DaemonState::new();
+        state.firefox = Some(ff);
+        state.active_iframe_sessions.insert("frame-session".into());
+        state.active_frame_id = Some("frame-id".into());
+        state.ref_map.add_with_frame(
+            "e1".into(),
+            Some(17),
+            "button",
+            "OK",
+            None,
+            Some("frame-id"),
+        );
+        state.ref_map.set_next_ref_num(2);
+
+        reset_refs(&mut state);
+
+        assert!(state.ref_map.get("e1").is_none());
+        assert_eq!(state.ref_map.next_ref_num(), 2);
+        assert!(state.active_iframe_sessions.is_empty());
+        assert!(state.active_frame_id.is_none());
+        let ff = state.firefox.as_ref().unwrap();
+        assert_eq!(ff.context, ff.top_context);
+        assert!(ff.refs.is_empty());
+        assert_eq!(ff.next_node_id, 42);
     }
 }

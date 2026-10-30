@@ -443,7 +443,9 @@ mod tests {
     #[test]
     fn find_prefers_explicit_and_rejects_snap() {
         let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("firefox");
+        let bin = dir
+            .path()
+            .join(format!("firefox{}", std::env::consts::EXE_SUFFIX));
         std::fs::write(&bin, "").unwrap();
         let on_path = find_firefox_with(None, Some(dir.path().into()), &[]).unwrap();
         assert_eq!(on_path, bin);

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Firefox forms</title></head>
+<body>
+<label>Issues <input id="issues" value="is:issue is:open"></label>
+<div id="editor" contenteditable="true" role="textbox" aria-label="Editor"></div>
+<label>Literal <textarea id="literal"></textarea></label>
+<label>Guarded <input id="guarded"></label>
+<label>Password <input id="password" type="password"></label>
+<label>Email <input id="email" type="email"></label>
+<label>Number <input id="number" type="number"></label>
+<div id="shadow-host"></div>
+<button id="drag-source" style="position:absolute;left:20px;top:20px;width:100px;height:50px">source</button>
+<button id="drag-target" style="position:absolute;left:180px;top:1400px;width:120px;height:60px">target</button>
+<div id="drag-cover" style="display:none;position:absolute;left:180px;top:1400px;width:120px;height:60px;z-index:2"></div>
+<iframe title="Cross origin forms" src="__OTHER__/forms-frame.html"></iframe>
+<script>
+const issues = document.getElementById('issues');
+let issuesState = issues.value;
+issues.addEventListener('input', event => {
+    if (event.isTrusted) issuesState = issues.value;
+    issues.value = issuesState;
+});
+document.getElementById('guarded').addEventListener('beforeinput', event => event.preventDefault());
+document.getElementById('shadow-host').attachShadow({ mode: 'open' }).innerHTML = '<input value="nested">';
+</script>
+</body>
+</html>

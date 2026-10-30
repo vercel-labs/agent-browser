@@ -18,13 +18,13 @@ const ORIGIN_STORAGE_JS: &str = r#"() => {
             const key = localStorage.key(i);
             result.localStorage.push({ name: key, value: localStorage.getItem(key) });
         }
-    } catch(e) {}
+    } catch(e) { return null; }
     try {
         for (let i = 0; i < sessionStorage.length; i++) {
             const key = sessionStorage.key(i);
             result.sessionStorage.push({ name: key, value: sessionStorage.getItem(key) });
         }
-    } catch(e) {}
+    } catch(e) { return null; }
     return result;
 }"#;
 
@@ -377,10 +377,10 @@ async fn collect_origins(
         else {
             continue;
         };
-        let Ok(origin) = serde_json::from_value::<OriginStorage>(data) else {
+        let Some(origin) = state::parse_origin_storage(&data) else {
             continue;
         };
-        if origin.origin == "null" || !seen.insert(origin.origin.clone()) {
+        if !seen.insert(origin.origin.clone()) {
             continue;
         }
         if !origin.local_storage.is_empty() || !origin.session_storage.is_empty() {
