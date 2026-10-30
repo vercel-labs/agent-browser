@@ -35,6 +35,8 @@ pub enum SessionFile {
     Target,
     /// Debug log written when `AGENT_BROWSER_DEBUG` is set.
     Log,
+    /// Startup lock. Keep the inode across daemon restarts so all callers lock the same file.
+    StartupLock,
 }
 
 impl SessionFile {
@@ -51,6 +53,7 @@ impl SessionFile {
         SessionFile::Extensions,
         SessionFile::Target,
         SessionFile::Log,
+        SessionFile::StartupLock,
     ];
 
     pub fn extension(self) -> &'static str {
@@ -66,6 +69,7 @@ impl SessionFile {
             SessionFile::Extensions => "extensions",
             SessionFile::Target => "target",
             SessionFile::Log => "log",
+            SessionFile::StartupLock => "startup.lock",
         }
     }
 
@@ -81,7 +85,7 @@ impl SessionFile {
             | SessionFile::Engine
             | SessionFile::Provider
             | SessionFile::Extensions => true,
-            SessionFile::Target | SessionFile::Log => false,
+            SessionFile::Target | SessionFile::Log | SessionFile::StartupLock => false,
         }
     }
 
@@ -139,7 +143,7 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         left.sort();
-        assert_eq!(left, ["s.log", "s.target"]);
+        assert_eq!(left, ["s.log", "s.startup.lock", "s.target"]);
         assert_eq!(
             fs::read_to_string(SessionFile::Target.path_in(dir.path(), "s")).unwrap(),
             "x"

@@ -79,7 +79,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "tags": {
@@ -182,7 +182,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -279,7 +279,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -381,7 +381,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -488,7 +488,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "submitSelector": {
@@ -603,7 +603,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -700,7 +700,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -813,7 +813,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -919,7 +919,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -1023,7 +1023,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -1134,7 +1134,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -1231,7 +1231,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -1325,7 +1325,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -1419,7 +1419,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -1513,7 +1513,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "text": {
@@ -1618,7 +1618,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -1715,7 +1715,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -1816,7 +1816,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "target": {
@@ -1920,7 +1920,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -2014,7 +2014,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -2108,7 +2108,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -2228,7 +2228,7 @@
             "type": "boolean"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -2338,7 +2338,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -2448,7 +2448,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -2542,7 +2542,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -2640,7 +2640,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -2738,7 +2738,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -2842,7 +2842,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -2936,7 +2936,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "text": {
@@ -3033,7 +3033,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -3127,7 +3127,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -3233,7 +3233,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "threshold": {
@@ -3342,7 +3342,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -3451,7 +3451,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -3575,7 +3575,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -3680,7 +3680,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -3783,7 +3783,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "source": {
@@ -3890,7 +3890,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -3988,7 +3988,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -4089,7 +4089,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "text": {
@@ -4223,7 +4223,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "text": {
@@ -4331,7 +4331,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -4426,7 +4426,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -4521,7 +4521,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -4618,7 +4618,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -4722,7 +4722,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -4822,7 +4822,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -4917,7 +4917,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -5013,7 +5013,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -5112,7 +5112,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -5211,7 +5211,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -5310,7 +5310,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -5407,7 +5407,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -5501,7 +5501,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -5599,7 +5599,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -5698,7 +5698,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -5799,7 +5799,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -5894,7 +5894,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -5988,7 +5988,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -6089,7 +6089,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -6188,7 +6188,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -6287,7 +6287,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -6382,7 +6382,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "text": {
@@ -6482,7 +6482,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "text": {
@@ -6586,7 +6586,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -6687,7 +6687,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -6793,7 +6793,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -6902,7 +6902,7 @@
             "type": "integer"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "steps": {
@@ -7021,7 +7021,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -7121,7 +7121,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -7226,7 +7226,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -7323,7 +7323,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -7420,7 +7420,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -7526,7 +7526,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "status": {
@@ -7640,7 +7640,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -7740,7 +7740,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -7841,7 +7841,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -7950,7 +7950,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -8073,7 +8073,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -8170,7 +8170,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -8277,7 +8277,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -8378,7 +8378,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -8479,7 +8479,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -8579,7 +8579,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -8676,7 +8676,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -8770,7 +8770,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -8864,7 +8864,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -8971,7 +8971,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -9071,7 +9071,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -9168,7 +9168,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -9268,7 +9268,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -9365,7 +9365,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -9487,7 +9487,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -9609,7 +9609,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -9733,7 +9733,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -9834,7 +9834,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -9928,7 +9928,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -10026,7 +10026,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -10163,7 +10163,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "threshold": {
@@ -10282,7 +10282,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -10380,7 +10380,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -10479,7 +10479,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -10585,7 +10585,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -10692,7 +10692,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -10786,7 +10786,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -10880,7 +10880,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -10977,7 +10977,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -11081,7 +11081,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -11184,7 +11184,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -11288,7 +11288,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -11400,7 +11400,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -11497,7 +11497,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -11600,7 +11600,7 @@
             "type": "number"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -11715,7 +11715,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -11809,7 +11809,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -11906,7 +11906,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -12034,7 +12034,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -12132,7 +12132,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -12235,7 +12235,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -12329,7 +12329,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -12426,7 +12426,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -12529,7 +12529,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -12630,7 +12630,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -12730,7 +12730,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -12827,7 +12827,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "storageType": {
@@ -12934,7 +12934,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "storageType": {
@@ -13041,7 +13041,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "storageType": {
@@ -13150,7 +13150,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -13247,7 +13247,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -13341,7 +13341,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -13447,7 +13447,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -13544,7 +13544,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "tab": {
@@ -13643,7 +13643,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -13741,7 +13741,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -13839,7 +13839,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "tab": {
@@ -13945,7 +13945,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -14042,7 +14042,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -14136,7 +14136,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -14233,7 +14233,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -14341,7 +14341,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "text": {
@@ -14447,7 +14447,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -14544,7 +14544,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -14650,7 +14650,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -14751,7 +14751,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -14852,7 +14852,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -14954,7 +14954,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -15054,7 +15054,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "state": {
@@ -15168,7 +15168,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -15270,7 +15270,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "text": {
@@ -15375,7 +15375,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -15483,7 +15483,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -15583,7 +15583,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -15689,7 +15689,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -15796,7 +15796,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -15896,7 +15896,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
@@ -15997,7 +15997,7 @@
             "type": "string"
           },
           "session": {
-            "description": "Optional isolated browser session name.",
+            "description": "Optional isolated browser session name. Daemon startup is serialized per session; dependent browser actions still need explicit ordering.",
             "type": "string"
           },
           "timeoutMs": {
