@@ -39,6 +39,11 @@ pub struct LightpandaLaunchOptions {
     pub port: Option<u16>,
 }
 
+/// Sub-resources Lightpanda skips unless asked. Chrome loads iframes and
+/// runs workers by default, so request both to match its behavior.
+/// Requires Lightpanda 0.4.0 or newer.
+const LIGHTPANDA_LOAD_RESOURCES: [&str; 2] = ["iframe", "worker"];
+
 fn build_lightpanda_serve_args(port: u16, proxy: Option<&str>) -> Vec<String> {
     let mut args = vec![
         "serve".to_string(),
@@ -47,6 +52,11 @@ fn build_lightpanda_serve_args(port: u16, proxy: Option<&str>) -> Vec<String> {
         "--port".to_string(),
         port.to_string(),
     ];
+
+    for resource in LIGHTPANDA_LOAD_RESOURCES {
+        args.push("--load-resources".to_string());
+        args.push(resource.to_string());
+    }
 
     if let Some(proxy) = proxy {
         args.push("--http_proxy".to_string());
@@ -464,6 +474,10 @@ mod tests {
                 "127.0.0.1".to_string(),
                 "--port".to_string(),
                 "9222".to_string(),
+                "--load-resources".to_string(),
+                "iframe".to_string(),
+                "--load-resources".to_string(),
+                "worker".to_string(),
             ]
         );
     }
@@ -480,6 +494,10 @@ mod tests {
                 "127.0.0.1".to_string(),
                 "--port".to_string(),
                 "9333".to_string(),
+                "--load-resources".to_string(),
+                "iframe".to_string(),
+                "--load-resources".to_string(),
+                "worker".to_string(),
                 "--http_proxy".to_string(),
                 "http://127.0.0.1:8080".to_string(),
             ]
