@@ -8,6 +8,7 @@ Multiple isolated browser sessions with state persistence and concurrent browsin
 
 - [Named Sessions](#named-sessions)
 - [Session Isolation Properties](#session-isolation-properties)
+- [Attaching to a Running Firefox](#attaching-to-a-running-firefox)
 - [Tab Pinning in a Shared Browser](#tab-pinning-in-a-shared-browser)
 - [Session State Persistence](#session-state-persistence)
 - [Common Patterns](#common-patterns)
@@ -48,9 +49,15 @@ Each session has independent:
 - Browsing history
 - Open tabs
 
+## Attaching to a Running Firefox
+
+Firefox attaches over WebDriver BiDi with `connect <port|url>` or `--cdp <port|url>`, for example `agent-browser connect 9222`. Start Firefox 150 or newer with `--remote-debugging-port 9222 --start-debugger-server 6000 -profile <dir>` and the DevTools prefs listed in [commands.md](commands.md). A `ws://` or `wss://` URL whose path is `/session` is treated as Firefox, and `?devtools=<port>` overrides the DevTools port, which defaults to 6000.
+
+The attached browser is externally owned, so `close` ends the BiDi session and leaves Firefox running. Only one client can hold a Firefox BiDi session at a time, so close the other client before attaching. Firefox's DevTools companion uses unencrypted RDP, so remote Firefox requires forwarding both the BiDi and DevTools ports through an encrypted tunnel such as `ssh -L`, then connecting to `127.0.0.1`.
+
 ## Tab Pinning in a Shared Browser
 
-Full isolation applies when each session launches its own browser. When sessions instead share one Chrome over `--cdp <port>`, cookies and storage are shared, and only the tab selection separates the sessions. Add `--pin-tab` so each session sticks to its own tab:
+Full isolation applies when each session launches its own browser. When sessions instead share one Chrome over `--cdp <port>`, cookies and storage are shared, and only the tab selection separates the sessions. Add `--pin-tab` so each session sticks to its own tab. The pin and its `tab_gone` guarantee are CDP-only; Firefox attach rejects `--pin-tab`:
 
 ```bash
 agent-browser --session agent1 --cdp 9222 --pin-tab open https://site-a.com

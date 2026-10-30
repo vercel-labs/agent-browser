@@ -22,6 +22,14 @@
         "to": "# Browser engine: chrome (default), lightpanda, firefox, obscura (experimental)"
       },
       {
+        "from": "agent-browser connect <port|url>      # Connect to browser via CDP",
+        "to": "agent-browser connect <port|url>      # Connect to a browser via CDP or Firefox BiDi"
+      },
+      {
+        "from": "--cdp <port|url>         # Connect via CDP; root WebSocket query slash is optional",
+        "to": "--cdp <port|url>         # Connect via CDP or Firefox WebDriver BiDi; Firefox accepts ?devtools=<port>"
+      },
+      {
         "from": "agent-browser network route <url> --body <json>  # Mock response",
         "to": "agent-browser network route <url> --body <json>  # Mock response\nagent-browser network route <url> --body <json> --allow-origin <origin>  # Mock readable cross-origin"
       }
@@ -116,6 +124,18 @@
       {
         "from": "pass it once and later commands and daemon restarts keep the strict semantics.",
         "to": "pass it once and later commands keep the strict semantics. Daemon restarts keep the pin; an explicit close releases it so other sessions can take the tab, and the next pinned command pins again."
+      },
+      {
+        "from": "    <tr><td><code>{\"--cdp <port|url>\"}</code></td><td>CDP connection (port or WebSocket URL)</td></tr>",
+        "to": "    <tr><td><code>--cdp &lt;port|url&gt;</code></td><td>CDP or Firefox WebDriver BiDi connection (port or WebSocket URL; Firefox accepts <code>?devtools=&lt;port&gt;</code>)</td></tr>"
+      },
+      {
+        "from": "CDP connection (port or WebSocket URL)",
+        "to": "CDP or Firefox WebDriver BiDi connection (port or WebSocket URL; Firefox accepts ?devtools=<port>)"
+      },
+      {
+        "from": "Pin the session to its bound tab (strict tab binding)",
+        "to": "Pin the session to its bound tab (CDP only; rejected for Firefox attach)"
       }
     ],
     "/engines/obscura": [

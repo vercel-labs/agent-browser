@@ -1745,7 +1745,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Connect to a browser over CDP. With pinTab, the session is strictly bound to its own tab: it re-binds by target id after restarts and fails with a tab_gone error instead of adopting another tab. Structured errors include code=tab_gone, data.targetId, and optional sanitized data.lastUrl. Pass pinTab: false to explicitly disable a sticky pin; omit it to keep the current state. The session stays attached until agent_browser_close, so later tools without a connection target use the same browser.",
+      "description": "Connect to a browser over CDP or to a running Firefox over WebDriver BiDi. A ws:// URL whose path is /session attaches to Firefox directly; an http(s):// URL or bare port falls back to BiDi when CDP discovery finds nothing. Add ?devtools=<port> to point at the Firefox DevTools server (default 6000). Firefox's RDP companion is unencrypted, so remote Firefox ports must be forwarded through an encrypted tunnel and the connection must use 127.0.0.1. With pinTab on a Chrome CDP session, the session is strictly bound to its own tab: it re-binds by target id after restarts and fails with a tab_gone error instead of adopting another tab. The pinTab binding and its tab_gone guarantee are CDP-only; Firefox attach rejects pinTab. Structured errors include code=tab_gone, data.targetId, and optional sanitized data.lastUrl. Pass pinTab: false to explicitly disable a sticky pin; omit it to keep the current state. The session stays attached until agent_browser_close, so later tools without a connection target use the same browser.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1780,7 +1780,7 @@
             "type": "string"
           },
           "pinTab": {
-            "description": "Strict session-to-tab binding (sticky for the session). Explicit false disables a sticky pin; omitted leaves it unchanged.",
+            "description": "Strict session-to-tab binding (sticky for the session; CDP only, rejected for Firefox attach). Explicit false disables a sticky pin; omitted leaves it unchanged.",
             "type": "boolean"
           },
           "restore": {
@@ -1820,7 +1820,7 @@
             "type": "string"
           },
           "target": {
-            "description": "CDP port or URL.",
+            "description": "CDP port or URL, or a Firefox WebDriver BiDi endpoint such as ws://127.0.0.1:9333/session or http://127.0.0.1:9333?devtools=6080.",
             "type": "string"
           },
           "timeoutMs": {
@@ -1843,7 +1843,7 @@
       "profiles": [
         "debug"
       ],
-      "title": "Connect CDP"
+      "title": "Connect to browser via CDP or Firefox WebDriver BiDi"
     },
     {
       "annotations": {

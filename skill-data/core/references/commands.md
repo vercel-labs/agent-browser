@@ -25,12 +25,20 @@ agent-browser pushstate <url> # SPA client-side navigation. Auto-detects
                               # window.next.router.push (triggers RSC fetch on Next.js);
                               # falls back to history.pushState + popstate/navigate events.
 agent-browser close           # Close browser (aliases: quit, exit)
-agent-browser connect 9222    # Connect to browser via CDP port
+agent-browser connect 9222    # Connect to a browser via CDP or Firefox BiDi
 ```
 
 After `connect`, the session stays attached until `agent-browser close`. Later commands without a connection flag run against the same browser, as if you passed `--cdp` again. If that browser goes away, commands fail instead of launching a local one.
 
 If the debugging port is not open yet, `connect` and `--cdp` wait up to 2 seconds for it before failing.
+
+Firefox attaches over WebDriver BiDi with the same commands. Start Firefox 150 or newer with `--remote-debugging-port 9222 --start-debugger-server 6000 -profile <dir>` and the `devtools.debugger.remote-enabled`, `devtools.chrome.enabled`, and `devtools.debugger.prompt-connection=false` prefs in that profile's `user.js`:
+
+```bash
+agent-browser connect 9222
+```
+
+A `ws://` or `wss://` URL whose path is `/session` is treated as Firefox. Other targets try CDP first and probe for Firefox only when CDP discovery fails. Firefox uses the DevTools server on port 6000 unless the URL sets `?devtools=<port>`. Detection is automatic; `--engine firefox` only skips the CDP attempt. `close` ends the BiDi session but leaves Firefox running, only one client can hold a Firefox BiDi session, and `--auto-connect` does not support Firefox. `--allowed-domains` is rejected when attaching, as it is for any pre-existing CDP session. The `--pin-tab` binding and its `tab_gone` guarantee apply only to Chrome over CDP; Firefox attach rejects `--pin-tab`.
 
 ### Pre-navigation setup (one-turn batch)
 
@@ -266,7 +274,7 @@ Labels are never auto-generated, never rewritten on navigation, and must be uniq
 
 Tabs opened through `tab new` or `click --new-tab` inherit the session's setup before their first document loads: user agent, `set headers`, `set credentials`, origin-scoped `--headers`, init scripts, `route` rules, and emulation overrides (color scheme, timezone, locale, geolocation, offline). Turning offline mode off or setting headers to `{}` restores the default setup for future tabs.
 
-`tab list --json` also reports each tab's CDP `targetId`, accepted anywhere a tab ref is accepted (`tab <targetId>`, `tab close <targetId>`). Target ids stay stable across daemon restarts, unlike `t<N>` ids, which are per-daemon counters. With `--pin-tab` the session is pinned to its bound tab: if that tab is closed, commands fail with a `tab_gone` error instead of falling back to another tab, and `tab new` or `tab list` recover. JSON errors include `code: "tab_gone"` and a recovery object with `data.targetId` plus optional sanitized `data.lastUrl`; batch uses `result` for the same object.
+`tab list --json` also reports each tab's CDP `targetId`, accepted anywhere a tab ref is accepted (`tab <targetId>`, `tab close <targetId>`). Target ids stay stable across daemon restarts, unlike `t<N>` ids, which are per-daemon counters. With `--pin-tab` the session is pinned to its bound tab: if that tab is closed, commands fail with a `tab_gone` error instead of falling back to another tab, and `tab new` or `tab list` recover. The pin and its `tab_gone` guarantee are CDP-only; Firefox attach rejects `--pin-tab`. JSON errors include `code: "tab_gone"` and a recovery object with `data.targetId` plus optional sanitized `data.lastUrl`; batch uses `result` for the same object.
 
 Switching to a tab that the browser discarded to save memory reactivates it, since a discarded tab has no renderer to drive. Reactivation reloads the page and resets its unsaved state, and the switch result adds `"revived": true` so the reload is not silent. A tab whose page is paused by a JavaScript dialog is alive rather than discarded: the switch leaves it untouched and adds `"dialogBlocked": true`. Resolve the dialog with `dialog accept`/`dialog dismiss` and its state is preserved. Closing the active tab onto a discarded successor revives it the same way and reports `"activeTabRevived": true`.
 
@@ -457,7 +465,7 @@ agent-browser --json ...              # JSON output for parsing
 agent-browser --headed ...            # Show browser window (not headless; on displayless Linux an Xvfb display starts automatically)
 agent-browser --webgpu ...            # Enable WebGPU (SwiftShader software Vulkan on Linux, no GPU needed)
 agent-browser --no-webmcp ...         # Disable default experimental WebMCP Chrome features (or AGENT_BROWSER_NO_WEBMCP env)
-agent-browser --cdp <port|url> ...    # Connect via CDP; root query slash is optional
+agent-browser --cdp <port|url> ...    # Connect via CDP or Firefox WebDriver BiDi; Firefox accepts ?devtools=<port>
 agent-browser --pin-tab ...           # Pin the session to its bound tab (strict tab binding)
 agent-browser --no-pin-tab ...        # Disable a sticky pin previously enabled with --pin-tab
 agent-browser -p <provider> ...       # Browser provider or configured provider plugin
@@ -483,7 +491,7 @@ On Windows, owned headless Chrome runs on a private desktop so hidden windows ca
 
 ```bash
 agent-browser --headed open example.com   # Show browser window
-agent-browser --cdp 9222 snapshot         # Connect via CDP port
+agent-browser --cdp 9222 snapshot         # Connect via CDP or Firefox BiDi port
 agent-browser connect 9222                # Alternative: connect command
 agent-browser console                     # View console messages
 agent-browser console --clear             # Clear console

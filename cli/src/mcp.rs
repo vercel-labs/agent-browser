@@ -1789,11 +1789,11 @@ fn parity_tools() -> Vec<Value> {
         ),
         tool(
             TOOL_CONNECT,
-            "Connect CDP",
-            "Connect to a browser over CDP. With pinTab, the session is strictly bound to its own tab: it re-binds by target id after restarts and fails with a tab_gone error instead of adopting another tab. Structured errors include code=tab_gone, data.targetId, and optional sanitized data.lastUrl. Pass pinTab: false to explicitly disable a sticky pin; omit it to keep the current state. The session stays attached until agent_browser_close, so later tools without a connection target use the same browser.",
+            "Connect to browser via CDP or Firefox WebDriver BiDi",
+            "Connect to a browser over CDP or to a running Firefox over WebDriver BiDi. A ws:// URL whose path is /session attaches to Firefox directly; an http(s):// URL or bare port falls back to BiDi when CDP discovery finds nothing. Add ?devtools=<port> to point at the Firefox DevTools server (default 6000). Firefox's RDP companion is unencrypted, so remote Firefox ports must be forwarded through an encrypted tunnel and the connection must use 127.0.0.1. With pinTab on a Chrome CDP session, the session is strictly bound to its own tab: it re-binds by target id after restarts and fails with a tab_gone error instead of adopting another tab. The pinTab binding and its tab_gone guarantee are CDP-only; Firefox attach rejects pinTab. Structured errors include code=tab_gone, data.targetId, and optional sanitized data.lastUrl. Pass pinTab: false to explicitly disable a sticky pin; omit it to keep the current state. The session stays attached until agent_browser_close, so later tools without a connection target use the same browser.",
             json!({
-                "target": { "type": "string", "description": "CDP port or URL." },
-                "pinTab": { "type": "boolean", "description": "Strict session-to-tab binding (sticky for the session). Explicit false disables a sticky pin; omitted leaves it unchanged." }
+                "target": { "type": "string", "description": "CDP port or URL, or a Firefox WebDriver BiDi endpoint such as ws://127.0.0.1:9333/session or http://127.0.0.1:9333?devtools=6080." },
+                "pinTab": { "type": "boolean", "description": "Strict session-to-tab binding (sticky for the session; CDP only, rejected for Firefox attach). Explicit false disables a sticky pin; omitted leaves it unchanged." }
             }),
             &["target"],
         ),
@@ -2668,7 +2668,7 @@ fn call_one_string(arguments: &Value, command: &str, key: &str) -> Result<Value,
     call_cli_tool(arguments, args, None)
 }
 
-fn call_connect(arguments: &Value) -> Result<Value, ProtocolError> {
+fn connect_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = vec!["connect".to_string()];
     args.push(required_string(arguments, "target")?);
     match arguments.get("pinTab").and_then(|v| v.as_bool()) {
@@ -2676,7 +2676,11 @@ fn call_connect(arguments: &Value) -> Result<Value, ProtocolError> {
         Some(false) => args.push("--no-pin-tab".to_string()),
         None => {}
     }
-    call_cli_tool(arguments, args, None)
+    Ok(args)
+}
+
+fn call_connect(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, connect_args(arguments)?, None)
 }
 
 fn call_optional_one(arguments: &Value, parts: &[&str], key: &str) -> Result<Value, ProtocolError> {
@@ -4490,6 +4494,27 @@ mod tests {
                 command["interactive"].as_bool().unwrap_or(false),
                 arguments["interactive"].as_bool().unwrap_or(true)
             );
+        }
+    }
+
+    #[test]
+    fn connect_forwards_a_firefox_bidi_endpoint_to_the_cli_parser() {
+        for target in [
+            "9333",
+            "ws://127.0.0.1:9333/session",
+            "ws://127.0.0.1:9333/session?devtools=6080",
+            "http://127.0.0.1:9333?devtools=6080",
+        ] {
+            let args = connect_args(&json!({ "target": target })).unwrap();
+            assert_eq!(args, vec!["connect", target]);
+            let flags = crate::flags::parse_flags(&args);
+            let command = crate::commands::parse_command(&args, &flags).unwrap();
+            assert_eq!(command["action"], "launch");
+            if target == "9333" {
+                assert_eq!(command["cdpPort"], 9333);
+            } else {
+                assert_eq!(command["cdpUrl"], target);
+            }
         }
     }
 

@@ -1,3 +1,4 @@
+use super::network::AbortOnDrop;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -8,6 +9,7 @@ use tokio::io::{
 use tokio::sync::{broadcast, oneshot};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_FRAME_SIZE: usize = 256 * 1024 * 1024;
 
 type Pending = Arc<Mutex<HashMap<String, VecDeque<oneshot::Sender<Value>>>>>;
 
@@ -20,22 +22,17 @@ pub struct RdpClient {
     reader: Arc<AbortOnDrop>,
 }
 
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
+async fn read_frame<R: AsyncRead + Unpin>(reader: &mut BufReader<R>) -> Option<Value> {
+    let mut length = Vec::new();
+    reader.take(21).read_until(b':', &mut length).await.ok()?;
+    let length = length.strip_suffix(b":")?;
+    let frame_size: usize = std::str::from_utf8(length).ok()?.parse().ok()?;
+    if frame_size > MAX_FRAME_SIZE {
+        return None;
     }
-}
-
-async fn read_frame<R: AsyncRead + Unpin>(r: &mut BufReader<R>) -> Option<Value> {
-    let mut len = Vec::new();
-    r.read_until(b':', &mut len).await.ok()?;
-    len.pop()?;
-    let n: usize = std::str::from_utf8(&len).ok()?.parse().ok()?;
-    let mut buf = vec![0; n];
-    r.read_exact(&mut buf).await.ok()?;
-    serde_json::from_slice(&buf).ok()
+    let mut buffer = vec![0; frame_size];
+    reader.read_exact(&mut buffer).await.ok()?;
+    serde_json::from_slice(&buffer).ok()
 }
 
 impl RdpClient {
@@ -48,9 +45,9 @@ impl RdpClient {
         Self::from_stream(s).await
     }
 
-    /// Connects to a DevTools server on a loopback TCP port.
-    pub async fn connect_tcp(port: u16) -> Result<Self, String> {
-        let s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+    /// Connects to a DevTools server on a TCP endpoint.
+    pub async fn connect_tcp(host: &str, port: u16) -> Result<Self, String> {
+        let s = tokio::net::TcpStream::connect((host, port))
             .await
             .map_err(|e| format!("DevTools connect failed: {e}"))?;
         Self::from_stream(s).await
@@ -138,8 +135,7 @@ impl RdpClient {
                 return Err(format!("DevTools send failed: {e}"));
             }
         }
-        let reply = tokio::time::timeout(timeout, rx).await;
-        match reply {
+        match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(reply)) => match reply.get("error") {
                 Some(e) => Err(format!(
                     "{}: {}",
@@ -158,7 +154,7 @@ impl RdpClient {
 mod tests {
     use super::*;
     use serde_json::json;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+    use tokio::io::{AsyncWriteExt, DuplexStream};
 
     async fn put(s: &mut DuplexStream, v: Value) {
         let b = v.to_string();
@@ -168,18 +164,9 @@ mod tests {
     }
 
     async fn get(s: &mut DuplexStream) -> Value {
-        let mut len = Vec::new();
-        loop {
-            let b = s.read_u8().await.unwrap();
-            if b == b':' {
-                break;
-            }
-            len.push(b);
-        }
-        let n: usize = String::from_utf8(len).unwrap().parse().unwrap();
-        let mut buf = vec![0; n];
-        s.read_exact(&mut buf).await.unwrap();
-        serde_json::from_slice(&buf).unwrap()
+        read_frame(&mut BufReader::with_capacity(1, s))
+            .await
+            .unwrap()
     }
 
     async fn pair() -> (RdpClient, DuplexStream) {
@@ -187,6 +174,24 @@ mod tests {
         put(&mut b, json!({"from":"root","applicationType":"browser"})).await;
         let c = RdpClient::from_stream(a).await.unwrap();
         (c, b)
+    }
+
+    #[tokio::test]
+    async fn oversized_frame_is_rejected_before_reading_payload() {
+        for prefix in [
+            b"268435457:".as_slice(),
+            b"00000000000000000000000000000000",
+        ] {
+            let (mut writer, reader) = tokio::io::duplex(64);
+            writer.write_all(prefix).await.unwrap();
+            let mut reader = BufReader::new(reader);
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), read_frame(&mut reader))
+                    .await
+                    .unwrap(),
+                None
+            );
+        }
     }
 
     #[tokio::test]

@@ -70,6 +70,19 @@ agent-browser screenshot result.png
 
 The browser stays running across commands so these feel like a single session. By default, an inactive daemon saves configured restore state, closes its headless browser, and exits after one hour; the next command starts it again. Without `--restore` or another restore key, shutdown discards transient browser state and open tabs. Dashboard mouse, keyboard, and touch input count as activity. Headed browsers, Safari and iOS WebDriver sessions, and user-attached browsers are exempt from the default; provider-owned cloud browsers are not. Use `--idle-timeout <time>` or `AGENT_BROWSER_IDLE_TIMEOUT_MS` to tune the timeout, and use `0` to disable it. Still run `agent-browser close` (or `close --all`) when you're done.
 
+### Attach to a running browser
+
+`connect <port|url>` and `--cdp <port|url>` attach to a browser you started yourself. Chrome is detected through CDP; Firefox through WebDriver BiDi.
+
+```bash
+# Firefox 150+: add devtools.debugger.remote-enabled, devtools.chrome.enabled,
+# and devtools.debugger.prompt-connection=false to the profile's user.js
+firefox --remote-debugging-port 9222 --start-debugger-server 6000 -profile <dir>
+agent-browser connect 9222
+```
+
+A `ws://` or `wss://` URL whose path is `/session` is treated as Firefox. Other targets try CDP first and probe for Firefox only when CDP discovery fails. Firefox uses the DevTools server on port 6000 unless the URL sets `?devtools=<port>`. `close` ends the BiDi session but leaves Firefox running. Only one client can hold a Firefox BiDi session, Firefox 150 or newer is required, and `--auto-connect` does not support Firefox. The `--pin-tab` binding and its `tab_gone` guarantee apply only to Chrome over CDP; Firefox attach rejects `--pin-tab`.
+
 ## MCP integration
 
 For tools that support Model Context Protocol servers, start the stdio server:
@@ -361,7 +374,7 @@ agent-browser --session b fill @e1 "bob@test.com"
 
 `AGENT_BROWSER_SESSION=myapp` sets the default session for the current shell.
 
-When several sessions share one Chrome over `--cdp <port>`, add `--pin-tab` so each session sticks to its own tab. Every session remembers its bound tab across daemon restarts; with `--pin-tab` a command whose bound tab was closed fails with a `tab_gone` error instead of acting on another session's tab. JSON output includes `"code": "tab_gone"`, `data.targetId`, and an optional sanitized `data.lastUrl` for recovery. Recover with `tab new <url>` or pick a tab from `tab list`. The flag is sticky per session, so pass it once (`--no-pin-tab` turns it off again). See `references/session-management.md` for details.
+When several sessions share one Chrome over `--cdp <port>`, add `--pin-tab` so each session sticks to its own tab. Every session remembers its bound tab across daemon restarts; with `--pin-tab` a command whose bound tab was closed fails with a `tab_gone` error instead of acting on another session's tab. The pin and its `tab_gone` guarantee are CDP-only; Firefox attach rejects `--pin-tab`. JSON output includes `"code": "tab_gone"`, `data.targetId`, and an optional sanitized `data.lastUrl` for recovery. Recover with `tab new <url>` or pick a tab from `tab list`. The flag is sticky per session, so pass it once (`--no-pin-tab` turns it off again). See `references/session-management.md` for details.
 
 ### Mock network requests
 
@@ -495,7 +508,7 @@ EOF
 --engine <name>         # chrome (default), lightpanda, firefox (requires Firefox 150+), obscura (experimental)
 --webgpu                # enable WebGPU (software Vulkan on Linux, no GPU needed)
 --auto-connect          # connect to an already-running Chrome
---cdp <port|url>        # connect to a CDP port or WebSocket URL; root query slash is optional
+--cdp <port|url>        # connect via CDP or Firefox WebDriver BiDi (Firefox accepts ?devtools=<port>)
 --profile <name|path>   # use a Chrome profile (login state survives)
 --headers <json>        # HTTP headers scoped to the URL's origin
 --proxy <url>           # proxy server

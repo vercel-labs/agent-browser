@@ -3307,12 +3307,13 @@ Examples:
         // === Connect ===
         "connect" => {
             r##"
-agent-browser connect - Connect to browser via CDP
+agent-browser connect - Connect to browser via CDP or Firefox WebDriver BiDi
 
 Usage: agent-browser connect <port|url>
 
-Connects to a running browser instance via Chrome DevTools Protocol (CDP).
-This allows controlling browsers, Electron apps, or remote browser services.
+Connects to a running browser instance via Chrome DevTools Protocol (CDP) or
+Firefox WebDriver BiDi. This allows controlling browsers, Electron apps, or
+remote browser services.
 
 Arguments:
   <port>               Local port number (e.g., 9222)
@@ -3323,6 +3324,11 @@ Supported URL formats:
   - WebSocket URL: ws://localhost:9222/devtools/browser/...
   - Remote service: wss://remote-browser.example.com/cdp?token=...
   - Root endpoint: wss://remote-browser.example.com?token=... (slash optional)
+  - Firefox BiDi: ws://localhost:9222/session?devtools=6080
+
+A ws:// or wss:// URL whose path is /session is treated as Firefox BiDi.
+Other targets try CDP first, then probe for Firefox. Firefox targets use the
+DevTools server at port 6000 unless the URL sets ?devtools=<port>. Remote Firefox requires forwarding both ports through an encrypted tunnel to 127.0.0.1 because RDP is unencrypted.
 
 Global Options:
   --json               Output as JSON
@@ -3332,6 +3338,10 @@ Examples:
   # Connect to local Chrome with remote debugging
   # Start Chrome: google-chrome --remote-debugging-port=9222
   agent-browser connect 9222
+
+  # Connect to a running Firefox over WebDriver BiDi (Firefox 150 or newer)
+  # Start Firefox with --remote-debugging-port 9333 --start-debugger-server 6000
+  agent-browser connect 9333
 
   # Connect using WebSocket URL from /json/version endpoint
   agent-browser connect "ws://localhost:9222/devtools/browser/abc123"
@@ -3887,7 +3897,7 @@ Core Commands:
   pdf <path>                 Save as PDF
   snapshot                   Accessibility tree with refs (for AI)
   eval <js>                  Run JavaScript
-  connect <port|url>         Connect to browser via CDP
+  connect <port|url>         Connect to browser via CDP or Firefox BiDi
   close [--all]              Close browser (--all closes every session)
 
 Navigation:
@@ -4103,8 +4113,10 @@ Options:
   --webgpu                   Enable WebGPU; uses SwiftShader software Vulkan on Linux, no GPU required (or AGENT_BROWSER_WEBGPU env)
   --no-webmcp                Disable default experimental WebMCP support for locally launched Chrome
                              (or AGENT_BROWSER_NO_WEBMCP env)
-  --cdp <port|url>           Connect via CDP; root WebSocket query slash is optional
-  --pin-tab                  Pin the session to its bound tab (or AGENT_BROWSER_PIN_TAB env)
+  --cdp <port|url>           Connect via CDP or Firefox WebDriver BiDi; root WebSocket
+                             query slash and Firefox ?devtools=<port> are optional
+  --pin-tab                  Pin the session to its bound tab (CDP only; Firefox attach
+                             rejects it) (or AGENT_BROWSER_PIN_TAB env)
                              Commands fail with a tab_gone error instead of falling back
                              to another tab when the bound tab is closed. JSON includes
                              data.targetId and optional sanitized data.lastUrl. Sticky per session.
@@ -4203,7 +4215,7 @@ Environment:
                                  close fails and stays retryable until the Cloud session confirms it
                                  stopped. After daemon exit, inspect and stop the browser in Cloud.
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
-  AGENT_BROWSER_PIN_TAB          Pin the session to its bound tab (strict tab binding)
+  AGENT_BROWSER_PIN_TAB          Pin the session to its bound tab (CDP only; strict tab binding)
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
   AGENT_BROWSER_HIDE_SCROLLBARS  Hide scrollbars in headless Chromium screenshots (default: true)
   AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)

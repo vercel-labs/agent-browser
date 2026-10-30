@@ -145,7 +145,7 @@ agent-browser screenshot --screenshot-format jpeg --screenshot-quality 80
 agent-browser pdf <path>              # Save as PDF
 agent-browser snapshot                # Accessibility tree with refs (best for AI)
 agent-browser eval <js>               # Run JavaScript (-b for base64, --stdin for piped input)
-agent-browser connect <port>          # Connect to browser via CDP
+agent-browser connect <port>          # Connect to a browser via CDP or Firefox BiDi
 agent-browser stream enable [--port <port>]  # Start runtime WebSocket streaming
 agent-browser webmcp list                     # List experimental page tools
 agent-browser webmcp invoke <tool> --params @input.json
@@ -770,7 +770,7 @@ Each session has its own:
 
 ### Tab pinning
 
-When several sessions share one Chrome over `--cdp`, each session remembers which tab it is bound to (by CDP target id, persisted across daemon restarts). A restarted daemon reattaches to the session's own tab instead of adopting whatever tab happens to be active, which is usually another session's.
+When several sessions share one Chrome over `--cdp`, each session remembers which tab it is bound to (by CDP target id, persisted across daemon restarts). A restarted daemon reattaches to the session's own tab instead of adopting whatever tab happens to be active, which is usually another session's. The pin and its `tab_gone` guarantee are CDP-only; Firefox attach rejects `--pin-tab`.
 
 By default, if the bound tab is closed the session falls back to a neighboring tab (legacy behavior). Pass `--pin-tab` (or set `AGENT_BROWSER_PIN_TAB=1`) to make the binding strict:
 
@@ -1087,9 +1087,9 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--headed` | Show browser window on the interactive desktop (or `AGENT_BROWSER_HEADED` env) |
 | `--webgpu` | Enable WebGPU; SwiftShader software Vulkan on Linux, no GPU required (or `AGENT_BROWSER_WEBGPU` env) |
 | `--no-webmcp` | Disable experimental WebMCP support, which is enabled by default for locally launched Chrome (or `AGENT_BROWSER_NO_WEBMCP` env) |
-| `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) |
+| `--cdp <port\|url>` | Connect via Chrome DevTools Protocol or Firefox WebDriver BiDi (port or WebSocket URL; Firefox accepts `?devtools=<port>`) |
 | `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
-| `--pin-tab` | Pin the session to its bound tab; fail with `tab_gone` instead of falling back to another tab (or `AGENT_BROWSER_PIN_TAB` env) |
+| `--pin-tab` | Pin the session to its bound tab (CDP only; rejected for Firefox attach); fail with `tab_gone` instead of falling back to another tab (or `AGENT_BROWSER_PIN_TAB` env) |
 | `--no-pin-tab` | Disable a sticky pin previously enabled with `--pin-tab` |
 | `--color-scheme <scheme>` | Color scheme: `dark`, `light`, `no-preference` (or `AGENT_BROWSER_COLOR_SCHEME` env) |
 | `--download-path <path>` | Default download directory (or `AGENT_BROWSER_DOWNLOAD_PATH` env) |
@@ -1573,6 +1573,34 @@ This enables control of:
 - Chrome/Chromium instances with remote debugging
 - WebView2 applications
 - Any browser exposing a CDP endpoint
+
+### Attach to Firefox
+
+Firefox exposes WebDriver BiDi instead of CDP. Start Firefox with remote debugging and the DevTools server, and add these prefs to the profile's `user.js`:
+
+```js
+user_pref("devtools.debugger.remote-enabled", true);
+user_pref("devtools.chrome.enabled", true);
+user_pref("devtools.debugger.prompt-connection", false);
+```
+
+```bash
+firefox --remote-debugging-port 9222 --start-debugger-server 6000 -profile <dir>
+
+agent-browser connect 9222
+agent-browser snapshot
+agent-browser close   # ends the BiDi session, leaves Firefox running
+```
+
+Detection is automatic. A `ws://` or `wss://` URL whose path is `/session` is treated as Firefox BiDi. Other targets try CDP first and probe for Firefox only when CDP discovery fails. Pass `--engine firefox` to skip CDP discovery. Firefox targets use the DevTools server on port 6000 unless the URL sets `?devtools=<port>`, for example when Firefox was started with `--start-debugger-server 6080`:
+
+```bash
+agent-browser connect "ws://127.0.0.1:9222/session?devtools=6080"
+```
+
+Firefox allows one BiDi session at a time. If another client is attached, close it before connecting. Firefox 150 or newer is required, and `--auto-connect` does not support Firefox. Its DevTools companion uses unencrypted RDP, so remote Firefox requires forwarding both ports through an encrypted tunnel such as `ssh -L`, then connecting to `127.0.0.1`.
+
+Launch-only options such as `--headed`, `--executable-path`, and `--profile` do not apply to an already-running Firefox. `--allowed-domains` is rejected when attaching, as it is for any pre-existing CDP session. `--pin-tab` and its `tab_gone` guarantee apply only to Chrome over CDP; Firefox attach rejects `--pin-tab`.
 
 ### Auto-Connect
 

@@ -6,6 +6,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
+use super::attach::AttachTarget;
 use super::client::{remote_to_json, BidiClient};
 use super::emulation::{self, Settings as EmulationSettings};
 use super::firefox::{check_firefox_version, find_firefox, DevtoolsEndpoint, FirefoxProcess};
@@ -16,7 +17,9 @@ use crate::native::actions::{EmulatedMedia, PendingDialog};
 use crate::native::cdp::chrome::LaunchOptions;
 
 const START_TIMEOUT: Duration = Duration::from_secs(30);
+const ATTACH_TIMEOUT: Duration = Duration::from_secs(15);
 const DEVTOOLS_CONNECT_WINDOW: Duration = Duration::from_secs(10);
+const ATTACH_DEVTOOLS_CONNECT_WINDOW: Duration = Duration::from_secs(2);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const CONTEXT_EVENTS: [&str; 2] = [
     "browsingContext.contextCreated",
@@ -27,7 +30,7 @@ const PROMPT_EVENTS: [&str; 2] = [
     "browsingContext.userPromptClosed",
 ];
 
-/// One launched Firefox. Dropping it kills the process tree and deletes the profile.
+/// A Firefox session. Dropping it releases protocol clients and kills only an owned process.
 pub struct FirefoxSession {
     process: Option<FirefoxProcess>,
     pub headless: bool,
@@ -90,28 +93,41 @@ fn proxy_capability(proxy: &str, bypass: Option<&str>) -> Value {
     cap
 }
 
-async fn connect_devtools(endpoint: &DevtoolsEndpoint) -> Result<RdpClient, String> {
-    tokio::time::timeout(DEVTOOLS_CONNECT_WINDOW, connect_devtools_loop(endpoint))
-        .await
-        .map_err(|_| "Firefox DevTools connection timed out".to_string())?
+async fn within_attach_deadline<T>(
+    deadline: Option<tokio::time::Instant>,
+    future: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, future)
+            .await
+            .map_err(|_| "Firefox attach timed out after 15 seconds".to_string())?,
+        None => future.await,
+    }
 }
 
-async fn connect_devtools_loop(endpoint: &DevtoolsEndpoint) -> Result<RdpClient, String> {
-    let deadline = tokio::time::Instant::now() + DEVTOOLS_CONNECT_WINDOW;
-    loop {
-        let attempt = match endpoint {
-            #[cfg(unix)]
-            DevtoolsEndpoint::Unix(path) => RdpClient::connect_unix(path).await,
-            #[cfg(not(unix))]
-            DevtoolsEndpoint::Unix(_) => Err("unix sockets are unavailable".to_string()),
-            DevtoolsEndpoint::Port(port) => RdpClient::connect_tcp(*port).await,
-        };
-        match attempt {
-            Ok(c) => return Ok(c),
-            Err(e) if tokio::time::Instant::now() >= deadline => return Err(e),
-            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+async fn connect_devtools(
+    endpoint: &DevtoolsEndpoint,
+    window: Duration,
+) -> Result<RdpClient, String> {
+    let deadline = tokio::time::Instant::now() + window;
+    tokio::time::timeout(window, async {
+        loop {
+            let attempt = match endpoint {
+                #[cfg(unix)]
+                DevtoolsEndpoint::Unix(path) => RdpClient::connect_unix(path).await,
+                #[cfg(not(unix))]
+                DevtoolsEndpoint::Unix(_) => Err("unix sockets are unavailable".to_string()),
+                DevtoolsEndpoint::Tcp { host, port } => RdpClient::connect_tcp(host, *port).await,
+            };
+            match attempt {
+                Ok(client) => return Ok(client),
+                Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
         }
-    }
+    })
+    .await
+    .map_err(|_| "Firefox DevTools connection timed out".to_string())?
 }
 
 impl FirefoxSession {
@@ -138,16 +154,48 @@ impl FirefoxSession {
         .await
         .map_err(|e| format!("Firefox launch task failed: {e}"))??;
 
-        let bidi = Arc::new(
-            tokio::time::timeout(
-                START_TIMEOUT,
-                BidiClient::connect(&format!("{}/session", process.bidi_url)),
-            )
-            .await
-            .map_err(|_| "Firefox BiDi connection timed out".to_string())??,
-        );
+        let target = AttachTarget {
+            bidi_url: format!("{}/session", process.bidi_url),
+            devtools: process.devtools.clone(),
+            devtools_explicit: false,
+        };
+        Self::initialize(&target, Some(process), options, net, auto_dialog, None).await
+    }
+
+    /// Opens a BiDi session on an already running Firefox and connects its DevTools server.
+    pub async fn attach(
+        target: &AttachTarget,
+        options: &LaunchOptions,
+        net: NetContext,
+        auto_dialog: bool,
+    ) -> Result<Self, String> {
+        Self::initialize(
+            target,
+            None,
+            options,
+            net,
+            auto_dialog,
+            Some(tokio::time::Instant::now() + ATTACH_TIMEOUT),
+        )
+        .await
+    }
+
+    async fn initialize(
+        target: &AttachTarget,
+        process: Option<FirefoxProcess>,
+        options: &LaunchOptions,
+        net: NetContext,
+        auto_dialog: bool,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<Self, String> {
+        let attached = process.is_none();
+        let connect = async {
+            tokio::time::timeout(START_TIMEOUT, BidiClient::connect(&target.bidi_url))
+                .await
+                .map_err(|_| "Firefox BiDi connection timed out".to_string())?
+        };
+        let bidi = Arc::new(within_attach_deadline(deadline, connect).await?);
         let events = bidi.subscribe_buffered();
-        let dispatch_events = bidi.subscribe_buffered();
         let mut caps = json!({
             "acceptInsecureCerts": options.ignore_https_errors,
             "unhandledPromptBehavior": if auto_dialog {
@@ -159,12 +207,44 @@ impl FirefoxSession {
         if let Some(proxy) = options.proxy.as_deref() {
             caps["proxy"] = proxy_capability(proxy, options.proxy_bypass.as_deref());
         }
-        let created = bidi
-            .send(
-                "session.new",
-                json!({"capabilities": {"alwaysMatch": caps}}),
-            )
-            .await?;
+        let create_session = bidi.send(
+            "session.new",
+            json!({"capabilities": {"alwaysMatch": caps}}),
+        );
+        let created = match within_attach_deadline(deadline, create_session).await {
+            Err(error) if attached && error.contains("Maximum number of active sessions") => {
+                return Err(format!(
+                    "Firefox at {} already has a WebDriver BiDi session. Another client is attached; close it and retry.",
+                    super::attach::target_label(&target.bidi_url)
+                ));
+            }
+            result => result?,
+        };
+        let cleanup_bidi = bidi.clone();
+        let result = within_attach_deadline(
+            deadline,
+            Self::open_session(bidi, target, process, options, net, events, created),
+        )
+        .await;
+        if attached && result.is_err() {
+            let _ = cleanup_bidi
+                .send_timeout("session.end", json!({}), SHUTDOWN_TIMEOUT)
+                .await;
+        }
+        result
+    }
+
+    async fn open_session(
+        bidi: Arc<BidiClient>,
+        target: &AttachTarget,
+        process: Option<FirefoxProcess>,
+        options: &LaunchOptions,
+        net: NetContext,
+        events: mpsc::Receiver<Value>,
+        created: Value,
+    ) -> Result<Self, String> {
+        let attached = process.is_none();
+        let dispatch_events = bidi.subscribe_buffered();
         check_firefox_version(
             created["capabilities"]["browserVersion"]
                 .as_str()
@@ -183,7 +263,16 @@ impl FirefoxSession {
         )
         .await?;
 
-        let rdp = connect_devtools(&process.devtools).await?;
+        let window = if attached {
+            ATTACH_DEVTOOLS_CONNECT_WINDOW
+        } else {
+            DEVTOOLS_CONNECT_WINDOW
+        };
+        let rdp = match connect_devtools(&target.devtools, window).await {
+            Ok(rdp) => rdp,
+            Err(_) if attached => return Err(target.devtools_unreachable_error()),
+            Err(error) => return Err(error),
+        };
         let root = rdp.request("root", "getRoot", json!({})).await?;
         let accessibility_actor = root["parentAccessibilityActor"]
             .as_str()
@@ -193,10 +282,28 @@ impl FirefoxSession {
             .await?;
 
         let tree = bidi.send("browsingContext.getTree", json!({})).await?;
-        let context = tree["contexts"][0]["context"]
-            .as_str()
+        let mut contexts: Vec<String> = tree["contexts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry["context"].as_str().map(str::to_string))
+            .collect();
+        if contexts.is_empty() && attached {
+            let created = bidi
+                .send("browsingContext.create", json!({"type": "tab"}))
+                .await?;
+            contexts.push(
+                created["context"]
+                    .as_str()
+                    .ok_or("Firefox did not return the created browsing context")?
+                    .to_string(),
+            );
+        }
+        let context = contexts
+            .first()
             .ok_or("Firefox reported no browsing context")?
-            .to_string();
+            .clone();
+        let next_tab_id = contexts.len() as u32 + 1;
         let emulation = Arc::new(std::sync::RwLock::new(EmulationSettings {
             user_agent: options.user_agent.clone(),
             media: options.color_scheme.as_ref().map(|scheme| EmulatedMedia {
@@ -213,14 +320,18 @@ impl FirefoxSession {
             emulation.clone(),
         ));
         let session = Self {
-            process: Some(process),
-            headless: options.headless,
+            process,
+            headless: !attached && options.headless,
             bidi,
             rdp,
             accessibility_actor,
-            tab_ids: HashMap::from([(context.clone(), 1)]),
+            tab_ids: contexts
+                .into_iter()
+                .enumerate()
+                .map(|(index, context)| (context, index as u32 + 1))
+                .collect(),
             context_parents: HashMap::new(),
-            next_tab_id: 2,
+            next_tab_id,
             top_context: context.clone(),
             context,
             refs: HashMap::new(),
@@ -269,10 +380,15 @@ impl FirefoxSession {
         self.process
             .as_mut()
             .is_some_and(FirefoxProcess::has_exited)
-            || self.bidi.reader.is_finished()
+            || self.bidi.is_closed()
     }
 
-    /// Ends the BiDi session, then kills Firefox and deletes its profile.
+    /// Returns whether this session attached to an existing Firefox.
+    pub fn is_attached(&self) -> bool {
+        self.process.is_none()
+    }
+
+    /// Ends the BiDi session and releases any owned Firefox process.
     pub async fn close(self) {
         let _ = self
             .bidi
@@ -395,7 +511,10 @@ pub(crate) fn owner_tab<'a>(
     context_parents: &'a HashMap<String, String>,
 ) -> &'a str {
     let mut owner = context;
-    while let Some(parent) = context_parents.get(owner) {
+    while let Some(parent) = context_parents
+        .get(owner)
+        .filter(|parent| !parent.is_empty())
+    {
         owner = parent;
     }
     owner
@@ -437,21 +556,37 @@ fn apply_event(
     }
 }
 
-fn owner_context<'a>(mut context: &'a str, parents: &'a HashMap<String, String>) -> &'a str {
-    while let Some(parent) = parents.get(context).filter(|parent| !parent.is_empty()) {
-        context = parent;
-    }
-    context
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use futures_util::{SinkExt, StreamExt};
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::Message;
 
     pub(crate) type Calls = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+    pub(crate) type Messages = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
+
+    async fn put<S: tokio::io::AsyncWrite + Unpin>(s: &mut S, v: Value) {
+        let b = v.to_string();
+        s.write_all(format!("{}:{}", b.len(), b).as_bytes())
+            .await
+            .unwrap();
+    }
+
+    async fn get<S: tokio::io::AsyncRead + Unpin>(s: &mut S) -> Option<Value> {
+        let mut len = Vec::new();
+        loop {
+            let b = s.read_u8().await.ok()?;
+            if b == b':' {
+                break;
+            }
+            len.push(b);
+        }
+        let n: usize = String::from_utf8(len).ok()?.parse().ok()?;
+        let mut buf = vec![0; n];
+        s.read_exact(&mut buf).await.ok()?;
+        serde_json::from_slice(&buf).ok()
+    }
 
     /// A session with no process, a BiDi socket that answers an empty `success`
     /// to every command and an idle DevTools stream. The sender injects BiDi events
@@ -502,7 +637,9 @@ pub(crate) mod tests {
         tokio::sync::mpsc::UnboundedSender<Value>,
         Calls,
     ) {
-        fake_session_with_replies(move |v: &Value| FakeReply::Result(responder(v))).await
+        let (url, tx, calls, _) = fake_bidi_with(responder).await;
+        let bidi = Arc::new(BidiClient::connect(&url).await.unwrap());
+        (session_over_bidi(bidi).await, tx, calls)
     }
 
     /// Same as `fake_session_with`, but `responder` can also reject a command the way Firefox
@@ -514,11 +651,49 @@ pub(crate) mod tests {
         tokio::sync::mpsc::UnboundedSender<Value>,
         Calls,
     ) {
+        let (url, tx, calls, _) = fake_bidi_with_replies(responder).await;
+        let bidi = Arc::new(BidiClient::connect(&url).await.unwrap());
+        (session_over_bidi(bidi).await, tx, calls)
+    }
+
+    async fn session_over_bidi(bidi: Arc<BidiClient>) -> FirefoxSession {
+        let events = bidi.subscribe_buffered();
+        let (a, mut b) = tokio::io::duplex(4096);
+        let greeting = json!({"from":"root"}).to_string();
+        b.write_all(format!("{}:{}", greeting.len(), greeting).as_bytes())
+            .await
+            .unwrap();
+        std::mem::forget(b);
+        let rdp = RdpClient::from_stream(a).await.unwrap();
+        test_session(bidi, rdp, events)
+    }
+
+    async fn fake_bidi_with(
+        responder: impl Fn(&Value) -> Value + Send + 'static,
+    ) -> (
+        String,
+        tokio::sync::mpsc::UnboundedSender<Value>,
+        Calls,
+        Messages,
+    ) {
+        fake_bidi_with_replies(move |v: &Value| FakeReply::Result(responder(v))).await
+    }
+
+    async fn fake_bidi_with_replies(
+        responder: impl Fn(&Value) -> FakeReply + Send + 'static,
+    ) -> (
+        String,
+        tokio::sync::mpsc::UnboundedSender<Value>,
+        Calls,
+        Messages,
+    ) {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", l.local_addr().unwrap());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
         let calls = Calls::default();
         let log = calls.clone();
+        let messages = Messages::default();
+        let message_log = messages.clone();
         tokio::spawn(async move {
             let (s, _) = l.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(s).await.unwrap();
@@ -528,6 +703,7 @@ pub(crate) mod tests {
                         let Some(Ok(Message::Text(t))) = m else { break };
                         let v: Value = serde_json::from_str(&t).unwrap();
                         log.lock().unwrap().push(v["method"].as_str().unwrap().to_string());
+                        message_log.lock().unwrap().push(v.clone());
                         let reply = match responder(&v) {
                             FakeReply::Result(result) => {
                                 json!({"type":"success","id":v["id"],"result":result})
@@ -547,17 +723,15 @@ pub(crate) mod tests {
                 }
             }
         });
-        let bidi = BidiClient::connect(&url).await.unwrap();
-        let bidi = Arc::new(bidi);
-        let events = bidi.subscribe_buffered();
-        let (a, mut b) = tokio::io::duplex(4096);
-        let greeting = json!({"from":"root"}).to_string();
-        b.write_all(format!("{}:{}", greeting.len(), greeting).as_bytes())
-            .await
-            .unwrap();
-        std::mem::forget(b);
-        let rdp = RdpClient::from_stream(a).await.unwrap();
-        let session = FirefoxSession {
+        (url, tx, calls, messages)
+    }
+
+    fn test_session(
+        bidi: Arc<BidiClient>,
+        rdp: RdpClient,
+        events: mpsc::Receiver<Value>,
+    ) -> FirefoxSession {
+        FirefoxSession {
             process: None,
             headless: true,
             bidi,
@@ -583,11 +757,233 @@ pub(crate) mod tests {
             inflight: HashSet::new(),
             visited_origins: HashSet::new(),
             dispatcher: None,
-        };
-        (session, tx, calls)
+        }
     }
 
-    pub(crate) type Messages = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
+    /// A session whose BiDi socket has closed, as when its Firefox goes away.
+    pub(crate) async fn fake_session_dead() -> FirefoxSession {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", l.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (s, _) = l.accept().await.unwrap();
+            drop(tokio_tungstenite::accept_async(s).await.unwrap());
+        });
+        let bidi = Arc::new(BidiClient::connect(&url).await.unwrap());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !bidi.is_closed() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        session_over_bidi(bidi).await
+    }
+
+    /// Runs `attach` against a BiDi socket that answers `steps` in order and returns the error.
+    async fn attach_error(
+        steps: &[(&str, Value)],
+        timeout: Duration,
+        delayed_method: Option<&str>,
+    ) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/session", listener.local_addr().unwrap());
+        let steps: Vec<(String, Value)> = steps
+            .iter()
+            .map(|(method, reply)| (method.to_string(), reply.clone()))
+            .collect();
+        let delayed_method = delayed_method.map(str::to_owned);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for (method, reply) in steps {
+                let message = tokio::time::timeout(Duration::from_secs(2), ws.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let request: Value = serde_json::from_str(&message.into_text().unwrap()).unwrap();
+                assert_eq!(request["method"], method, "{request}");
+                if delayed_method.as_deref() == Some(method.as_str()) {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                let response = match reply.get("error").and_then(Value::as_str) {
+                    Some(error) => json!({
+                        "type": "error",
+                        "id": request["id"],
+                        "error": error,
+                        "message": reply["message"].as_str().unwrap_or(""),
+                    }),
+                    None => json!({
+                        "type": "success",
+                        "id": request["id"],
+                        "result": reply,
+                    }),
+                };
+                ws.send(Message::Text(response.to_string())).await.unwrap();
+            }
+        });
+        let target = AttachTarget {
+            bidi_url: url,
+            devtools: DevtoolsEndpoint::Tcp {
+                host: "127.0.0.1".into(),
+                port: 6000,
+            },
+            devtools_explicit: false,
+        };
+        let error = FirefoxSession::initialize(
+            &target,
+            None,
+            &LaunchOptions::default(),
+            NetContext::default(),
+            false,
+            Some(tokio::time::Instant::now() + timeout),
+        )
+        .await
+        .err()
+        .unwrap();
+        server.await.unwrap();
+        error
+    }
+
+    #[tokio::test]
+    async fn attach_timeout_ends_created_session() {
+        let error = attach_error(
+            &[
+                (
+                    "session.new",
+                    json!({"capabilities": {"browserVersion": "150.0"}}),
+                ),
+                ("session.subscribe", json!({})),
+                ("session.end", json!({})),
+            ],
+            Duration::from_millis(50),
+            Some("session.subscribe"),
+        )
+        .await;
+        assert!(error.contains("attach timed out"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn attach_ends_created_session_after_initialization_failure() {
+        let error = attach_error(
+            &[
+                (
+                    "session.new",
+                    json!({"capabilities": {"browserVersion": "150.0"}}),
+                ),
+                (
+                    "session.subscribe",
+                    json!({"error": "unsupported operation", "message": "subscription rejected"}),
+                ),
+                ("session.end", json!({})),
+            ],
+            ATTACH_TIMEOUT,
+            None,
+        )
+        .await;
+        assert_eq!(error, "unsupported operation: subscription rejected");
+    }
+
+    #[tokio::test]
+    async fn attach_reports_another_client_holding_the_bidi_session() {
+        let error = attach_error(
+            &[(
+                "session.new",
+                json!({
+                    "error": "invalid argument",
+                    "message": "Maximum number of active sessions reached",
+                }),
+            )],
+            ATTACH_TIMEOUT,
+            None,
+        )
+        .await;
+        assert!(error.contains("Another client is attached"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn attach_rejects_unreachable_devtools_and_ends_the_bidi_session() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Keep the port reserved without an RDP greeting, so it cannot serve DevTools.
+        let (url, _tx, calls, _) = fake_bidi_with(|v: &Value| match v["method"].as_str() {
+            Some("session.new") => json!({"capabilities": {"browserVersion": "150.0"}}),
+            _ => json!({}),
+        })
+        .await;
+        let target =
+            super::super::attach::parse_attach_url(&format!("{url}/session?devtools={port}"))
+                .unwrap()
+                .unwrap();
+        let error = FirefoxSession::attach(
+            &target,
+            &LaunchOptions::default(),
+            NetContext::default(),
+            false,
+        )
+        .await
+        .err()
+        .expect("attach must fail when the required DevTools server is unreachable");
+        assert_eq!(error, target.devtools_unreachable_error());
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.last().map(String::as_str), Some("session.end"));
+        assert!(!calls
+            .iter()
+            .any(|method| method == "browsingContext.getTree"));
+    }
+
+    /// A DevTools server on TCP that answers the accessibility handshake and ignores the rest.
+    async fn fake_devtools() -> DevtoolsEndpoint {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut s, _) = l.accept().await.unwrap();
+            put(&mut s, json!({"from":"root"})).await;
+            while let Some(v) = get(&mut s).await {
+                let to = v["to"].as_str().unwrap_or("");
+                let reply = if v["type"] == "getRoot" {
+                    json!({"from": "root", "parentAccessibilityActor": "acc"})
+                } else {
+                    json!({"from": to})
+                };
+                put(&mut s, reply).await;
+            }
+        });
+        DevtoolsEndpoint::Tcp {
+            host: "127.0.0.1".into(),
+            port,
+        }
+    }
+
+    #[tokio::test]
+    async fn attach_creates_a_tab_when_firefox_reports_none() {
+        let (url, _tx, calls, _) = fake_bidi_with(|v: &Value| match v["method"].as_str() {
+            Some("session.new") => json!({"capabilities": {"browserVersion": "150.0"}}),
+            Some("browsingContext.getTree") => json!({"contexts": []}),
+            Some("browsingContext.create") => json!({"context": "ctx-new"}),
+            _ => json!({}),
+        })
+        .await;
+        let target = AttachTarget {
+            bidi_url: url,
+            devtools: fake_devtools().await,
+            devtools_explicit: true,
+        };
+        let session = FirefoxSession::attach(
+            &target,
+            &LaunchOptions::default(),
+            NetContext::default(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(session.context, "ctx-new");
+        assert!(calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|method| method == "browsingContext.create"));
+    }
 
     /// A session whose BiDi server records full messages, answers `browsingContext.create`
     /// with a new context and whose DevTools stream answers tab configuration requests.
@@ -598,63 +994,16 @@ pub(crate) mod tests {
         Messages,
         Messages,
     ) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
-
-        async fn put(s: &mut DuplexStream, v: Value) {
-            let b = v.to_string();
-            s.write_all(format!("{}:{}", b.len(), b).as_bytes())
-                .await
-                .unwrap();
-        }
-
-        async fn get(s: &mut DuplexStream) -> Option<Value> {
-            let mut len = Vec::new();
-            loop {
-                let b = s.read_u8().await.ok()?;
-                if b == b':' {
-                    break;
-                }
-                len.push(b);
+        let (url, tx, calls, bidi_messages) = fake_bidi_with(|v: &Value| {
+            if v["method"] == "browsingContext.create" {
+                json!({"context": "ctx-new"})
+            } else if v["method"] == "browsingContext.getTree" {
+                json!({"contexts": [{"context": "ctx-active", "url": "https://example.com/", "userContext": "default"}]})
+            } else {
+                json!({})
             }
-            let n: usize = String::from_utf8(len).ok()?.parse().ok()?;
-            let mut buf = vec![0; n];
-            s.read_exact(&mut buf).await.ok()?;
-            serde_json::from_slice(&buf).ok()
-        }
-
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("ws://{}", l.local_addr().unwrap());
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
-        let calls = Calls::default();
-        let methods = calls.clone();
-        let bidi_messages = Messages::default();
-        let bidi_log = bidi_messages.clone();
-        tokio::spawn(async move {
-            let (s, _) = l.accept().await.unwrap();
-            let mut ws = tokio_tungstenite::accept_async(s).await.unwrap();
-            loop {
-                tokio::select! {
-                    m = ws.next() => {
-                        let Some(Ok(Message::Text(t))) = m else { break };
-                        let v: Value = serde_json::from_str(&t).unwrap();
-                        methods.lock().unwrap().push(v["method"].as_str().unwrap().to_string());
-                        bidi_log.lock().unwrap().push(v.clone());
-                        let result = if v["method"] == "browsingContext.create" {
-                            json!({"context": "ctx-new"})
-                        } else if v["method"] == "browsingContext.getTree" {
-                            json!({"contexts": [{"context": "ctx-active", "url": "https://example.com/", "userContext": "default"}]})
-                        } else {
-                            json!({})
-                        };
-                        let reply = json!({"type":"success","id":v["id"],"result":result});
-                        ws.send(Message::Text(reply.to_string())).await.unwrap();
-                    }
-                    Some(ev) = rx.recv() => {
-                        ws.send(Message::Text(ev.to_string())).await.unwrap();
-                    }
-                }
-            }
-        });
+        })
+        .await;
         let bidi = BidiClient::connect(&url).await.unwrap();
         let events = bidi.subscribe_buffered();
 
@@ -687,33 +1036,7 @@ pub(crate) mod tests {
             }
         });
         let rdp = RdpClient::from_stream(a).await.unwrap();
-        let session = FirefoxSession {
-            process: None,
-            headless: true,
-            bidi: Arc::new(bidi),
-            rdp,
-            accessibility_actor: "acc".into(),
-            context: "ctx-active".into(),
-            tab_ids: HashMap::from([("ctx-active".into(), 1)]),
-            context_parents: HashMap::new(),
-            next_tab_id: 2,
-            top_context: "ctx-active".into(),
-            refs: HashMap::new(),
-            next_node_id: 0,
-            shadow_ids: Default::default(),
-            frames: None,
-            documents: HashMap::new(),
-            tab_labels: HashMap::new(),
-            touches: Vec::new(),
-            emulation: Arc::default(),
-            download_dir: None,
-            events,
-            net: NetContext::default(),
-            intercepting: false,
-            inflight: HashSet::new(),
-            visited_origins: HashSet::new(),
-            dispatcher: None,
-        };
+        let session = test_session(Arc::new(bidi), rdp, events);
         (session, tx, calls, bidi_messages, rdp_messages)
     }
 

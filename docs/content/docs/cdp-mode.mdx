@@ -71,6 +71,8 @@ This is useful when:
 
 When several sessions share one browser over CDP, each session remembers which tab it is bound to (by CDP target id, persisted across daemon restarts). A restarted daemon reattaches to the session's own tab instead of adopting whatever tab is currently active, which in a shared browser is usually another session's.
 
+The pin and its `tab_gone` guarantee are CDP-only; Firefox attach rejects `--pin-tab`.
+
 Pass `--pin-tab` (or set `AGENT_BROWSER_PIN_TAB=1`) to make the binding strict:
 
 ```bash
@@ -116,7 +118,36 @@ This enables control of:
 - Chrome/Chromium with remote debugging
 - WebView2 applications
 - Remote browser services (via WebSocket URL)
+- Firefox 150 or newer over WebDriver BiDi
 - Any browser exposing a CDP endpoint
+
+## Attach to Firefox
+
+Firefox exposes WebDriver BiDi instead of CDP. Start Firefox with remote debugging and its DevTools server, and add these prefs to the profile's `user.js`:
+
+```js
+user_pref("devtools.debugger.remote-enabled", true);
+user_pref("devtools.chrome.enabled", true);
+user_pref("devtools.debugger.prompt-connection", false);
+```
+
+```bash
+firefox --remote-debugging-port 9222 --start-debugger-server 6000 -profile <dir>
+
+agent-browser connect 9222
+agent-browser snapshot
+agent-browser close
+```
+
+Detection is automatic. A `ws://` or `wss://` URL whose path is `/session` is treated as Firefox BiDi. Other targets try CDP first and probe for Firefox only when CDP discovery fails. Pass `--engine firefox` to skip the CDP attempt. Firefox targets use the DevTools server on port 6000 unless the URL sets `?devtools=<port>`, for example when Firefox was started with `--start-debugger-server 6080`:
+
+```bash
+agent-browser connect "ws://127.0.0.1:9222/session?devtools=6080"
+```
+
+The attached browser is externally owned: `close` ends the BiDi session and leaves Firefox running. Firefox allows one BiDi session at a time, so close any other client before attaching. Firefox 150 or newer is required, and `--auto-connect` does not support Firefox. Its DevTools companion uses unencrypted RDP, so remote Firefox requires forwarding both ports through an encrypted tunnel such as `ssh -L`, then connecting to `127.0.0.1`.
+
+When attaching to Firefox, `--allowed-domains` is rejected, as it is for any pre-existing CDP session. Launch-only options such as `--headed`, `--executable-path`, and `--profile` do not apply to an already-running browser. `--pin-tab` and its `tab_gone` guarantee apply only to Chrome over CDP; Firefox attach rejects `--pin-tab`.
 
 ## Global options
 
@@ -138,9 +169,9 @@ This enables control of:
     <tr><td><code>--name, -n</code></td><td>Locator name filter</td></tr>
     <tr><td><code>--exact</code></td><td>Exact, case-sensitive match (accessible name for role)</td></tr>
     <tr><td><code>--headed</code></td><td>Show browser window</td></tr>
-    <tr><td><code>{"--cdp <port|url>"}</code></td><td>CDP connection (port or WebSocket URL)</td></tr>
+    <tr><td><code>--cdp &lt;port|url&gt;</code></td><td>CDP or Firefox WebDriver BiDi connection (port or WebSocket URL; Firefox accepts <code>?devtools=&lt;port&gt;</code>)</td></tr>
     <tr><td><code>--auto-connect</code></td><td>Auto-discover and connect to running Chrome</td></tr>
-    <tr><td><code>--pin-tab</code></td><td>Pin the session to its bound tab (strict tab binding)</td></tr>
+    <tr><td><code>--pin-tab</code></td><td>Pin the session to its bound tab (CDP only; rejected for Firefox attach)</td></tr>
     <tr><td><code>--no-pin-tab</code></td><td>Disable a sticky pin previously enabled with <code>--pin-tab</code></td></tr>
     <tr><td><code>--color-scheme &lt;scheme&gt;</code></td><td>Persistent color scheme (<code>dark</code>, <code>light</code>, <code>no-preference</code>)</td></tr>
     <tr><td><code>--debug</code></td><td>Debug output</td></tr>

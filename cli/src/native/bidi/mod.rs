@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 pub mod actions;
+pub mod attach;
 pub mod capture;
 pub mod client;
 pub mod emulation;

@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 
 use crate::native::cdp::chrome::LaunchOptions;
 #[cfg(windows)]
-use crate::native::cdp::windows_process::Child;
+pub(crate) use crate::native::cdp::windows_process::Child;
 #[cfg(not(windows))]
-use std::process::Child;
+pub(crate) use std::process::Child;
 
 const DOWNLOAD_LINK: &str = "https://www.mozilla.org/firefox/new/";
 const MIN_MAJOR: u32 = 150;
@@ -22,12 +22,11 @@ const FIXED_PATHS: &[&str] = &[
     "/opt/firefox/firefox",
 ];
 
-/// Where Firefox's DevTools (RDP) server listens: a unix socket inside the
-/// private profile dir, or a loopback port on Windows.
+/// Where Firefox's DevTools (RDP) server listens.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DevtoolsEndpoint {
     Unix(PathBuf),
-    Port(u16),
+    Tcp { host: String, port: u16 },
 }
 
 /// An owned Firefox child, its temp profile and its stderr tail. Dropping it
@@ -42,18 +41,20 @@ pub struct FirefoxProcess {
     reader: Option<std::thread::JoinHandle<()>>,
 }
 
-/// Rejects options Firefox cannot honour. `cdp`, `auto_connect` and `provider`
-/// are resolved from flags, env and config by the caller.
+/// Rejects options Firefox cannot honour. `auto_connect` and `provider` are resolved from flags, env and config by the caller.
 pub fn validate_firefox_options(
     options: &LaunchOptions,
-    cdp: Option<&str>,
     auto_connect: bool,
     provider: Option<&str>,
+    attached: bool,
 ) -> Result<(), String> {
-    let unsupported = |flag: &str| Err(format!("{flag} is not supported with --engine firefox"));
-    if cdp.is_some() {
-        return unsupported("--cdp");
-    }
+    let unsupported = |flag: &str| {
+        Err(if attached {
+            format!("{flag} is not supported when attaching to Firefox")
+        } else {
+            format!("{flag} is not supported with --engine firefox")
+        })
+    };
     if auto_connect {
         return unsupported("--auto-connect");
     }
@@ -185,7 +186,14 @@ fn devtools_endpoint(
         .and_then(|l| l.local_addr())
         .map_err(|e| format!("Failed to reserve a DevTools port: {e}"))?
         .port();
-    Ok((DevtoolsEndpoint::Port(port), port.to_string(), None))
+    Ok((
+        DevtoolsEndpoint::Tcp {
+            host: "127.0.0.1".into(),
+            port,
+        },
+        port.to_string(),
+        None,
+    ))
 }
 
 #[cfg(not(windows))]
@@ -204,6 +212,21 @@ fn devtools_endpoint(
     Ok((DevtoolsEndpoint::Unix(sock), arg, None))
 }
 
+/// The headless choice and platform flags that keep the process tied to its child handle.
+pub(crate) fn base_args(headless: bool) -> Vec<String> {
+    let mut args = Vec::new();
+    if headless {
+        args.push("--headless".into());
+    }
+    if cfg!(target_os = "macos") {
+        args.push("--foreground".into());
+    }
+    if cfg!(windows) {
+        args.push("--wait-for-browser".into());
+    }
+    args
+}
+
 fn prepare(
     path: &Path,
     headless: bool,
@@ -217,16 +240,7 @@ fn prepare(
     )
     .map_err(|e| format!("Failed to write Firefox profile: {e}"))?;
     let (devtools, rdp, socket_dir) = devtools_endpoint(profile_dir)?;
-    let mut args: Vec<String> = Vec::new();
-    if headless {
-        args.push("--headless".into());
-    }
-    if cfg!(target_os = "macos") {
-        args.push("--foreground".into());
-    }
-    if cfg!(windows) {
-        args.push("--wait-for-browser".into());
-    }
+    let mut args = base_args(headless);
     args.extend(["--remote-debugging-port", "0", "--start-debugger-server"].map(String::from));
     args.push(rdp);
     args.extend([
@@ -322,12 +336,7 @@ impl FirefoxProcess {
 
     /// Kills the process tree.
     pub fn kill(&mut self) {
-        let _ = self.child.kill();
-        #[cfg(unix)]
-        unsafe {
-            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
-        }
-        let _ = self.child.wait();
+        kill_tree(&mut self.child);
     }
 
     /// Last lines Firefox wrote to stderr.
@@ -356,14 +365,24 @@ fn remove_private_dir(dir: &Path) {
     }
 }
 
+/// Kills a Firefox process tree and reaps it.
+pub(crate) fn kill_tree(child: &mut Child) {
+    let _ = child.kill();
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let _ = child.wait();
+}
+
 #[cfg(windows)]
-fn spawn(path: &Path, args: &[String], headless: bool) -> Result<Child, String> {
+pub(crate) fn spawn(path: &Path, args: &[String], headless: bool) -> Result<Child, String> {
     Child::spawn(path, args, headless)
         .map_err(|e| format!("Failed to launch Firefox at {path:?}: {e}"))
 }
 
 #[cfg(not(windows))]
-fn spawn(path: &Path, args: &[String], _headless: bool) -> Result<Child, String> {
+pub(crate) fn spawn(path: &Path, args: &[String], _headless: bool) -> Result<Child, String> {
     use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new(path);
     cmd.args(args)
@@ -389,7 +408,7 @@ mod tests {
     }
 
     fn err_of(o: &LaunchOptions) -> String {
-        validate_firefox_options(o, None, false, None).unwrap_err()
+        validate_firefox_options(o, false, None, false).unwrap_err()
     }
 
     #[test]
@@ -412,11 +431,9 @@ mod tests {
         let mut o = ok();
         o.ca_cert = Some("c".into());
         assert!(err_of(&o).contains("--ca-cert"));
-        let e = validate_firefox_options(&ok(), Some("9222"), false, None).unwrap_err();
-        assert!(e.contains("--cdp"));
-        let e = validate_firefox_options(&ok(), None, true, None).unwrap_err();
+        let e = validate_firefox_options(&ok(), true, None, false).unwrap_err();
         assert!(e.contains("--auto-connect"));
-        let e = validate_firefox_options(&ok(), None, false, Some("browserbase")).unwrap_err();
+        let e = validate_firefox_options(&ok(), false, Some("browserbase"), false).unwrap_err();
         assert!(e.contains("--provider"));
     }
 

@@ -33,7 +33,10 @@ use windows_sys::Win32::Foundation::CloseHandle;
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::OpenProcess;
 
-use commands::{attach_ca_cert_to_launch_command, gen_id, parse_command, ParseError};
+use commands::{
+    apply_attach_launch_options, attach_allowed_domains_to_launch_command,
+    attach_ca_cert_to_launch_command, gen_id, parse_command, ParseError,
+};
 use connection::{
     cleanup_stale_files, daemon_unreachable, ensure_daemon, get_socket_dir,
     is_agent_browser_process, is_pid_alive, send_command, walk_daemons, DaemonOptions, Response,
@@ -115,12 +118,6 @@ fn attach_webmcp_launch_option(launch_cmd: &mut serde_json::Value, flags: &Flags
     }
 }
 
-fn attach_allowed_domains_to_launch_command(launch_cmd: &mut serde_json::Value, flags: &Flags) {
-    if let Some(ref domains) = flags.allowed_domains {
-        launch_cmd["allowedDomains"] = json!(domains);
-    }
-}
-
 fn attach_pin_tab_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
     if flags.pin_tab {
         cmd["pinTab"] = json!(true);
@@ -148,6 +145,63 @@ fn command_is_external_launch(cmd: &serde_json::Value) -> bool {
                 .get("autoConnect")
                 .and_then(|value| value.as_bool())
                 .unwrap_or(false))
+}
+
+/// Builds the eager `--cdp` launch envelope, validating the target up front.
+fn build_cdp_launch_command(cdp_value: &str, flags: &Flags) -> Result<serde_json::Value, String> {
+    let mut launch_cmd = if cdp_value.starts_with("ws://")
+        || cdp_value.starts_with("wss://")
+        || cdp_value.starts_with("http://")
+        || cdp_value.starts_with("https://")
+    {
+        json!({
+            "id": gen_id(),
+            "action": "launch",
+            "cdpUrl": cdp_value
+        })
+    } else {
+        let cdp_port: u16 = match cdp_value.parse::<u32>() {
+            Ok(0) => {
+                return Err("Invalid CDP port: port must be greater than 0".to_string());
+            }
+            Ok(p) if p > 65535 => {
+                return Err(format!(
+                    "Invalid CDP port: {} is out of range (valid range: 1-65535)",
+                    p
+                ));
+            }
+            Ok(p) => p as u16,
+            Err(_) => {
+                return Err(format!(
+                    "Invalid CDP value: '{}' is not a valid port number or URL",
+                    cdp_value
+                ));
+            }
+        };
+        json!({
+            "id": gen_id(),
+            "action": "launch",
+            "cdpPort": cdp_port
+        })
+    };
+
+    attach_script_launch_options(&mut launch_cmd, flags);
+    attach_webmcp_launch_option(&mut launch_cmd, flags);
+    apply_attach_launch_options(&mut launch_cmd, flags);
+    attach_pin_tab_to_command(&mut launch_cmd, flags);
+    attach_restore_config_to_command(&mut launch_cmd, flags);
+
+    if flags.ignore_https_errors {
+        launch_cmd["ignoreHTTPSErrors"] = json!(true);
+    }
+
+    attach_ca_cert_to_launch_command(&mut launch_cmd, flags);
+
+    if let Some(ref cs) = flags.color_scheme {
+        launch_cmd["colorScheme"] = json!(cs);
+    }
+
+    Ok(launch_cmd)
 }
 
 /// Commands that make their own HTTPS requests and never need a browser
@@ -1897,82 +1951,17 @@ fn main() {
     if let Some(ref cdp_value) = flags.cdp {
         // Validate CDP value eagerly (even when daemon is already running) so
         // the user gets an immediate error for bad input instead of a silent no-op.
-        let launch_cmd = if cdp_value.starts_with("ws://")
-            || cdp_value.starts_with("wss://")
-            || cdp_value.starts_with("http://")
-            || cdp_value.starts_with("https://")
-        {
-            // It's a URL - use cdpUrl field
-            json!({
-                "id": gen_id(),
-                "action": "launch",
-                "cdpUrl": cdp_value
-            })
-        } else {
-            // It's a port number - validate and use cdpPort field
-            let cdp_port: u16 = match cdp_value.parse::<u32>() {
-                Ok(0) => {
-                    let msg = "Invalid CDP port: port must be greater than 0".to_string();
-                    if flags.json {
-                        print_json_error(&msg);
-                    } else {
-                        eprintln!("{} {}", color::error_indicator(), msg);
-                    }
-                    exit(1);
+        let launch_cmd = match build_cdp_launch_command(cdp_value, &flags) {
+            Ok(cmd) => cmd,
+            Err(msg) => {
+                if flags.json {
+                    print_json_error(&msg);
+                } else {
+                    eprintln!("{} {}", color::error_indicator(), msg);
                 }
-                Ok(p) if p > 65535 => {
-                    let msg = format!(
-                        "Invalid CDP port: {} is out of range (valid range: 1-65535)",
-                        p
-                    );
-                    if flags.json {
-                        print_json_error(&msg);
-                    } else {
-                        eprintln!("{} {}", color::error_indicator(), msg);
-                    }
-                    exit(1);
-                }
-                Ok(p) => p as u16,
-                Err(_) => {
-                    let msg = format!(
-                        "Invalid CDP value: '{}' is not a valid port number or URL",
-                        cdp_value
-                    );
-                    if flags.json {
-                        print_json_error(&msg);
-                    } else {
-                        eprintln!("{} {}", color::error_indicator(), msg);
-                    }
-                    exit(1);
-                }
-            };
-            json!({
-                "id": gen_id(),
-                "action": "launch",
-                "cdpPort": cdp_port
-            })
+                exit(1);
+            }
         };
-
-        let mut launch_cmd = launch_cmd;
-        attach_script_launch_options(&mut launch_cmd, &flags);
-        attach_webmcp_launch_option(&mut launch_cmd, &flags);
-        attach_allowed_domains_to_launch_command(&mut launch_cmd, &flags);
-        attach_pin_tab_to_command(&mut launch_cmd, &flags);
-        attach_restore_config_to_command(&mut launch_cmd, &flags);
-
-        if flags.ignore_https_errors {
-            launch_cmd["ignoreHTTPSErrors"] = json!(true);
-        }
-
-        attach_ca_cert_to_launch_command(&mut launch_cmd, &flags);
-
-        if let Some(ref cs) = flags.color_scheme {
-            launch_cmd["colorScheme"] = json!(cs);
-        }
-
-        if let Some(ref dp) = flags.download_path {
-            launch_cmd["downloadPath"] = json!(dp);
-        }
 
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
@@ -2642,6 +2631,25 @@ mod tests {
             cmd["allowedDomains"],
             json!(["example.com", "*.example.org"])
         );
+    }
+
+    #[test]
+    fn test_cdp_launch_envelope_forwards_attach_launch_options() {
+        let mut flags = neutral_launch_config_flags();
+        flags.download_path = Some("/tmp/downloads".to_string());
+        flags.allowed_domains = Some(vec!["example.com".to_string()]);
+        flags.engine = Some("firefox".to_string());
+
+        let cmd = build_cdp_launch_command("9222", &flags).unwrap();
+
+        assert_eq!(cmd["cdpPort"], 9222);
+        assert_eq!(cmd["downloadPath"], "/tmp/downloads");
+        assert_eq!(cmd["allowedDomains"], json!(["example.com"]));
+        assert_eq!(cmd["engine"], "firefox");
+
+        let url_cmd = build_cdp_launch_command("ws://127.0.0.1:9222/session", &flags).unwrap();
+        assert_eq!(url_cmd["cdpUrl"], "ws://127.0.0.1:9222/session");
+        assert_eq!(url_cmd["engine"], "firefox");
     }
 
     #[test]

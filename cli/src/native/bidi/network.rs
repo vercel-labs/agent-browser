@@ -165,7 +165,7 @@ impl NetContext {
 }
 
 /// A background task that is aborted when dropped.
-pub struct AbortOnDrop(tokio::task::JoinHandle<()>);
+pub struct AbortOnDrop(pub(crate) tokio::task::JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
