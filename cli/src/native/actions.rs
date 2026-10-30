@@ -2029,20 +2029,16 @@ impl DaemonState {
                                 serde_json::from_value::<ExceptionThrownEvent>(event.params.clone())
                             {
                                 let details = &ex_event.exception_details;
-                                let text = details
-                                    .exception
-                                    .as_ref()
-                                    .and_then(|e| e.description.as_deref())
-                                    .unwrap_or(&details.text);
+                                let text = details.message();
                                 self.event_tracker.add_error(
-                                    text,
+                                    &text,
                                     None,
                                     details.line_number,
                                     details.column_number,
                                 );
                                 if let Some(ref server) = self.stream_server {
                                     server.broadcast_page_error(
-                                        text,
+                                        &text,
                                         details.line_number,
                                         details.column_number,
                                     );

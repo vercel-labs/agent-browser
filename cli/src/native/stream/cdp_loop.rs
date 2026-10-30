@@ -6,7 +6,7 @@ use futures_util::FutureExt;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 use crate::native::cdp::client::CdpClient;
-use crate::native::cdp::types::CdpEvent;
+use crate::native::cdp::types::{CdpEvent, ExceptionDetails};
 use crate::native::network;
 
 use super::timestamp_ms;
@@ -513,12 +513,9 @@ pub(super) async fn cdp_event_loop(
                                         }
                                     } else if evt.method == "Runtime.exceptionThrown" {
                                         let text = evt.params.get("exceptionDetails")
-                                            .and_then(|d| {
-                                                d.get("exception")
-                                                    .and_then(|e| e.get("description").and_then(|v| v.as_str()))
-                                                    .or_else(|| d.get("text").and_then(|v| v.as_str()))
-                                            })
-                                            .unwrap_or("Unknown error");
+                                            .and_then(|d| serde_json::from_value::<ExceptionDetails>(d.clone()).ok())
+                                            .map(|d| d.message())
+                                            .unwrap_or_else(|| "Unknown error".to_string());
                                         let line = evt.params.get("exceptionDetails")
                                             .and_then(|d| d.get("lineNumber").and_then(|v| v.as_i64()));
                                         let column = evt.params.get("exceptionDetails")
