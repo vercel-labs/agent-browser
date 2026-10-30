@@ -4745,6 +4745,7 @@ mod tests {
             }
         });
 
+        let start = Instant::now();
         let error = manager
             .wait_for_lifecycle(
                 WaitUntil::NetworkIdle,
@@ -4754,6 +4755,12 @@ mod tests {
             )
             .await
             .unwrap_err();
+        assert!(start.elapsed() >= Duration::from_millis(300));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "wait should stop at the caller budget, took {:?}",
+            start.elapsed()
+        );
         assert_eq!(error, LifecycleWaitError::TimedOut);
     }
 
