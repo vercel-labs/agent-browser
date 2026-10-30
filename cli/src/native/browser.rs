@@ -1605,7 +1605,15 @@ impl BrowserManager {
     }
 
     /// Checks if the CDP connection is alive by sending a simple command.
-    /// Returns false if the command times out or fails.
+    ///
+    /// A transport error means the socket is gone and the browser must be
+    /// relaunched or redialed. A probe that gets no answer in time only counts
+    /// as dead for a browser this daemon launched itself: that process is ours
+    /// to replace. On an external connection (`--cdp`, `--auto-connect`, a
+    /// provider) a slow reply does not mean the browser is gone, and redialing
+    /// while the first socket is still open attaches a second client, which
+    /// single-attachment endpoints refuse and which leaves the session wedged
+    /// (#2108). Such a connection is kept and the command runs on it.
     pub async fn is_connection_alive(&self) -> bool {
         let timeout = tokio::time::Duration::from_secs(3);
         let result = tokio::time::timeout(
@@ -1617,7 +1625,8 @@ impl BrowserManager {
 
         match result {
             Ok(Ok(_)) => true,
-            Ok(Err(_)) | Err(_) => false,
+            Ok(Err(_)) => false,
+            Err(_) => self.is_cdp_connection(),
         }
     }
 
@@ -3618,11 +3627,17 @@ mod tests {
                 }
             }
         });
-        let client = CdpClient::connect(&format!("ws://{}", addr)).await.unwrap();
+        test_manager_at(&format!("ws://{}", addr), pages).await
+    }
+
+    /// Build an external (`browser_process: None`) `BrowserManager` attached
+    /// to the WebSocket server at `ws_url`.
+    async fn test_manager_at(ws_url: &str, pages: Vec<PageInfo>) -> BrowserManager {
+        let client = CdpClient::connect(ws_url).await.unwrap();
         BrowserManager {
             client: Arc::new(client),
             browser_process: None,
-            ws_url: format!("ws://{}", addr),
+            ws_url: ws_url.to_string(),
             pages,
             active_page_index: 0,
             default_timeout_ms: 25_000,
@@ -3637,6 +3652,96 @@ mod tests {
             wedge_suspect: None,
             headless: true,
         }
+    }
+
+    /// An external CDP endpoint that answers the liveness probe late must not be
+    /// treated as dead: a redial while the first socket is still open attaches
+    /// a second client, which single-attachment endpoints refuse (#2108).
+    #[tokio::test]
+    async fn test_slow_liveness_probe_keeps_external_connection() {
+        use futures_util::{SinkExt, StreamExt};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let connections = Arc::new(AtomicUsize::new(0));
+        let connections_task = connections.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                connections_task.fetch_add(1, Ordering::SeqCst);
+                let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let (mut tx, mut rx) = ws.split();
+                while let Some(Ok(msg)) = rx.next().await {
+                    let text = match msg {
+                        Message::Text(t) => t,
+                        Message::Ping(p) => {
+                            let _ = tx.send(Message::Pong(p)).await;
+                            continue;
+                        }
+                        _ => continue,
+                    };
+                    let cmd: Value = serde_json::from_str(&text).unwrap();
+                    let id = cmd["id"].as_u64().unwrap();
+                    let result = match cmd["method"].as_str().unwrap_or("") {
+                        "Browser.getVersion" => {
+                            // Longer than the probe timeout, like a slow gateway.
+                            tokio::time::sleep(Duration::from_millis(3500)).await;
+                            json!({ "product": "Chrome/1" })
+                        }
+                        "Runtime.evaluate" => {
+                            json!({ "result": { "type": "string", "value": "ok" } })
+                        }
+                        _ => json!({}),
+                    };
+                    let _ = tx
+                        .send(Message::Text(
+                            json!({ "id": id, "result": result }).to_string(),
+                        ))
+                        .await;
+                }
+            }
+        });
+
+        let manager = test_manager_at(&format!("ws://{}", addr), Vec::new()).await;
+        assert!(manager.is_cdp_connection());
+        assert!(
+            manager.is_connection_alive().await,
+            "a slow probe on an external connection must not report the browser dead"
+        );
+
+        // The command that follows still runs on the same socket once the
+        // endpoint catches up, and no second attachment was dialed.
+        let value: Value = manager
+            .client
+            .send_command("Runtime.evaluate", Some(json!({"expression": "1"})), None)
+            .await
+            .expect("the slow but healthy connection should still serve commands");
+        assert_eq!(value["result"]["value"], "ok");
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+    }
+
+    /// A probe that fails because the socket is gone still reports the
+    /// connection dead, external or not.
+    #[tokio::test]
+    async fn test_liveness_probe_reports_closed_socket_dead() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                if let Ok(ws) = tokio_tungstenite::accept_async(stream).await {
+                    drop(ws);
+                }
+            }
+        });
+
+        let manager = test_manager_at(&format!("ws://{}", addr), Vec::new()).await;
+        // Let the reader observe the server hanging up.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(manager.is_cdp_connection());
+        assert!(!manager.is_connection_alive().await);
     }
 
     #[tokio::test]
