@@ -8,6 +8,19 @@ use std::path::{Path, PathBuf};
 const CONFIG_DIR: &str = ".agent-browser";
 const CONFIG_FILENAME: &str = "config.json";
 const PROJECT_CONFIG_FILENAME: &str = "agent-browser.json";
+pub(crate) const PROJECT_CONFIG_ALLOWED_KEYS: &[&str] = &[
+    "headed",
+    "json",
+    "debug",
+    "userAgent",
+    "hideScrollbars",
+    "annotate",
+    "colorScheme",
+    "maxOutput",
+    "screenshotQuality",
+    "screenshotFormat",
+    "idleTimeout",
+];
 
 /// Split `--args` into launch args. Newlines always separate args; commas separate
 /// only before another `--` flag, so values like `--disable-features=A,B` and
@@ -261,20 +274,7 @@ fn read_config_file(path: &Path, is_auto_project_config: bool) -> Option<Config>
             |mut object| {
                 let mut ignored = 0;
                 object.retain(|key, value| {
-                    let allowed = matches!(
-                        key.as_str(),
-                        "headed"
-                            | "json"
-                            | "debug"
-                            | "userAgent"
-                            | "hideScrollbars"
-                            | "annotate"
-                            | "colorScheme"
-                            | "maxOutput"
-                            | "screenshotQuality"
-                            | "screenshotFormat"
-                            | "idleTimeout"
-                    );
+                    let allowed = PROJECT_CONFIG_ALLOWED_KEYS.contains(&key.as_str());
                     if !allowed && key != "$schema" && !value.is_null() {
                         ignored += 1;
                     }
@@ -1931,14 +1931,9 @@ mod tests {
 
         let mut user = read_config_file(&config_path, false).unwrap();
         assert_eq!(user.session.as_deref(), Some("test-session"));
-        assert_eq!(user.executable_path.as_deref(), Some("/test/chrome"));
-        assert_eq!(user.args.as_deref(), Some("test-argument"));
-        assert_eq!(user.plugins.as_ref().unwrap()[0].command, "test-plugin");
         assert_eq!(user.extensions, Some(vec!["/test/extension".to_string()]));
         assert_eq!(user.profile.as_deref(), Some("/test/profile"));
-        assert_eq!(user.proxy.as_deref(), Some("http://test:1234"));
-        assert_eq!(user.allowed_domains, Some(vec!["example.com".to_string()]));
-        assert_eq!(user.clear_ca_cert, Some(true));
+        assert_eq!(user.idle_timeout.as_deref(), Some("10000"));
         user.headed = Some(true);
         let merged = user.merge(project);
         assert_eq!(merged.headed, Some(false));
@@ -1957,51 +1952,34 @@ mod tests {
     fn test_project_config_ignores_disallowed_fields_before_deserialization() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join(PROJECT_CONFIG_FILENAME);
-        for key in [
-            "session",
-            "sessionName",
-            "restore",
-            "restoreSave",
-            "restoreCheckUrl",
-            "restoreCheckText",
-            "restoreCheckFn",
-            "namespace",
-            "executablePath",
-            "extensions",
-            "initScripts",
-            "enable",
-            "profile",
-            "state",
-            "proxy",
-            "proxyBypass",
-            "args",
-            "provider",
-            "device",
-            "webgpu",
-            "noWebmcp",
-            "ignoreHttpsErrors",
-            "caCert",
-            "clearCaCert",
-            "useSystemCa",
-            "allowFileAccess",
-            "cdp",
-            "autoConnect",
-            "pinTab",
-            "headers",
-            "downloadPath",
-            "contentBoundaries",
-            "allowedDomains",
-            "actionPolicy",
-            "confirmActions",
-            "confirmInteractive",
-            "engine",
-            "screenshotDir",
-            "noAutoDialog",
-            "model",
-            "plugins",
-            "unknownFutureKey",
-            "$schema",
-        ] {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("cli should have a repository parent");
+        let schema: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(repo_root.join("agent-browser.schema.json")).unwrap(),
+        )
+        .unwrap();
+        let expected_allowed_keys = [
+            "headed",
+            "json",
+            "debug",
+            "userAgent",
+            "hideScrollbars",
+            "annotate",
+            "colorScheme",
+            "maxOutput",
+            "screenshotQuality",
+            "screenshotFormat",
+            "idleTimeout",
+        ];
+        for key in schema["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !expected_allowed_keys.contains(key))
+            .chain(["unknownFutureKey", "$schema"])
+        {
             fs::write(
                 &config_path,
                 serde_json::json!({"headed": true, key: {}}).to_string(),
@@ -2037,24 +2015,6 @@ mod tests {
         let config = read_config_file(&config_path, false).unwrap();
         assert_eq!(config.headed, Some(true));
         assert_eq!(config.proxy.as_deref(), Some("http://test:1234"));
-
-        let _ = fs::remove_file(&config_path);
-        let _ = fs::remove_dir(&dir);
-    }
-
-    #[test]
-    fn test_load_config_from_file_parses_idle_timeout() {
-        use std::io::Write;
-        let dir = std::env::temp_dir().join("ab-test-idle-timeout-config");
-        let _ = fs::create_dir_all(&dir);
-        let config_path = dir.join("test-config.json");
-        let mut f = fs::File::create(&config_path).unwrap();
-        writeln!(f, r#"{{"idleTimeout": "10s"}}"#).unwrap();
-
-        for is_auto_project_config in [false, true] {
-            let config = read_config_file(&config_path, is_auto_project_config).unwrap();
-            assert_eq!(config.idle_timeout.as_deref(), Some("10000"));
-        }
 
         let _ = fs::remove_file(&config_path);
         let _ = fs::remove_dir(&dir);

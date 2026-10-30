@@ -4163,11 +4163,11 @@ Configuration:
   AGENT_BROWSER_CONFIG has the same effect. Environment variables and CLI flags
   still override values from the selected config file.
   If --config points to a missing or invalid file, agent-browser exits with an error.
-  The auto-discovered ./agent-browser.json accepts only headed, json, debug,
-  userAgent, hideScrollbars, annotate, colorScheme, maxOutput, screenshotQuality,
-  screenshotFormat, and idleTimeout. Other runtime keys, including extensions,
-  initScripts, state, trust, policy, session, connection, and path settings, are
-  ignored with a warning. The $schema metadata key is ignored silently.
+  The auto-discovered ./agent-browser.json accepts only:
+    {project_config_keys}.
+  Other runtime keys, including extensions, initScripts, state, trust, policy,
+  session, connection, and path settings, are ignored with a warning.
+  The $schema metadata key is ignored silently.
   Put advanced settings in ~/.agent-browser/config.json or load a trusted file
   with --config or AGENT_BROWSER_CONFIG.
 
@@ -4316,7 +4316,12 @@ iOS Simulator (requires Xcode and Appium):
   agent-browser -p ios device list                         # List simulators
   agent-browser -p ios swipe up                            # Swipe gesture
   agent-browser -p ios tap @e1                             # Touch element
-"#
+"#,
+        project_config_keys = crate::flags::PROJECT_CONFIG_ALLOWED_KEYS
+            .chunks(4)
+            .map(|keys| keys.join(", "))
+            .collect::<Vec<_>>()
+            .join(",\n    ")
     );
 }
 
