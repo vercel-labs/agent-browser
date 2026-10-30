@@ -554,6 +554,7 @@ async fn test_daemon_state_new_defaults() {
     assert!(state.har_entries.is_empty());
     assert!(state.pending_confirmation.is_none());
     assert!(!state.request_tracking);
+    assert!(state.request_capture_enabled);
     assert!(state.tracked_requests.is_empty());
     assert!(state.active_frame_id.is_none());
     assert!(state.iframe_sessions.is_empty());
@@ -628,6 +629,79 @@ async fn test_request_tracking_state() {
     // Clear
     state.tracked_requests.clear();
     assert!(state.tracked_requests.is_empty());
+}
+
+#[tokio::test]
+async fn request_history_controls_keep_capture_state_across_reads_and_stream_setup() {
+    let mut state = DaemonState::new();
+    state.har_recording = true;
+    state.tracked_requests.push(super::actions::TrackedRequest {
+        url: "https://api.example/first".to_string(),
+        method: "GET".to_string(),
+        headers: json!({}),
+        timestamp: 1,
+        resource_type: "Fetch".to_string(),
+        request_id: "same".to_string(),
+        post_data: None,
+        status: Some(200),
+        response_headers: None,
+        mime_type: None,
+    });
+    state.tracked_requests.push(super::actions::TrackedRequest {
+        url: "https://api.example/latest".to_string(),
+        method: "POST".to_string(),
+        headers: json!({}),
+        timestamp: 2,
+        resource_type: "Fetch".to_string(),
+        request_id: "same".to_string(),
+        post_data: None,
+        status: Some(201),
+        response_headers: None,
+        mime_type: None,
+    });
+
+    let malformed = super::actions::handle_requests(&json!({"stop": "yes"}), &mut state).await;
+    assert!(malformed.is_err());
+    assert!(state.request_capture_enabled);
+
+    let stop = super::actions::handle_requests(&json!({"stop": true}), &mut state)
+        .await
+        .unwrap();
+    assert_eq!(stop["recording"]["enabled"], false);
+    assert_eq!(stop["recording"]["count"], 2);
+    assert!(state.har_recording);
+
+    let read = super::actions::handle_requests(&json!({"filter":"latest"}), &mut state)
+        .await
+        .unwrap();
+    assert_eq!(read["recording"]["enabled"], false);
+    assert_eq!(read["requests"].as_array().unwrap().len(), 1);
+
+    let detail = super::actions::handle_request_detail(&json!({"requestId":"same"}), &mut state)
+        .await
+        .unwrap();
+    assert_eq!(detail["url"], "https://api.example/latest");
+    assert_eq!(detail["status"], 201);
+
+    // Stream startup enables event tracking, but must not resume a paused history.
+    state.request_tracking = true;
+    let streamed_read = super::actions::handle_requests(&json!({}), &mut state)
+        .await
+        .unwrap();
+    assert_eq!(streamed_read["recording"]["enabled"], false);
+
+    let cleared = super::actions::handle_requests(&json!({"clear": true}), &mut state)
+        .await
+        .unwrap();
+    assert_eq!(cleared["recording"]["enabled"], false);
+    assert_eq!(cleared["recording"]["count"], 0);
+    assert!(state.tracked_requests.is_empty());
+
+    let started = super::actions::handle_requests(&json!({"start": true}), &mut state)
+        .await
+        .unwrap();
+    assert_eq!(started["recording"]["enabled"], true);
+    assert!(state.har_recording);
 }
 
 #[test]

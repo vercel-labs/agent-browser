@@ -384,6 +384,8 @@ agent-browser network har start --content none # Metadata only, no bodies
 agent-browser network har stop [output.har]    # Stop and save HAR (temp path if omitted)
 ```
 
+Request history keeps the newest 1,000 records by default. This limits record count only, not bytes, heap use, or process memory. Use `network requests --stop` to pause new request-history entries and `--start` to resume them; reads and dashboard polling preserve the paused state. Responses can still finish pairing with requests already retained. `--clear` releases retained request-history storage. HAR capture is separate. Stop and start require a daemon acknowledgement; an older daemon returns `request_recording_unconfirmed`.
+
 ### Tabs & Windows
 
 ```bash

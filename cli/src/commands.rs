@@ -3438,15 +3438,44 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         }
         Some("requests") => {
             let clear = rest.contains(&"--clear");
-            let filter_idx = rest.iter().position(|&s| s == "--filter");
-            let filter = filter_idx.and_then(|i| rest.get(i + 1).copied());
-            let type_idx = rest.iter().position(|&s| s == "--type");
-            let rtype = type_idx.and_then(|i| rest.get(i + 1).copied());
-            let method_idx = rest.iter().position(|&s| s == "--method");
-            let method = method_idx.and_then(|i| rest.get(i + 1).copied());
-            let status_idx = rest.iter().position(|&s| s == "--status");
-            let status = status_idx.and_then(|i| rest.get(i + 1).copied());
+            let mut stop = false;
+            let mut start = false;
+            // Keep the legacy first-value filter parsing, including values
+            // that look like flags, independently of the new capture controls.
+            let value_after = |flag| {
+                rest.iter()
+                    .position(|arg| *arg == flag)
+                    .and_then(|index| rest.get(index + 1).copied())
+            };
+            let filter = value_after("--filter");
+            let rtype = value_after("--type");
+            let method = value_after("--method");
+            let status = value_after("--status");
+            // A token right after a value flag is a legacy value, or an
+            // ignored repeat value, so it never acts as a capture control.
+            for pair in rest.windows(2) {
+                if matches!(pair[0], "--filter" | "--type" | "--method" | "--status") {
+                    continue;
+                }
+                match pair[1] {
+                    "--stop" => stop = true,
+                    "--start" => start = true,
+                    _ => {}
+                }
+            }
+            if stop && start {
+                return Err(ParseError::InvalidValue {
+                    message: "Use either --stop or --start, not both".to_string(),
+                    usage: "network requests [--stop|--start]",
+                });
+            }
             let mut cmd = json!({ "id": id, "action": "requests", "clear": clear });
+            if stop {
+                cmd["stop"] = json!(true);
+            }
+            if start {
+                cmd["start"] = json!(true);
+            }
             if let Some(f) = filter {
                 cmd["filter"] = json!(f);
             }
@@ -4827,6 +4856,76 @@ mod tests {
         assert_eq!(cmd["type"], "xhr");
         assert_eq!(cmd["method"], "GET");
         assert_eq!(cmd["status"], "200");
+    }
+
+    #[test]
+    fn test_network_requests_capture_controls_and_filter_values() {
+        let stop =
+            parse_command(&args("network requests --stop --clear"), &default_flags()).unwrap();
+        assert_eq!(stop["stop"], true);
+        assert_eq!(stop["clear"], true);
+
+        let start = parse_command(&args("network requests --start"), &default_flags()).unwrap();
+        assert_eq!(start["start"], true);
+        assert!(start.get("stop").is_none());
+
+        let filter = parse_command(
+            &args("network requests --filter --stop --method --start"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(filter["filter"], "--stop");
+        assert_eq!(filter["method"], "--start");
+        assert!(filter.get("stop").is_none());
+        assert!(filter.get("start").is_none());
+
+        let legacy = parse_command(
+            &args("network requests ignored --unknown --filter first --filter second --type xhr --type fetch"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(legacy["filter"], "first");
+        assert_eq!(legacy["type"], "xhr");
+        let overlapping = parse_command(
+            &args("network requests --filter --method POST"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(overlapping["filter"], "--method");
+        assert_eq!(overlapping["method"], "POST");
+        let trailing = parse_command(&args("network requests --filter"), &default_flags()).unwrap();
+        assert!(trailing.get("filter").is_none());
+
+        assert!(parse_command(&args("network requests --stop --start"), &default_flags()).is_err());
+    }
+
+    #[test]
+    fn test_network_requests_legacy_filter_value_is_never_a_capture_control() {
+        let chained = parse_command(
+            &args("network requests --filter --type --stop"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(chained["filter"], "--type");
+        assert_eq!(chained["type"], "--stop");
+        assert!(chained.get("stop").is_none());
+
+        let reversed = parse_command(
+            &args("network requests --type --filter --start"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(reversed["type"], "--filter");
+        assert_eq!(reversed["filter"], "--start");
+        assert!(reversed.get("start").is_none());
+
+        let control = parse_command(
+            &args("network requests --filter api --stop"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(control["filter"], "api");
+        assert_eq!(control["stop"], true);
     }
 
     #[test]

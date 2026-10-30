@@ -3,6 +3,9 @@ use std::collections::HashMap;
 
 use super::cdp::client::CdpClient;
 
+/// Maximum retained page events for native console, errors, and request history.
+pub const MAX_EVENT_HISTORY_ENTRIES: usize = 1_000;
+
 pub async fn set_extra_headers(
     client: &CdpClient,
     session_id: &str,
@@ -610,7 +613,7 @@ impl EventTracker {
         Self {
             console_entries: Vec::new(),
             error_entries: Vec::new(),
-            max_entries: 1000,
+            max_entries: MAX_EVENT_HISTORY_ENTRIES,
         }
     }
 
