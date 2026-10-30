@@ -1,0 +1,31 @@
+{
+  "name": "@agent-browser/cli-linux-x64-musl",
+  "version": "0.39.1",
+  "description": "The linux-x64-musl native binary for agent-browser",
+  "files": [
+    "bin/agent-browser"
+  ],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "musl"
+  ],
+  "preferUnplugged": true,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vercel-labs/agent-browser",
+    "directory": "packages/@agent-browser/cli-linux-x64-musl"
+  },
+  "bugs": {
+    "url": "https://github.com/vercel-labs/agent-browser/issues"
+  },
+  "homepage": "https://agent-browser.dev",
+  "publishConfig": {
+    "access": "public"
+  }
+}

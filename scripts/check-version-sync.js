@@ -5,7 +5,7 @@
  * Used in CI to catch version drift.
  */
 
-import { readFileSync } from 'fs';
+import { readdirSync, readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -49,6 +49,17 @@ const evePkg = JSON.parse(readFileSync(join(rootDir, 'packages/@agent-browser/ev
 const eveVersion = evePkg.version;
 const eveSandboxDependency = evePkg.dependencies?.['@agent-browser/sandbox'];
 
+// Read native binary package versions
+const scopeDir = join(rootDir, 'packages/@agent-browser');
+const nativePackages = readdirSync(scopeDir)
+  .filter((name) => name.startsWith('cli-'))
+  .sort()
+  .map((name) => ({
+    name,
+    version: JSON.parse(readFileSync(join(scopeDir, name, 'package.json'), 'utf-8')).version,
+  }));
+const rootOptionalDependencies = packageJson.optionalDependencies ?? {};
+
 const mismatches = [];
 if (packageVersion !== cargoVersion) {
   mismatches.push(`  cli/Cargo.toml:              ${cargoVersion}`);
@@ -67,6 +78,15 @@ if (packageVersion !== eveVersion) {
 }
 if (eveSandboxDependency !== 'workspace:^') {
   mismatches.push(`  packages/@agent-browser/eve dependency @agent-browser/sandbox: ${eveSandboxDependency}`);
+}
+
+for (const { name, version } of nativePackages) {
+  if (packageVersion !== version) {
+    mismatches.push(`  packages/@agent-browser/${name}/package.json: ${version}`);
+  }
+  if (rootOptionalDependencies[`@agent-browser/${name}`] !== 'workspace:*') {
+    mismatches.push(`  package.json optionalDependencies @agent-browser/${name}: ${rootOptionalDependencies[`@agent-browser/${name}`]}`);
+  }
 }
 
 if (mismatches.length > 0) {

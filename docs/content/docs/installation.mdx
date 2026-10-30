@@ -14,6 +14,8 @@ agent-browser install  # Download Chrome from Chrome for Testing (first time)
 
 This is the fastest option -- commands run through the native Rust CLI directly with sub-millisecond parsing overhead.
 
+npm, pnpm, Yarn, and Bun download only the binary for your platform, from a matching `@agent-browser/cli-*` optional dependency. The global `agent-browser` command runs the native binary directly. Package managers that block install scripts by default, such as npm 12, pnpm, and Bun, link it on the first run instead, so no extra setup is needed. Installing with `--omit=optional` skips the binary; reinstall without that flag.
+
 ## Quick start (no install)
 
 ```bash

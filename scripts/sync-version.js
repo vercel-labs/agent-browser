@@ -6,13 +6,21 @@
  */
 
 import { execSync } from "child_process";
-import { readFileSync, writeFileSync } from "fs";
+import { readdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, "..");
 const cliDir = join(rootDir, "cli");
+
+function nativePackageManifests() {
+  const scopeDir = join(rootDir, "packages", "@agent-browser");
+  return readdirSync(scopeDir)
+    .filter((name) => name.startsWith("cli-"))
+    .sort()
+    .map((name) => join(scopeDir, name, "package.json"));
+}
 
 // Read version from package.json (single source of truth)
 const packageJson = JSON.parse(
@@ -80,6 +88,20 @@ if (evePkg.version !== version || evePkg.dependencies["@agent-browser/sandbox"] 
   console.log(`  Updated packages/@agent-browser/eve/package.json: ${oldVersion} -> ${version}`);
 } else {
   console.log(`  packages/@agent-browser/eve/package.json already up to date`);
+}
+
+// Update packages/@agent-browser/cli-*/package.json (native binary packages)
+for (const pkgPath of nativePackageManifests()) {
+  const relativePath = pkgPath.slice(rootDir.length + 1);
+  const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
+  if (pkg.version !== version) {
+    const oldVersion = pkg.version;
+    pkg.version = version;
+    writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
+    console.log(`  Updated ${relativePath}: ${oldVersion} -> ${version}`);
+  } else {
+    console.log(`  ${relativePath} already up to date`);
+  }
 }
 
 // Update package runtime version constant
