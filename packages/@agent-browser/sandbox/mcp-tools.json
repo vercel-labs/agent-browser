@@ -13671,7 +13671,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Open a new tab after applying session setup before its first navigation.",
+      "description": "Open a new tab after applying session setup before its first navigation. Rejected labels preserve the current tab's refs and selected frame.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

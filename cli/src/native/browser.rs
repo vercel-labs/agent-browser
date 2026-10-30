@@ -1829,6 +1829,7 @@ impl BrowserManager {
     }
 
     /// Creates a tab with an optional unique label; `t<N>` forms are reserved for tab IDs.
+    /// Rejected labels preserve the current tab and its selection.
     pub async fn tab_new(
         &mut self,
         url: Option<&str>,

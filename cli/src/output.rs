@@ -2688,6 +2688,7 @@ accepted. A label starts with a letter and contains only letters, digits, `-`, o
 `_`. Labels must be unique within a session and cannot use the reserved `t<N>`
 or `T<N>` tab-id form. CDP target ids (from `tab list --json`) are also accepted
 as tab refs; unlike `t<N>` ids they stay stable across daemon restarts.
+Rejected labels preserve the current tab's refs and selected frame.
 
 Tabs opened with `tab new` or `click --new-tab` inherit the session's user
 agent, headers, HTTP credentials, init scripts, routes, and emulation
