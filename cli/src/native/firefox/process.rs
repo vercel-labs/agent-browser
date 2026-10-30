@@ -443,7 +443,11 @@ mod tests {
     #[test]
     fn find_prefers_explicit_and_rejects_snap() {
         let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("firefox");
+        let bin = dir.path().join(if cfg!(windows) {
+            "firefox.exe"
+        } else {
+            "firefox"
+        });
         std::fs::write(&bin, "").unwrap();
         let on_path = find_firefox_with(None, Some(dir.path().into()), &[]).unwrap();
         assert_eq!(on_path, bin);

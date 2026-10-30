@@ -18,13 +18,13 @@ const ORIGIN_STORAGE_JS: &str = r#"() => {
             const key = localStorage.key(i);
             result.localStorage.push({ name: key, value: localStorage.getItem(key) });
         }
-    } catch(e) {}
+    } catch(e) { return null; }
     try {
         for (let i = 0; i < sessionStorage.length; i++) {
             const key = sessionStorage.key(i);
             result.sessionStorage.push({ name: key, value: sessionStorage.getItem(key) });
         }
-    } catch(e) {}
+    } catch(e) { return null; }
     return result;
 }"#;
 
