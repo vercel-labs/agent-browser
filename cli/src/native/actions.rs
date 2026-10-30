@@ -35,6 +35,7 @@ use super::policy::{ActionPolicy, ConfirmActions, PolicyResult};
 use super::providers;
 use super::react;
 use super::recording::{self, RecordingState};
+use super::request_log::RequestHistory;
 use super::screenshot::{self, ScreenshotOptions};
 use super::snapshot::{self, SnapshotOptions};
 use super::state;
@@ -676,7 +677,10 @@ pub struct DaemonState {
     pub confirm_actions: Option<ConfirmActions>,
     pub inspect_server: Option<InspectServer>,
     pub routes: Arc<RwLock<Vec<RouteEntry>>>,
-    pub tracked_requests: Vec<TrackedRequest>,
+    pub tracked_requests: RequestHistory,
+    /// Request history capture is enabled by default and can be paused without
+    /// disabling Network events used by streaming or HAR recording.
+    pub request_capture_enabled: bool,
     pub request_tracking: bool,
     pub active_frame_id: Option<String>,
     /// Cross-origin iframe frame_id → dedicated CDP session_id.
@@ -848,7 +852,8 @@ impl DaemonState {
             confirm_actions: ConfirmActions::from_env(),
             inspect_server: None,
             routes: Arc::new(RwLock::new(Vec::new())),
-            tracked_requests: Vec::new(),
+            tracked_requests: RequestHistory::default(),
+            request_capture_enabled: true,
             request_tracking: false,
             active_frame_id: None,
             iframe_sessions: HashMap::new(),
@@ -2111,7 +2116,7 @@ impl DaemonState {
                                         response_body_base64: false,
                                     });
                                 }
-                                if self.request_tracking {
+                                if self.request_tracking && self.request_capture_enabled {
                                     let headers =
                                         request.get("headers").cloned().unwrap_or(json!({}));
                                     let resource_type = event
@@ -2195,22 +2200,20 @@ impl DaemonState {
                                         entry.cdp_timing = cdp_timing;
                                     }
                                 }
+                                // Finish pairing responses for records already
+                                // retained when capture was paused.
                                 if self.request_tracking {
                                     let resp_headers = response.get("headers").cloned();
                                     let resp_mime = response
                                         .get("mimeType")
                                         .and_then(|v| v.as_str())
                                         .map(String::from);
-                                    if let Some(entry) = self
-                                        .tracked_requests
-                                        .iter_mut()
-                                        .rev()
-                                        .find(|e| e.request_id == request_id)
-                                    {
-                                        entry.status = status;
-                                        entry.mime_type = resp_mime;
-                                        entry.response_headers = resp_headers;
-                                    }
+                                    self.tracked_requests.update_response(
+                                        request_id,
+                                        status,
+                                        resp_headers,
+                                        resp_mime,
+                                    );
                                 }
                             }
                         }
@@ -12640,10 +12643,35 @@ pub fn matches_status_filter(status: Option<i64>, filter: &str) -> bool {
     false
 }
 
-async fn handle_requests(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+pub(super) async fn handle_requests(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let stop = match cmd.get("stop") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err("'stop' must be a boolean".to_string()),
+    };
+    let start = match cmd.get("start") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err("'start' must be a boolean".to_string()),
+    };
+    if stop && start {
+        return Err("Use either --stop or --start, not both".to_string());
+    }
+    if stop {
+        state.request_capture_enabled = false;
+    } else if start {
+        state.request_capture_enabled = true;
+    }
+
     if cmd.get("clear").and_then(|v| v.as_bool()).unwrap_or(false) {
         state.tracked_requests.clear();
-        return Ok(json!({ "cleared": true }));
+        return Ok(json!({
+            "cleared": true,
+            "recording": {
+                "enabled": state.request_capture_enabled,
+                "count": state.tracked_requests.len(),
+            }
+        }));
     }
 
     if !state.request_tracking {
@@ -12694,10 +12722,19 @@ async fn handle_requests(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         })
         .collect();
 
-    Ok(json!({ "requests": requests }))
+    Ok(json!({
+        "requests": requests,
+        "recording": {
+            "enabled": state.request_capture_enabled,
+            "count": state.tracked_requests.len(),
+        }
+    }))
 }
 
-async fn handle_request_detail(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+pub(super) async fn handle_request_detail(
+    cmd: &Value,
+    state: &mut DaemonState,
+) -> Result<Value, String> {
     let request_id = cmd
         .get("requestId")
         .and_then(|v| v.as_str())
@@ -12706,6 +12743,7 @@ async fn handle_request_detail(cmd: &Value, state: &mut DaemonState) -> Result<V
     let entry = state
         .tracked_requests
         .iter()
+        .rev()
         .find(|r| r.request_id == request_id)
         .ok_or("Request not found")?;
 
@@ -14234,6 +14272,82 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn paused_history_stays_paused_after_stream_tracking_starts_but_har_continues() {
+        let mut state = super::DaemonState::new();
+        let (events, receiver) = tokio::sync::broadcast::channel(8);
+        state.event_rx = Some(receiver);
+        state.active_iframe_sessions.insert("active".to_string());
+        state.har_recording = true;
+        state.request_tracking = true;
+
+        let send_request = |request_id: &str| {
+            events
+                .send(super::CdpEvent {
+                    method: "Network.requestWillBeSent".to_string(),
+                    params: json!({
+                        "requestId": request_id,
+                        "type": "Fetch",
+                        "wallTime": 1.0,
+                        "request": {
+                            "url": format!("https://api.example/{request_id}"),
+                            "method": "GET",
+                            "headers": {}
+                        }
+                    }),
+                    session_id: Some("active".to_string()),
+                })
+                .unwrap();
+        };
+
+        send_request("inflight");
+        state.drain_cdp_events();
+        assert_eq!(state.tracked_requests.len(), 1);
+        assert_eq!(state.har_entries.len(), 1);
+
+        super::handle_requests(&json!({"stop": true}), &mut state)
+            .await
+            .unwrap();
+        // Stream startup enables event tracking without enabling history.
+        state.request_tracking = true;
+        send_request("paused");
+        state.drain_cdp_events();
+        assert_eq!(state.tracked_requests.len(), 1);
+        assert_eq!(state.har_entries.len(), 2);
+
+        events
+            .send(super::CdpEvent {
+                method: "Network.responseReceived".to_string(),
+                params: json!({
+                    "requestId": "inflight",
+                    "response": {
+                        "status": 204,
+                        "mimeType": "application/json",
+                        "headers": {"x-result": "paired"}
+                    }
+                }),
+                session_id: Some("active".to_string()),
+            })
+            .unwrap();
+        state.drain_cdp_events();
+        assert_eq!(
+            state.tracked_requests.latest("inflight").unwrap().status,
+            Some(204)
+        );
+
+        super::handle_requests(&json!({"start": true}), &mut state)
+            .await
+            .unwrap();
+        send_request("resumed");
+        state.drain_cdp_events();
+        assert_eq!(state.tracked_requests.len(), 2);
+        assert_eq!(
+            state.tracked_requests.latest("resumed").unwrap().url,
+            "https://api.example/resumed"
+        );
+        assert_eq!(state.har_entries.len(), 3);
+    }
+
     #[test]
     fn wedged_tab_replacement_follows_tab_policy() {
         let dir = tempfile::tempdir().unwrap();

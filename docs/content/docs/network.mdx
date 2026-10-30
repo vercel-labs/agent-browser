@@ -42,6 +42,8 @@ agent-browser network requests --filter api
 agent-browser network requests --type xhr,fetch
 agent-browser network requests --method POST
 agent-browser network requests --status 2xx
+agent-browser network requests --stop
+agent-browser network requests --start
 agent-browser network request <requestId>
 agent-browser network requests --clear
 ```
@@ -56,8 +58,12 @@ agent-browser network requests --clear
     <tr><td><code>--method &lt;method&gt;</code></td><td>Filter by HTTP method</td></tr>
     <tr><td><code>--status &lt;status&gt;</code></td><td>Filter by exact status, status family, or range</td></tr>
     <tr><td><code>--clear</code></td><td>Clear the tracked request log</td></tr>
+    <tr><td><code>--stop</code></td><td>Pause request-history capture until <code>--start</code>, including during reads and dashboard polling</td></tr>
+    <tr><td><code>--start</code></td><td>Resume request-history capture</td></tr>
   </tbody>
 </table>
+
+Request history keeps the newest 1,000 records by default. This is a record-count limit only; it does not guarantee a byte, heap, or process-memory limit. Pausing stops new history entries, while responses can still finish pairing with requests already retained. `--clear` releases retained history. HAR recording is separate and continues while request-history capture is paused. A stop or start command must receive an acknowledgement from the daemon; an older daemon produces `request_recording_unconfirmed` instead of reporting success.
 
 Use `network request <requestId>` to inspect one request and response in detail after finding its ID in `network requests`.
 

@@ -2556,7 +2556,10 @@ Subcommands:
     --allow-origin <origin>  Let a page on <origin> read the mocked body cross-origin
   unroute [url]              Remove route (all if no URL)
   requests [options]         List captured requests
-    --clear                  Clear request log
+    --clear                  Clear request history and release its storage
+    --stop                   Pause request-history capture until --start
+    --start                  Resume request-history capture
+  Request history keeps the newest 1,000 records by default (count limit only).
     --filter <pattern>       Filter by URL pattern
     --type <types>           Filter by resource type (comma-separated: xhr,fetch,document)
     --method <method>        Filter by HTTP method (GET, POST, etc.)
@@ -2577,6 +2580,8 @@ Examples:
   agent-browser network requests --filter "api"
   agent-browser network requests --type xhr,fetch
   agent-browser network requests --method POST --status 2xx
+  agent-browser network requests --stop
+  agent-browser network requests --start
   agent-browser network requests --clear
   agent-browser network request 1234.5
   agent-browser network har start

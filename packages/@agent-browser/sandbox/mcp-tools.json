@@ -7450,7 +7450,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "List captured network requests.",
+      "description": "List captured network requests or pause and resume request-history capture.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -7529,8 +7529,16 @@
             "description": "Optional isolated browser session name.",
             "type": "string"
           },
+          "start": {
+            "description": "Resume request-history capture.",
+            "type": "boolean"
+          },
           "status": {
             "type": "string"
+          },
+          "stop": {
+            "description": "Pause request-history capture until start. HAR recording is unaffected.",
+            "type": "boolean"
           },
           "timeoutMs": {
             "default": 120000,

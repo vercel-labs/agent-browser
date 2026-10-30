@@ -1290,8 +1290,8 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_NETWORK_REQUESTS,
             "Network requests",
-            "List captured network requests.",
-            json!({ "clear": { "type": "boolean" }, "filter": { "type": "string" }, "type": { "type": "string" }, "method": { "type": "string" }, "status": { "type": "string" } }),
+            "List captured network requests or pause and resume request-history capture.",
+            json!({ "clear": { "type": "boolean" }, "stop": { "type": "boolean", "description": "Pause request-history capture until start. HAR recording is unaffected." }, "start": { "type": "boolean", "description": "Resume request-history capture." }, "filter": { "type": "string" }, "type": { "type": "string" }, "method": { "type": "string" }, "status": { "type": "string" } }),
             &[],
         ),
         tool(
@@ -3253,9 +3253,27 @@ fn call_network_route(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_network_requests(arguments: &Value) -> Result<Value, ProtocolError> {
+    let args = network_requests_args(arguments)?;
+    call_cli_tool(arguments, args, None)
+}
+
+fn network_requests_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = vec!["network".to_string(), "requests".to_string()];
     if optional_bool(arguments, "clear")?.unwrap_or(false) {
         args.push("--clear".to_string());
+    }
+    let stop = optional_bool(arguments, "stop")?.unwrap_or(false);
+    let start = optional_bool(arguments, "start")?.unwrap_or(false);
+    if stop && start {
+        return Err(ProtocolError::invalid_params(
+            "Use either stop or start, not both",
+        ));
+    }
+    if stop {
+        args.push("--stop".to_string());
+    }
+    if start {
+        args.push("--start".to_string());
     }
     for (key, flag) in [
         ("filter", "--filter"),
@@ -3268,7 +3286,7 @@ fn call_network_requests(arguments: &Value) -> Result<Value, ProtocolError> {
             args.push(value);
         }
     }
-    call_cli_tool(arguments, args, None)
+    Ok(args)
 }
 
 fn call_storage_get(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -5406,6 +5424,41 @@ mod tests {
             .unwrap();
         // Must stay in sync with the CLI parser's accepted --content values.
         assert_eq!(modes, &vec![json!("all"), json!("text"), json!("none")]);
+    }
+
+    #[test]
+    fn network_request_controls_match_cli_parser() {
+        for (arguments, expected) in [
+            (
+                json!({"stop": true, "clear": true}),
+                vec!["network", "requests", "--clear", "--stop"],
+            ),
+            (
+                json!({"start": true, "filter": "--stop"}),
+                vec!["network", "requests", "--start", "--filter", "--stop"],
+            ),
+        ] {
+            let args = network_requests_args(&arguments).unwrap();
+            assert_eq!(
+                args,
+                expected
+                    .iter()
+                    .map(|item| (*item).to_string())
+                    .collect::<Vec<_>>()
+            );
+            let flags = crate::flags::parse_flags(&args);
+            let command = crate::commands::parse_command(&args, &flags).unwrap();
+            assert_eq!(
+                command["stop"].as_bool().unwrap_or(false),
+                arguments["stop"].as_bool().unwrap_or(false)
+            );
+            assert_eq!(
+                command["start"].as_bool().unwrap_or(false),
+                arguments["start"].as_bool().unwrap_or(false)
+            );
+            assert_eq!(command.get("filter"), arguments.get("filter"));
+        }
+        assert!(network_requests_args(&json!({"start": true, "stop": true})).is_err());
     }
 
     #[test]

@@ -2185,8 +2185,9 @@ fn main() {
 
     let output_opts = OutputOptions::from_flags(&flags);
 
-    match send_command_with_respawn(cmd.clone(), &flags.session, &daemon_opts) {
+    match send_command_for_command(cmd.clone(), &flags.session, &daemon_opts) {
         Ok(mut resp) => {
+            acknowledge_request_recording_control(&cmd, &mut resp);
             if daemon_restarted {
                 mark_restarted_background(&mut resp);
             }
@@ -2236,6 +2237,58 @@ fn send_command_with_respawn(
         },
         other => other,
     }
+}
+
+fn request_recording_control(cmd: &serde_json::Value) -> Option<bool> {
+    if cmd.get("action").and_then(|value| value.as_str()) != Some("requests") {
+        return None;
+    }
+    if cmd.get("stop").and_then(|value| value.as_bool()) == Some(true) {
+        Some(false)
+    } else if cmd.get("start").and_then(|value| value.as_bool()) == Some(true) {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+fn send_command_for_command(
+    cmd: serde_json::Value,
+    session: &str,
+    daemon_opts: &DaemonOptions,
+) -> Result<connection::Response, String> {
+    if request_recording_control(&cmd).is_some()
+        || (cmd.get("action").and_then(|value| value.as_str()) == Some("requests")
+            && cmd.get("clear").and_then(|value| value.as_bool()) == Some(true))
+    {
+        // A timeout can leave a mutating control applied without its reply.
+        // Do not replay it against a newly started daemon.
+        send_command(cmd, session)
+    } else {
+        send_command_with_respawn(cmd, session, daemon_opts)
+    }
+}
+
+fn acknowledge_request_recording_control(
+    cmd: &serde_json::Value,
+    response: &mut connection::Response,
+) {
+    let Some(expected_capturing) = request_recording_control(cmd) else {
+        return;
+    };
+    let acknowledged = response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("recording"))
+        .and_then(|recording| recording.get("enabled"))
+        .and_then(|capturing| capturing.as_bool());
+    if !response.success || acknowledged == Some(expected_capturing) {
+        return;
+    }
+    response.success = false;
+    response.data = None;
+    response.error = Some("The running daemon did not confirm request-history capture state; inspect and coordinate matching-version maintenance before relying on this control.".to_string());
+    response.code = Some("request_recording_unconfirmed".to_string());
 }
 
 /// Read batch commands given on stdin as a JSON array of string arrays.
@@ -2341,8 +2394,9 @@ fn run_batch(
 
         attach_pin_tab_to_command(&mut parsed, flags);
 
-        match send_command_with_respawn(parsed, &flags.session, daemon_opts) {
-            Ok(resp) => {
+        match send_command_for_command(parsed.clone(), &flags.session, daemon_opts) {
+            Ok(mut resp) => {
+                acknowledge_request_recording_control(&parsed, &mut resp);
                 if flags.json {
                     let mut result = batch_result_identity(i, cmd_args, omit_command);
                     result["success"] = json!(resp.success);
@@ -2438,6 +2492,42 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn request_capture_control_rejects_unacknowledged_response() {
+        let command = json!({"action":"requests", "stop":true});
+        assert_eq!(request_recording_control(&command), Some(false));
+
+        let mut old_daemon = Response {
+            success: true,
+            data: Some(json!({"requests": []})),
+            ..Response::default()
+        };
+        acknowledge_request_recording_control(&command, &mut old_daemon);
+        assert!(!old_daemon.success);
+        assert_eq!(
+            old_daemon.code.as_deref(),
+            Some("request_recording_unconfirmed")
+        );
+        assert!(old_daemon.data.is_none());
+
+        let mut current_daemon = Response {
+            success: true,
+            data: Some(json!({"requests": [], "recording": {"enabled": false, "count": 0}})),
+            ..Response::default()
+        };
+        acknowledge_request_recording_control(&command, &mut current_daemon);
+        assert!(current_daemon.success);
+
+        assert_eq!(
+            request_recording_control(&json!({"action":"requests", "start":true})),
+            Some(true)
+        );
+        assert_eq!(
+            request_recording_control(&json!({"action":"requests", "filter":"api"})),
+            None
+        );
+    }
 
     #[test]
     fn dashboard_config_comparison_rejects_unknown_or_changed_settings() {

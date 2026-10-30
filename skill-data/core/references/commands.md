@@ -231,6 +231,8 @@ agent-browser network route <url> --body '{}'  # Mock response
 agent-browser network route <url> --body '{}' --allow-origin https://www.example.com  # Mock a cross-origin API for that page
 agent-browser network unroute [url]            # Remove routes
 agent-browser network requests                 # View tracked requests
+agent-browser network requests --stop           # Pause request-history capture
+agent-browser network requests --start          # Resume request-history capture
 agent-browser network requests --filter api    # Filter requests
 agent-browser network request <requestId>      # Full request/response detail incl. body
 agent-browser network har start                # Record traffic (embeds text response bodies)
@@ -238,6 +240,8 @@ agent-browser network har start --content all  # Embed all bodies (binary as bas
 agent-browser network har start --content none # Sizes and headers only
 agent-browser network har stop [output.har]    # Stop and save HAR
 ```
+
+Request history keeps the newest 1,000 records by default. This is a record-count limit only; it does not guarantee a byte, heap, or process-memory limit. Reads, dashboard polling, and stream startup preserve a paused state. Responses can still finish pairing with retained requests. `--clear` releases retained history, and HAR capture runs separately. Stop and start require a daemon acknowledgement; an older daemon produces `request_recording_unconfirmed`.
 
 ## Tabs and Windows
 
