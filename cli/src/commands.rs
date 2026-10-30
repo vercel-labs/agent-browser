@@ -3451,17 +3451,17 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             let rtype = value_after("--type");
             let method = value_after("--method");
             let status = value_after("--status");
-            let mut index = 1;
-            while index < rest.len() {
-                match rest[index] {
+            // A token right after a value flag is a legacy value, or an
+            // ignored repeat value, so it never acts as a capture control.
+            for pair in rest.windows(2) {
+                if matches!(pair[0], "--filter" | "--type" | "--method" | "--status") {
+                    continue;
+                }
+                match pair[1] {
                     "--stop" => stop = true,
                     "--start" => start = true,
-                    "--filter" | "--type" | "--method" | "--status" => {
-                        index += 1;
-                    }
                     _ => {}
                 }
-                index += 1;
             }
             if stop && start {
                 return Err(ParseError::InvalidValue {
@@ -4897,6 +4897,35 @@ mod tests {
         assert!(trailing.get("filter").is_none());
 
         assert!(parse_command(&args("network requests --stop --start"), &default_flags()).is_err());
+    }
+
+    #[test]
+    fn test_network_requests_legacy_filter_value_is_never_a_capture_control() {
+        let chained = parse_command(
+            &args("network requests --filter --type --stop"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(chained["filter"], "--type");
+        assert_eq!(chained["type"], "--stop");
+        assert!(chained.get("stop").is_none());
+
+        let reversed = parse_command(
+            &args("network requests --type --filter --start"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(reversed["type"], "--filter");
+        assert_eq!(reversed["filter"], "--start");
+        assert!(reversed.get("start").is_none());
+
+        let control = parse_command(
+            &args("network requests --filter api --stop"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(control["filter"], "api");
+        assert_eq!(control["stop"], true);
     }
 
     #[test]
