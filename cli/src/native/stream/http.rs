@@ -489,7 +489,7 @@ mod tests {
 
     #[test]
     fn parse_content_length_handles_spacing_case_and_unicode_header_values() {
-        let headers = "POST / HTTP/1.1\r\nX-Label: café\r\ncOnTeNt-LeNgTh:\t5 \r\n\r\n";
+        let headers = "POST / HTTP/1.1\r\nX-Label: 123456é\r\ncOnTeNt-LeNgTh:\t5 \r\n\r\n";
 
         assert_eq!(parse_content_length(headers), Some(5));
     }
