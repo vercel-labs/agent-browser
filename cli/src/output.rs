@@ -127,6 +127,17 @@ fn format_storage_text(data: &serde_json::Value) -> Option<String> {
     Some(format!("{}: {}", key, format_storage_value(value)))
 }
 
+fn format_errors_text(errors: &[serde_json::Value]) -> String {
+    errors
+        .iter()
+        .map(|err| {
+            let text = err.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            format!("{} {}", color::error_indicator(), text)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
     match action {
         Some("stream_disable") => data
@@ -950,9 +961,9 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         }
         // Errors
         if let Some(errors) = data.get("errors").and_then(|v| v.as_array()) {
-            for err in errors {
-                let msg = err.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                println!("{} {}", color::error_indicator(), msg);
+            let rendered = format_errors_text(errors);
+            if !rendered.is_empty() {
+                println!("{}", rendered);
             }
             return;
         }
@@ -4764,5 +4775,63 @@ hydration: -  phases: 0  hydratedComponents: 0"
             format_webmcp_context(&json!({"webmcp": {"status": "unavailable"}}), &opts).unwrap();
         assert!(unavailable.contains("do not reuse tools"));
         assert!(!unavailable.contains(": 0"));
+    }
+
+    #[test]
+    fn test_format_errors_text_shows_error_text() {
+        let errors = json!([{
+            "text": "Error: boom\n    at https://example.com/app.js:1:31",
+            "url": null,
+            "line": 0,
+            "column": 30
+        }]);
+
+        let rendered = super::format_errors_text(errors.as_array().unwrap());
+
+        assert_eq!(
+            rendered,
+            format!(
+                "{} Error: boom\n    at https://example.com/app.js:1:31",
+                crate::color::error_indicator()
+            )
+        );
+    }
+
+    #[test]
+    fn test_format_errors_text_one_line_per_error() {
+        let errors = json!([
+            { "text": "TypeError: a is undefined", "url": null, "line": 3, "column": 7 },
+            { "text": "Uncaught", "url": null, "line": 9, "column": 1 }
+        ]);
+
+        let rendered = super::format_errors_text(errors.as_array().unwrap());
+
+        let indicator = crate::color::error_indicator();
+        assert_eq!(
+            rendered,
+            format!("{indicator} TypeError: a is undefined\n{indicator} Uncaught")
+        );
+    }
+
+    #[test]
+    fn test_format_errors_text_reads_daemon_error_entries() {
+        let mut tracker = crate::native::network::EventTracker::new();
+        tracker.add_error("ReferenceError: x is not defined", None, Some(4), Some(2));
+        let data = tracker.get_errors_json();
+
+        let rendered = super::format_errors_text(data["errors"].as_array().unwrap());
+
+        assert_eq!(
+            rendered,
+            format!(
+                "{} ReferenceError: x is not defined",
+                crate::color::error_indicator()
+            )
+        );
+    }
+
+    #[test]
+    fn test_format_errors_text_empty_list_renders_nothing() {
+        assert_eq!(super::format_errors_text(&[]), "");
     }
 }
