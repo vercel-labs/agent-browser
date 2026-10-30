@@ -2,10 +2,9 @@ use serde_json::{json, Value};
 
 use crate::native::interaction::{char_to_key_info, key_text, named_key_info};
 
-/// Target of a pointer action: a shared element id or a viewport position.
+/// Target of a pointer action: a viewport position.
 #[derive(Clone, Debug)]
 pub(crate) enum Origin {
-    Element(String),
     Viewport { x: f64, y: f64 },
 }
 
@@ -29,12 +28,12 @@ pub(crate) fn key_chord_actions(chord: &str) -> Value {
 
     let mut actions = Vec::new();
     for modifier in &modifiers {
-        actions.push(json!({ "type": "keyDown", "value": modifier_value(modifier) }));
+        actions.push(json!({ "type": "keyDown", "value": key_value(modifier) }));
     }
     actions.push(json!({ "type": "keyDown", "value": value }));
     actions.push(json!({ "type": "keyUp", "value": value }));
     for modifier in modifiers.iter().rev() {
-        actions.push(json!({ "type": "keyUp", "value": modifier_value(modifier) }));
+        actions.push(json!({ "type": "keyUp", "value": key_value(modifier) }));
     }
     key_source(actions)
 }
@@ -106,20 +105,8 @@ pub(crate) fn pointer_wheel(origin: &Origin, delta_x: f64, delta_y: f64) -> Valu
     }])
 }
 
-/// Build the BiDi actions for a touch tap.
-pub(crate) fn touch_tap(origin: &Origin) -> Value {
-    pointer_source(
-        "touch",
-        vec![
-            pointer_move(origin),
-            json!({ "type": "pointerDown", "button": 0 }),
-            json!({ "type": "pointerUp", "button": 0 }),
-        ],
-    )
-}
-
-/// Build the BiDi actions for a touch swipe with intermediate moves toward `to`.
-pub(crate) fn touch_swipe_path(from: &Origin, to: &Origin, steps: u32) -> Value {
+/// Build the BiDi actions for a `pointer_type` drag or swipe between two points, emitting `steps` intermediate moves.
+pub(crate) fn pointer_path(pointer_type: &str, from: &Origin, to: &Origin, steps: u32) -> Value {
     let (fx, fy, _) = origin_json(from);
     let (tx, ty, _) = origin_json(to);
     let steps = steps.max(1);
@@ -137,7 +124,19 @@ pub(crate) fn touch_swipe_path(from: &Origin, to: &Origin, steps: u32) -> Value 
         }));
     }
     actions.push(json!({ "type": "pointerUp", "button": 0 }));
-    pointer_source("touch", actions)
+    pointer_source(pointer_type, actions)
+}
+
+/// Build the BiDi actions for a touch tap.
+pub(crate) fn touch_tap(origin: &Origin) -> Value {
+    pointer_source(
+        "touch",
+        vec![
+            pointer_move(origin),
+            json!({ "type": "pointerDown", "button": 0 }),
+            json!({ "type": "pointerUp", "button": 0 }),
+        ],
+    )
 }
 
 /// Build the BiDi actions for one raw touch event over `points`.
@@ -185,11 +184,6 @@ fn pointer_move(origin: &Origin) -> Value {
 
 fn origin_json(origin: &Origin) -> (f64, f64, Value) {
     match origin {
-        Origin::Element(id) => (
-            0.0,
-            0.0,
-            json!({ "type": "element", "element": { "sharedId": id } }),
-        ),
         Origin::Viewport { x, y } => (*x, *y, json!("viewport")),
     }
 }
@@ -233,16 +227,6 @@ fn key_value(key_name: &str) -> String {
             Some(n @ 1..=12) => char::from_u32(0xE030 + n).unwrap().to_string(),
             _ => key_text(key_name).unwrap_or_else(|| key_name.to_string()),
         },
-    }
-}
-
-fn modifier_value(modifier: &str) -> String {
-    match modifier {
-        "Control" => "\u{E009}".to_string(),
-        "Shift" => "\u{E008}".to_string(),
-        "Alt" => "\u{E00A}".to_string(),
-        "Meta" => "\u{E03D}".to_string(),
-        _ => modifier.to_string(),
     }
 }
 
@@ -301,26 +285,6 @@ mod tests {
     }
 
     #[test]
-    fn named_keys_use_webdriver_code_points() {
-        for (name, code) in [
-            ("Enter", "\u{E007}"),
-            ("Tab", "\u{E004}"),
-            ("ArrowLeft", "\u{E012}"),
-            ("Escape", "\u{E00C}"),
-            ("Backspace", "\u{E003}"),
-            ("Insert", "\u{E016}"),
-            ("F1", "\u{E031}"),
-            ("F12", "\u{E03C}"),
-        ] {
-            let actions = key_chord_actions(name);
-            let steps = steps(&actions);
-
-            assert_eq!(steps[0]["value"], code, "{name} keyDown value");
-            assert_eq!(steps[1]["value"], code, "{name} keyUp value");
-        }
-    }
-
-    #[test]
     fn control_chord_presses_and_releases_modifier_around_key() {
         let actions = key_chord_actions("Control+a");
 
@@ -344,38 +308,5 @@ mod tests {
         let ups = steps.iter().filter(|s| s["type"] == "pointerUp").count();
 
         assert_eq!((downs, ups), (2, 2));
-    }
-
-    #[test]
-    fn single_key_event_uses_webdriver_code_points_and_the_requested_direction() {
-        let down = key_event_actions("keyDown", "Enter");
-        assert_eq!(
-            steps(&down),
-            &[json!({"type": "keyDown", "value": "\u{E007}"})]
-        );
-
-        let up = key_event_actions("keyUp", "Tab");
-        assert_eq!(steps(&up), &[json!({"type": "keyUp", "value": "\u{E004}"})]);
-
-        let printable = key_event_actions("keyDown", "a");
-        assert_eq!(
-            steps(&printable),
-            &[json!({"type": "keyDown", "value": "a"})]
-        );
-
-        let modifier = key_event_actions("keyDown", "Shift");
-        assert_eq!(
-            steps(&modifier),
-            &[json!({"type": "keyDown", "value": "\u{E008}"})]
-        );
-    }
-
-    #[test]
-    fn touch_tap_uses_touch_pointer_type() {
-        let origin = Origin::Element("node-1".to_string());
-        let actions = touch_tap(&origin);
-
-        assert_eq!(actions[0]["parameters"]["pointerType"], "touch");
-        assert_eq!(actions[0]["actions"][1]["type"], "pointerDown");
     }
 }

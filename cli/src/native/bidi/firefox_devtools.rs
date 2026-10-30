@@ -1,5 +1,3 @@
-//! Firefox DevTools (remote debugging) protocol client: `<len>:<json>` frames.
-
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -13,13 +11,12 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 type Pending = Arc<Mutex<HashMap<String, VecDeque<oneshot::Sender<Value>>>>>;
 
-/** A connected DevTools protocol session; clones share the same connection. */
+/// A connected DevTools protocol session; clones share the same connection.
 #[derive(Clone)]
 pub struct RdpClient {
     writer: Arc<tokio::sync::Mutex<Box<dyn AsyncWrite + Send + Unpin>>>,
     pending: Pending,
     events: broadcast::Sender<Value>,
-    greeting: Value,
     reader: Arc<AbortOnDrop>,
 }
 
@@ -66,7 +63,7 @@ impl RdpClient {
     {
         let (rd, wr) = split(stream);
         let mut rd = BufReader::new(rd);
-        let greeting = read_frame(&mut rd)
+        read_frame(&mut rd)
             .await
             .ok_or("DevTools greeting not received")?;
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
@@ -96,14 +93,8 @@ impl RdpClient {
             writer: Arc::new(tokio::sync::Mutex::new(Box::new(wr))),
             pending,
             events,
-            greeting,
             reader: Arc::new(AbortOnDrop(reader)),
         })
-    }
-
-    /// Returns the server greeting message.
-    pub fn greeting(&self) -> &Value {
-        &self.greeting
     }
 
     /// Subscribes to unsolicited actor events.

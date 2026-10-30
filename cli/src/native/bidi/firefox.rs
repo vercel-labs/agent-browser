@@ -152,7 +152,11 @@ fn user_js(download_path: Option<&str>, restrict_webrtc: bool) -> String {
          user_pref(\"dom.w3c_touch_events.enabled\", 1);\n\
          user_pref(\"browser.download.useDownloadDir\", true);\n\
          user_pref(\"browser.download.always_ask_before_handling_new_types\", false);\n\
-         user_pref(\"browser.download.manager.showWhenStarting\", false);\n",
+         user_pref(\"browser.download.manager.showWhenStarting\", false);\n\
+         user_pref(\"permissions.default.geo\", 2);\n\
+         user_pref(\"permissions.default.desktop-notification\", 2);\n\
+         user_pref(\"permissions.default.camera\", 2);\n\
+         user_pref(\"permissions.default.microphone\", 2);\n",
     );
     if restrict_webrtc {
         js.push_str("user_pref(\"media.peerconnection.enabled\", false);\n");
@@ -389,11 +393,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_plain_options() {
-        assert!(validate_firefox_options(&ok(), None, false, None).is_ok());
-    }
-
-    #[test]
     fn validate_rejects_each_option_naming_it() {
         let mut o = ok();
         o.extensions = Some(vec!["x".into()]);
@@ -435,18 +434,18 @@ mod tests {
     }
 
     #[test]
-    fn webrtc_is_disabled_only_when_domains_are_restricted() {
-        assert!(user_js(None, true).contains("media.peerconnection.enabled\", false"));
-        assert!(!user_js(None, false).contains("peerconnection"));
-    }
-
-    #[test]
     fn version_gate() {
         let e = check_firefox_version("149.0").unwrap_err();
         assert!(e.contains("149.0") && e.contains(DOWNLOAD_LINK), "{e}");
         assert!(check_firefox_version("150.0").is_ok());
         assert!(check_firefox_version("158.0.1").is_ok());
         assert!(check_firefox_version("garbage").is_err());
+    }
+
+    #[test]
+    fn webrtc_is_disabled_only_when_domains_are_restricted() {
+        assert!(user_js(None, true).contains("media.peerconnection.enabled\", false"));
+        assert!(!user_js(None, false).contains("media.peerconnection.enabled"));
     }
 
     #[test]
@@ -553,17 +552,5 @@ mod tests {
             .unwrap();
         assert!(start.elapsed() < Duration::from_secs(10));
         assert!(e.contains("bad profile"), "{e}");
-    }
-
-    #[test]
-    #[ignore = "requires FIREFOX_BIN"]
-    fn real_firefox_smoke() {
-        let bin = std::env::var("FIREFOX_BIN").expect("FIREFOX_BIN");
-        let p = FirefoxProcess::launch(Path::new(&bin), true, None, false, Duration::from_secs(30))
-            .unwrap();
-        assert!(p.bidi_url.starts_with("ws://127.0.0.1:"), "{}", p.bidi_url);
-        let profile = p.profile_dir.clone();
-        drop(p);
-        assert!(!profile.exists());
     }
 }

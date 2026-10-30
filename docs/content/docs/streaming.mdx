@@ -54,7 +54,7 @@ Connect to `ws://localhost:9223` to receive frames and send input.
 
 Frame encoding is set per daemon with `AGENT_BROWSER_STREAM_QUALITY` (0 to 100), `AGENT_BROWSER_STREAM_MAX_WIDTH` and `AGENT_BROWSER_STREAM_MAX_HEIGHT`. The live stream requests jpeg. An explicit `screencast_start` reconfigures the same underlying screencast, so a client can see the format change mid-stream. Width and height cap the frame and default to the session viewport. On a busy page at 1280x720, quality 80 costs about 54 KB per frame, quality 20 about 25 KB, and quality 20 at 640x360 about 9 KB.
 
-Browser clients must load from `localhost`, `127.0.0.1`, `::1` or `file://`. Any other origin gets a 403 on the upgrade and needs a proxy.
+Browser clients must load over HTTP or HTTPS from the same loopback host and port as the stream socket (`localhost`, `127.0.0.1` or `::1`). Any other origin, including `file://`, gets a 403 on the upgrade and needs a proxy. A client that sends no Origin header, such as a server-side bridge, can connect.
 
 ### Frame messages
 

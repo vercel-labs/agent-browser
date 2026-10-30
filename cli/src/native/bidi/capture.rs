@@ -1,52 +1,21 @@
-//! Firefox screenshots and PDF.
+use std::collections::HashMap;
 
 use base64::Engine;
 use serde_json::{json, Value};
 
 use super::actions::session;
-use super::bidi::remote_to_json;
+use super::client::remote_to_json;
 use super::query;
 use super::target::{resolve_target, Target};
-use crate::native::actions::DaemonState;
+use crate::native::actions::{pdf_save_path, DaemonState};
 use crate::native::screenshot::{
     annotation_overlay_js, annotation_removal_js, filter_annotations, parse_rect,
-    project_annotations, save_screenshot, RawAnnotation, Rect, ScreenshotOptions,
+    project_annotations, save_screenshot, screenshot_format, screenshot_options, RawAnnotation,
+    Rect,
 };
 use crate::native::snapshot::SnapshotOptions;
 
 const NOT_YET: &str = "not yet supported on Firefox";
-
-fn screenshot_format(cmd: &Value) -> String {
-    cmd.get("format")
-        .or_else(|| cmd.get("type"))
-        .and_then(Value::as_str)
-        .unwrap_or("png")
-        .to_string()
-}
-
-fn screenshot_options(cmd: &Value) -> ScreenshotOptions {
-    ScreenshotOptions {
-        selector: cmd
-            .get("selector")
-            .and_then(Value::as_str)
-            .map(String::from),
-        path: cmd.get("path").and_then(Value::as_str).map(String::from),
-        full_page: cmd
-            .get("fullPage")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        format: screenshot_format(cmd),
-        quality: cmd.get("quality").and_then(Value::as_i64).map(|q| q as i32),
-        annotate: cmd
-            .get("annotate")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        output_dir: cmd
-            .get("screenshotDir")
-            .and_then(Value::as_str)
-            .map(String::from),
-    }
-}
 
 fn reject_unsupported_screenshot_options(cmd: &Value) -> Result<(), String> {
     if cmd
@@ -107,27 +76,6 @@ fn pdf_params(cmd: &Value, context: &str) -> Value {
         "orientation": if landscape { "landscape" } else { "portrait" },
         "shrinkToFit": !prefer_css_page_size,
     })
-}
-
-fn pdf_save_path(cmd: &Value) -> String {
-    match cmd.get("path").and_then(Value::as_str) {
-        Some(path) => path.to_string(),
-        None => {
-            let dir = dirs::home_dir()
-                .unwrap_or_else(std::env::temp_dir)
-                .join(".agent-browser")
-                .join("tmp")
-                .join("pdfs");
-            let _ = std::fs::create_dir_all(&dir);
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis();
-            dir.join(format!("page-{}.pdf", timestamp))
-                .to_string_lossy()
-                .to_string()
-        }
-    }
 }
 
 async fn evaluate(
@@ -221,14 +169,17 @@ async fn collect_annotations(
         .bidi
         .send("browsingContext.getTree", json!({"root": ff.top_context}))
         .await?;
+    let mut targets_by_id = HashMap::with_capacity(ff.refs.len());
+    for (target, id) in &ff.refs {
+        targets_by_id.entry(*id).or_insert(target);
+    }
     let mut annotations = Vec::new();
     let mut overlay_annotations = Vec::new();
     for (ref_id, entry) in state.ref_map.entries_sorted() {
         let Some(id) = entry.backend_node_id else {
             continue;
         };
-        let Some(((context, shared_id), _)) = ff.refs.iter().find(|(_, value)| **value == id)
-        else {
+        let Some(&(context, shared_id)) = targets_by_id.get(&id) else {
             continue;
         };
         let target = Target {
@@ -388,19 +339,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn viewport_png_maps_to_bidi_screenshot() {
-        let params = screenshot_params(&json!({}), "ctx-1").unwrap();
-        assert_eq!(
-            params,
-            json!({
-                "context": "ctx-1",
-                "origin": "viewport",
-                "format": {"type": "image/png"},
-            })
-        );
-    }
-
-    #[test]
     fn full_page_jpeg_carries_quality_as_a_fraction() {
         let params = screenshot_params(
             &json!({"fullPage": true, "format": "jpeg", "quality": 55}),
@@ -427,25 +365,6 @@ mod tests {
         assert_eq!(png["format"], json!({"type": "image/png"}));
         let e = screenshot_params(&json!({"format": "webp"}), "c").unwrap_err();
         assert!(e.contains("Unsupported screenshot format"), "{e}");
-    }
-
-    #[test]
-    fn element_clip_is_a_bidi_element_reference() {
-        assert_eq!(
-            element_clip("node-7"),
-            json!({"type": "element", "element": {"sharedId": "node-7"}})
-        );
-    }
-
-    #[test]
-    fn element_and_annotated_screenshots_build_params() {
-        let element = screenshot_params(&json!({"selector": "#main"}), "c").unwrap();
-        assert_eq!(element["origin"], "viewport");
-        let annotated = screenshot_params(&json!({"annotate": true}), "c").unwrap();
-        assert_eq!(annotated["origin"], "viewport");
-        let options = screenshot_options(&json!({"selector": "#main", "annotate": true}));
-        assert_eq!(options.selector.as_deref(), Some("#main"));
-        assert!(options.annotate);
     }
 
     #[test]

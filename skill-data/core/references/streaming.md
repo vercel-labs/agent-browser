@@ -39,7 +39,7 @@ Read the port from `stream status --json` rather than assuming one; the OS-assig
 
 ## Connecting
 
-Connect a WebSocket client to `ws://127.0.0.1:<port>`. Frame delivery starts automatically once a client attaches, so there is no subscribe message. Browser clients must load from `localhost`, `127.0.0.1`, `::1` or `file://`. Any other origin gets a 403 on the upgrade and needs a proxy.
+Connect a WebSocket client to `ws://127.0.0.1:<port>`. Frame delivery starts automatically once a client attaches, so there is no subscribe message. Browser clients must load over HTTP or HTTPS from the same loopback host and port as the stream socket (`localhost`, `127.0.0.1` or `::1`). Any other origin, including `file://`, gets a 403 on the upgrade and needs a proxy. A client that sends no Origin header can connect.
 
 ## Messages from the server
 

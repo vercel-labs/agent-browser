@@ -7,9 +7,11 @@
 <label>Literal <textarea id="literal"></textarea></label>
 <label>Guarded <input id="guarded"></label>
 <label>Password <input id="password" type="password"></label>
+<label>Notes <textarea id="notes"></textarea></label>
 <label>Email <input id="email" type="email"></label>
 <label>Number <input id="number" type="number"></label>
 <div id="shadow-host"></div>
+<div id="nest-host"></div>
 <button id="drag-source" style="position:absolute;left:20px;top:20px;width:100px;height:50px">source</button>
 <button id="drag-target" style="position:absolute;left:180px;top:1400px;width:120px;height:60px">target</button>
 <div id="drag-cover" style="display:none;position:absolute;left:180px;top:1400px;width:120px;height:60px;z-index:2"></div>
@@ -23,6 +25,9 @@ issues.addEventListener('input', event => {
 });
 document.getElementById('guarded').addEventListener('beforeinput', event => event.preventDefault());
 document.getElementById('shadow-host').attachShadow({ mode: 'open' }).innerHTML = '<input value="nested">';
+const outer = document.getElementById('nest-host').attachShadow({mode: 'open'});
+const inner = outer.appendChild(document.createElement('div')).attachShadow({mode: 'open'});
+inner.appendChild(document.createElement('input')).id = 'shadow-input';
 </script>
 </body>
 </html>

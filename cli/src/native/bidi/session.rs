@@ -1,5 +1,3 @@
-//! A running Firefox: the owned process, both protocol clients and per-session state.
-
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
@@ -8,11 +6,12 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use super::bidi::{remote_to_json, BidiClient};
+use super::client::{remote_to_json, BidiClient};
 use super::emulation::{self, Settings as EmulationSettings};
+use super::firefox::{check_firefox_version, find_firefox, DevtoolsEndpoint, FirefoxProcess};
+use super::firefox_devtools::RdpClient;
 use super::network::{AbortOnDrop, NetContext, NETWORK_EVENTS};
-use super::process::{check_firefox_version, find_firefox, DevtoolsEndpoint, FirefoxProcess};
-use super::rdp::RdpClient;
+use super::types::UserPromptOpened;
 use crate::native::actions::{EmulatedMedia, PendingDialog};
 use crate::native::cdp::chrome::LaunchOptions;
 
@@ -28,7 +27,7 @@ const PROMPT_EVENTS: [&str; 2] = [
     "browsingContext.userPromptClosed",
 ];
 
-/** One launched Firefox. Dropping it kills the process tree and deletes the profile. */
+/// One launched Firefox. Dropping it kills the process tree and deletes the profile.
 pub struct FirefoxSession {
     process: Option<FirefoxProcess>,
     pub headless: bool,
@@ -41,7 +40,7 @@ pub struct FirefoxSession {
     pub top_context: String,
     /// Stable `t<N>` ids keyed by BiDi context; assigned on first sight and never reused.
     pub tab_ids: HashMap<String, u32>,
-    context_parents: HashMap<String, String>,
+    pub(crate) context_parents: HashMap<String, String>,
     next_tab_id: u32,
     /// Durable ref ids keyed by `(context, sharedId)`; reset when a document changes.
     pub refs: HashMap<(String, String), i64>,
@@ -64,6 +63,8 @@ pub struct FirefoxSession {
     pub intercepting: bool,
     /// Ids of requests that have started and not yet finished or failed.
     pub inflight: HashSet<String>,
+    /// Origins of pages this session navigated to, kept so state saves still cover them after the tab moves on.
+    pub visited_origins: HashSet<String>,
     pub(crate) dispatcher: Option<AbortOnDrop>,
 }
 
@@ -235,10 +236,21 @@ impl FirefoxSession {
             net,
             intercepting: false,
             inflight: HashSet::new(),
+            visited_origins: HashSet::new(),
             dispatcher,
         };
         let _ = emulation::apply_to_context(&session, &session.context).await;
         Ok(session)
+    }
+
+    /// Records the origin of a URL the session navigated to.
+    pub fn note_visit(&mut self, url: &str) {
+        if let Ok(parsed) = url::Url::parse(url) {
+            let origin = parsed.origin().ascii_serialization();
+            if origin != "null" {
+                self.visited_origins.insert(origin);
+            }
+        }
     }
 
     /// Returns the stable `t<N>` id for `context`, assigning the next id the first time it is seen.
@@ -299,8 +311,8 @@ impl FirefoxSession {
                     Some(e) if e["method"] == "browsingContext.userPromptOpened"
                         && e["params"]["handler"] != "accept"
                         && [context, &self.context, &self.top_context].iter().any(|active|
-                            owner_context(active, &parents)
-                                == owner_context(e["params"]["context"].as_str().unwrap_or_default(), &parents)
+                            owner_tab(active, &parents)
+                                == owner_tab(e["params"]["context"].as_str().unwrap_or_default(), &parents)
                         ) => return Ok(None),
                     Some(e) => apply_event(&e, &mut None, &mut parents),
                     None => return fut.await.map(Some),
@@ -359,33 +371,61 @@ impl FirefoxSession {
     }
 }
 
+/// Records frame parentage from browsing context lifecycle events.
+pub(crate) fn record_context(e: &Value, context_parents: &mut HashMap<String, String>) {
+    let p = &e["params"];
+    match (
+        e["method"].as_str(),
+        p["context"].as_str(),
+        p["parent"].as_str(),
+    ) {
+        (Some("browsingContext.contextCreated"), Some(context), Some(parent)) => {
+            context_parents.insert(context.to_string(), parent.to_string());
+        }
+        (Some("browsingContext.contextDestroyed"), Some(context), _) => {
+            context_parents.remove(context);
+        }
+        _ => {}
+    }
+}
+
+/// Returns the top-level tab that owns `context`.
+pub(crate) fn owner_tab<'a>(
+    context: &'a str,
+    context_parents: &'a HashMap<String, String>,
+) -> &'a str {
+    let mut owner = context;
+    while let Some(parent) = context_parents.get(owner) {
+        owner = parent;
+    }
+    owner
+}
+
+/// True when a dialog with this owner context would block the tab `top_context`.
+pub(crate) fn dialog_blocks_tab(owner_context: Option<&str>, top_context: &str) -> bool {
+    owner_context.is_none_or(|context| context == top_context)
+}
+
 fn apply_event(
     e: &Value,
     dialog: &mut Option<PendingDialog>,
     context_parents: &mut HashMap<String, String>,
 ) {
+    record_context(e, context_parents);
     let p = &e["params"];
     match e["method"].as_str() {
-        Some("browsingContext.contextCreated") => {
-            if let (Some(context), Some(parent)) = (p["context"].as_str(), p["parent"].as_str()) {
-                context_parents.insert(context.to_string(), parent.to_string());
-            }
-        }
-        Some("browsingContext.contextDestroyed") => {
-            if let Some(context) = p["context"].as_str() {
-                context_parents.remove(context);
-            }
-        }
         Some("browsingContext.userPromptOpened") if p["handler"] != "accept" => {
-            let context = p["context"].as_str();
+            let prompt: UserPromptOpened = serde_json::from_value(p.clone()).unwrap_or_default();
             *dialog = Some(PendingDialog {
-                dialog_type: p["type"].as_str().unwrap_or("alert").to_string(),
-                message: p["message"].as_str().unwrap_or("").to_string(),
+                dialog_type: prompt.kind.unwrap_or_else(|| "alert".to_string()),
+                message: prompt.message,
                 url: String::new(),
-                default_prompt: p["defaultValue"].as_str().map(String::from),
-                session_id: context.map(String::from),
-                owner_context: context
-                    .map(|context| owner_context(context, context_parents).to_string()),
+                default_prompt: prompt.default_value,
+                owner_context: prompt
+                    .context
+                    .as_deref()
+                    .map(|context| owner_tab(context, context_parents).to_string()),
+                session_id: prompt.context,
             });
         }
         Some("browsingContext.userPromptClosed")
@@ -541,6 +581,7 @@ pub(crate) mod tests {
             net: NetContext::default(),
             intercepting: false,
             inflight: HashSet::new(),
+            visited_origins: HashSet::new(),
             dispatcher: None,
         };
         (session, tx, calls)
@@ -670,6 +711,7 @@ pub(crate) mod tests {
             net: NetContext::default(),
             intercepting: false,
             inflight: HashSet::new(),
+            visited_origins: HashSet::new(),
             dispatcher: None,
         };
         (session, tx, calls, bidi_messages, rdp_messages)

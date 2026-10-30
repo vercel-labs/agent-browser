@@ -56,6 +56,9 @@ for (const path of Object.keys(edits.pages))
   if (!pages.some((page) => page.path === path))
     throw new Error(`docs-edits.json: unknown page ${path}`);
 
+/** Pages added after the pinned baseline, listed only for the sitemap and agent indexes. */
+export const addedPages = edits.addedPages ?? [];
+
 /** Baseline pages with intentional edits applied: the floor for live routes. */
 export const currentPages = pages.map(applyEdits);
 

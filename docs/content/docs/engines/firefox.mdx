@@ -1,0 +1,104 @@
+---
+title: "Firefox"
+navTitle: "Firefox"
+description: "Drive a system Firefox install over WebDriver BiDi from agent-browser."
+---
+
+The Firefox engine drives a Firefox install on the local machine over WebDriver BiDi. Snapshots come from Firefox's DevTools accessibility tree, so refs work the same way they do with Chrome.
+
+## Installation
+
+The Firefox engine requires Firefox 150 or newer. agent-browser does not download Firefox as part of `agent-browser install`; install it with your package manager or from Mozilla.
+
+agent-browser finds Firefox on your `PATH` and in standard install locations. To use a specific binary, pass `--executable-path` or set `AGENT_BROWSER_EXECUTABLE_PATH`.
+
+On macOS and Linux, install Firefox 150 or newer. The Snap package is not supported because it cannot use temporary profiles; use the Mozilla tarball and pass `--executable-path`.
+
+## Usage
+
+Set `--engine` on the command that launches the browser. Later commands in the same session use Firefox without the flag:
+
+```bash
+agent-browser --engine firefox open example.com
+agent-browser snapshot
+agent-browser screenshot
+```
+
+Or set it as the default via environment variable:
+
+```bash
+export AGENT_BROWSER_ENGINE=firefox
+agent-browser open example.com
+```
+
+Or in your `agent-browser.json` config:
+
+```json
+{
+  "engine": "firefox"
+}
+```
+
+## Custom Binary Path
+
+If Firefox is not in a standard location, use `--executable-path`:
+
+```bash
+agent-browser --engine firefox --executable-path /path/to/firefox open example.com
+```
+
+## Profiles
+
+Each launch uses a fresh temporary profile, so cookies and storage start clean unless you restore them with state or a session name. `--profile` is not supported with Firefox.
+
+## Supported features
+
+Navigation, tabs, `eval`, snapshots and refs (including iframes and open shadow roots), all element commands, `find`, frames, dialogs, screenshots (including `--annotate`), PDF, cookies, storage, state save and load with `--session-name` restore, `network route` and `network unroute`, requests, HAR and response bodies, extra headers, offline mode, HTTP auth, `--allowed-domains`, downloads, uploads, emulation (`set viewport`, `set device`, `set geo`, `set media`, and `--user-agent`), `--proxy`, `--ignore-https-errors`, and the dashboard live view.
+
+Media emulation on Firefox supports only `prefers-color-scheme` and print media. Other media features return an error that lists the supported ones.
+
+`find text` and `find label` search the main document only, like Chrome. The dashboard live view polls screenshots of the active tab and forwards mouse and keyboard input, so it works without screencast.
+
+## Chrome-only features
+
+These commands return a clear "Chrome-only" error on Firefox. Any other command without a Firefox implementation returns a "not supported on Firefox" error.
+
+<table>
+  <thead>
+    <tr><th>Feature</th><th>Status</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Trace and profiler</td><td>Chrome-only</td></tr>
+    <tr><td>WebMCP commands</td><td>Chrome-only</td></tr>
+    <tr><td>Screencast, recording, and video</td><td>Chrome-only</td></tr>
+    <tr><td>Accessibility audit (<code>a11y</code>)</td><td>Chrome-only</td></tr>
+    <tr><td><code>react_*</code> commands</td><td>Chrome-only</td></tr>
+  </tbody>
+</table>
+
+## Rejected options
+
+Not every launch option applies to Firefox. These are rejected when combined with `--engine firefox`:
+
+<table>
+  <thead>
+    <tr><th>Option</th><th>Reason</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>--cdp</code>, <code>--auto-connect</code></td><td>Firefox is launched over WebDriver BiDi</td></tr>
+    <tr><td><code>--provider</code></td><td>Cloud and direct-page providers are not supported</td></tr>
+    <tr><td><code>--extension</code>, <code>--args</code></td><td>Chrome extension and startup argument handling is not supported</td></tr>
+    <tr><td><code>--enable</code>, <code>--init-script</code>, launch-mutator plugins</td><td>Launch-time scripts and feature toggles are not supported</td></tr>
+    <tr><td><code>--profile</code></td><td>Each launch uses a fresh temporary profile</td></tr>
+    <tr><td><code>--allow-file-access</code>, <code>--webgpu</code>, <code>--ca-cert</code></td><td>Not supported by the Firefox engine</td></tr>
+    <tr><td><code>--state</code> or <code>--restore</code> with <code>--allowed-domains</code></td><td>Not supported in combination</td></tr>
+  </tbody>
+</table>
+
+## Security
+
+The daemon enables Firefox's DevTools server only for the Firefox profile it owns. On macOS and Linux the server listens on a private unix socket inside a directory with `0700` permissions. On Windows it listens on a random loopback port.
+
+## When to Use Firefox
+
+Use the Firefox engine when you need to test against Firefox rendering, JavaScript, or accessibility behavior with the same CLI and refs you use for Chrome. Use Chrome when you need Chrome-only commands, Chrome extensions, persistent profiles, or the exact Chrome fingerprint.

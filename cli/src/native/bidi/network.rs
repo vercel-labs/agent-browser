@@ -6,9 +6,11 @@ use serde_json::{json, Value};
 use tokio::sync::{Mutex, RwLock};
 
 use super::actions::session;
-use super::bidi::BidiClient;
+use super::client::BidiClient;
+use super::forms::require;
 use super::session::FirefoxSession;
 use super::target::resolve_target;
+use super::types::{BytesValue, Header, NetworkData, NetworkEvent, RequestData};
 use crate::native::actions::{
     self as chrome, DaemonState, HarContentMode, HarEntry, RouteEntry, TrackedRequest,
 };
@@ -145,6 +147,8 @@ pub struct NetContext {
     /// Downloads seen on this session, so `wait --download` can claim one that
     /// finished before the command arrived.
     pub downloads: Arc<Mutex<DownloadLedger>>,
+    /// Contexts whose requests are answered with a blank page instead of reaching the network.
+    pub blank_contexts: Arc<RwLock<std::collections::HashSet<String>>>,
 }
 
 impl NetContext {
@@ -169,21 +173,14 @@ impl Drop for AbortOnDrop {
     }
 }
 
-fn header_list(headers: &Value) -> Vec<(String, String)> {
+fn header_list(headers: &[Header]) -> Vec<(String, String)> {
     headers
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|h| {
-            Some((
-                h["name"].as_str()?.to_string(),
-                h["value"]["value"].as_str().unwrap_or("").to_string(),
-            ))
-        })
+        .iter()
+        .map(|h| (h.name.clone(), h.value.text()))
         .collect()
 }
 
-fn header_object(headers: &Value) -> Value {
+fn header_object(headers: &[Header]) -> Value {
     Value::Object(
         header_list(headers)
             .into_iter()
@@ -192,18 +189,21 @@ fn header_object(headers: &Value) -> Value {
     )
 }
 
-fn bidi_headers(headers: Vec<(String, String)>) -> Value {
+fn bidi_headers(headers: Vec<(String, String)>) -> Vec<Header> {
     headers
         .into_iter()
-        .map(|(name, value)| json!({"name": name, "value": {"type": "string", "value": value}}))
+        .map(|(name, value)| Header {
+            name,
+            value: BytesValue::string(value),
+        })
         .collect()
 }
 
 /// Maps a BiDi request to the resource type names Chrome reports.
-fn resource_type(request: &Value) -> &'static str {
+fn resource_type(request: &RequestData) -> &'static str {
     match (
-        request["initiatorType"].as_str(),
-        request["destination"].as_str(),
+        request.initiator_type.as_deref(),
+        request.destination.as_deref(),
     ) {
         (Some("fetch"), _) => "Fetch",
         (Some("xmlhttprequest"), _) => "XHR",
@@ -239,7 +239,7 @@ pub async fn ensure_intercept(ff: &mut FirefoxSession) -> Result<(), String> {
 /// Starts the task that resolves every intercepted request exactly once.
 pub fn spawn_dispatcher(
     bidi: Arc<BidiClient>,
-    rdp: super::rdp::RdpClient,
+    rdp: super::firefox_devtools::RdpClient,
     net: NetContext,
     mut rx: tokio::sync::mpsc::Receiver<Value>,
     emulation: Arc<std::sync::RwLock<super::emulation::Settings>>,
@@ -292,13 +292,11 @@ pub fn spawn_dispatcher(
 }
 
 async fn resolve(bidi: Arc<BidiClient>, net: NetContext, event: Value) {
-    let id = event["params"]["request"]["request"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+    let ev: NetworkEvent = serde_json::from_value(event["params"].clone()).unwrap_or_default();
+    let id = ev.request.request.clone();
     let (result, fallback, fallback_params) = match event["method"].as_str() {
         Some("network.beforeRequestSent") => (
-            before_request(&bidi, &net, &event["params"]["request"]).await,
+            before_request(&bidi, &net, &ev.request, ev.context.as_deref()).await,
             "network.failRequest",
             json!({"request": id}),
         ),
@@ -317,11 +315,16 @@ async fn resolve(bidi: Arc<BidiClient>, net: NetContext, event: Value) {
 async fn before_request(
     bidi: &BidiClient,
     net: &NetContext,
-    request: &Value,
+    request: &RequestData,
+    context: Option<&str>,
 ) -> Result<(), String> {
-    let id = request["request"].as_str().unwrap_or("");
-    let url = request["url"].as_str().unwrap_or("");
-    let decision = {
+    let id = request.request.as_str();
+    let url = request.url.as_str();
+    let blank = match context {
+        Some(c) => net.blank_contexts.read().await.contains(c),
+        None => false,
+    };
+    let mut decision = {
         let mut extra = net.headers.read().await.clone();
         let origin = url::Url::parse(url)
             .ok()
@@ -336,8 +339,7 @@ async fn before_request(
         } else {
             HashMap::from([(origin, extra)])
         };
-        let headers: HashMap<String, String> =
-            header_list(&request["headers"]).into_iter().collect();
+        let headers: HashMap<String, String> = header_list(&request.headers).into_iter().collect();
         let filter = net.domain_filter.read().await;
         let routes = net.routes.read().await;
         decide_request(
@@ -349,6 +351,16 @@ async fn before_request(
             &origin_headers,
         )
     };
+    if blank && !matches!(decision, NetworkDecision::Fail | NetworkDecision::Abort) {
+        decision = NetworkDecision::Fulfill {
+            status: 200,
+            headers: vec![("Content-Type".to_string(), "text/html".to_string())],
+            body: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                "<html></html>",
+            ),
+        };
+    }
     match decision {
         NetworkDecision::Fail | NetworkDecision::Abort => {
             bidi.send("network.failRequest", json!({"request": id}))
@@ -373,7 +385,7 @@ async fn before_request(
         NetworkDecision::Continue { headers } => {
             let mut params = json!({"request": id});
             if let Some(headers) = headers {
-                params["headers"] = bidi_headers(headers);
+                params["headers"] = json!(bidi_headers(headers));
             }
             bidi.send("network.continueRequest", params).await?;
         }
@@ -414,53 +426,64 @@ async fn auth_required(
     Ok(())
 }
 
-/// Drains buffered BiDi events and applies them to the daemon's dialog, network and console state.
-pub async fn drain(state: &mut DaemonState) {
+/// Applies buffered BiDi events and reports whether the top-level context set changed.
+pub async fn drain(state: &mut DaemonState) -> bool {
     if let Some(ff) = state.firefox.as_mut() {
         let events = ff.drain_events(&mut state.pending_dialog);
+        let tabs_changed = events.iter().any(top_level_context_changed);
         apply_events(state, events).await;
+        return tabs_changed;
     }
+    false
+}
+
+fn top_level_context_changed(event: &Value) -> bool {
+    matches!(
+        event["method"].as_str(),
+        Some("browsingContext.contextCreated" | "browsingContext.contextDestroyed")
+    ) && event["params"]["parent"].is_null()
 }
 
 async fn apply_events(state: &mut DaemonState, events: Vec<Value>) {
     for e in events {
-        let p = &e["params"];
-        match e["method"].as_str() {
-            Some("network.beforeRequestSent") => request_started(state, p),
-            Some("network.responseStarted") => response_seen(state, p),
-            Some("network.responseCompleted") => {
-                response_seen(state, p);
+        let method = e["method"].as_str().unwrap_or("");
+        if method == "log.entryAdded" {
+            log_entry(state, &e["params"]);
+            continue;
+        }
+        let p: NetworkEvent = serde_json::from_value(e["params"].clone()).unwrap_or_default();
+        let id = p.request.request.as_str();
+        match method {
+            "network.beforeRequestSent" => request_started(state, &p),
+            "network.responseStarted" => response_seen(state, &p),
+            "network.responseCompleted" => {
+                response_seen(state, &p);
                 if let Some(ff) = state.firefox.as_mut() {
-                    ff.inflight.remove(request_id(p));
+                    ff.inflight.remove(id);
                 }
-                har_body(state, request_id(p)).await;
+                har_body(state, id).await;
             }
-            Some("network.fetchError") => {
+            "network.fetchError" => {
                 if let Some(ff) = state.firefox.as_mut() {
-                    ff.inflight.remove(request_id(p));
+                    ff.inflight.remove(id);
                 }
             }
-            Some("log.entryAdded") => log_entry(state, p),
             _ => {}
         }
     }
 }
 
-fn request_id(p: &Value) -> &str {
-    p["request"]["request"].as_str().unwrap_or("")
-}
-
-fn request_started(state: &mut DaemonState, p: &Value) {
-    let request = &p["request"];
-    let id = request_id(p).to_string();
-    let url = request["url"].as_str().unwrap_or("").to_string();
-    let method = request["method"].as_str().unwrap_or("GET").to_string();
+fn request_started(state: &mut DaemonState, p: &NetworkEvent) {
+    let request = &p.request;
+    let id = request.request.clone();
+    let url = request.url.clone();
+    let method = request.method.clone().unwrap_or_else(|| "GET".to_string());
     if !is_websocket(&url) {
         if let Some(ff) = state.firefox.as_mut() {
             ff.inflight.insert(id.clone());
         }
     }
-    let millis = p["timestamp"].as_u64().unwrap_or_default();
+    let millis = p.timestamp;
     let resource_type = resource_type(request).to_string();
     if state.har_recording {
         state.har_entries.push(HarEntry {
@@ -468,9 +491,9 @@ fn request_started(state: &mut DaemonState, p: &Value) {
             wall_time: millis as f64 / 1000.0,
             method: method.clone(),
             url: url.clone(),
-            request_headers: header_list(&request["headers"]),
+            request_headers: header_list(&request.headers),
             post_data: None,
-            request_body_size: request["bodySize"].as_i64().unwrap_or(0),
+            request_body_size: request.body_size.unwrap_or(0),
             resource_type: resource_type.clone(),
             status: None,
             status_text: String::new(),
@@ -489,7 +512,7 @@ fn request_started(state: &mut DaemonState, p: &Value) {
         state.tracked_requests.push(TrackedRequest {
             url,
             method,
-            headers: header_object(&request["headers"]),
+            headers: header_object(&request.headers),
             timestamp: millis,
             resource_type,
             request_id: id,
@@ -501,11 +524,11 @@ fn request_started(state: &mut DaemonState, p: &Value) {
     }
 }
 
-fn response_seen(state: &mut DaemonState, p: &Value) {
-    let id = request_id(p);
-    let response = &p["response"];
-    let status = response["status"].as_i64();
-    let mime = response["mimeType"].as_str().unwrap_or("").to_string();
+fn response_seen(state: &mut DaemonState, p: &NetworkEvent) {
+    let id = p.request.request.as_str();
+    let response = &p.response;
+    let status = response.status;
+    let mime = response.mime_type.clone();
     if state.har_recording {
         if let Some(entry) = state
             .har_entries
@@ -513,23 +536,18 @@ fn response_seen(state: &mut DaemonState, p: &Value) {
             .rev()
             .find(|e| e.request_id == id)
         {
-            let headers = header_list(&response["headers"]);
+            let headers = header_list(&response.headers);
             entry.status = status;
-            entry.status_text = response["statusText"].as_str().unwrap_or("").to_string();
+            entry.status_text = response.status_text.clone();
             entry.mime_type = mime.clone();
-            entry.http_version = chrome::har_cdp_protocol_to_http_version(
-                response["protocol"].as_str().unwrap_or(""),
-            );
+            entry.http_version = chrome::har_cdp_protocol_to_http_version(&response.protocol);
             entry.redirect_url = headers
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("location"))
                 .map(|(_, v)| v.clone())
                 .unwrap_or_default();
             entry.response_headers = headers;
-            entry.response_body_size = response["bodySize"]
-                .as_i64()
-                .or(response["content"]["size"].as_i64())
-                .unwrap_or(-1);
+            entry.response_body_size = response.body_size.or(response.content.size).unwrap_or(-1);
         }
     }
     if state.request_tracking {
@@ -541,23 +559,20 @@ fn response_seen(state: &mut DaemonState, p: &Value) {
         {
             entry.status = status;
             entry.mime_type = Some(mime);
-            entry.response_headers = Some(header_object(&response["headers"]));
+            entry.response_headers = Some(header_object(&response.headers));
         }
     }
 }
 
 /// Reads the body bytes of a collected response as `(text, is_base64)`.
 async fn response_data(bidi: &BidiClient, id: &str) -> Result<(String, bool), String> {
-    let r = bidi
-        .send(
+    let r: NetworkData = bidi
+        .send_typed(
             "network.getData",
-            json!({"dataType": "response", "request": id}),
+            &json!({"dataType": "response", "request": id}),
         )
         .await?;
-    Ok((
-        r["bytes"]["value"].as_str().unwrap_or("").to_string(),
-        r["bytes"]["type"] == "base64",
-    ))
+    Ok((r.bytes.raw().to_string(), r.bytes.is_base64()))
 }
 
 async fn har_body(state: &mut DaemonState, id: &str) {
@@ -776,10 +791,7 @@ async fn in_active_tab(ff: &FirefoxSession, context: &str) -> bool {
 
 /// `responsebody`: waits for the next response whose URL contains the pattern and returns its body.
 pub async fn responsebody(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let pattern = cmd
-        .get("url")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'url' parameter")?;
+    let pattern = require(cmd, "url")?;
     let timeout_ms = cmd
         .get("timeout")
         .and_then(Value::as_u64)
@@ -793,18 +805,16 @@ pub async fn responsebody(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             Ok(None) => return Err("Event stream closed".to_string()),
             Err(_) => return Err(format!("Timeout waiting for response matching '{pattern}'")),
         };
-        let p = &event["params"];
+        let p: NetworkEvent = serde_json::from_value(event["params"].clone()).unwrap_or_default();
         if event["method"] == "network.responseCompleted"
-            && p["response"]["url"]
-                .as_str()
-                .is_some_and(|u| u.contains(pattern))
-            && in_active_tab(ff, p["context"].as_str().unwrap_or("")).await
+            && p.response.url.contains(pattern)
+            && in_active_tab(ff, event["params"]["context"].as_str().unwrap_or("")).await
         {
-            let (body, _) = response_data(&ff.bidi, request_id(p)).await?;
+            let (body, _) = response_data(&ff.bidi, &p.request.request).await?;
             return Ok(json!({
                 "body": body,
-                "status": p["response"]["status"].as_i64().unwrap_or(0),
-                "headers": header_object(&p["response"]["headers"]),
+                "status": p.response.status.unwrap_or(0),
+                "headers": header_object(&p.response.headers),
             }));
         }
     }
@@ -867,14 +877,8 @@ pub async fn download(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 }
 
 async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let selector = cmd
-        .get("selector")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'selector' parameter")?;
-    let path = cmd
-        .get("path")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'path' parameter")?;
+    let selector = require(cmd, "selector")?;
+    let path = require(cmd, "path")?;
     let (dir, _) = chrome::resolve_download_dest(path)?;
     let download_dir = dir
         .to_str()
@@ -1184,7 +1188,7 @@ mod tests {
     #[tokio::test]
     async fn mocked_responses_preserve_json_cors_and_base64_over_bidi() {
         let (ff, _tx, _, messages, _) =
-            crate::native::firefox::session::tests::fake_session_with_rdp().await;
+            crate::native::bidi::session::tests::fake_session_with_rdp().await;
         let net = NetContext::default();
         let mut route = mock_route("*", r#"{"mock":true}"#, 201);
         route.response.as_mut().unwrap().allow_origin = Some("https://page.example".to_string());
@@ -1220,7 +1224,13 @@ mod tests {
             before_request(
                 &ff.bidi,
                 &net,
-                &json!({"request": "r1", "url": "https://api.example/data", "headers": bidi_headers(headers)}),
+                &RequestData {
+                    request: "r1".to_string(),
+                    url: "https://api.example/data".to_string(),
+                    headers: bidi_headers(headers),
+                    ..Default::default()
+                },
+                None,
             )
             .await
             .unwrap();
@@ -1251,8 +1261,28 @@ mod tests {
                         json!("content-type,x-client");
                 }
             }
-            assert_eq!(header_object(&params["headers"]), expected_headers);
+            let headers: Vec<Header> = serde_json::from_value(params["headers"].clone()).unwrap();
+            assert_eq!(header_object(&headers), expected_headers);
         }
+        net.blank_contexts
+            .write()
+            .await
+            .insert("storage".to_string());
+        before_request(
+            &ff.bidi,
+            &net,
+            &RequestData {
+                request: "storage".to_string(),
+                url: "https://page.example/".to_string(),
+                ..Default::default()
+            },
+            Some("storage"),
+        )
+        .await
+        .unwrap();
+        let sent = messages.lock().unwrap().last().unwrap().clone();
+        let body: BytesValue = serde_json::from_value(sent["params"]["body"].clone()).unwrap();
+        assert_eq!(body.text(), "<html></html>");
     }
 
     #[test]
@@ -1303,7 +1333,7 @@ mod tests {
         assert_eq!(decision, NetworkDecision::Continue { headers: None });
     }
 
-    use crate::native::firefox::session::tests::fake_session;
+    use crate::native::bidi::session::tests::fake_session;
 
     fn request_event(method: &str, id: &str, url: &str, blocked: bool) -> Value {
         json!({
@@ -1371,6 +1401,24 @@ mod tests {
                 "network.failRequest"
             ]
         );
+    }
+
+    #[test]
+    fn only_top_level_lifecycle_events_change_the_tab_set() {
+        for method in [
+            "browsingContext.contextCreated",
+            "browsingContext.contextDestroyed",
+        ] {
+            assert!(top_level_context_changed(
+                &json!({"method":method, "params":{"context":"tab", "parent":null}})
+            ));
+            assert!(!top_level_context_changed(
+                &json!({"method":method, "params":{"context":"frame", "parent":"tab"}})
+            ));
+        }
+        assert!(!top_level_context_changed(
+            &json!({"method":"log.entryAdded", "params":{}})
+        ));
     }
 
     #[tokio::test]

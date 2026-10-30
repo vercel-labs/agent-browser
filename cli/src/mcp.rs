@@ -2120,7 +2120,7 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         json!({
             "type": "array",
             "items": { "type": "string" },
-            "description": "Advanced: extra CLI arguments, including --engine chrome|lightpanda|obscura. Global flags that change network, file, policy, or host access (such as --allowed-domains, --executable-path, --args, --config) are rejected; set them in the MCP server environment or config. Obscura is experimental and rejects --proxy-bypass (including resolved config/environment settings). Explicit Obscura launches send this invocation's resolved bypass setting even to an existing daemon."
+            "description": "Advanced: extra CLI arguments, including --engine chrome|lightpanda|firefox|obscura. Global flags that change network, file, policy, or host access (such as --allowed-domains, --executable-path, --args, --config) are rejected; set them in the MCP server environment or config. Obscura is experimental and rejects --proxy-bypass (including resolved config/environment settings). Explicit Obscura launches send this invocation's resolved bypass setting even to an existing daemon."
         }),
     );
     props.insert(
@@ -5216,7 +5216,12 @@ mod tests {
             let error = cli_tool_args(&arguments, vec!["open".to_string()], None).unwrap_err();
             assert!(error.message.contains("may not set"), "{:?}", bad);
         }
-        for ok in [vec!["--engine", "obscura"], vec!["--full"], vec!["-i"]] {
+        for ok in [
+            vec!["--engine", "obscura"],
+            vec!["--engine", "firefox"],
+            vec!["--full"],
+            vec!["-i"],
+        ] {
             let arguments = json!({ "extraArgs": ok });
             assert!(cli_tool_args(&arguments, vec!["open".to_string()], None).is_ok());
         }

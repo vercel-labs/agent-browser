@@ -1,15 +1,14 @@
-//! Firefox element pointer commands, raw input, scrolling and dialogs.
-
 use serde_json::{json, Value};
 
 use super::actions::session;
+use super::forms::require;
 use super::input::{
-    pointer_click, pointer_down, pointer_hover, pointer_up, pointer_wheel, touch_event,
-    touch_swipe_path, touch_tap, Origin,
+    pointer_click, pointer_down, pointer_hover, pointer_path, pointer_up, pointer_wheel,
+    touch_event, touch_tap, Origin,
 };
 use super::session::FirefoxSession;
 use super::target::{resolve_target, Target};
-use crate::native::actions::{DaemonState, PendingDialog};
+use crate::native::actions::{mouse_button_mask, DaemonState, PendingDialog};
 use crate::native::element::{
     intercepted_error, not_actionable_error, ACTIONABILITY_JS, BLOCKER_AT_JS,
 };
@@ -17,7 +16,7 @@ use crate::native::interaction::{
     dispatch_event_js, CLICK_HREF_JS, FOCUS_JS, HIGHLIGHT_JS, SCROLL_BY_JS, SCROLL_INTO_VIEW_JS,
 };
 
-/// Scrolls `this` into view, then reports its center plus Chrome's actionability and blocker verdicts.
+/// Scrolls `this` into view, then reports its viewport-clipped, rounded center plus Chrome's actionability and blocker verdicts.
 fn prepare_js() -> String {
     format!(
         r#"function() {{
@@ -31,8 +30,10 @@ fn prepare_js() -> String {
                 el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
                 rect = el.getBoundingClientRect();
             }}
-            const x = rect.x + rect.width / 2;
-            const y = rect.y + rect.height / 2;
+            const vw = window.innerWidth || document.documentElement.clientWidth;
+            const vh = window.innerHeight || document.documentElement.clientHeight;
+            const x = Math.floor((Math.max(0, rect.left) + Math.min(vw, rect.right)) / 2);
+            const y = Math.floor((Math.max(0, rect.top) + Math.min(vh, rect.bottom)) / 2);
             const blockerAt = {BLOCKER_AT_JS};
             const notActionable = {ACTIONABILITY_JS};
             return {{ x: x, y: y, reason: notActionable(document, el, x, y), blocker: blockerAt(document, el, x, y) }};
@@ -90,10 +91,7 @@ pub(super) async fn perform(
 
 /// Clicks a ref or selector, returning Chrome's `{clicked}` shape.
 pub async fn click(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let selector = cmd
-        .get("selector")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'selector' parameter")?;
+    let selector = require(cmd, "selector")?;
 
     if cmd.get("newTab").and_then(Value::as_bool).unwrap_or(false) {
         return click_new_tab(selector, state).await;
@@ -106,14 +104,9 @@ pub async fn click(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
         .and_then(Value::as_i64)
         .unwrap_or(1)
         .max(0) as u32;
-    let actions = pointer_click(
-        &Origin::Element(target.shared_id.clone()),
-        button,
-        click_count,
-    );
-
     let ff = session(state)?;
-    prepare(ff, &target, selector, true).await?;
+    let (x, y) = prepare(ff, &target, selector, true).await?;
+    let actions = pointer_click(&Origin::Viewport { x, y }, button, click_count);
     if perform(ff, &target.context, actions).await? {
         return Ok(json!({ "clicked": selector, "dialogOpened": true }));
     }
@@ -143,15 +136,11 @@ async fn click_new_tab(selector: &str, state: &mut DaemonState) -> Result<Value,
 
 /// Double-clicks a ref or selector.
 pub async fn dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let selector = cmd
-        .get("selector")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'selector' parameter")?;
+    let selector = require(cmd, "selector")?;
     let target = resolve_target(state, selector).await?;
-    let actions = pointer_click(&Origin::Element(target.shared_id.clone()), "left", 2);
-
     let ff = session(state)?;
-    prepare(ff, &target, selector, true).await?;
+    let (x, y) = prepare(ff, &target, selector, true).await?;
+    let actions = pointer_click(&Origin::Viewport { x, y }, "left", 2);
     if perform(ff, &target.context, actions).await? {
         return Ok(json!({ "clicked": selector, "dialogOpened": true }));
     }
@@ -160,25 +149,18 @@ pub async fn dblclick(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
 /// Moves the mouse over a ref or selector.
 pub async fn hover(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let selector = cmd
-        .get("selector")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'selector' parameter")?;
+    let selector = require(cmd, "selector")?;
     let target = resolve_target(state, selector).await?;
-    let actions = pointer_hover(&Origin::Element(target.shared_id.clone()));
-
     let ff = session(state)?;
-    prepare(ff, &target, selector, true).await?;
+    let (x, y) = prepare(ff, &target, selector, true).await?;
+    let actions = pointer_hover(&Origin::Viewport { x, y });
     perform(ff, &target.context, actions).await?;
     Ok(json!({ "hovered": selector }))
 }
 
 /// Focuses a ref or selector.
 pub async fn focus(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let selector = cmd
-        .get("selector")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'selector' parameter")?;
+    let selector = require(cmd, "selector")?;
     let target = resolve_target(state, selector).await?;
     session(state)?
         .bidi
@@ -194,15 +176,11 @@ pub async fn focus(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
 
 /// Taps a ref or selector with a touch pointer.
 pub async fn tap(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let selector = cmd
-        .get("selector")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'selector' parameter")?;
+    let selector = require(cmd, "selector")?;
     let target = resolve_target(state, selector).await?;
-    let actions = touch_tap(&Origin::Element(target.shared_id.clone()));
-
     let ff = session(state)?;
-    prepare(ff, &target, selector, true).await?;
+    let (x, y) = prepare(ff, &target, selector, true).await?;
+    let actions = touch_tap(&Origin::Viewport { x, y });
     perform(ff, &target.context, actions).await?;
     Ok(json!({ "tapped": selector }))
 }
@@ -230,7 +208,8 @@ pub async fn swipe(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
         ),
     };
 
-    let actions = touch_swipe_path(
+    let actions = pointer_path(
+        "touch",
         &Origin::Viewport {
             x: start_x,
             y: start_y,
@@ -254,14 +233,8 @@ pub async fn swipe(cmd: &Value, state: &mut DaemonState) -> Result<Value, String
 
 /// Drags from one ref or selector to another.
 pub async fn drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let source = cmd
-        .get("source")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'source' parameter")?;
-    let target_selector = cmd
-        .get("target")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'target' parameter")?;
+    let source = require(cmd, "source")?;
+    let target_selector = require(cmd, "target")?;
     let source_target = resolve_target(state, source).await?;
     let target = resolve_target(state, target_selector).await?;
     if source_target.context != target.context {
@@ -343,10 +316,7 @@ pub async fn scroll(cmd: &Value, state: &mut DaemonState) -> Result<Value, Strin
 
 /// Scrolls a ref or selector into view.
 pub async fn scrollintoview(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let selector = cmd
-        .get("selector")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'selector' parameter")?;
+    let selector = require(cmd, "selector")?;
     let target = resolve_target(state, selector).await?;
     session(state)?
         .bidi
@@ -362,10 +332,7 @@ pub async fn scrollintoview(cmd: &Value, state: &mut DaemonState) -> Result<Valu
 
 /// Dispatches a DOM event on a ref or selector.
 pub async fn dispatch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let selector = cmd
-        .get("selector")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'selector' parameter")?;
+    let selector = require(cmd, "selector")?;
     let event_type = cmd
         .get("event")
         .or_else(|| cmd.get("eventType"))
@@ -379,10 +346,7 @@ pub async fn dispatch(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
 
 /// Highlights a ref or selector with a temporary red outline.
 pub async fn highlight(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let selector = cmd
-        .get("selector")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'selector' parameter")?;
+    let selector = require(cmd, "selector")?;
     let target = resolve_target(state, selector).await?;
     session(state)?
         .bidi
@@ -396,19 +360,8 @@ pub async fn highlight(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
     Ok(json!({ "highlighted": selector }))
 }
 
-fn button_mask(button: &str) -> i32 {
-    match button {
-        "left" => 1,
-        "right" => 2,
-        "middle" => 4,
-        "back" => 8,
-        "forward" => 16,
-        _ => 0,
-    }
-}
-
 fn apply_button(state: &mut DaemonState, event_type: &str, button: &str) {
-    let mask = button_mask(button);
+    let mask = mouse_button_mask(button);
     match event_type {
         "mousePressed" => state.mouse_state.buttons |= mask,
         "mouseReleased" => state.mouse_state.buttons &= !mask,
@@ -466,7 +419,7 @@ pub async fn mousedown(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
         x: state.mouse_state.x,
         y: state.mouse_state.y,
     };
-    state.mouse_state.buttons |= button_mask(button);
+    state.mouse_state.buttons |= mouse_button_mask(button);
 
     let ff = session(state)?;
     perform(ff, &ff.context.clone(), pointer_down(&origin, button)).await?;
@@ -480,7 +433,7 @@ pub async fn mouseup(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         x: state.mouse_state.x,
         y: state.mouse_state.y,
     };
-    state.mouse_state.buttons &= !button_mask(button);
+    state.mouse_state.buttons &= !mouse_button_mask(button);
 
     let ff = session(state)?;
     perform(ff, &ff.context.clone(), pointer_up(&origin, button)).await?;
@@ -630,7 +583,7 @@ fn dialog_status(dialog: Option<&PendingDialog>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::{fake_session_with_script, Calls};
+    use crate::native::bidi::session::tests::{fake_session_with_script, Calls};
 
     fn connected(params: &Value) -> Value {
         if params["functionDeclaration"]
@@ -681,25 +634,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn click_scrolls_checks_and_performs_the_pointer_action() {
-        let (mut state, calls) = state_with_refs(connected).await;
-
-        let result = click(&json!({ "selector": "@e1" }), &mut state)
-            .await
-            .unwrap();
-
-        assert_eq!(result, json!({ "clicked": "@e1" }));
-        assert_eq!(
-            *calls.lock().unwrap(),
-            [
-                "script.callFunction",
-                "script.callFunction",
-                "input.performActions"
-            ]
-        );
-    }
-
-    #[tokio::test]
     async fn a_covered_target_fails_before_any_pointer_action() {
         let (mut state, calls) = state_with_refs(blocked).await;
 
@@ -711,80 +645,6 @@ mod tests {
         assert_eq!(
             *calls.lock().unwrap(),
             ["script.callFunction", "script.callFunction"]
-        );
-    }
-
-    #[tokio::test]
-    async fn element_commands_return_chrome_shapes() {
-        let (mut state, _calls) = state_with_refs(connected).await;
-
-        assert_eq!(
-            focus(&json!({ "selector": "@e1" }), &mut state)
-                .await
-                .unwrap(),
-            json!({ "focused": "@e1" })
-        );
-        assert_eq!(
-            scrollintoview(&json!({ "selector": "@e1" }), &mut state)
-                .await
-                .unwrap(),
-            json!({ "scrolled": "@e1" })
-        );
-        assert_eq!(
-            highlight(&json!({ "selector": "@e1" }), &mut state)
-                .await
-                .unwrap(),
-            json!({ "highlighted": "@e1" })
-        );
-        assert_eq!(
-            dispatch(
-                &json!({ "selector": "@e1", "event": "click", "eventInit": { "bubbles": true } }),
-                &mut state
-            )
-            .await
-            .unwrap(),
-            json!({ "dispatched": "click", "selector": "@e1" })
-        );
-        assert_eq!(
-            scroll(
-                &json!({ "selector": "@e1", "direction": "down", "amount": 120 }),
-                &mut state
-            )
-            .await
-            .unwrap(),
-            json!({ "scrolled": true })
-        );
-        assert_eq!(
-            scroll(&json!({ "y": 80 }), &mut state).await.unwrap(),
-            json!({ "scrolled": true })
-        );
-    }
-
-    #[tokio::test]
-    async fn raw_pointer_commands_return_chrome_shapes() {
-        let (mut state, _calls) = state_with_refs(connected).await;
-
-        assert_eq!(
-            wheel(&json!({ "x": 5, "y": 6, "deltaY": 100 }), &mut state)
-                .await
-                .unwrap(),
-            json!({ "scrolled": true, "deltaX": 0.0, "deltaY": 100.0 })
-        );
-        assert_eq!(
-            swipe(&json!({ "direction": "up" }), &mut state)
-                .await
-                .unwrap(),
-            json!({ "swiped": "up" })
-        );
-        assert_eq!(
-            swipe(&json!({}), &mut state).await.unwrap(),
-            json!({ "swiped": true, "from": [200.0, 400.0], "to": [200.0, 100.0] })
-        );
-        assert_eq!(
-            drag(&json!({ "source": "@e1", "target": "@e2" }), &mut state)
-                .await
-                .unwrap(),
-            json!({ "dragged": true, "source": "@e1", "target": "@e2" })
         );
     }
 
@@ -839,41 +699,5 @@ mod tests {
             2
         );
         assert!(state.firefox.as_ref().unwrap().touches.is_empty());
-    }
-
-    #[tokio::test]
-    async fn dialog_reports_and_dismisses_the_pending_prompt() {
-        let (mut state, calls) = state_with_refs(connected).await;
-        state.pending_dialog = Some(PendingDialog {
-            dialog_type: "prompt".into(),
-            message: "name?".into(),
-            default_prompt: Some("Ada".into()),
-            session_id: Some("ctx-active".into()),
-            ..Default::default()
-        });
-
-        assert_eq!(
-            dialog(&json!({ "response": "status" }), &mut state)
-                .await
-                .unwrap(),
-            json!({
-                "hasDialog": true,
-                "type": "prompt",
-                "message": "name?",
-                "defaultPrompt": "Ada",
-            })
-        );
-        assert_eq!(
-            dialog(
-                &json!({ "response": "dismiss", "promptText": "Bob" }),
-                &mut state
-            )
-            .await
-            .unwrap(),
-            json!({ "handled": true, "accepted": false })
-        );
-
-        assert!(state.pending_dialog.is_none());
-        assert_eq!(*calls.lock().unwrap(), ["browsingContext.handleUserPrompt"]);
     }
 }

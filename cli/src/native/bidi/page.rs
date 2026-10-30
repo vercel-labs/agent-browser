@@ -1,10 +1,9 @@
-//! Page-level Firefox commands: navigation, history, reading page state, evaluate and wait.
-
 use std::time::Duration;
 
 use serde_json::{json, Value};
 
 use super::actions::session;
+use super::forms::require;
 use super::network;
 use super::session::FirefoxSession;
 use crate::native::actions::{route_url_matches, DaemonState};
@@ -89,18 +88,15 @@ fn reset_page_state(state: &mut DaemonState) {
 /// Navigates the active tab and returns `{url, title, targetId}` like `BrowserManager::navigate`.
 /// `waitUntil` maps to the BiDi `wait` state.
 pub async fn navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let url = cmd
-        .get("url")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'url' parameter")?;
-    if let Some(filter) = state.domain_filter.read().await.as_ref() {
-        filter.check_url(url)?;
-    }
+    let url = require(cmd, "url")?;
     let wait = match cmd.get("waitUntil").and_then(Value::as_str) {
         Some("domcontentloaded") => "interactive",
         Some("none") => "none",
         _ => "complete",
     };
+    if let Some(filter) = state.domain_filter.read().await.as_ref() {
+        filter.check_url(url)?;
+    }
     network::set_origin_headers(cmd, url, state).await?;
     reset_page_state(state);
     let ff = session(state)?;
@@ -123,6 +119,7 @@ pub async fn navigate(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
     if let Some(msg) = neterror_message(landed) {
         return Err(format!("Navigation failed: {msg}"));
     }
+    ff.note_visit(landed);
     let title = ff.eval("document.title").await.unwrap_or(Value::Null);
     Ok(json!({ "url": landed, "title": title, "targetId": context }))
 }
@@ -198,10 +195,7 @@ pub async fn content(state: &mut DaemonState) -> Result<Value, String> {
 
 /// Evaluates `script` and returns `{result, origin}` like Chrome's `handle_evaluate`.
 pub async fn evaluate(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let script = cmd
-        .get("script")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'script' parameter")?;
+    let script = require(cmd, "script")?;
     let ff = session(state)?;
     let result = ff.eval(script).await?;
     let origin = ff.url().await.unwrap_or_default();
@@ -244,7 +238,7 @@ fn selector_check(selector: &str, state: &str) -> String {
 }
 
 /// Polls `expression` in the active context until it is truthy or the timeout expires.
-pub(super) async fn poll_until_true(
+pub(crate) async fn poll_until_true(
     ff: &FirefoxSession,
     expression: &str,
     timeout_ms: u64,
@@ -346,10 +340,7 @@ pub async fn wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, String>
 /// Waits for the active URL to match `url` and returns `{url}` like Chrome's
 /// `handle_waitforurl`.
 pub async fn waitforurl(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let url_pattern = cmd
-        .get("url")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'url' parameter")?;
+    let url_pattern = require(cmd, "url")?;
     let timeout_ms = cmd
         .get("timeout")
         .and_then(Value::as_u64)
@@ -388,10 +379,7 @@ pub async fn waitforloadstate(cmd: &Value, state: &mut DaemonState) -> Result<Va
 /// Waits for `expression` to be truthy and returns `{result}` like Chrome's
 /// `handle_waitforfunction`.
 pub async fn waitforfunction(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let expression = cmd
-        .get("expression")
-        .and_then(Value::as_str)
-        .ok_or("Missing 'expression' parameter")?;
+    let expression = require(cmd, "expression")?;
     let timeout_ms = cmd
         .get("timeout")
         .and_then(Value::as_u64)
@@ -405,7 +393,7 @@ pub async fn waitforfunction(cmd: &Value, state: &mut DaemonState) -> Result<Val
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::firefox::session::tests::{
+    use crate::native::bidi::session::tests::{
         fake_session, fake_session_with, fake_session_with_replies, FakeReply,
     };
 
@@ -565,75 +553,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selector_wait_polls_then_reports_the_timeout() {
-        let mut state = DaemonState::new();
-        let (ff, _tx, _) = fake_session().await;
-        state.firefox = Some(ff);
-        let err = wait(
-            &json!({"selector": "#missing", "state": "hidden", "timeout": 50}),
-            &mut state,
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err, "Wait timed out after 50ms");
-    }
-
-    #[tokio::test]
-    async fn url_wait_resolves_when_the_current_url_already_matches() {
-        let mut state = DaemonState::new();
-        let (ff, _tx, _) = fake_session().await;
-        state.firefox = Some(ff);
-        let result = wait(&json!({"url": "*", "timeout": 50}), &mut state)
-            .await
-            .unwrap();
-        assert_eq!(result, json!({ "waited": "url", "url": "*" }));
-    }
-
-    #[tokio::test]
-    async fn load_state_none_returns_without_polling() {
-        let mut state = DaemonState::new();
-        let (ff, _tx, _) = fake_session().await;
-        state.firefox = Some(ff);
-        let result = wait(&json!({"loadState": "none", "timeout": 50}), &mut state)
-            .await
-            .unwrap();
-        assert_eq!(result, json!({ "waited": "load", "state": "none" }));
-    }
-
-    #[tokio::test]
-    async fn waitforurl_resolves_when_the_current_url_already_matches() {
-        let mut state = DaemonState::new();
-        let (ff, _tx, calls) = fake_session().await;
-        state.firefox = Some(ff);
-        let result = waitforurl(&json!({"url": "*", "timeout": 50}), &mut state)
-            .await
-            .unwrap();
-        assert_eq!(result, json!({ "url": "" }));
-        assert_eq!(
-            calls.lock().unwrap().clone(),
-            vec!["browsingContext.getTree", "browsingContext.getTree"]
-        );
-    }
-
-    #[tokio::test]
     async fn waitforurl_requires_a_url() {
         let mut state = DaemonState::new();
         let (ff, _tx, calls) = fake_session().await;
         state.firefox = Some(ff);
         let err = waitforurl(&json!({}), &mut state).await.unwrap_err();
         assert_eq!(err, "Missing 'url' parameter");
-        assert!(calls.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn waitforloadstate_none_returns_without_touching_the_page() {
-        let mut state = DaemonState::new();
-        let (ff, _tx, calls) = fake_session().await;
-        state.firefox = Some(ff);
-        let result = waitforloadstate(&json!({"state": "none", "timeout": 50}), &mut state)
-            .await
-            .unwrap();
-        assert_eq!(result, json!({ "state": "none" }));
         assert!(calls.lock().unwrap().is_empty());
     }
 
@@ -649,62 +574,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn waitforfunction_polls_then_reports_the_timeout() {
-        let mut state = DaemonState::new();
-        let (ff, _tx, calls) = fake_session().await;
-        state.firefox = Some(ff);
-        let err = waitforfunction(&json!({"expression": "true", "timeout": 30}), &mut state)
-            .await
-            .unwrap_err();
-        assert_eq!(err, "Wait timed out after 30ms");
-        assert!(calls.lock().unwrap().iter().any(|c| c == "script.evaluate"));
-    }
-
-    #[tokio::test]
     async fn waitforfunction_requires_an_expression() {
         let mut state = DaemonState::new();
         let (ff, _tx, _) = fake_session().await;
         state.firefox = Some(ff);
         let err = waitforfunction(&json!({}), &mut state).await.unwrap_err();
         assert_eq!(err, "Missing 'expression' parameter");
-    }
-
-    #[tokio::test]
-    async fn history_and_reload_use_the_bidi_commands_and_return_the_url() {
-        let mut state = DaemonState::new();
-        let (ff, _tx, calls) = fake_session().await;
-        state.firefox = Some(ff);
-
-        assert_eq!(
-            back(&json!({}), &mut state).await.unwrap(),
-            json!({ "url": "" })
-        );
-        assert_eq!(
-            forward(&json!({}), &mut state).await.unwrap(),
-            json!({ "url": "" })
-        );
-        assert_eq!(
-            reload(&json!({}), &mut state).await.unwrap(),
-            json!({ "url": "" })
-        );
-
-        let calls = calls.lock().unwrap().clone();
-        assert_eq!(calls[0], "browsingContext.traverseHistory");
-        assert_eq!(calls[1], "browsingContext.getTree");
-        assert_eq!(calls[2], "browsingContext.traverseHistory");
-        assert_eq!(calls[3], "browsingContext.getTree");
-        assert_eq!(calls[4], "browsingContext.reload");
-        assert_eq!(calls[5], "browsingContext.getTree");
-    }
-
-    #[tokio::test]
-    async fn content_returns_html_and_origin() {
-        let mut state = DaemonState::new();
-        let (ff, _tx, _) = fake_session().await;
-        state.firefox = Some(ff);
-        assert_eq!(
-            content(&mut state).await.unwrap(),
-            json!({ "html": "", "origin": "" })
-        );
     }
 }

@@ -492,7 +492,7 @@ EOF
 --session <name>        # isolated browser session
 --json                  # JSON output (for machine parsing)
 --headed                # show the window (default is headless)
---engine <name>         # chrome (default), lightpanda, obscura (experimental)
+--engine <name>         # chrome (default), lightpanda, firefox (requires Firefox 150+), obscura (experimental)
 --webgpu                # enable WebGPU (software Vulkan on Linux, no GPU needed)
 --auto-connect          # connect to an already-running Chrome
 --cdp <port|url>        # connect to a CDP port or WebSocket URL; root query slash is optional
@@ -508,7 +508,7 @@ EOF
 --namespace <name>      # isolate daemon sockets and restore-state directories
 ```
 
-Engine setup and limits: [Lightpanda](https://agent-browser.dev/engines/lightpanda), [Obscura (experimental)](https://agent-browser.dev/engines/obscura).
+Engine setup and limits: [Lightpanda](https://agent-browser.dev/engines/lightpanda), [Firefox](https://agent-browser.dev/engines/firefox), [Obscura (experimental)](https://agent-browser.dev/engines/obscura).
 
 ## When to load another skill
 
