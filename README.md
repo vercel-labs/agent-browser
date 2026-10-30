@@ -325,7 +325,7 @@ agent-browser mouse up [button]       # Release button
 agent-browser mouse wheel <dy> [dx]   # Scroll at current tracked pointer (starts at 0,0)
 ```
 
-To scroll elsewhere, move the pointer first:
+Failed wheel dispatches leave the tracked pointer unchanged. To scroll elsewhere, move the pointer first:
 
 ```bash
 agent-browser mouse move 600 400

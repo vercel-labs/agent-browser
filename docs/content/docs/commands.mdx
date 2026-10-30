@@ -170,7 +170,7 @@ agent-browser mouse up [button]       # Release button
 agent-browser mouse wheel <dy> [dx]   # Scroll wheel
 ```
 
-The wheel scrolls at the current tracked pointer, which starts at `0,0`.
+The wheel scrolls at the current tracked pointer, which starts at `0,0`. Failed wheel dispatches leave the tracked pointer unchanged.
 
 To scroll elsewhere, move the pointer first:
 
