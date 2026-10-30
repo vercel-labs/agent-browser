@@ -1872,7 +1872,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SKILLS_GET,
             "Skills get",
-            "Get skill content, including home-directory skills when no package root is found.",
+            "Get skill content, including home-directory skills when no package root is found. Package discovery looks for the bundled skill-data/core/SKILL.md file.",
             json!({ "names": string_array_schema("Skill names."), "all": { "type": "boolean" }, "full": { "type": "boolean" } }),
             &[],
         ),

@@ -3756,6 +3756,7 @@ The skills command serves bundled skill content that always matches the
 installed CLI version. Agents should use this to get current instructions
 rather than relying on cached copies.
 When no package root is found, the CLI reads manually installed skills from ~/.agent-browser/skills and ~/.agent-browser/skill-data.
+Package discovery looks for the bundled skill-data/core/SKILL.md file.
 
 Examples:
   agent-browser skills

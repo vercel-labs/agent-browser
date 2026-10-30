@@ -11634,7 +11634,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Get skill content, including home-directory skills when no package root is found.",
+      "description": "Get skill content, including home-directory skills when no package root is found. Package discovery looks for the bundled skill-data/core/SKILL.md file.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
