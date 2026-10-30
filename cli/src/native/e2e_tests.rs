@@ -5434,6 +5434,516 @@ async fn e2e_error_handling() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_click_stabilizes_active_smooth_scroll() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({"id": "launch", "action": "launch", "headless": true}),
+            &mut state,
+        )
+        .await,
+    );
+    let html = r#"<!doctype html><html><body style="margin:0;height:4000px">
+        <div id="scroller" style="height:440px;overflow:auto;scroll-behavior:smooth">
+            <div style="height:280px"></div>
+            <button id="target" style="width:180px;height:48px">Target</button>
+            <div style="height:1600px"></div>
+        </div>
+        <script>
+            window.presses = [];
+            window.clicks = 0;
+            document.addEventListener('pointerdown', event => {
+                window.presses.push({target:event.target.id, trusted:event.isTrusted});
+            }, true);
+            document.getElementById('target').onclick = () => window.clicks++;
+        </script>
+        </body></html>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let mut failures = Vec::new();
+    for normal_command in [false, true] {
+        for nested in [false, true] {
+            for selector in ["#target", "xpath=//button[@id='target']", "ref"] {
+                assert_success(
+                    &execute_command(
+                        &json!({"id":"navigate", "action":"navigate", "url":url}),
+                        &mut state,
+                    )
+                    .await,
+                );
+                assert_success(
+                    &execute_command(&json!({"id":"snapshot", "action":"snapshot"}), &mut state)
+                        .await,
+                );
+                let requested_selector = if selector == "ref" {
+                    state
+                        .ref_map
+                        .entries_sorted()
+                        .into_iter()
+                        .find(|(_, entry)| entry.role == "button" && entry.name == "Target")
+                        .unwrap()
+                        .0
+                } else {
+                    selector.to_string()
+                };
+                let script = format!(
+                    r#"new Promise(resolve => {{
+                    const nested = {nested};
+                    const scroller = document.getElementById('scroller');
+                    if (!nested) scroller.style.overflow = 'visible';
+                    const scrolling = nested ? scroller : window;
+                    window.scrollPosition = () => nested ? scroller.scrollTop : scrollY;
+                    scrolling.scrollTo({{top:200, behavior:'smooth'}});
+                    const deadline = performance.now() + 2000;
+                    let previousPosition = window.scrollPosition();
+                    function sample() {{
+                        const position = window.scrollPosition();
+                        if (position > 0 && position < 190 && position !== previousPosition) return resolve(true);
+                        if (performance.now() > deadline) return resolve(false);
+                        previousPosition = position;
+                        requestAnimationFrame(sample);
+                    }}
+                    sample();
+                }})"#
+                );
+                assert_evaluate(&mut state, "start-scroll", &script, json!(true)).await;
+                if normal_command {
+                    let clicked = execute_command(
+                        &json!({"id":"click", "action":"click", "selector":requested_selector}),
+                        &mut state,
+                    )
+                    .await;
+                    assert_success(&clicked);
+                } else {
+                    let manager = state.browser.as_ref().unwrap();
+                    let session = manager.active_session_id().unwrap();
+                    let (click_x, click_y, target_session, _) =
+                        super::interaction::resolve_stable_click_center(
+                            &manager.client,
+                            session,
+                            &state.ref_map,
+                            &requested_selector,
+                            &state.iframe_sessions,
+                        )
+                        .await
+                        .unwrap();
+                    let geometry_script = "(() => { const bounds = document.getElementById('target').getBoundingClientRect(); return {x:bounds.x+bounds.width/2,y:bounds.y+bounds.height/2,scroll:window.scrollPosition()}; })()";
+                    let before = manager
+                        .client
+                        .send_command(
+                            "Runtime.evaluate",
+                            Some(json!({"expression":geometry_script,"returnByValue":true})),
+                            Some(&target_session),
+                        )
+                        .await
+                        .unwrap();
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    let after = manager
+                        .client
+                        .send_command(
+                            "Runtime.evaluate",
+                            Some(json!({"expression":geometry_script,"returnByValue":true})),
+                            Some(&target_session),
+                        )
+                        .await
+                        .unwrap();
+                    for coordinate in ["x", "y", "scroll"] {
+                        let before_value = before["result"]["value"][coordinate].as_f64().unwrap();
+                        let after_value = after["result"]["value"][coordinate].as_f64().unwrap();
+                        if (before_value - after_value).abs() > 0.5 {
+                            failures.push((
+                                nested,
+                                selector.to_string(),
+                                json!({"before":before,"after":after}),
+                            ));
+                            break;
+                        }
+                    }
+                    for event in ["mousePressed", "mouseReleased"] {
+                        manager
+                            .client
+                            .send_command(
+                                "Input.dispatchMouseEvent",
+                                Some(json!({
+                                    "type":event, "x":click_x, "y":click_y,
+                                    "button":"left", "clickCount":1,
+                                })),
+                                Some(&target_session),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                }
+                let observed = execute_command(
+                &json!({"id":"observe", "action":"evaluate", "script":"({presses:window.presses, clicks:window.clicks})"}),
+                &mut state,
+            )
+            .await;
+                assert_success(&observed);
+                let observed = &get_data(&observed)["result"];
+                if observed["clicks"] != 1
+                    || observed["presses"] != json!([{"target":"target", "trusted":true}])
+                {
+                    failures.push((nested, selector.to_string(), observed.clone()));
+                }
+            }
+        }
+    }
+    assert_success(&execute_command(&json!({"id":"close", "action":"close"}), &mut state).await);
+    assert!(
+        failures.is_empty(),
+        "Scrolling changed trusted input targets: {failures:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_unstable_target_times_out_without_pressing() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({"id":"launch", "action":"launch", "headless":true}),
+            &mut state,
+        )
+        .await,
+    );
+    let html = r#"<!doctype html><style>
+        @keyframes move { from { transform:translateX(0); } to { transform:translateX(500px); } }
+        button { margin:80px; width:100px; height:50px; animation:move 1s linear infinite alternate; }
+        </style><button id=target>Moving</button><script>
+        window.presses=0;
+        document.addEventListener('pointerdown', () => window.presses++);
+        </script>"#;
+    assert_success(&execute_command(
+        &json!({"id":"navigate", "action":"navigate", "url":format!("data:text/html;base64,{}", STANDARD.encode(html))}), &mut state,
+    ).await);
+    let started = tokio::time::Instant::now();
+    let clicked = execute_command(
+        &json!({"id":"click", "action":"click", "selector":"#target"}),
+        &mut state,
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert_evaluate(&mut state, "presses", "window.presses", json!(0)).await;
+    assert_evaluate(
+        &mut state,
+        "stop",
+        "document.querySelector('button').style.animation='none'; true",
+        json!(true),
+    )
+    .await;
+    let recovered = execute_command(
+        &json!({"id":"recovered", "action":"click", "selector":"#target"}),
+        &mut state,
+    )
+    .await;
+    assert_evaluate(&mut state, "presses", "window.presses", json!(1)).await;
+    assert_evaluate(
+        &mut state,
+        "fallback",
+        "window.savedFrame=requestAnimationFrame; window.requestAnimationFrame=undefined; true",
+        json!(true),
+    )
+    .await;
+    let fallback = execute_command(
+        &json!({"id":"fallback-click", "action":"click", "selector":"#target"}),
+        &mut state,
+    )
+    .await;
+    assert_evaluate(&mut state, "presses", "window.presses", json!(2)).await;
+    assert_evaluate(
+        &mut state,
+        "throw",
+        "window.requestAnimationFrame=()=>{throw new Error('frame rejected')}; true",
+        json!(true),
+    )
+    .await;
+    let rejected = execute_command(
+        &json!({"id":"rejected-click", "action":"click", "selector":"#target"}),
+        &mut state,
+    )
+    .await;
+    assert_evaluate(&mut state, "presses", "window.presses", json!(2)).await;
+    assert_success(&execute_command(&json!({"id":"close", "action":"close"}), &mut state).await);
+    assert_eq!(clicked["success"], false, "{clicked}");
+    assert!(
+        clicked["error"]
+            .as_str()
+            .unwrap()
+            .contains("did not stabilize"),
+        "{clicked}"
+    );
+    assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
+    assert_success(&recovered);
+    assert_success(&fallback);
+    assert_eq!(rejected["success"], false);
+    assert!(rejected["error"]
+        .as_str()
+        .unwrap()
+        .contains("Could not wait"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_stabilizes_same_origin_scrolling_frame() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({"id":"launch", "action":"launch", "headless":true}),
+            &mut state,
+        )
+        .await,
+    );
+    let html = r#"<!doctype html><body style="margin:0;height:4000px">
+        <iframe id="child" style="width:700px;height:440px;border:0" srcdoc="
+            <body style='margin:0;height:2000px'><div style='height:300px'></div>
+            <button id='target' style='width:160px;height:48px'>Target</button>
+            <script>window.presses=[];document.addEventListener('pointerdown',event=>window.presses.push({target:event.target.id,trusted:event.isTrusted}));</script>
+        "></iframe></body>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    for selector in ["#target", "xpath=//button[@id='target']", "ref"] {
+        assert_success(
+            &execute_command(
+                &json!({"id":"navigate", "action":"navigate", "url":url}),
+                &mut state,
+            )
+            .await,
+        );
+        assert_success(
+            &execute_command(
+                &json!({"id":"frame", "action":"frame", "selector":"#child"}),
+                &mut state,
+            )
+            .await,
+        );
+        assert_success(
+            &execute_command(&json!({"id":"snapshot", "action":"snapshot"}), &mut state).await,
+        );
+        let requested = if selector == "ref" {
+            state
+                .ref_map
+                .entries_sorted()
+                .into_iter()
+                .find(|(_, entry)| entry.role == "button" && entry.name == "Target")
+                .unwrap()
+                .0
+        } else {
+            selector.to_string()
+        };
+        assert_evaluate(&mut state, "scroll", r#"new Promise(resolve=>{
+            const frame=document.getElementById('child').contentWindow;
+            frame.scrollTo({top:180,behavior:'smooth'});
+            let previous=frame.scrollY;
+            const deadline=performance.now()+2000;
+            function sample(){const position=frame.scrollY;if(position>0&&position<170&&position!==previous)return resolve(true);if(performance.now()>deadline)return resolve(false);previous=position;requestAnimationFrame(sample);}
+            requestAnimationFrame(sample);
+        })"#, json!(true)).await;
+        let clicked = execute_command(
+            &json!({"id":"click", "action":"click", "selector":requested}),
+            &mut state,
+        )
+        .await;
+        assert_success(&clicked);
+        assert_evaluate(
+            &mut state,
+            "presses",
+            "document.getElementById('child').contentWindow.presses",
+            json!([{"target":"target","trusted":true}]),
+        )
+        .await;
+    }
+    assert_success(&execute_command(&json!({"id":"close", "action":"close"}), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_centers_offscreen_targets_away_from_fixed_edges() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(&json!({"action":"launch", "headless":true}), &mut state).await,
+    );
+    let html = r#"<!doctype html><style>
+        body { margin:0; width:4000px; height:4000px; }
+        #target { position:absolute; left:1600px; top:1600px; width:160px; height:48px; }
+        .edge { position:fixed; background:gray; z-index:10; }
+        #header { top:0; left:0; right:0; height:96px; }
+        #footer { bottom:0; left:0; right:0; height:96px; }
+        #left { top:0; bottom:0; left:0; width:96px; }
+        #right { top:0; bottom:0; right:0; width:96px; }
+        </style><button id="target">Target</button>
+        <div id="header" class="edge"></div><div id="footer" class="edge"></div>
+        <div id="left" class="edge"></div><div id="right" class="edge"></div>
+        <script>
+            window.presses=[]; window.clicks=0;
+            document.addEventListener('pointerdown',event=>presses.push({target:event.target.id,trusted:event.isTrusted}),true);
+            document.getElementById('target').onclick=()=>clicks++;
+        </script>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let mut failures = Vec::new();
+    for (edge, scroll_x, scroll_y) in [
+        ("above", 1200, 2000),
+        ("below", 1200, 800),
+        ("left", 2000, 1200),
+        ("right", 0, 1200),
+        ("visible", 1200, 1400),
+        ("partial-after-preparation", 1200, 1400),
+    ] {
+        for selector in ["#target", "xpath=//button[@id='target']", "ref"] {
+            assert_success(
+                &execute_command(&json!({"action":"navigate", "url":url}), &mut state).await,
+            );
+            assert_evaluate(
+                &mut state,
+                "position",
+                &format!("scrollTo({{left:{scroll_x},top:{scroll_y},behavior:'instant'}});true"),
+                json!(true),
+            )
+            .await;
+            let requested = if selector == "ref" {
+                assert_success(&execute_command(&json!({"action":"snapshot"}), &mut state).await);
+                state
+                    .ref_map
+                    .entries_sorted()
+                    .into_iter()
+                    .find(|(_, entry)| entry.role == "button" && entry.name == "Target")
+                    .unwrap()
+                    .0
+            } else {
+                selector.to_string()
+            };
+            if edge == "partial-after-preparation" {
+                assert_evaluate(
+                    &mut state,
+                    "defer-scroll",
+                    r#"
+                    document.querySelectorAll('.edge').forEach(edge => edge.remove());
+                    const original = Element.prototype.scrollIntoView;
+                    let moved = false;
+                    Element.prototype.scrollIntoView = function(options) {
+                        original.call(this, options);
+                        if (this.id === 'target' && !moved) {
+                            moved = true;
+                            requestAnimationFrame(() => scrollTo({
+                                left:scrollX,
+                                top:this.offsetTop - innerHeight + 5,
+                                behavior:'instant'
+                            }));
+                        }
+                    };
+                    true
+                "#,
+                    json!(true),
+                )
+                .await;
+            }
+            let clicked =
+                execute_command(&json!({"action":"click", "selector":requested}), &mut state).await;
+            if clicked["success"] != true {
+                failures.push(format!("{edge}/{selector}: {clicked}"));
+                continue;
+            }
+            assert_evaluate(
+                &mut state,
+                "activation",
+                "({presses:window.presses,clicks:window.clicks})",
+                json!({"presses":[{"target":"target","trusted":true}],"clicks":1}),
+            )
+            .await;
+            if edge == "visible" {
+                assert_evaluate(
+                    &mut state,
+                    "unchanged-scroll",
+                    "[scrollX,scrollY]",
+                    json!([scroll_x, scroll_y]),
+                )
+                .await;
+            }
+        }
+    }
+    assert_success(&execute_command(&json!({"action":"close"}), &mut state).await);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_cancels_scroll_started_by_previous_click() {
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(&json!({"action":"launch", "headless":true}), &mut state).await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"action":"viewport", "width":1280, "height":577}),
+            &mut state,
+        )
+        .await,
+    );
+    let html = r#"<!doctype html><html style="scroll-behavior:smooth"><body style="margin:0"><main id="scroller">
+        <div style="height:1400px"></div>
+        <div style="height:1600px"><div id="card" style="position:sticky;top:16px;height:600px;border:1px solid">Form</div></div>
+        <div style="height:1400px"></div>
+        <section style="padding:20px"><button id="target" style="padding:10px 16px">Submit</button></section></main>
+        <script>
+            window.done = false;
+            window.presses = [];
+            window.activations = 0;
+            document.addEventListener('pointerdown', event => {
+                window.presses.push({target:event.target.id, trusted:event.isTrusted});
+            }, true);
+            document.getElementById('target').onclick = () => {
+                window.activations++;
+                if (!window.done) document.getElementById('card').scrollIntoView({behavior:'smooth',block:'center'});
+            };
+        </script></body></html>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let mut failures = Vec::new();
+    for nested in [false, true] {
+        for selector in ["#target", "xpath=//button[@id='target']", "ref"] {
+            for _ in 0..5 {
+                assert_success(
+                    &execute_command(&json!({"action":"navigate", "url":url}), &mut state).await,
+                );
+                if nested {
+                    assert_evaluate(&mut state, "nested-scroller", "document.getElementById('scroller').style.cssText='height:577px;overflow:auto;scroll-behavior:smooth';true", json!(true)).await;
+                }
+                let requested = if selector == "ref" {
+                    assert_success(
+                        &execute_command(&json!({"action":"snapshot"}), &mut state).await,
+                    );
+                    state
+                        .ref_map
+                        .entries_sorted()
+                        .into_iter()
+                        .find(|(_, entry)| entry.role == "button" && entry.name == "Submit")
+                        .unwrap()
+                        .0
+                } else {
+                    selector.to_string()
+                };
+                assert_success(
+                    &execute_command(&json!({"action":"click", "selector":requested}), &mut state)
+                        .await,
+                );
+                assert_evaluate(&mut state, "complete-form", "window.done=true", json!(true)).await;
+                let clicked =
+                    execute_command(&json!({"action":"click", "selector":requested}), &mut state)
+                        .await;
+                if clicked["success"] != true {
+                    failures.push(format!("nested={nested}/{selector}: {clicked}"));
+                    continue;
+                }
+                assert_evaluate(&mut state, "activation", "({presses,activations})", json!({
+                "presses":[{"target":"target","trusted":true},{"target":"target","trusted":true}],
+                "activations":2
+            })).await;
+            }
+        }
+    }
+    assert_success(&execute_command(&json!({"action":"close"}), &mut state).await);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_click_reports_covering_overlay() {
     let mut state = DaemonState::new();
 

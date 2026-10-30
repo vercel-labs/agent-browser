@@ -100,6 +100,8 @@ agent-browser close
 
 Clicks fail early when another element covers the target's click point, for example a consent banner or modal. Dismiss or interact with the reported covering element, then take a fresh snapshot before retrying the original ref. Click and dblclick fail, instead of reporting success, when the element is hidden, disabled, or outside the viewport. `click --new-tab` opens the link's URL directly, so these checks do not apply to it.
 
+Native click and dblclick request instant scrolling and sample the target position before sending input. Preparation is bounded to two seconds and requires consecutive samples within a 0.5 CSS-pixel tolerance; if preparation times out, no mouse press is sent. This reduces smooth-scroll races but does not guarantee immobility under arbitrary page mutations, and never retries a click after input has been sent.
+
 Headless Chromium screenshots hide native scrollbars for consistent image output. Pass `--hide-scrollbars false` when launching to keep native scrollbars visible.
 
 ### Traditional Selectors (also supported)

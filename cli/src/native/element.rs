@@ -340,7 +340,7 @@ async fn resolve_center_in_same_process_frame(
             const el = {find_expr};
             if (!el) return null;
             if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded(true);
-            else el.scrollIntoView({{ block: 'center', inline: 'center' }});
+            else el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
             const rect = el.getBoundingClientRect();
             let x = rect.x + rect.width / 2;
             let y = rect.y + rect.height / 2;

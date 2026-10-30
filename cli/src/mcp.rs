@@ -922,7 +922,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_CLICK,
             "Click element",
-            "Click an element by @ref or CSS selector.",
+            "Click an element by @ref or CSS selector. Native input waits up to two seconds for target geometry to settle and fails without pressing if it remains unstable.",
             json!({
                 "selector": selector_schema(),
                 "newTab": { "type": "boolean", "default": false, "description": "Open link targets in a new tab after applying session setup." },
@@ -1058,7 +1058,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_DBLCLICK,
             "Double-click element",
-            "Double-click an element.",
+            "Double-click an element. Native input waits up to two seconds for target geometry to settle and fails without pressing if it remains unstable.",
             json!({ "selector": selector_schema() }),
             &["selector"],
         ),
@@ -5074,6 +5074,32 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["click", "@e1", "--new-tab"]);
+    }
+
+    #[test]
+    fn click_tools_use_native_cli_actions_and_describe_stabilization() {
+        for (tool_name, action) in [(TOOL_CLICK, "click"), (TOOL_DBLCLICK, "dblclick")] {
+            let tool = tools()
+                .into_iter()
+                .find(|tool| tool["name"] == tool_name)
+                .unwrap();
+            assert!(tool["description"]
+                .as_str()
+                .unwrap()
+                .contains("geometry to settle"));
+            for selector in ["#target", "@e1", "xpath=//button"] {
+                let args = if action == "click" {
+                    click_command_args(&json!({"selector":selector})).unwrap()
+                } else {
+                    vec![action.to_string(), selector.to_string()]
+                };
+                let flags = crate::flags::parse_flags(&args);
+                let parsed = crate::commands::parse_command(&args, &flags).unwrap();
+                assert_eq!(parsed["action"], action);
+                assert_eq!(parsed["selector"], selector);
+                assert_ne!(parsed["newTab"], true);
+            }
+        }
     }
 
     #[test]

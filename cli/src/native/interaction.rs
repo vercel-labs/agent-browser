@@ -65,20 +65,32 @@ async fn click_element(
     iframe_sessions: &HashMap<String, String>,
     require_actionable: bool,
 ) -> Result<ClickResult, String> {
-    let (x, y, effective_session_id) = resolve_element_center(
-        client,
-        session_id,
-        ref_map,
-        selector_or_ref,
-        iframe_sessions,
-        require_actionable,
-    )
-    .await?;
+    let (x, y, effective_session_id, offset) = if require_actionable {
+        resolve_stable_click_center(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            iframe_sessions,
+        )
+        .await?
+    } else {
+        let (center_x, center_y, target_session) = resolve_element_center(
+            client,
+            session_id,
+            ref_map,
+            selector_or_ref,
+            iframe_sessions,
+            require_actionable,
+        )
+        .await?;
+        let offset =
+            session_viewport_offset(client, session_id, &target_session, iframe_sessions).await?;
+        (center_x, center_y, target_session, offset)
+    };
     // A click-triggered dialog can fire on the frame's own session (OOPIF) or
     // on the top-level page session; both count as "ours". A dialog on any
     // other session belongs to a background tab and must not abort this click.
-    let offset =
-        session_viewport_offset(client, session_id, &effective_session_id, iframe_sessions).await?;
     let mut result = dispatch_click(
         client,
         &effective_session_id,
@@ -93,6 +105,105 @@ async fn click_element(
     result.position = (x + offset.0, y + offset.1);
     (result.x, result.y) = result.position;
     Ok(result)
+}
+
+/// Bounds pre-press geometry sampling; no input is sent or retried here.
+pub(super) async fn resolve_stable_click_center(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector_or_ref: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<(f64, f64, String, (f64, f64)), String> {
+    let mut last_preparation_error = None;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut previous: Option<(f64, f64, String, (f64, f64))> = None;
+        let mut stable_frames = 0;
+        let mut preparation = Some(false);
+        loop {
+            if let Some(force_center) = preparation.take() {
+                let (object_id, target_session) = resolve_element_object_id(
+                    client, session_id, ref_map, selector_or_ref, iframe_sessions,
+                ).await?;
+                let scrolled = client.send_command(
+                    "Runtime.callFunctionOn",
+                    Some(serde_json::json!({
+                        "objectId":object_id,
+                        "arguments":[{"value":force_center}],
+                        "functionDeclaration":r#"function(forceCenter) {
+                            const doc = this.ownerDocument;
+                            const view = doc.defaultView;
+                            for (let ancestor = this.parentElement; ancestor; ancestor = ancestor.parentElement) {
+                                ancestor.scrollTo({left:ancestor.scrollLeft, top:ancestor.scrollTop, behavior:'instant'});
+                            }
+                            view.scrollTo({left:view.scrollX, top:view.scrollY, behavior:'instant'});
+                            const rect = this.getBoundingClientRect();
+                            const inView = rect.width > 0 && rect.height > 0 &&
+                                rect.bottom > 0 && rect.right > 0 &&
+                                rect.top < (view.innerHeight || doc.documentElement.clientHeight) &&
+                                rect.left < (view.innerWidth || doc.documentElement.clientWidth);
+                            const alignment = !forceCenter && inView ? 'nearest' : 'center';
+                            this.scrollIntoView({behavior:'instant', block:alignment, inline:alignment});
+                        }"#,
+                        "returnByValue":true,
+                    })),
+                    Some(&target_session),
+                ).await;
+                let _ = client.send_command(
+                    "Runtime.releaseObject",
+                    Some(serde_json::json!({"objectId":object_id})),
+                    Some(&target_session),
+                ).await;
+                let scrolled = scrolled?;
+                if scrolled.get("exceptionDetails").is_some() {
+                    return Err(format!("Could not prepare target '{selector_or_ref}' for clicking: {scrolled}"));
+                }
+            }
+            let resolved = resolve_element_center(
+                client, session_id, ref_map, selector_or_ref, iframe_sessions, true,
+            ).await;
+            let (center_x, center_y, target_session) = match resolved {
+                Ok(center) => center,
+                Err(error) if error.contains("is outside the viewport, so the click would not reach it") => {
+                    last_preparation_error = Some(error);
+                    previous = None;
+                    stable_frames = 0;
+                    preparation = Some(true);
+                    tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            last_preparation_error = None;
+            let offset = session_viewport_offset(
+                client, session_id, &target_session, iframe_sessions,
+            ).await?;
+            let unchanged = previous.as_ref().is_some_and(|prior| {
+                prior.2 == target_session
+                    && (prior.0 - center_x).abs() <= 0.5
+                    && (prior.1 - center_y).abs() <= 0.5
+                    && (prior.3.0 - offset.0).abs() <= 0.5
+                    && (prior.3.1 - offset.1).abs() <= 0.5
+            });
+            stable_frames = if unchanged { stable_frames + 1 } else { 0 };
+            if stable_frames >= 2 {
+                return Ok((center_x, center_y, target_session, offset));
+            }
+            previous = Some((center_x, center_y, target_session.clone(), offset));
+            let waited = client.send_command(
+                "Runtime.evaluate",
+                Some(serde_json::json!({
+                    "expression": "new Promise(resolve => { const timer = setTimeout(resolve, 50); if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => { clearTimeout(timer); resolve(); }); })",
+                    "awaitPromise": true,
+                    "returnByValue": true,
+                })),
+                Some(&target_session),
+            ).await?;
+            if waited.get("exceptionDetails").is_some() {
+                return Err(format!("Could not wait for target '{selector_or_ref}' to stabilize: {waited}"));
+            }
+        }
+    }).await.map_err(|_| last_preparation_error.unwrap_or_else(|| format!("Element '{selector_or_ref}' did not stabilize before clicking (2000 ms)")))?
 }
 
 pub async fn dblclick(
@@ -1304,6 +1415,126 @@ fn named_key_info(key: &str) -> (String, String, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::json;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use tokio_tungstenite::tungstenite::Message;
+
+    async fn click_test_client(
+        delay: std::time::Duration,
+        fail_frame_wait: bool,
+    ) -> (CdpClient, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let presses = Arc::new(AtomicUsize::new(0));
+        let recorded_presses = presses.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                tokio::time::sleep(delay).await;
+                let method = command["method"].as_str().unwrap();
+                let result = if method == "DOM.resolveNode" {
+                    json!({"object":{"type":"object","objectId":"target"}})
+                } else if method == "Runtime.evaluate" {
+                    let expression = command["params"]["expression"].as_str().unwrap();
+                    if expression.starts_with("new Promise") {
+                        if fail_frame_wait {
+                            json!({"exceptionDetails":{"text":"frame wait rejected"}, "result":{"type":"undefined"}})
+                        } else {
+                            json!({"result":{"type":"undefined"}})
+                        }
+                    } else if command["params"]["returnByValue"] == false {
+                        json!({"result":{"type":"object","objectId":"target"}})
+                    } else {
+                        json!({"result":{"type":"object", "value":{"x":100.0,"y":100.0}}})
+                    }
+                } else {
+                    if command["params"]["type"] == "mousePressed" {
+                        recorded_presses.fetch_add(1, Ordering::SeqCst);
+                    }
+                    json!({})
+                };
+                if socket
+                    .send(Message::Text(
+                        json!({"id":command["id"],"result":result}).to_string(),
+                    ))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        (CdpClient::connect(&url).await.unwrap(), presses, server)
+    }
+
+    #[tokio::test]
+    async fn stable_click_accepts_stationary_target_on_delayed_transport() {
+        let (client, presses, server) =
+            click_test_client(std::time::Duration::from_millis(120), false).await;
+        let result = click(
+            &client,
+            "page",
+            &RefMap::new(),
+            "#target",
+            "left",
+            1,
+            &HashMap::new(),
+        )
+        .await;
+        client.close().await;
+        server.await.unwrap();
+        assert!(result.is_ok(), "{}", result.err().unwrap_or_default());
+        assert_eq!(presses.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stable_click_rejects_frame_wait_exception_without_input() {
+        let (client, presses, server) = click_test_client(std::time::Duration::ZERO, true).await;
+        let result = click(
+            &client,
+            "page",
+            &RefMap::new(),
+            "#target",
+            "left",
+            1,
+            &HashMap::new(),
+        )
+        .await;
+        client.close().await;
+        server.await.unwrap();
+        assert!(result.err().unwrap().contains("Could not wait"));
+        assert_eq!(presses.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn stable_click_timeout_ignores_late_response_and_keeps_connection_usable() {
+        let (client, presses, server) =
+            click_test_client(std::time::Duration::from_millis(2100), false).await;
+        let result = click(
+            &client,
+            "page",
+            &RefMap::new(),
+            "#target",
+            "left",
+            1,
+            &HashMap::new(),
+        )
+        .await;
+        let recovered = client
+            .send_command_no_params("Browser.getVersion", Some("page"))
+            .await;
+        client.close().await;
+        server.await.unwrap();
+        assert!(result.err().unwrap().contains("did not stabilize"));
+        assert!(recovered.is_ok());
+        assert_eq!(presses.load(Ordering::SeqCst), 0);
+    }
 
     /// Verify that `char_to_key_info` returns the correct (key, code,
     /// windowsVirtualKeyCode) triple for every character in Playwright's

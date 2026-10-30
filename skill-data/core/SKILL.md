@@ -458,7 +458,7 @@ agent-browser wait --text "..."
 agent-browser snapshot -i
 ```
 
-**Click does nothing / overlay swallows the click** Some modals and cookie banners block other clicks. If `click` reports `covered by <...>`, interact with that covering element first. Otherwise, snapshot, find the dismiss/close button, click it, then re-snapshot.
+**Click does nothing / overlay swallows the click** Some modals and cookie banners block other clicks. If `click` reports `covered by <...>`, interact with that covering element first. Otherwise, snapshot, find the dismiss/close button, click it, then re-snapshot. Native clicks wait up to two seconds for target geometry to settle. A stabilization timeout sends no mouse press; stop the movement before trying again. Never blindly repeat an action that may already have taken effect.
 
 **Fill / type doesn't work** Some custom input components intercept key events. Try:
 

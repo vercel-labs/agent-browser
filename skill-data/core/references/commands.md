@@ -89,6 +89,8 @@ Visible-label matching treats non-breaking and ordinary spaces equivalently.
 
 Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, run a fresh snapshot, then retry the original action. Click and dblclick fail, instead of reporting success, when the element is hidden, disabled, or outside the viewport. `click --new-tab` opens the link's URL directly, so these checks do not apply to it.
 
+Native click and dblclick request instant scrolling and sample the target position before sending input. Preparation is bounded to two seconds and requires consecutive samples within a 0.5 CSS-pixel tolerance; if preparation times out, no mouse press is sent. This reduces smooth-scroll races but does not guarantee immobility under arbitrary page mutations, and never retries a click after input has been sent.
+
 ## Get Information
 
 ```bash

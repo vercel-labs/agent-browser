@@ -1747,6 +1747,8 @@ XPath, or an element reference from snapshot (e.g., @e1).
 
 If another element covers the click point, agent-browser reports the
 covering element instead of dispatching a click to the wrong target.
+Click and dblclick wait up to two seconds for target geometry to settle
+before input. A preparation timeout sends no mouse press.
 
 Click and dblclick fail, instead of reporting success, when the element
 is hidden, disabled, or outside the viewport. With --new-tab, click opens
@@ -1783,6 +1785,9 @@ or triggering double-click handlers.
 
 Double-click fails, instead of reporting success, when the element is
 hidden, disabled, or outside the viewport.
+
+Waits up to two seconds for target geometry to settle before input.
+An unstable target fails without a mouse press.
 
 Global Options:
   --json               Output as JSON
