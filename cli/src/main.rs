@@ -1994,8 +1994,13 @@ fn main() {
         }
     }
 
-    // Launch with cloud provider if -p flag is set.
-    if let Some(ref provider) = flags.provider {
+    // Close is handled by the existing daemon, including provider cleanup.
+    // Selecting a provider must not allocate a new browser just to close it.
+    if let Some(provider) = flags
+        .provider
+        .as_ref()
+        .filter(|_| cmd.get("action").and_then(|value| value.as_str()) != Some("close"))
+    {
         let launch_cmd = build_provider_launch_command(provider, &flags);
 
         let err = match send_command(launch_cmd, &flags.session) {
