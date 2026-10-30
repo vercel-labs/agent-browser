@@ -362,7 +362,42 @@ pub async fn press_key_with_modifiers(
     key: &str,
     modifiers: Option<i32>,
 ) -> Result<(), String> {
-    let (key_name, code, key_code) = named_key_info(key);
+    let (key_name, _, _) = named_key_info(key);
+    let modifier_keys = modifiers.map(modifier_key_names).unwrap_or_default();
+    let modifiers = modifiers.filter(|modifiers| *modifiers != 0);
+    let mut pressed_modifiers: Vec<&'static str> = Vec::with_capacity(modifier_keys.len());
+    let mut active_modifiers = 0;
+
+    for modifier in &modifier_keys {
+        let modifier_key_bit = modifier_bit(modifier).expect("modifier names have a CDP bit");
+        let next_modifiers = active_modifiers | modifier_key_bit;
+        if let Err(error) = dispatch_key_event(
+            client,
+            session_id,
+            modifier,
+            "keyDown",
+            Some(next_modifiers),
+            None,
+        )
+        .await
+        {
+            for pressed in pressed_modifiers.iter().rev() {
+                active_modifiers &= !modifier_bit(pressed).expect("modifier names have a CDP bit");
+                let _ = dispatch_key_event(
+                    client,
+                    session_id,
+                    pressed,
+                    "keyUp",
+                    nonzero_modifiers(active_modifiers),
+                    None,
+                )
+                .await;
+            }
+            return Err(error);
+        }
+        pressed_modifiers.push(*modifier);
+        active_modifiers = next_modifiers;
+    }
 
     // Suppress text insertion when Control (2) or Meta (4) modifiers are active,
     // since these are command chords (e.g. Ctrl+A = select-all), not text input.
@@ -373,32 +408,80 @@ pub async fn press_key_with_modifiers(
         key_text(&key_name)
     };
 
-    client
-        .send_command_typed::<_, Value>(
-            "Input.dispatchKeyEvent",
-            &DispatchKeyEventParams {
-                event_type: "keyDown".to_string(),
-                key: Some(key_name.clone()),
-                code: Some(code.clone()),
-                text: text.clone(),
-                unmodified_text: text.clone(),
-                windows_virtual_key_code: Some(key_code),
-                native_virtual_key_code: Some(key_code),
-                modifiers,
-            },
-            Some(session_id),
+    let key_result = async {
+        dispatch_key_event(
+            client,
+            session_id,
+            &key_name,
+            "keyDown",
+            modifiers,
+            text.clone(),
         )
         .await?;
+        dispatch_key_event(client, session_id, &key_name, "keyUp", modifiers, None).await
+    }
+    .await;
 
+    let mut release_error = None;
+    for modifier in pressed_modifiers.iter().rev() {
+        active_modifiers &= !modifier_bit(modifier).expect("modifier names have a CDP bit");
+        if let Err(error) = dispatch_key_event(
+            client,
+            session_id,
+            modifier,
+            "keyUp",
+            nonzero_modifiers(active_modifiers),
+            None,
+        )
+        .await
+        {
+            release_error.get_or_insert(error);
+        }
+    }
+
+    key_result?;
+    release_error.map_or(Ok(()), Err)
+}
+
+fn modifier_key_names(modifiers: i32) -> Vec<&'static str> {
+    [(2, "Control"), (1, "Alt"), (8, "Shift"), (4, "Meta")]
+        .into_iter()
+        .filter_map(|(bit, key)| (modifiers & bit != 0).then_some(key))
+        .collect()
+}
+
+fn modifier_bit(key: &str) -> Option<i32> {
+    match key.to_ascii_lowercase().as_str() {
+        "alt" => Some(1),
+        "control" | "ctrl" => Some(2),
+        "meta" | "cmd" | "command" => Some(4),
+        "shift" => Some(8),
+        _ => None,
+    }
+}
+
+fn nonzero_modifiers(modifiers: i32) -> Option<i32> {
+    (modifiers != 0).then_some(modifiers)
+}
+
+async fn dispatch_key_event(
+    client: &CdpClient,
+    session_id: &str,
+    key: &str,
+    event_type: &str,
+    modifiers: Option<i32>,
+    text: Option<String>,
+) -> Result<(), String> {
+    let (key_name, code, key_code) = named_key_info(key);
     client
         .send_command_typed::<_, Value>(
             "Input.dispatchKeyEvent",
             &DispatchKeyEventParams {
-                event_type: "keyUp".to_string(),
+                event_type: event_type.to_string(),
                 key: Some(key_name),
                 code: Some(code),
-                text: None,
-                unmodified_text: None,
+                text: text.clone(),
+                unmodified_text: text,
                 windows_virtual_key_code: Some(key_code),
                 native_virtual_key_code: Some(key_code),
                 modifiers,
@@ -406,7 +489,6 @@ pub async fn press_key_with_modifiers(
             Some(session_id),
         )
         .await?;
-
     Ok(())
 }
 
@@ -1276,6 +1358,10 @@ fn key_text(key_name: &str) -> Option<String> {
 
 fn named_key_info(key: &str) -> (String, String, i32) {
     match key.to_lowercase().as_str() {
+        "control" | "ctrl" => ("Control".to_string(), "ControlLeft".to_string(), 17),
+        "alt" => ("Alt".to_string(), "AltLeft".to_string(), 18),
+        "shift" => ("Shift".to_string(), "ShiftLeft".to_string(), 16),
+        "meta" | "cmd" | "command" => ("Meta".to_string(), "MetaLeft".to_string(), 91),
         "enter" | "return" => ("Enter".to_string(), "Enter".to_string(), 13),
         "tab" => ("Tab".to_string(), "Tab".to_string(), 9),
         "escape" | "esc" => ("Escape".to_string(), "Escape".to_string(), 27),
@@ -1304,6 +1390,36 @@ fn named_key_info(key: &str) -> (String, String, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modifier_key_names_follow_chord_order() {
+        assert_eq!(modifier_key_names(2 | 8), vec!["Control", "Shift"]);
+        assert_eq!(
+            modifier_key_names(1 | 2 | 4 | 8),
+            vec!["Control", "Alt", "Shift", "Meta"]
+        );
+    }
+
+    #[test]
+    fn modifier_keys_have_standard_dom_codes_and_virtual_key_codes() {
+        assert_eq!(
+            named_key_info("Control"),
+            ("Control".into(), "ControlLeft".into(), 17)
+        );
+        assert_eq!(named_key_info("Alt"), ("Alt".into(), "AltLeft".into(), 18));
+        assert_eq!(
+            named_key_info("Shift"),
+            ("Shift".into(), "ShiftLeft".into(), 16)
+        );
+        assert_eq!(
+            named_key_info("Meta"),
+            ("Meta".into(), "MetaLeft".into(), 91)
+        );
+        assert_eq!(modifier_bit("Control"), Some(2));
+        assert_eq!(modifier_bit("Shift"), Some(8));
+        assert_eq!(nonzero_modifiers(0), None);
+        assert_eq!(nonzero_modifiers(2), Some(2));
+    }
 
     /// Verify that `char_to_key_info` returns the correct (key, code,
     /// windowsVirtualKeyCode) triple for every character in Playwright's
