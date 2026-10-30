@@ -141,6 +141,39 @@ pub struct SetDiscoverTargetsParams {
 #[serde(rename_all = "camelCase")]
 pub struct CreateTargetParams {
     pub url: String,
+    /// Create a new OS window rather than a tab. Off by default in Chrome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_window: Option<bool>,
+    /// Create the target in the background. CDP documents that
+    /// `background: false` with `focus: false` opens the target while leaving
+    /// the current browser window unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background: Option<bool>,
+    /// Whether the new target should focus (and raise) its browser window.
+    /// Experimental in CDP; verified per-platform. `focus: false` avoids
+    /// stealing OS focus from the human's foreground window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus: Option<bool>,
+    /// Browser context to create the page in. When omitted, the target is
+    /// created in the browser's default context (sharing the founder's
+    /// login/cookies). When set, the page is storage-isolated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_context_id: Option<String>,
+}
+
+impl CreateTargetParams {
+    /// A plain `Target.createTarget { url }` in the default context with no
+    /// window/focus overrides — wire-compatible with the original url-only
+    /// struct used by discovery, `ensure_page`, `tab new`, and temp targets.
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            new_window: None,
+            background: None,
+            focus: None,
+            browser_context_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -583,4 +616,59 @@ pub struct BrowserVersionInfo {
 #[allow(clippy::upper_case_acronyms)]
 pub mod generated {
     include!(concat!(env!("OUT_DIR"), "/cdp_generated.rs"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_target_params_new_serializes_url_only() {
+        // The `::new` constructor must keep the existing wire format (url-only) so
+        // the discovery / ensure_page / tab_new / temp-target call sites are
+        // byte-for-byte identical on the CDP wire.
+        let v = serde_json::to_value(CreateTargetParams::new("about:blank")).unwrap();
+        assert_eq!(v, serde_json::json!({ "url": "about:blank" }));
+    }
+
+    #[test]
+    fn create_target_params_default_context_window_serializes_camel_case_flags() {
+        // `window new` (login-preserving): a real OS window in the DEFAULT context.
+        let v = serde_json::to_value(CreateTargetParams {
+            url: "about:blank".to_string(),
+            new_window: Some(true),
+            background: Some(false),
+            focus: Some(false),
+            browser_context_id: None,
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "url": "about:blank",
+                "newWindow": true,
+                "background": false,
+                "focus": false
+            })
+        );
+        // Must be omitted so Chrome creates the target in the founder's
+        // default (logged-in) context rather than an incognito-like one.
+        assert!(v.get("browserContextId").is_none());
+    }
+
+    #[test]
+    fn create_target_params_isolated_includes_browser_context_id() {
+        let v = serde_json::to_value(CreateTargetParams {
+            url: "about:blank".to_string(),
+            new_window: Some(true),
+            background: None,
+            focus: None,
+            browser_context_id: Some("ctx-123".to_string()),
+        })
+        .unwrap();
+        assert_eq!(v["browserContextId"], "ctx-123");
+        // background/focus omitted when None.
+        assert!(v.get("background").is_none());
+        assert!(v.get("focus").is_none());
+    }
 }
