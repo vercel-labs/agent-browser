@@ -37,9 +37,10 @@ pub struct ReadOptions {
     pub require_md: bool,
     /// Return the nearest ancestor llms.txt or llms-full.txt view.
     pub llms: Option<LlmsMode>,
-    /// Return a heading outline for the selected page content.
+    /// Return a heading outline, excluding heading-like lines inside fenced code.
     pub outline: bool,
     /// Filter page sections, /llms.txt links, /llms-full.txt sections, or outline headings.
+    /// Section filters preserve fenced code blocks within matching sections.
     pub filter: Option<String>,
     /// HTTP request timeout in milliseconds.
     pub timeout_ms: u64,
@@ -902,17 +903,40 @@ fn format_page_outline(content: &str, final_url: &str, filter: Option<&str>) -> 
 }
 
 fn parse_markdown_headings(content: &str) -> Vec<Heading> {
-    content.lines().filter_map(parse_markdown_heading).collect()
+    let mut fence: Option<(char, usize)> = None;
+    let mut headings = Vec::new();
+    for line in content.lines() {
+        if update_code_fence(line, &mut fence) {
+            continue;
+        }
+        if fence.is_some() {
+            continue;
+        }
+        if let Some(heading) =
+            parse_markdown_heading(line).filter(|heading| !heading.title.is_empty())
+        {
+            headings.push(heading);
+        }
+    }
+    headings
 }
 
 fn filter_page_sections(content: &str, filter: &str) -> String {
     let needle = filter.to_ascii_lowercase();
     let lines = content.lines().collect::<Vec<_>>();
-    let headings = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, line)| parse_markdown_heading(line).map(|heading| (index, heading)))
-        .collect::<Vec<_>>();
+    let mut fence: Option<(char, usize)> = None;
+    let mut headings = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if update_code_fence(line, &mut fence) {
+            continue;
+        }
+        if fence.is_some() {
+            continue;
+        }
+        if let Some(heading) = parse_markdown_heading(line) {
+            headings.push((index, heading));
+        }
+    }
 
     let mut sections = Vec::new();
     let mut captured_until = 0;
@@ -937,6 +961,17 @@ fn filter_page_sections(content: &str, filter: &str) -> String {
 }
 
 fn parse_markdown_heading(line: &str) -> Option<Heading> {
+    let mut indent_width = 0;
+    for ch in line.chars() {
+        match ch {
+            ' ' => indent_width += 1,
+            '\t' => indent_width += 4,
+            _ => break,
+        }
+        if indent_width > 3 {
+            return None;
+        }
+    }
     let trimmed = line.trim_start();
     let level = trimmed.chars().take_while(|ch| *ch == '#').count();
     if level == 0 || level > 6 {
@@ -953,13 +988,69 @@ fn parse_markdown_heading(line: &str) -> Option<Heading> {
         return None;
     }
     let title = rest.trim().trim_end_matches('#').trim();
-    if title.is_empty() {
-        None
-    } else {
-        Some(Heading {
-            level,
-            title: title.to_string(),
-        })
+    // Empty headings delimit sections even though they have no outline label.
+    Some(Heading {
+        level,
+        title: title.to_string(),
+    })
+}
+
+fn update_code_fence(line: &str, fence: &mut Option<(char, usize)>) -> bool {
+    let mut indent_width = 0;
+    let mut rest = line;
+    for ch in line.chars() {
+        match ch {
+            ' ' => {
+                indent_width += 1;
+                rest = &rest[1..];
+            }
+            '\t' => {
+                indent_width += 4;
+                rest = &rest[1..];
+            }
+            _ => break,
+        }
+        if indent_width > 3 {
+            return false;
+        }
+    }
+
+    let mut chars = rest.chars();
+    let fence_char = match chars.next() {
+        Some('`') => '`',
+        Some('~') => '~',
+        _ => return false,
+    };
+    let mut len = 1;
+    for ch in chars {
+        if ch == fence_char {
+            len += 1;
+        } else {
+            break;
+        }
+    }
+    if len < 3 {
+        return false;
+    }
+    let after = &rest[len..];
+    match *fence {
+        None => {
+            if fence_char == '`' && after.contains('`') {
+                return false;
+            }
+            *fence = Some((fence_char, len));
+            true
+        }
+        Some((open_char, open_len)) => {
+            if fence_char != open_char || len < open_len {
+                return false;
+            }
+            if !after.bytes().all(|byte| matches!(byte, b' ' | b'\t')) {
+                return false;
+            }
+            *fence = None;
+            true
+        }
     }
 }
 
@@ -967,9 +1058,16 @@ fn filter_markdown_sections(body: &str, filter: &str, no_match_message: &str) ->
     let needle = filter.to_ascii_lowercase();
     let mut sections: Vec<String> = Vec::new();
     let mut current = String::new();
+    let mut fence: Option<(char, usize)> = None;
 
     for line in body.lines() {
-        if line.trim_start().starts_with('#') && !current.trim().is_empty() {
+        if update_code_fence(line, &mut fence) {
+            current.push_str(line);
+            current.push('\n');
+            continue;
+        }
+        let is_heading = fence.is_none() && parse_markdown_heading(line).is_some();
+        if is_heading && !current.trim().is_empty() {
             if current.to_ascii_lowercase().contains(&needle) {
                 sections.push(current.trim().to_string());
             }
@@ -1335,6 +1433,147 @@ Inline [Authentication](/inline-auth) should not become a TOC item.
         assert!(filtered.contains("Use a component."));
         assert!(!filtered.contains("## Setup"));
         assert!(!filtered.contains("## Further reading"));
+    }
+
+    #[test]
+    fn filter_page_sections_ignores_hash_inside_fenced_code() {
+        let content = "# Guide\n\nIntro.\n\n## Authentication\n\nUse token.\n\n```bash\n# configure token\nexport TOKEN=abc\ncurl -H \"Authorization: Bearer\" https://example.com\n```\n\nAfter code instructions.\n\n## Other\n\nNo match.\n";
+        let filtered = filter_page_sections(content, "Authentication");
+
+        assert!(filtered.contains("## Authentication"));
+        assert!(filtered.contains("# configure token"));
+        assert!(filtered.contains("export TOKEN=abc"));
+        assert!(filtered.contains("After code instructions."));
+        assert!(!filtered.contains("## Other"));
+    }
+
+    #[test]
+    fn filter_page_sections_ignores_hash_inside_tilde_fence() {
+        let content = "# Guide\n\n## Authentication\n\nToken docs.\n\n~~~bash\n# setup token\necho hi\n~~~\n\nTrailing instructions.\n\n## Other\n\nNo match.\n";
+        let filtered = filter_page_sections(content, "Authentication");
+
+        assert!(filtered.contains("Trailing instructions."));
+        assert!(!filtered.contains("## Other"));
+    }
+
+    #[test]
+    fn format_page_outline_ignores_hash_inside_fenced_code() {
+        let content =
+            "# Guide\n\n## Authentication\n\n```bash\n# configure token\n```\n\n## Other\n";
+        let outline = format_page_outline(content, "https://example.com/docs", None);
+
+        assert!(outline.contains("Authentication"));
+        assert!(outline.contains("Other"));
+        assert!(!outline.contains("configure token"));
+    }
+
+    #[test]
+    fn filter_markdown_sections_ignores_hash_inside_fenced_code() {
+        let body = "# Intro\nWelcome.\n\n## Auth\nUse auth docs.\n\n```bash\n# not a section\necho hi\n```\n\nAfter code marker.\n\n## Other\nNo match.\n";
+        let filtered = filter_markdown_sections(body, "after code marker", "No match");
+
+        assert!(filtered.contains("## Auth"));
+        assert!(filtered.contains("After code marker."));
+        assert!(!filtered.contains("## Other"));
+    }
+
+    #[test]
+    fn invalid_backtick_info_does_not_hide_headings() {
+        let body = "# Guide\n\n```use `token` here```\n\n## Authentication\nToken docs.\n\n## Other\nNext.";
+        assert_eq!(
+            filter_page_sections(body, "Authentication"),
+            "## Authentication\nToken docs."
+        );
+        assert!(
+            format_page_outline(body, "https://example.com", None).contains("  - Authentication")
+        );
+    }
+
+    #[test]
+    fn non_ascii_whitespace_does_not_close_fences() {
+        let body = "# Guide\n```text\n```\u{00a0}\n# still code\n```\n## Visible\n";
+        assert_eq!(
+            format_page_outline(body, "https://example.com", None),
+            "# Outline\n\nSource: https://example.com\n\n- Guide\n  - Visible"
+        );
+    }
+
+    #[test]
+    fn empty_headings_remain_section_boundaries() {
+        let body = "# Target\nWanted.\n#\nUnrelated.\n# Next\nOther.";
+        assert_eq!(
+            filter_markdown_sections(body, "Target", "No match"),
+            "# Target\nWanted."
+        );
+        assert_eq!(filter_page_sections(body, "Target"), "# Target\nWanted.");
+    }
+
+    #[test]
+    fn fence_closers_require_matching_markers_length_and_ascii_whitespace() {
+        for (opening, candidate, closes) in [
+            ("````", "```", false),
+            ("~~~~", "~~~", false),
+            ("```", "~~~", false),
+            ("~~~", "```", false),
+            ("```", "```text", false),
+            ("```", "```\u{00a0}", false),
+            ("~~~", "~~~\u{000c}", false),
+            ("```", "    ```", false),
+            ("~~~", "\t~~~", false),
+            ("```", "   ```", true),
+            ("```", "```` \t", true),
+            ("~~~", "~~~~\t ", true),
+        ] {
+            let body = format!("# Before\n{opening}\n# hidden\n{candidate}\n# After\n");
+            let expected = if closes {
+                "# Outline\n\nSource: https://example.com\n\n- Before\n- After"
+            } else {
+                "# Outline\n\nSource: https://example.com\n\n- Before"
+            };
+            assert_eq!(
+                format_page_outline(&body, "https://example.com", None),
+                expected,
+                "opening={opening:?}, candidate={candidate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn section_filters_preserve_indented_fences_and_tilde_info_with_backticks() {
+        for (opening, closing) in [
+            (" ```sh", " ```"),
+            ("  ~~~sh", "~~~"),
+            ("   ```sh", "  ```"),
+            ("~~~lang`tick", "~~~"),
+        ] {
+            let body = format!("# Guide\n\n## Authentication\nUse token.\n{opening}\n# hidden\n{closing}\nAfter code marker.\n\n## Other\nNext.");
+            for filtered in [
+                filter_page_sections(&body, "Authentication"),
+                filter_page_sections(&body, "After code marker"),
+                filter_markdown_sections(&body, "After code marker", "No match"),
+            ] {
+                assert!(filtered.starts_with("## Authentication\n"), "{filtered}");
+                assert!(filtered.contains("# hidden"), "{filtered}");
+                assert!(filtered.ends_with("After code marker."), "{filtered}");
+                assert!(!filtered.contains("## Other"), "{filtered}");
+            }
+            assert_eq!(format_page_outline(&body, "https://example.com", None), "# Outline\n\nSource: https://example.com\n\n- Guide\n  - Authentication\n  - Other");
+        }
+    }
+
+    #[test]
+    fn outline_ignores_indented_code_and_empty_headings() {
+        let body = "# Guide\n\n    # code\n\t# tab code\n\n    ```\n\n#\n   ## Visible\n";
+        assert_eq!(
+            format_page_outline(body, "https://example.com", None),
+            "# Outline\n\nSource: https://example.com\n\n- Guide\n  - Visible"
+        );
+    }
+
+    #[test]
+    fn body_filter_does_not_split_on_non_heading_hash_lines() {
+        let body = "## Authentication\n#not a heading\n####### too many hashes\n    # indented code\nAfter code marker.\n\n## Other\nNext.";
+        assert_eq!(filter_markdown_sections(body, "After code marker", "No match"), "## Authentication\n#not a heading\n####### too many hashes\n    # indented code\nAfter code marker.");
     }
 
     #[test]
