@@ -382,6 +382,18 @@ fn attach_restore_config_to_command(cmd: &mut serde_json::Value, flags: &Flags) 
     }
 }
 
+/// Bare `open` (no URL) parses to a stripped `{"action":"launch"}` envelope
+/// that carries none of the profile/executablePath/etc. launch options. When a
+/// config launch envelope was already sent for this invocation, re-sending the
+/// stripped envelope would change the daemon's launch hash and relaunch the
+/// browser without those options (vercel-labs/agent-browser#1977). The config
+/// envelope already launched the browser on about:blank, which is exactly what
+/// bare `open` wants, so the second envelope is skipped.
+fn bare_launch_follows_config_launch(flags: &Flags, command: &serde_json::Value) -> bool {
+    command.get("action").and_then(|v| v.as_str()) == Some("launch")
+        && should_send_local_launch_config(flags, command)
+}
+
 fn mark_restarted_background(resp: &mut Response) {
     if !resp.success {
         return;
@@ -2237,6 +2249,15 @@ fn main() {
 
     let output_opts = OutputOptions::from_flags(&flags);
 
+    if bare_launch_follows_config_launch(&flags, &cmd) {
+        if flags.json {
+            print_json_value(json!({ "success": true, "data": { "launched": true } }));
+        } else {
+            println!("{}", color::green("✓ Done"));
+        }
+        return;
+    }
+
     match send_command_with_respawn(cmd.clone(), &flags.session, &daemon_opts) {
         Ok(mut resp) => {
             if daemon_restarted {
@@ -2475,6 +2496,46 @@ fn batch_result_identity(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bare_open_after_config_launch_is_suppressed() {
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_PROFILE",
+            "AGENT_BROWSER_HEADED",
+            "AGENT_BROWSER_EXECUTABLE_PATH",
+        ]);
+        guard.remove("AGENT_BROWSER_PROFILE");
+        guard.remove("AGENT_BROWSER_HEADED");
+        guard.remove("AGENT_BROWSER_EXECUTABLE_PATH");
+        // Bare `open` with profile env/flags set would otherwise re-send a
+        // stripped launch envelope that relaunches the browser without the
+        // profile (#1977).
+        let args: Vec<String> = ["--profile", "/tmp/profile", "open"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let flags = crate::flags::parse_flags(&args);
+        let cmd = crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+        assert_eq!(cmd["action"], "launch");
+        assert!(super::bare_launch_follows_config_launch(&flags, &cmd));
+
+        // `open <url>` navigates instead of launching.
+        let args: Vec<String> = ["--profile", "/tmp/profile", "open", "https://example.com"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let flags = crate::flags::parse_flags(&args);
+        let cmd = crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+        assert_eq!(cmd["action"], "navigate");
+        assert!(!super::bare_launch_follows_config_launch(&flags, &cmd));
+
+        // Without launch config there is no config envelope to duplicate, so
+        // the bare launch envelope must still be sent.
+        let args: Vec<String> = ["open"].into_iter().map(str::to_string).collect();
+        let flags = crate::flags::parse_flags(&args);
+        let cmd = crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+        assert!(!super::bare_launch_follows_config_launch(&flags, &cmd));
+    }
+
     #[test]
     fn input_mode_session_setting_preserves_command_override() {
         let args: Vec<String> = ["--input-mode", "smooth", "click", "#button", "--human"]
