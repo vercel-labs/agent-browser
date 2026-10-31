@@ -647,6 +647,11 @@ impl EventTracker {
         self.console_entries.clear();
     }
 
+    /// Removes all captured page errors.
+    pub fn clear_errors(&mut self) {
+        self.error_entries.clear();
+    }
+
     pub fn get_console_json(&self) -> Value {
         let messages: Vec<Value> = self
             .console_entries

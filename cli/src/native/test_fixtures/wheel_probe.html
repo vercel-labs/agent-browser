@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Wheel Probe</title>
+  <style>
+    body { margin: 0; min-height: 2000px; }
+    #target {
+      position: absolute;
+      left: 240px;
+      top: 180px;
+      width: 160px;
+      height: 100px;
+      overflow-y: auto;
+    }
+    #target > div { height: 300px; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <div id="target"><div></div></div>
+  <script>
+    window.__wheelProbe = null;
+    window.__wheelEvents = [];
+    document.addEventListener("wheel", (event) => {
+      const entry = {
+        target: event.target.id || event.target.nodeName,
+        x: event.clientX,
+        y: event.clientY,
+        deltaX: event.deltaX,
+        deltaY: event.deltaY,
+      };
+      window.__wheelProbe = entry;
+      window.__wheelEvents.push(entry);
+    });
+  </script>
+</body>
+</html>
