@@ -13577,7 +13577,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "List tabs.",
+      "description": "List tabs without switching. Optionally filter by title or URL, then limit results in their existing order.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -13603,9 +13603,18 @@
             },
             "type": "array"
           },
+          "filter": {
+            "description": "Case-insensitive literal substring of the title or URL. Empty matches all tabs.",
+            "type": "string"
+          },
           "idleTimeout": {
             "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Values too large to convert to milliseconds produce a warning and are ignored. Defaults to 1h; 0 disables idle shutdown.",
             "type": "string"
+          },
+          "limit": {
+            "description": "Maximum number of matching tabs to return. Omit to return all matches.",
+            "minimum": 1,
+            "type": "integer"
           },
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",

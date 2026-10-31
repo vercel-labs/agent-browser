@@ -1385,7 +1385,16 @@ fn parity_tools() -> Vec<Value> {
             }),
             &[],
         ),
-        tool(TOOL_TAB_LIST, "Tab list", "List tabs.", json!({}), &[]),
+        tool(
+            TOOL_TAB_LIST,
+            "Tab list",
+            "List tabs without switching. Optionally filter by title or URL, then limit results in their existing order.",
+            json!({
+                "filter": { "type": "string", "description": "Case-insensitive literal substring of the title or URL. Empty matches all tabs." },
+                "limit": { "type": "integer", "minimum": 1, "description": "Maximum number of matching tabs to return. Omit to return all matches." }
+            }),
+            &[],
+        ),
         tool(
             TOOL_TAB_SWITCH,
             "Tab switch",
@@ -2450,7 +2459,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_COOKIES_SET_CURL => call_cookies_set_curl(arguments),
         TOOL_COOKIES_CLEAR => call_literal(arguments, &["cookies", "clear"]),
         TOOL_TAB_NEW => call_tab_new(arguments),
-        TOOL_TAB_LIST => call_literal(arguments, &["tab", "list"]),
+        TOOL_TAB_LIST => call_cli_tool(arguments, tab_list_command_args(arguments)?, None),
         TOOL_TAB_SWITCH => call_one_string(arguments, "tab", "tab"),
         TOOL_TAB_CLOSE => call_optional_one(arguments, &["tab", "close"], "tab"),
         TOOL_WINDOW_NEW => call_literal(arguments, &["window", "new"]),
@@ -3440,6 +3449,25 @@ fn call_cookies_set_curl(arguments: &Value) -> Result<Value, ProtocolError> {
         args.push(url);
     }
     call_cli_tool(arguments, args, None)
+}
+
+/// Keep MCP tab discovery on the canonical CLI parser, including validation.
+fn tab_list_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec!["tab".to_string(), "list".to_string()];
+    if let Some(filter) = optional_string(arguments, "filter")? {
+        // An inline value cannot be mistaken for a global flag such as --json.
+        args.push(format!("--filter={filter}"));
+    }
+    if let Some(limit) = optional_u64(arguments, "limit")? {
+        if limit == 0 {
+            return Err(ProtocolError::invalid_params(
+                "limit must be a positive integer",
+            ));
+        }
+        args.push("--limit".to_string());
+        args.push(limit.to_string());
+    }
+    Ok(args)
 }
 
 fn call_tab_new(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4547,6 +4575,76 @@ mod tests {
                 assert_eq!(command["fps"], fps);
             }
         }
+    }
+
+    #[test]
+    fn tab_list_options_use_cli_parser() {
+        for arguments in [
+            json!({}),
+            json!({ "filter": "API Docs" }),
+            json!({ "filter": "", "limit": 1 }),
+            json!({ "limit": u64::MAX }),
+            json!({ "filter": "--json", "limit": 2 }),
+            json!({ "filter": "--session", "limit": 2 }),
+            json!({ "filter": "--allowed-domains", "limit": 2 }),
+            json!({ "filter": "--limit", "limit": 2 }),
+        ] {
+            let (name, call_arguments, config) =
+                parse_mcp_call(&[TOOL_TAB_LIST.into(), arguments.to_string()]).unwrap();
+            assert_eq!(name, TOOL_TAB_LIST);
+            assert_eq!(call_arguments, arguments);
+            assert!(config.allows(&name));
+            reject_unknown_arguments(&name, &find_tool(&name).unwrap(), &call_arguments).unwrap();
+            let args = cli_tool_args(
+                &call_arguments,
+                tab_list_command_args(&call_arguments).unwrap(),
+                None,
+            )
+            .unwrap();
+            let flags = crate::flags::parse_flags(&args);
+            let command =
+                crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
+            assert_eq!(command["action"], "tab_list");
+            assert_eq!(command.get("filter"), arguments.get("filter"));
+            assert_eq!(command.get("limit"), arguments.get("limit"));
+        }
+        assert_eq!(tab_list_command_args(&json!({})).unwrap(), ["tab", "list"]);
+    }
+
+    #[test]
+    fn tab_list_rejects_invalid_arguments() {
+        for arguments in [
+            json!({ "filter": 1 }),
+            json!({ "filter": null }),
+            json!({ "limit": 0 }),
+            json!({ "limit": -1 }),
+            json!({ "limit": 1.5 }),
+            json!({ "limit": "2" }),
+            json!({ "limit": null }),
+            json!({ "limit": 18446744073709551616.0 }),
+            json!({ "filter": "docs", "limit": 1, "unexpected": true }),
+        ] {
+            let err = call_tool(
+                Some(&json!({ "name": TOOL_TAB_LIST, "arguments": arguments })),
+                &McpConfig::from_profiles(vec![ToolProfile::All]),
+            )
+            .unwrap_err();
+            assert_eq!(err.code, -32602, "{arguments}");
+        }
+    }
+
+    #[test]
+    fn tab_list_tool_exposes_optional_discovery_arguments() {
+        let tools = tools();
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == TOOL_TAB_LIST)
+            .unwrap();
+        let schema = &tool["inputSchema"];
+        assert_eq!(schema["properties"]["filter"]["type"], "string");
+        assert_eq!(schema["properties"]["limit"]["type"], "integer");
+        assert_eq!(schema["properties"]["limit"]["minimum"], 1);
+        assert!(schema.get("required").is_none());
     }
 
     #[test]
