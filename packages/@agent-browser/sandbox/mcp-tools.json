@@ -11635,7 +11635,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Get bundled skill content.",
+      "description": "Get skill content, including home-directory skills when no package root is found. Package discovery looks for the bundled skill-data/core/SKILL.md file.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -11743,7 +11743,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "List bundled skills.",
+      "description": "List available skills.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -13672,7 +13672,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Open a new tab after applying session setup before its first navigation.",
+      "description": "Open a new tab after applying session setup before its first navigation. Rejected labels preserve the current tab's refs and selected frame.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -13703,6 +13703,8 @@
             "type": "string"
           },
           "label": {
+            "description": "Starts with an ASCII letter, then ASCII letters, digits, `-`, or `_`; `t<N>` and `T<N>` forms are reserved for tab IDs.",
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
             "type": "string"
           },
           "namespace": {

@@ -2967,6 +2967,43 @@ async fn e2e_tab_new_with_label_can_be_switched_and_closed() {
     .await;
     assert_success(&resp);
 
+    for (index, label) in ["t1", "T1", "t0", "T0", "t01", "T01", "T4294967296"]
+        .iter()
+        .enumerate()
+    {
+        let resp = execute_command(
+            &json!({
+                "id": format!("reserved-{index}"),
+                "action": "tab_new",
+                "url": "about:blank",
+                "label": label,
+            }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(
+            resp.get("success").and_then(Value::as_bool),
+            Some(false),
+            "reserved label `{label}` should be rejected: {}",
+            serde_json::to_string_pretty(&resp).unwrap_or_default()
+        );
+        assert!(
+            resp.get("error")
+                .and_then(Value::as_str)
+                .is_some_and(|error| error.contains("reserved for tab IDs")),
+            "reserved label `{label}` should report the reserved-ID error: {}",
+            serde_json::to_string_pretty(&resp).unwrap_or_default()
+        );
+
+        let resp = execute_command(
+            &json!({ "id": format!("reserved-list-{index}"), "action": "tab_list" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(get_data(&resp)["tabs"].as_array().unwrap().len(), 1);
+    }
+
     // Open a labeled tab and verify the response echoes the label and a
     // `t<N>` style tabId.
     let resp = execute_command(
@@ -3027,6 +3064,43 @@ async fn e2e_tab_new_with_label_can_be_switched_and_closed() {
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_rejected_tab_label_preserves_refs_and_frame() {
+    let mut state = DaemonState::new();
+    for command in [
+        json!({ "action": "launch", "headless": true }),
+        json!({ "action": "navigate", "url": "data:text/html,<iframe id='child' srcdoc='<button>Preserved</button>'></iframe>" }),
+        json!({ "action": "frame", "selector": "#child" }),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+    let snapshot = execute_command(&json!({ "action": "snapshot" }), &mut state).await;
+    assert_success(&snapshot);
+    let button_ref = get_data(&snapshot)["refs"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, node)| node["name"] == "Preserved")
+        .unwrap()
+        .0
+        .clone();
+    let frame_id = state.active_frame_id.clone().unwrap();
+
+    let response =
+        execute_command(&json!({ "action": "tab_new", "label": "t1" }), &mut state).await;
+    assert_eq!(response["success"], false);
+    assert!(state.ref_map.get(&button_ref).is_some());
+    assert_eq!(state.active_frame_id.as_deref(), Some(frame_id.as_str()));
+
+    for command in [
+        json!({ "action": "click", "selector": format!("@{button_ref}") }),
+        json!({ "action": "close" }),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
 }
 
 /// Duplicate labels must be rejected so agents can treat a label as a unique

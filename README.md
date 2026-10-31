@@ -418,6 +418,8 @@ Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused wi
 
 You can also assign a memorable label (`docs`, `app`, `admin`) and use it interchangeably with the id. Labels are never auto-generated and never rewritten on navigation — they're yours to name and keep:
 
+A label starts with a letter and contains only letters, digits, `-`, or `_`. Labels must be unique within a session and cannot use the reserved `t<N>` or `T<N>` tab-id form. Rejected labels preserve the current tab's refs and selected frame.
+
 ```bash
 agent-browser tab new --label docs https://docs.example.com
 agent-browser tab docs               # switch to the docs tab
@@ -614,6 +616,8 @@ agent-browser skills path [name]      # Print skill directory path
 ```
 
 Serves bundled skill content that always matches the installed CLI version. AI agents use this to get current instructions rather than relying on cached copies. Set `AGENT_BROWSER_SKILLS_DIR` to override the skills directory path.
+
+When no package root is found, the CLI reads manually installed skills from `~/.agent-browser/skills` and `~/.agent-browser/skill-data`. Package discovery looks for the bundled `skill-data/core/SKILL.md` file.
 
 ### MCP Server
 

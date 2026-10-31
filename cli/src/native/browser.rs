@@ -1904,6 +1904,8 @@ impl BrowserManager {
         self.pages.iter().any(|p| p.label.as_deref() == Some(label))
     }
 
+    /// Creates a tab with an optional unique label; `t<N>` forms are reserved for tab IDs.
+    /// Rejected labels preserve the current tab and its selection.
     pub async fn tab_new(
         &mut self,
         url: Option<&str>,
@@ -1914,6 +1916,12 @@ impl BrowserManager {
                 return Err(format!(
                     "Invalid tab label `{}`; labels must start with a letter and contain only \
                      letters, digits, `-`, and `_`",
+                    label
+                ));
+            }
+            if !matches!(TabRef::parse(label), Ok(TabRef::Label(_))) {
+                return Err(format!(
+                    "Tab label `{}` uses syntax reserved for tab IDs",
                     label
                 ));
             }
