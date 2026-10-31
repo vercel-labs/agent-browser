@@ -3613,9 +3613,13 @@ async fn apply_tab_binding_on_attach(state: &mut DaemonState) -> Result<bool, St
         }
         None => {
             if pin {
-                // A pinned session never implicitly adopts an existing tab:
-                // start it on a fresh one.
-                if let Some(ref mut mgr) = state.browser {
+                // A browser-wide pinned session needs a fresh tab. A direct-page
+                // provider exposes only its own page and cannot create targets.
+                if let Some(mgr) = state
+                    .browser
+                    .as_mut()
+                    .filter(|mgr| !mgr.is_direct_page_connection())
+                {
                     mgr.tab_new(None, None).await?;
                 }
                 true
@@ -4535,6 +4539,7 @@ async fn auto_launch_inner(
                     state.reset_input_state();
                     state.browser = Some(mgr);
                     state.launch_hash = Some(hash);
+                    apply_tab_binding_on_attach_or_rollback(state).await?;
                     state.subscribe_to_browser_events();
                     state.start_fetch_handler();
                     state.start_dialog_handler();
@@ -5628,6 +5633,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
                         state.reset_input_state();
                         state.browser = Some(mgr);
                         state.launch_hash = Some(new_hash);
+                        apply_tab_binding_on_attach_or_rollback(state).await?;
                         state.subscribe_to_browser_events();
                         state.start_fetch_handler();
                         state.start_dialog_handler();
@@ -14867,6 +14873,63 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn direct_page_cold_pin_does_not_allocate_a_browser_target() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_SOCKET_DIR",
+            "AGENT_BROWSER_SESSION",
+            "AGENT_BROWSER_NAMESPACE",
+            "XDG_RUNTIME_DIR",
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.set("AGENT_BROWSER_SESSION", "direct-page-cold-pin");
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        guard.remove("XDG_RUNTIME_DIR");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = ws.next().await {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let response = if command["method"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("Target.")
+                {
+                    json!({"id": command["id"], "error": {"code": -32601, "message": "page-only endpoint"}})
+                } else {
+                    json!({"id": command["id"], "result": {}})
+                };
+                if ws.send(Message::Text(response.to_string())).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut state = DaemonState::new();
+        state.pin_tab = true;
+        state.browser = Some(BrowserManager::connect_cdp_direct(&ws_url).await.unwrap());
+        let result = apply_tab_binding_on_attach_or_rollback(&mut state).await;
+        server.abort();
+        let _ = server.await;
+        assert!(result.is_ok(), "direct-page cold pin failed: {result:?}");
+        assert!(state.browser.as_ref().is_some_and(|mgr| mgr.pin_tab()));
+        assert_eq!(
+            tab_binding::load(&state.session_id).unwrap(),
+            Some(tab_binding::TabBinding {
+                target_id: "provider-page".to_string(),
+                url: String::new(),
+                pinned: true,
+            })
+        );
+    }
+
     /// `find --help`, the MCP tool schema, and the docs/skill references are
     /// plain text, not generated from `FIND_ACTIONS`; this pins their
     /// wording to the actual accepted set so an edit to one without the
@@ -18480,6 +18543,101 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             state.browser.is_none(),
             "direct-page provider should be rejected before CDP connect"
         );
+    }
+
+    /// Provider-plugin launches must apply the same persisted pin-tab binding
+    /// as direct CDP and auto-connect launches. Force-red: omit the binding
+    /// attach after storing the provider manager and the live manager remains
+    /// unpinned even though the session state and binding are pinned.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_provider_plugin_launch_applies_persisted_pin_tab_binding() {
+        use futures_util::{SinkExt, StreamExt};
+        use std::os::unix::fs::PermissionsExt;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_SOCKET_DIR",
+            "XDG_RUNTIME_DIR",
+        ]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        guard.remove("XDG_RUNTIME_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(message) = ws.next().await {
+                let Ok(message) = message else {
+                    break;
+                };
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let command: Value = serde_json::from_str(&text).unwrap();
+                if ws
+                    .send(Message::Text(
+                        json!({ "id": command["id"], "result": {} }).to_string(),
+                    ))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        let plugin_path = dir.path().join("mock-pinned-provider");
+        fs::write(
+            &plugin_path,
+            format!(
+                r#"#!/bin/sh
+cat >/dev/null
+printf '%s' '{{"protocol":"agent-browser.plugin.v1","success":true,"browser":{{"cdpUrl":"{ws_url}","directPage":true}}}}'
+"#
+            ),
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&plugin_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&plugin_path, perms).unwrap();
+
+        let mut state = DaemonState::new();
+        state.pin_tab = true;
+        super::tab_binding::save(
+            &state.session_id,
+            &super::tab_binding::TabBinding {
+                target_id: "provider-page".to_string(),
+                url: String::new(),
+                pinned: true,
+            },
+        )
+        .unwrap();
+
+        handle_launch(
+            &json!({
+                "action": "launch",
+                "provider": "pinned-provider",
+                "plugins": [
+                    {
+                        "name": "pinned-provider",
+                        "command": plugin_path.to_string_lossy(),
+                        "capabilities": ["browser.provider"]
+                    }
+                ]
+            }),
+            &mut state,
+        )
+        .await
+        .unwrap();
+
+        assert!(state.browser.as_ref().unwrap().pin_tab());
+        close_current_browser(&mut state).await.unwrap();
+        server.await.unwrap();
     }
 
     #[test]
