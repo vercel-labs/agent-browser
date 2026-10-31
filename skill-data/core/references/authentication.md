@@ -62,6 +62,8 @@ agent-browser open https://app.example.com/dashboard
 
 This works for any site, including those with complex OAuth flows, SSO, or 2FA, as long as Chrome already has valid session cookies.
 
+Saved localStorage and sessionStorage are written through Chrome DevTools, not page JavaScript, and only while the page is on the saved origin. If an origin redirects elsewhere or fails to load, its storage is skipped, the rest still loads, and `state load` lists it under `skippedOrigins`. For `--state` and `--restore` at launch, `session info` lists it under `restoreSkippedOrigins`.
+
 > **Security note:** State files contain session tokens in plaintext. Add them to `.gitignore`, delete when no longer needed, and set `AGENT_BROWSER_ENCRYPTION_KEY` for encryption at rest. See [Security Best Practices](#security-best-practices).
 
 **Tip:** Combine with `--session <id> --restore` so the imported auth auto-persists across restarts:
@@ -126,7 +128,8 @@ agent-browser --session secure --restore open https://app.example.com
 ```bash
 # Navigate to login page
 agent-browser open https://app.example.com/login
-agent-browser wait --load networkidle
+agent-browser wait --load domcontentloaded
+agent-browser wait --fn "(() => { const usable = (el) => { const style = getComputedStyle(el); return !el.disabled && !el.readOnly && style.display !== 'none' && style.visibility !== 'hidden' && el.getClientRects().length > 0; }; const username = Array.from(document.querySelectorAll('input[type=email], input[type=text], input[autocomplete=username], input[name*=email i], input[name*=user i], input[name*=login i]')).some(usable); const password = Array.from(document.querySelectorAll('input[type=password]')).some(usable); return username && password; })()"
 
 # Get form elements
 agent-browser snapshot -i
@@ -138,17 +141,37 @@ agent-browser fill @e2 "password123"
 
 # Submit
 agent-browser click @e3
-agent-browser wait --load networkidle
+agent-browser wait --url "**/dashboard"
 
 # Verify login succeeded
 agent-browser get url  # Should be dashboard, not login
 ```
 
+After submitting, wait for the authenticated destination, a success message, or another app-specific condition. Do not use `networkidle` as a generic login wait because long-lived background connections can keep it from resolving.
+
+`auth login` filters matching controls by their layout size, computed visibility and opacity, and disabled/readonly state, including custom CSS selectors. If a selected credential field is replaced or redirects focus before entry, the command fails without submitting.
+
+For a form reached through an in-page click, challenge clearance, consent dismissal, or another stateful step, use the auth vault without discarding the prepared document:
+
+```bash
+agent-browser open https://app.example.com/
+agent-browser click "a[href='/login']"
+agent-browser auth login my-app --no-navigate
+```
+
+`--no-navigate` suppresses only the initial navigation that `auth login` normally performs. An existing active top-level HTTP(S) page is required. Before either credential is filled, agent-browser compares the page origin with the effective credential URL using scheme, host, and effective port. Paths, queries, and fragments may differ. Selector waits, credential filling, submit clicking, and submit-triggered navigation remain unchanged.
+
+The command-level `--url` override takes precedence over stored profile or credential-provider URL metadata. In no-navigation mode it is an expected-origin constraint, not a navigation destination. This supports hosted identity-provider flows:
+
+```bash
+agent-browser auth login work --no-navigate --url https://identity.example.com/login
+```
+
 ## Plugins
 
-Use credential provider plugins when credentials live in external vault software. Plugins are configured in `agent-browser.json` and run as external executables over the `agent-browser.plugin.v1` stdio JSON protocol.
+Use credential provider plugins when credentials live in external vault software. Plugins are configured in `~/.agent-browser/config.json` or a file loaded with `--config` and run as external executables over the `agent-browser.plugin.v1` stdio JSON protocol. The auto-discovered `./agent-browser.json` ignores `plugins` with a warning. An explicitly loaded file replaces default config discovery.
 
-Add a plugin with `plugin add`. A plain `name` or `@scope/name` resolves from npm; `owner/repo` resolves from GitHub:
+Add a plugin with `plugin add`, which writes `~/.agent-browser/config.json` by default; use `--project` for `./agent-browser.json` (only used with `--config`). A plain `name` or `@scope/name` resolves from npm; `owner/repo` resolves from GitHub:
 
 ```bash
 agent-browser plugin add agent-browser-plugin-vault --name vault
@@ -196,6 +219,12 @@ Resolve credentials just-in-time for one login:
 agent-browser auth login my-app --credential-provider vault --item "My App"
 ```
 
+After stateful setup, combine the provider with no-navigation mode. The provider secret remains in memory and does not enter generated process arguments or normal output:
+
+```bash
+agent-browser auth login my-app --credential-provider vault --item "My App" --no-navigate --url https://identity.example.com/login
+```
+
 Use a plugin as a browser provider or a generic domain command:
 
 ```bash
@@ -204,6 +233,8 @@ agent-browser plugin run captcha captcha.solve --payload '{"siteKey":"...","url"
 ```
 
 `plugin run` is for `command.run` and custom capabilities. Core capabilities and protocol request types use their dedicated command paths.
+
+Credential resolution, browser launch and cleanup, and launch mutation errors omit plugin response error text and unsupported protocol values from diagnostics. Manifest discovery and `plugin run` retain detailed errors. Plugins remain trusted local executables; this redaction does not sandbox them.
 
 Use `--url`, `--username-selector`, `--password-selector`, and `--submit-selector` on `auth login` to override plugin-provided metadata for the current login only.
 
@@ -305,6 +336,8 @@ agent-browser set credentials username password
 # Navigate to protected resource
 agent-browser open https://protected.example.com/api
 ```
+
+The credentials also apply to tabs opened later through `tab new` or `click --new-tab`, including their first document request.
 
 ## Cookie-Based Auth
 

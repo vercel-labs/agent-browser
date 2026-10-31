@@ -11,6 +11,50 @@ export function getDashboardApiPath(path: string): string {
   return normalizedPath;
 }
 
+const ACCESS_TOKEN_FRAGMENT_KEY = "dashboard-access-token";
+const ACCESS_TOKEN_COOKIE = "__Host-agent-browser-dashboard-token";
+const LEGACY_ACCESS_TOKEN_COOKIE = "agent-browser-dashboard-token";
+
+/**
+ * Reads the access token from a dashboard URL fragment and removes it from the
+ * address bar before application requests begin. Fragments never reach proxies
+ * or servers, avoiding token leakage through HTTP request logs.
+ */
+function getDashboardAccessToken(): string | null {
+  if (typeof window === "undefined") return null;
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  const token = params.get(ACCESS_TOKEN_FRAGMENT_KEY);
+  if (!token) return null;
+
+  params.delete(ACCESS_TOKEN_FRAGMENT_KEY);
+  const fragment = params.toString();
+  window.history.replaceState(
+    null,
+    "",
+    `${window.location.pathname}${window.location.search}${fragment ? `#${fragment}` : ""}`,
+  );
+  return token;
+}
+
+let dashboardAccessToken: string | null | undefined;
+
+/**
+ * Persist external-dashboard tokens only in a Secure, host-bound cookie so
+ * HTTP and WebSocket requests authenticate without exposing the token in URLs.
+ * Loopback HTTP requests do not require a token.
+ */
+export function initializeDashboardAccessToken(): void {
+  dashboardAccessToken ??= getDashboardAccessToken();
+  if (typeof window === "undefined") return;
+
+  // Remove cookies written by older dashboard builds. The legacy cookie was
+  // readable by every localhost port when created over plain HTTP.
+  document.cookie = `${LEGACY_ACCESS_TOKEN_COOKIE}=; Path=/; Max-Age=0; SameSite=Strict`;
+
+  if (!dashboardAccessToken || window.location.protocol !== "https:") return;
+  document.cookie = `${ACCESS_TOKEN_COOKIE}=${encodeURIComponent(dashboardAccessToken)}; Path=/; SameSite=Strict; Secure`;
+}
+
 /** Build the same-origin per-session tabs endpoint proxied through the dashboard. */
 export function getSessionTabsPath(port: number): string {
   assertValidPort(port);

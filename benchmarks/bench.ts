@@ -105,6 +105,7 @@ const REPO_URL = "https://github.com/vercel-labs/agent-browser.git";
 
 const CHROMIUM_SYSTEM_DEPS = [
   "nss",
+  "nss-tools",
   "nspr",
   "libxkbcommon",
   "atk",

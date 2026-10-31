@@ -35,7 +35,7 @@ echo "Authentication workflow: $LOGIN_URL"
 if [[ -f "$STATE_FILE" ]]; then
     echo "Loading saved state from $STATE_FILE..."
     if agent-browser --state "$STATE_FILE" open "$LOGIN_URL" 2>/dev/null; then
-        agent-browser wait --load networkidle
+        agent-browser wait --load load
 
         CURRENT_URL=$(agent-browser get url)
         if [[ "$CURRENT_URL" != *"login"* ]] && [[ "$CURRENT_URL" != *"signin"* ]]; then
@@ -56,7 +56,8 @@ fi
 # ================================================================
 echo "Opening login page..."
 agent-browser open "$LOGIN_URL"
-agent-browser wait --load networkidle
+agent-browser wait --load domcontentloaded
+agent-browser wait --fn "(() => { const usable = (el) => { const style = getComputedStyle(el); return !el.disabled && !el.readOnly && style.display !== 'none' && style.visibility !== 'hidden' && el.getClientRects().length > 0; }; const username = Array.from(document.querySelectorAll('input[type=email], input[type=text], input[autocomplete=username], input[name*=email i], input[name*=user i], input[name*=login i]')).some(usable); const password = Array.from(document.querySelectorAll('input[type=password]')).some(usable); return username && password; })()"
 
 echo ""
 echo "Login form structure:"
@@ -80,14 +81,17 @@ exit 0
 # : "${APP_PASSWORD:?Set APP_PASSWORD environment variable}"
 #
 # agent-browser open "$LOGIN_URL"
-# agent-browser wait --load networkidle
+# agent-browser wait --load domcontentloaded
+# agent-browser wait --fn "(() => { const usable = (el) => { const style = getComputedStyle(el); return !el.disabled && !el.readOnly && style.display !== 'none' && style.visibility !== 'hidden' && el.getClientRects().length > 0; }; const username = Array.from(document.querySelectorAll('input[type=email], input[type=text], input[autocomplete=username], input[name*=email i], input[name*=user i], input[name*=login i]')).some(usable); const password = Array.from(document.querySelectorAll('input[type=password]')).some(usable); return username && password; })()"
 # agent-browser snapshot -i
 #
 # # Fill credentials (update refs to match your form)
 # agent-browser fill @e1 "$APP_USERNAME"
 # agent-browser fill @e2 "$APP_PASSWORD"
 # agent-browser click @e3
-# agent-browser wait --load networkidle
+# Replace this with the app-specific post-login wait, for example:
+# agent-browser wait --url "**/dashboard"
+# agent-browser wait --text "Welcome"
 #
 # # Verify login succeeded
 # FINAL_URL=$(agent-browser get url)

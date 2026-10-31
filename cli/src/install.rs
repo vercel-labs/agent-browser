@@ -182,7 +182,78 @@ fn platform_key() -> &'static str {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn validate_macos_version(version: &str) -> Result<(), String> {
+    let parts = version.split('.').collect::<Vec<_>>();
+    let parts = parts
+        .iter()
+        .map(|part| {
+            if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(());
+            }
+            part.parse::<u32>().map_err(|_| ())
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
+        .filter(|parts| matches!(parts.len(), 2 | 3))
+        .ok_or_else(|| {
+            format!(
+                "Could not parse macOS version `{}`. Expected a numeric version such as 13.0.0.",
+                version
+            )
+        })?;
+
+    if parts[0] < 13 {
+        return Err(format!(
+            "Chrome installation requires macOS 13 or newer; detected macOS {}. Update macOS or install Chrome manually from https://www.google.com/chrome/.",
+            version
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn check_macos_version() -> Result<(), String> {
+    let output = Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+        .map_err(|e| {
+            format!(
+                "Could not run `sw_vers -productVersion`: {}. Ensure macOS system utilities are available.",
+                e
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = if stderr.trim().is_empty() {
+            String::new()
+        } else {
+            format!(": {}", stderr.trim())
+        };
+        return Err(format!(
+            "`sw_vers -productVersion` failed with {}{}. Ensure it succeeds to detect the macOS version.",
+            output.status, detail
+        ));
+    }
+
+    let version = String::from_utf8_lossy(&output.stdout);
+    let version = version.trim();
+    if version.is_empty() {
+        return Err(
+            "`sw_vers -productVersion` returned no version. Ensure it prints a version such as 13.0.0."
+                .to_string(),
+        );
+    }
+
+    validate_macos_version(version)
+}
+
 async fn fetch_download_url() -> Result<(String, String), String> {
+    #[cfg(target_os = "macos")]
+    check_macos_version()?;
+
     let client = http_client()?;
     let resp = client
         .get(LAST_KNOWN_GOOD_URL)
@@ -237,7 +308,7 @@ fn format_reqwest_error(e: &reqwest::Error) -> String {
 }
 
 fn http_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+    crate::tls::apply_to_reqwest(reqwest::Client::builder(), &crate::tls::process_options())?
         .user_agent(format!("agent-browser/{}", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(120))
         .connect_timeout(std::time::Duration::from_secs(30))
@@ -556,6 +627,7 @@ fn apt_dependency_specs() -> Vec<(&'static str, Option<&'static str>)> {
         ("libfontconfig1", None),
         ("libdbus-1-3", Some("libdbus-1-3t64")),
         ("libnss3", None),
+        ("libnss3-tools", None),
         ("libnspr4", None),
         ("libatk-bridge2.0-0", Some("libatk-bridge2.0-0t64")),
         ("libdrm2", None),
@@ -593,6 +665,58 @@ fn resolve_apt_deps() -> Vec<&'static str> {
     resolve_apt_deps_with(package_exists_apt)
 }
 
+fn dnf_dependencies() -> Vec<&'static str> {
+    vec![
+        "nss",
+        "nss-tools",
+        "nspr",
+        "atk",
+        "at-spi2-atk",
+        "cups-libs",
+        "libdrm",
+        "libXcomposite",
+        "libXdamage",
+        "libXrandr",
+        "mesa-libgbm",
+        "pango",
+        "alsa-lib",
+        "libxkbcommon",
+        "libxcb",
+        "libX11-xcb",
+        "libX11",
+        "libXext",
+        "libXcursor",
+        "libXfixes",
+        "libXi",
+        "gtk3",
+        "cairo-gobject",
+        "google-noto-cjk-fonts",
+        "google-noto-emoji-color-fonts",
+        "liberation-fonts",
+    ]
+}
+
+fn yum_dependencies() -> Vec<&'static str> {
+    vec![
+        "nss",
+        "nss-tools",
+        "nspr",
+        "atk",
+        "at-spi2-atk",
+        "cups-libs",
+        "libdrm",
+        "libXcomposite",
+        "libXdamage",
+        "libXrandr",
+        "mesa-libgbm",
+        "pango",
+        "alsa-lib",
+        "libxkbcommon",
+        "google-noto-cjk-fonts",
+        "liberation-fonts",
+    ]
+}
+
 fn install_linux_deps() {
     println!("{}", color::cyan("Installing system dependencies..."));
 
@@ -600,8 +724,9 @@ fn install_linux_deps() {
         // Run apt-get update before resolving t64 package variants. Fresh
         // sandbox images may have no local package index yet, which would
         // make apt-cache miss packages that are actually available.
-        println!("Running: sudo apt-get update");
-        let update_status = Command::new("sudo").args(["apt-get", "update"]).status();
+        println!("Running: {}apt-get update", privilege_prefix());
+        let update_status =
+            privileged_command("apt-get").and_then(|mut command| command.arg("update").status());
 
         match update_status {
             Ok(s) if !s.success() => {
@@ -626,59 +751,9 @@ fn install_linux_deps() {
         // t64 package exists.
         ("apt-get", resolve_apt_deps())
     } else if which_exists("dnf") {
-        (
-            "dnf",
-            vec![
-                "nss",
-                "nspr",
-                "atk",
-                "at-spi2-atk",
-                "cups-libs",
-                "libdrm",
-                "libXcomposite",
-                "libXdamage",
-                "libXrandr",
-                "mesa-libgbm",
-                "pango",
-                "alsa-lib",
-                "libxkbcommon",
-                "libxcb",
-                "libX11-xcb",
-                "libX11",
-                "libXext",
-                "libXcursor",
-                "libXfixes",
-                "libXi",
-                "gtk3",
-                "cairo-gobject",
-                // Fonts
-                "google-noto-cjk-fonts",
-                "google-noto-emoji-color-fonts",
-                "liberation-fonts",
-            ],
-        )
+        ("dnf", dnf_dependencies())
     } else if which_exists("yum") {
-        (
-            "yum",
-            vec![
-                "nss",
-                "nspr",
-                "atk",
-                "at-spi2-atk",
-                "cups-libs",
-                "libdrm",
-                "libXcomposite",
-                "libXdamage",
-                "libXrandr",
-                "mesa-libgbm",
-                "pango",
-                "alsa-lib",
-                "libxkbcommon",
-                // Fonts
-                "google-noto-cjk-fonts",
-                "liberation-fonts",
-            ],
-        )
+        ("yum", yum_dependencies())
     } else {
         eprintln!(
             "{} No supported package manager found (apt-get, dnf, or yum)",
@@ -694,10 +769,8 @@ fn install_linux_deps() {
         // due to dependency conflicts (e.g. on Ubuntu 24.04 with the
         // t64 transition).
         println!("Checking for conflicts...");
-        let sim_output = Command::new("sudo")
-            .args(["apt-get", "install", "--simulate"])
-            .args(&deps)
-            .output();
+        let sim_output = privileged_command("apt-get")
+            .and_then(|mut command| command.args(["install", "--simulate"]).args(&deps).output());
 
         match sim_output {
             Ok(output) => {
@@ -718,7 +791,11 @@ fn install_linux_deps() {
                     }
                     eprintln!();
                     eprintln!("  To install dependencies manually, run:");
-                    eprintln!("    sudo apt-get install {}", deps.join(" "));
+                    eprintln!(
+                        "    {}apt-get install {}",
+                        privilege_prefix(),
+                        deps.join(" ")
+                    );
                     exit(1);
                 }
 
@@ -748,7 +825,11 @@ fn install_linux_deps() {
                     }
                     eprintln!();
                     eprintln!("  To install dependencies manually, run:");
-                    eprintln!("    sudo apt-get install {}", deps.join(" "));
+                    eprintln!(
+                        "    {}apt-get install {}",
+                        privilege_prefix(),
+                        deps.join(" ")
+                    );
                     eprintln!();
                     eprintln!("  Review the apt output carefully before confirming.");
                     exit(1);
@@ -764,23 +845,74 @@ fn install_linux_deps() {
         }
 
         // Safe to proceed: no removals detected
-        let install_cmd = format!("sudo apt-get install -y {}", deps.join(" "));
+        let install_cmd = format!(
+            "{}apt-get install -y {}",
+            privilege_prefix(),
+            deps.join(" ")
+        );
         println!("Running: {}", install_cmd);
-        let status = Command::new("sudo")
-            .args(["apt-get", "install", "-y"])
-            .args(&deps)
-            .status();
+        let status = privileged_command("apt-get")
+            .and_then(|mut command| command.args(["install", "-y"]).args(&deps).status());
 
         report_install_status(status);
     } else {
         // dnf / yum path — these package managers do not remove packages
         // during install, so the simulate-first guard is not needed.
-        let install_cmd = format!("sudo {} install -y {}", pkg_mgr, deps.join(" "));
+        let install_cmd = format!(
+            "{}{} install -y {}",
+            privilege_prefix(),
+            pkg_mgr,
+            deps.join(" ")
+        );
         println!("Running: {}", install_cmd);
-        let status = Command::new("sh").arg("-c").arg(&install_cmd).status();
+        let status = privileged_command(pkg_mgr)
+            .and_then(|mut command| command.args(["install", "-y"]).args(&deps).status());
 
         report_install_status(status);
     }
+}
+
+fn privilege_prefix() -> &'static str {
+    if is_root() {
+        ""
+    } else {
+        "sudo "
+    }
+}
+
+fn is_root() -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+fn privileged_command(pkg_mgr: &str) -> io::Result<Command> {
+    let running_as_root = is_root();
+    privileged_command_with(
+        running_as_root,
+        running_as_root || which_exists("sudo"),
+        pkg_mgr,
+    )
+}
+
+fn privileged_command_with(is_root: bool, has_sudo: bool, pkg_mgr: &str) -> io::Result<Command> {
+    if is_root {
+        return Ok(Command::new(pkg_mgr));
+    }
+    if has_sudo {
+        let mut command = Command::new("sudo");
+        command.arg(pkg_mgr);
+        return Ok(command);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "installing system dependencies requires root privileges or sudo",
+    ))
 }
 
 fn which_exists(cmd: &str) -> bool {
@@ -866,6 +998,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_macos_version_checks_minimum_and_rejects_malformed_versions() {
+        assert!(validate_macos_version("12.7.6")
+            .unwrap_err()
+            .contains("13 or newer"));
+        assert!(validate_macos_version("13.0.0").is_ok());
+        assert!(validate_macos_version("15.4").is_ok());
+        assert!(validate_macos_version("26.1").is_ok());
+        for malformed in ["", "15.", ".4", "15.4.1.2", "not.a.version"] {
+            assert!(validate_macos_version(malformed)
+                .unwrap_err()
+                .contains("Could not parse macOS version"));
+        }
+    }
+
+    #[test]
     fn resolve_apt_deps_prefers_available_t64_variants() {
         let deps = resolve_apt_deps_with(|pkg| matches!(pkg, "libasound2t64" | "libgtk-3-0t64"));
 
@@ -874,6 +1021,7 @@ mod tests {
         assert!(deps.contains(&"libgtk-3-0t64"));
         assert!(!deps.contains(&"libgtk-3-0"));
         assert!(deps.contains(&"libnss3"));
+        assert!(deps.contains(&"libnss3-tools"));
     }
 
     #[test]
@@ -884,6 +1032,53 @@ mod tests {
         assert!(!deps.contains(&"libasound2t64"));
         assert!(deps.contains(&"libgtk-3-0"));
         assert!(!deps.contains(&"libgtk-3-0t64"));
+        assert!(deps.contains(&"libnss3-tools"));
+    }
+
+    #[test]
+    fn rpm_dependencies_include_certutil() {
+        assert!(dnf_dependencies().contains(&"nss-tools"));
+        assert!(yum_dependencies().contains(&"nss-tools"));
+    }
+
+    #[test]
+    fn privileged_command_runs_package_manager_directly_as_root() {
+        let command = privileged_command_with(true, false, "apt-get").unwrap();
+        assert_eq!(command.get_program(), "apt-get");
+        assert_eq!(command.get_args().count(), 0);
+    }
+
+    #[test]
+    fn privileged_command_uses_sudo_for_non_root() {
+        let command = privileged_command_with(false, true, "dnf").unwrap();
+        assert_eq!(command.get_program(), "sudo");
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["dnf"]);
+    }
+
+    #[test]
+    fn privileged_command_errors_when_sudo_is_unavailable() {
+        let error = privileged_command_with(false, false, "apt-get").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("root privileges or sudo"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn privileged_command_uses_current_process_privileges() {
+        match privileged_command("apt-get") {
+            Ok(command) if is_root() => assert_eq!(command.get_program(), "apt-get"),
+            Ok(command) => {
+                assert_eq!(command.get_program(), "sudo");
+                assert_eq!(
+                    command.get_args().next(),
+                    Some(std::ffi::OsStr::new("apt-get"))
+                );
+            }
+            Err(error) => {
+                assert!(!is_root());
+                assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            }
+        }
     }
 
     #[test]

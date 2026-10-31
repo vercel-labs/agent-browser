@@ -1,14 +1,22 @@
+#[cfg(windows)]
+use super::windows_process::Child;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::discovery::discover_cdp_url;
+use crate::ca_bundle::CaBundle;
 
 pub struct ChromeProcess {
     child: Child,
     pub ws_url: String,
     temp_user_data_dir: Option<PathBuf>,
+    temp_nss_home: Option<PreparedNssHome>,
     /// On Unix, the process group ID used to kill the entire Chrome process tree.
     #[cfg(unix)]
     pgid: Option<i32>,
@@ -16,6 +24,40 @@ pub struct ChromeProcess {
     /// hosts. Dropped (and killed) after the Chrome tree is torn down.
     #[cfg(target_os = "linux")]
     xvfb: Option<XvfbServer>,
+}
+
+struct PreparedNssHomeInner {
+    path: PathBuf,
+}
+
+impl Drop for PreparedNssHomeInner {
+    fn drop(&mut self) {
+        for attempt in 0..3 {
+            match std::fs::remove_dir_all(&self.path) {
+                Ok(()) => break,
+                Err(_) if attempt < 2 => std::thread::sleep(Duration::from_millis(100)),
+                Err(e) => {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "Warning: failed to clean up temporary CA trust store {}: {}",
+                        self.path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct PreparedNssHome {
+    inner: Arc<PreparedNssHomeInner>,
+}
+
+impl PreparedNssHome {
+    fn path(&self) -> &Path {
+        &self.inner.path
+    }
 }
 
 impl ChromeProcess {
@@ -289,6 +331,7 @@ fn maybe_start_xvfb(options: &LaunchOptions) -> Option<XvfbServer> {
 pub struct LaunchOptions {
     pub headless: bool,
     pub executable_path: Option<String>,
+    /// Chrome proxy address; trailing slashes are removed except for scheme delimiters.
     pub proxy: Option<String>,
     pub proxy_bypass: Option<String>,
     pub proxy_username: Option<String>,
@@ -300,6 +343,10 @@ pub struct LaunchOptions {
     pub storage_state: Option<String>,
     pub user_agent: Option<String>,
     pub ignore_https_errors: bool,
+    pub ca_cert: Option<String>,
+    pub(crate) ca_bundle: Option<CaBundle>,
+    pub(crate) ca_cert_digest: Option<[u8; 32]>,
+    pub(crate) prepared_nss_home: Option<PreparedNssHome>,
     pub color_scheme: Option<String>,
     pub download_path: Option<String>,
     /// Hide native scrollbars in headless Chromium screenshots by launching
@@ -317,6 +364,9 @@ pub struct LaunchOptions {
     /// this routes WebGPU through SwiftShader's software Vulkan with software
     /// compositing so it works without a GPU or display.
     pub webgpu: bool,
+    /// Enable Chrome's experimental WebMCP implementation for agent-browser
+    /// managed sessions. Enabled by default and disabled with `--no-webmcp`.
+    pub webmcp: bool,
     /// Disable automatic Xvfb for headed launches on displayless Linux
     /// hosts (AGENT_BROWSER_NO_XVFB). Carried as a launch option so the
     /// CLI's current environment wins over the env a long-lived daemon was
@@ -357,12 +407,17 @@ impl Default for LaunchOptions {
             storage_state: None,
             user_agent: None,
             ignore_https_errors: false,
+            ca_cert: None,
+            ca_bundle: None,
+            ca_cert_digest: None,
+            prepared_nss_home: None,
             color_scheme: None,
             download_path: None,
             hide_scrollbars: true,
             viewport_size: None,
             use_real_keychain: false,
             webgpu: false,
+            webmcp: true,
             no_xvfb: false,
             restrict_webrtc: false,
         }
@@ -382,6 +437,10 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         "NetworkService".to_string(),
         "NetworkServiceInProcess".to_string(),
     ];
+    if options.webmcp {
+        enable_features.push("WebMCPTesting".to_string());
+        enable_features.push("DevToolsWebMCPSupport".to_string());
+    }
     if options.webgpu && cfg!(target_os = "linux") {
         enable_features.push("Vulkan".to_string());
     }
@@ -464,7 +523,13 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
     }
 
     if let Some(ref proxy) = options.proxy {
-        args.push(format!("--proxy-server={}", proxy));
+        let trimmed = proxy.trim_end_matches('/');
+        let server = if trimmed.is_empty() || proxy.ends_with("://") {
+            proxy.as_str()
+        } else {
+            trimmed
+        };
+        args.push(format!("--proxy-server={}", server));
     }
 
     if let Some(ref bypass) = options.proxy_bypass {
@@ -536,6 +601,120 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
         user_data_dir,
         temp_user_data_dir,
     })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn prepare_nss_home(ca_cert: &CaBundle) -> Result<PreparedNssHome, String> {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let home = std::env::temp_dir().join(format!("agent-browser-nss-{}", uuid::Uuid::new_v4()));
+    let pki_dir = home.join(".local/share/pki");
+    let db_dir = pki_dir.join("nssdb");
+
+    let result = (|| {
+        std::fs::create_dir_all(&db_dir)
+            .map_err(|e| format!("Failed to create temporary CA trust store: {e}"))?;
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("Failed to secure temporary CA trust store: {e}"))?;
+        symlink(".local/share/pki", home.join(".pki"))
+            .map_err(|e| format!("Failed to configure temporary CA trust store: {e}"))?;
+
+        let db = format!("sql:{}", db_dir.display());
+        run_certutil(
+            &["-N", "--empty-password", "-d", &db],
+            "initialize the NSS database",
+        )?;
+
+        for (index, cert) in ca_cert.certificates().iter().enumerate() {
+            let cert_path = home.join(format!("ca-{index}.der"));
+            std::fs::write(&cert_path, cert.as_ref())
+                .map_err(|e| format!("Failed to stage CA certificate for import: {e}"))?;
+            std::fs::set_permissions(&cert_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("Failed to secure staged CA certificate: {e}"))?;
+            let nickname = format!("agent-browser-ca-{index}");
+            let cert_path_arg = cert_path.display().to_string();
+            let import_result = run_certutil(
+                &[
+                    "-A",
+                    "-d",
+                    &db,
+                    "-t",
+                    "C,,",
+                    "-n",
+                    &nickname,
+                    "-i",
+                    &cert_path_arg,
+                ],
+                "import the CA certificate",
+            );
+            let _ = std::fs::remove_file(&cert_path);
+            import_result?;
+        }
+
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        let _ = std::fs::remove_dir_all(&home);
+        return Err(error);
+    }
+
+    Ok(PreparedNssHome {
+        inner: Arc::new(PreparedNssHomeInner { path: home }),
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn prepare_nss_home(_ca_cert: &CaBundle) -> Result<PreparedNssHome, String> {
+    Err("--ca-cert is currently supported only on Linux".to_string())
+}
+
+fn resolve_prepared_nss_home(options: &LaunchOptions) -> Result<Option<PreparedNssHome>, String> {
+    if let Some(home) = options.prepared_nss_home.clone() {
+        return Ok(Some(home));
+    }
+
+    let ca_bundle = match options.ca_bundle.clone() {
+        Some(bundle) => Some(bundle),
+        None => options
+            .ca_cert
+            .as_deref()
+            .map(crate::ca_bundle::load)
+            .transpose()?,
+    };
+
+    ca_bundle.as_ref().map(prepare_nss_home).transpose()
+}
+
+#[cfg(target_os = "linux")]
+fn run_certutil(args: &[&str], action: &str) -> Result<(), String> {
+    let output = Command::new("certutil").args(args).output().map_err(|e| {
+        format!(
+            "Failed to {action}: could not run certutil ({e}). Run agent-browser install --with-deps, or install libnss3-tools on Debian/Ubuntu or nss-tools on RPM Linux."
+        )
+    })?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if detail.is_empty() {
+        Err(format!(
+            "Failed to {action}: certutil exited with {}. Run agent-browser install --with-deps, or repair libnss3-tools on Debian/Ubuntu or nss-tools on RPM Linux.",
+            output.status
+        ))
+    } else {
+        Err(format!("Failed to {action}: {detail}"))
+    }
+}
+
+fn terminate_launched_chrome(child: &mut Child) {
+    let _ = child.kill();
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let _ = child.wait();
 }
 
 pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
@@ -639,9 +818,22 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
     };
 
     #[cfg(target_os = "linux")]
+    let temp_nss_home = match resolve_prepared_nss_home(options) {
+        Ok(home) => home,
+        Err(error) => {
+            cleanup_temp_dir(&temp_user_data_dir);
+            return Err(error);
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let temp_nss_home: Option<PreparedNssHome> = None;
+
+    #[cfg(target_os = "linux")]
     let xvfb = maybe_start_xvfb(options);
 
+    #[cfg(not(windows))]
     let mut cmd = Command::new(chrome_path);
+    #[cfg(not(windows))]
     cmd.args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -653,6 +845,11 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
     if let Some(ref x) = xvfb {
         cmd.env("DISPLAY", &x.display);
         cmd.env("XAUTHORITY", &x.auth_file);
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(ref home) = temp_nss_home {
+        cmd.env("HOME", home.path());
+        cmd.env("XDG_DATA_HOME", home.path().join(".local/share"));
     }
 
     // Place Chrome in its own process group so we can kill the entire tree
@@ -676,7 +873,11 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         }
     }
 
-    let mut child = cmd.spawn().map_err(|e| {
+    #[cfg(not(windows))]
+    let spawned = cmd.spawn();
+    #[cfg(windows)]
+    let spawned = Child::spawn(chrome_path, &args, options.effectively_headless());
+    let mut child = spawned.map_err(|e| {
         cleanup_temp_dir(&temp_user_data_dir);
         format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
     })?;
@@ -692,7 +893,7 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         Err(primary_err) => {
             // Fallback: scrape stderr (legacy behavior) for better diagnostics.
             let stderr = child.stderr.take().ok_or_else(|| {
-                let _ = child.kill();
+                terminate_launched_chrome(&mut child);
                 cleanup_temp_dir(&temp_user_data_dir);
                 "Failed to capture Chrome stderr".to_string()
             })?;
@@ -700,7 +901,7 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
             match wait_for_ws_url_until(reader, deadline) {
                 Ok(url) => url,
                 Err(fallback_err) => {
-                    let _ = child.kill();
+                    terminate_launched_chrome(&mut child);
                     cleanup_temp_dir(&temp_user_data_dir);
                     return Err(format!(
                         "{}\n(also tried parsing stderr) {}",
@@ -710,6 +911,17 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
             }
         }
     };
+
+    // Chrome blocks on stderr writes once the pipe buffer fills, so keep draining it
+    // after readiness. The fallback path has already taken stderr.
+    if let Some(stderr) = child.stderr.take() {
+        let _ = std::thread::Builder::new()
+            .name("chrome-stderr-drain".into())
+            .spawn(move || {
+                let mut stderr = stderr;
+                let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+            });
+    }
 
     #[cfg(unix)]
     let pgid = {
@@ -723,6 +935,7 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         child,
         ws_url,
         temp_user_data_dir,
+        temp_nss_home,
         #[cfg(unix)]
         pgid,
         #[cfg(target_os = "linux")]
@@ -763,7 +976,7 @@ fn wait_for_devtools_active_port(
 }
 
 fn wait_for_ws_url_until(
-    reader: BufReader<std::process::ChildStderr>,
+    reader: impl BufRead,
     deadline: std::time::Instant,
 ) -> Result<String, String> {
     let prefix = "DevTools listening on ";
@@ -958,8 +1171,17 @@ pub async fn auto_connect_cdp() -> Result<String, String> {
 
     for dir in &user_data_dirs {
         if let Some((port, ws_path)) = read_devtools_active_port(dir) {
-            if let Ok(ws_url) = resolve_cdp_from_active_port(port, &ws_path).await {
-                return Ok(ws_url);
+            match resolve_cdp_from_active_port(port, &ws_path).await {
+                Ok(ws_url) => return Ok(ws_url),
+                // Chrome is alive and still showing the permission prompt.
+                // Probing further would open another prompt (#1365).
+                Err(ActivePortError::AwaitingApproval) => {
+                    return Err(format!(
+                        "Chrome is waiting for remote-debugging approval on port {}. Approve the prompt in Chrome and retry.",
+                        port
+                    ));
+                }
+                Err(ActivePortError::Unreachable(_)) => {}
             }
             // Port is dead — remove the stale file so future runs skip it.
             let stale = dir.join("DevToolsActivePort");
@@ -983,10 +1205,28 @@ pub async fn auto_connect_cdp() -> Result<String, String> {
 /// prompt on M144+), then falls back to legacy HTTP discovery for older
 /// Chrome versions. This order avoids triggering duplicate remote-debugging
 /// permission prompts (#1210, #1206).
-async fn resolve_cdp_from_active_port(port: u16, ws_path: &str) -> Result<String, String> {
+async fn resolve_cdp_from_active_port(port: u16, ws_path: &str) -> Result<String, ActivePortError> {
+    resolve_cdp_from_active_port_within(port, ws_path, AUTO_CONNECT_WS_VERIFY_TIMEOUT).await
+}
+
+#[derive(Debug, PartialEq)]
+enum ActivePortError {
+    /// The handshake stayed open past the timeout: Chrome is holding it for
+    /// the remote-debugging permission prompt.
+    AwaitingApproval,
+    Unreachable(String),
+}
+
+async fn resolve_cdp_from_active_port_within(
+    port: u16,
+    ws_path: &str,
+    timeout: Duration,
+) -> Result<String, ActivePortError> {
     let ws_url = format!("ws://127.0.0.1:{}{}", port, ws_path);
-    if verify_ws_endpoint(&ws_url).await {
-        return Ok(ws_url);
+    match verify_ws_endpoint(&ws_url, timeout).await {
+        WsVerify::Live => return Ok(ws_url),
+        WsVerify::TimedOut => return Err(ActivePortError::AwaitingApproval),
+        WsVerify::Failed => {}
     }
 
     // Pre-M144 fallback: HTTP endpoints (/json/version, /json/list, etc.)
@@ -994,19 +1234,31 @@ async fn resolve_cdp_from_active_port(port: u16, ws_path: &str) -> Result<String
         return Ok(ws_url);
     }
 
-    Err(format!(
+    Err(ActivePortError::Unreachable(format!(
         "Cannot connect to Chrome on port {}: both direct WebSocket and HTTP discovery failed",
         port
-    ))
+    )))
+}
+
+/// How long `--auto-connect` keeps the direct WebSocket handshake open.
+/// Chrome 144+ holds the handshake while it shows the remote-debugging
+/// permission prompt, so this must leave time to approve it (#1365). It stays
+/// below the client's 30s read timeout (`connection::read_timeout_for`) so the
+/// daemon answers before the client gives up and retries.
+const AUTO_CONNECT_WS_VERIFY_TIMEOUT: Duration = Duration::from_secs(20);
+
+enum WsVerify {
+    Live,
+    TimedOut,
+    Failed,
 }
 
 /// Verify that a WebSocket endpoint is a live CDP server by sending
 /// `Browser.getVersion` and checking for a valid response.
-async fn verify_ws_endpoint(ws_url: &str) -> bool {
+async fn verify_ws_endpoint(ws_url: &str, timeout: Duration) -> WsVerify {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 
-    let timeout = Duration::from_secs(2);
     let result = tokio::time::timeout(timeout, async {
         let (mut ws, _) = tokio_tungstenite::connect_async(ws_url).await.ok()?;
         let cmd = r#"{"id":1,"method":"Browser.getVersion"}"#;
@@ -1024,7 +1276,11 @@ async fn verify_ws_endpoint(ws_url: &str) -> bool {
         None
     })
     .await;
-    matches!(result, Ok(Some(())))
+    match result {
+        Ok(Some(())) => WsVerify::Live,
+        Ok(None) => WsVerify::Failed,
+        Err(_) => WsVerify::TimedOut,
+    }
 }
 
 /// Returns the default Chrome user-data directory paths for the current platform.
@@ -1228,6 +1484,7 @@ const PROFILE_COPY_EXCLUDE_DIRS: &[&str] = &[
 /// The copy is best-effort: individual file failures (e.g., `SingletonLock`)
 /// are skipped with a warning. If the source profile directory is missing or
 /// the temp dir cannot be created, returns an error after cleaning up.
+/// A copied `Preferences` with `profile.exit_type` of `Crashed` is set to `Normal`, best effort.
 pub fn copy_chrome_profile(
     user_data_dir: &Path,
     profile_directory: &str,
@@ -1261,6 +1518,25 @@ pub fn copy_chrome_profile(
     if let Err(e) = copy_dir_recursive(&src_profile, &dst_profile) {
         let _ = std::fs::remove_dir_all(&temp_dir);
         return Err(format!("Failed to copy profile: {}", e));
+    }
+
+    let preferences_path = dst_profile.join("Preferences");
+    let normalized = (|| {
+        let bytes = std::fs::read(&preferences_path).ok()?;
+        let mut preferences: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let exit_type = preferences.pointer_mut("/profile/exit_type")?;
+        if exit_type.as_str() != Some("Crashed") {
+            return None;
+        }
+        *exit_type = serde_json::Value::String("Normal".to_string());
+        serde_json::to_vec(&preferences).ok()
+    })();
+    if let Some(bytes) = normalized {
+        let candidate = dst_profile.join(format!(".Preferences-{}.tmp", uuid::Uuid::new_v4()));
+        if std::fs::write(&candidate, bytes).is_ok() {
+            let _ = std::fs::rename(&candidate, &preferences_path);
+        }
+        let _ = std::fs::remove_file(&candidate);
     }
 
     Ok(temp_dir)
@@ -1366,14 +1642,44 @@ fn should_disable_sandbox(existing_args: &[String]) -> bool {
     false
 }
 
-/// Returns true if Chrome should use disk instead of /dev/shm for shared memory.
-/// On CI runners and containers, /dev/shm is often too small (64MB default),
-/// which causes Chrome to crash mid-session.
+#[cfg(any(target_os = "linux", test))]
+const MIN_DEV_SHM_AVAILABLE_BYTES: u64 = 256 * 1024 * 1024;
+
+#[cfg(target_os = "linux")]
+fn available_filesystem_bytes(path: &Path) -> Option<u64> {
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+
+    // SAFETY: `path` is a valid, NUL-terminated C string and `stats` points to
+    // writable storage for a `statvfs` value. A successful call initializes it.
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return None;
+    }
+
+    let stats = unsafe { stats.assume_init() };
+    let available_bytes = u128::from(stats.f_bavail).saturating_mul(u128::from(stats.f_frsize));
+    Some(u64::try_from(available_bytes).unwrap_or(u64::MAX))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn dev_shm_is_too_small(available_bytes: u64) -> bool {
+    available_bytes < MIN_DEV_SHM_AVAILABLE_BYTES
+}
+
+/// Returns true if Chrome should use disk instead of `/dev/shm` for shared memory.
+/// Prefer the actual filesystem capacity over environment markers because some
+/// container runtimes expose no conventional marker and others provision a large mount.
 fn should_disable_dev_shm(existing_args: &[String]) -> bool {
     if existing_args.iter().any(|a| a == "--disable-dev-shm-usage") {
         return false;
     }
 
+    #[cfg(target_os = "linux")]
+    if let Some(available_bytes) = available_filesystem_bytes(Path::new("/dev/shm")) {
+        return dev_shm_is_too_small(available_bytes);
+    }
+
+    // Preserve the existing safe fallback when `/dev/shm` cannot be inspected.
     if std::env::var("CI").is_ok() {
         return true;
     }
@@ -1551,6 +1857,128 @@ mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
 
+    #[test]
+    fn test_dev_shm_capacity_threshold() {
+        assert!(dev_shm_is_too_small(64 * 1024 * 1024));
+        assert!(dev_shm_is_too_small(128 * 1024 * 1024));
+        assert!(!dev_shm_is_too_small(256 * 1024 * 1024));
+        assert!(!dev_shm_is_too_small(1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_existing_disable_dev_shm_arg_is_not_duplicated() {
+        assert!(!should_disable_dev_shm(&[
+            "--disable-dev-shm-usage".to_string()
+        ]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_stderr_drained_after_port_readiness() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let executable = fixture.path().join("chrome");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+set -eu
+for arg do
+    case "$arg" in --user-data-dir=*) profile="${arg#*=}" ;; esac
+done
+printf '9222\n/devtools/browser/stderr-test\n' > "$profile/DevToolsActivePort"
+for round in 1 2; do
+    while [ ! -f "$profile/request-$round" ]; do sleep 0.01; done
+    printf '\377' >&2
+    head -c 2097152 /dev/zero >&2
+    touch "$profile/drained-$round"
+done
+exec sleep 60
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let options = LaunchOptions {
+            headless: true,
+            ..Default::default()
+        };
+        let mut chrome = try_launch_chrome(&executable, &options).unwrap();
+        let profile = chrome.temp_user_data_dir.clone().unwrap();
+        assert_eq!(
+            chrome.ws_url,
+            "ws://127.0.0.1:9222/devtools/browser/stderr-test"
+        );
+        for round in 1..=2 {
+            std::fs::write(profile.join(format!("request-{round}")), b"").unwrap();
+            let drained = profile.join(format!("drained-{round}"));
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !drained.exists() && std::time::Instant::now() < deadline {
+                assert!(
+                    !chrome.has_exited(),
+                    "writer exited before completing stderr"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                drained.exists(),
+                "stderr burst {round} blocked after readiness"
+            );
+            assert!(!chrome.has_exited());
+        }
+        drop(chrome);
+        assert!(!profile.exists());
+    }
+
+    fn prepared_nss_home() -> PreparedNssHome {
+        let path = std::env::temp_dir().join(format!(
+            "agent-browser-prepared-nss-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        PreparedNssHome {
+            inner: Arc::new(PreparedNssHomeInner { path }),
+        }
+    }
+
+    #[test]
+    fn test_resolve_prepared_nss_home_without_ca_returns_none() {
+        assert!(resolve_prepared_nss_home(&LaunchOptions::default())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_resolve_prepared_nss_home_reuses_prepared_home() {
+        let prepared = prepared_nss_home();
+        let expected_path = prepared.path().to_path_buf();
+        let options = LaunchOptions {
+            prepared_nss_home: Some(prepared),
+            ca_cert: Some("/path/that/must/not/be/read".to_string()),
+            ..Default::default()
+        };
+
+        let resolved = resolve_prepared_nss_home(&options).unwrap().unwrap();
+        assert_eq!(resolved.path(), expected_path);
+    }
+
+    #[test]
+    fn test_resolve_prepared_nss_home_surfaces_ca_load_error() {
+        let missing = std::env::temp_dir()
+            .join(format!("missing-ca-{}", uuid::Uuid::new_v4()))
+            .display()
+            .to_string();
+        let options = LaunchOptions {
+            ca_cert: Some(missing),
+            ..Default::default()
+        };
+
+        let result = resolve_prepared_nss_home(&options);
+        assert!(matches!(
+            result,
+            Err(error) if error.contains("Failed to read CA certificate")
+        ));
+    }
+
     #[cfg(unix)]
     fn spawn_noop_child() -> Child {
         Command::new("/bin/sh")
@@ -1564,13 +1992,8 @@ mod tests {
 
     #[cfg(windows)]
     fn spawn_noop_child() -> Child {
-        Command::new("cmd.exe")
-            .args(["/C", "exit 0"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap()
+        let cmd = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe");
+        Child::spawn(&cmd, &["/C".into(), "exit 0".into()], false).unwrap()
     }
 
     #[test]
@@ -1656,6 +2079,41 @@ mod tests {
 
         let result = find_playwright_chromium();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_build_args_proxy_and_bypass() {
+        for (proxy, expected) in [
+            ("/", "--proxy-server=/"),
+            ("///", "--proxy-server=///"),
+            ("", "--proxy-server="),
+            ("direct://", "--proxy-server=direct://"),
+            (
+                "http://proxy.example:8080,direct://",
+                "--proxy-server=http://proxy.example:8080,direct://",
+            ),
+            (
+                "http://proxy.example:8080",
+                "--proxy-server=http://proxy.example:8080",
+            ),
+            (
+                "http://proxy.example:8080/",
+                "--proxy-server=http://proxy.example:8080",
+            ),
+        ] {
+            let opts = LaunchOptions {
+                proxy: Some(proxy.to_string()),
+                proxy_bypass: Some("localhost,*.example.com".to_string()),
+                ..Default::default()
+            };
+            let result = build_chrome_args(&opts).unwrap();
+            assert!(result.args.iter().any(|arg| arg == expected));
+            assert!(result
+                .args
+                .iter()
+                .any(|arg| arg == "--proxy-bypass-list=localhost,*.example.com"));
+            std::fs::remove_dir_all(result.temp_user_data_dir.unwrap()).unwrap();
+        }
     }
 
     #[test]
@@ -1833,10 +2291,16 @@ mod tests {
         let result = build_chrome_args(&opts).unwrap();
         assert!(result.args.iter().any(|a| a == "--enable-unsafe-webgpu"));
         if cfg!(target_os = "linux") {
-            assert!(result
+            let features: Vec<&str> = result
                 .args
                 .iter()
-                .any(|a| a == "--enable-features=NetworkService,NetworkServiceInProcess,Vulkan"));
+                .find_map(|arg| arg.strip_prefix("--enable-features="))
+                .unwrap()
+                .split(',')
+                .collect();
+            assert!(features.contains(&"NetworkService"));
+            assert!(features.contains(&"NetworkServiceInProcess"));
+            assert!(features.contains(&"Vulkan"));
             assert!(result.args.iter().any(|a| a == "--use-angle=vulkan"));
             assert!(result.args.iter().any(|a| a == "--use-vulkan=swiftshader"));
             assert!(result
@@ -1966,6 +2430,34 @@ mod tests {
     }
 
     #[test]
+    fn test_build_args_enables_webmcp_by_default() {
+        let result = build_chrome_args(&LaunchOptions::default()).unwrap();
+        let features = result
+            .args
+            .iter()
+            .find(|arg| arg.starts_with("--enable-features="))
+            .unwrap();
+        assert!(features.contains("WebMCPTesting"));
+        assert!(features.contains("DevToolsWebMCPSupport"));
+    }
+
+    #[test]
+    fn test_build_args_webmcp_opt_out() {
+        let result = build_chrome_args(&LaunchOptions {
+            webmcp: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let features = result
+            .args
+            .iter()
+            .find(|arg| arg.starts_with("--enable-features="))
+            .unwrap();
+        assert!(!features.contains("WebMCPTesting"));
+        assert!(!features.contains("DevToolsWebMCPSupport"));
+    }
+
+    #[test]
     fn test_build_args_headless_with_extensions_skips_headless_flag() {
         let opts = LaunchOptions {
             headless: true,
@@ -2062,6 +2554,7 @@ mod tests {
                 child,
                 ws_url: String::new(),
                 temp_user_data_dir: Some(dir.clone()),
+                temp_nss_home: None,
                 #[cfg(unix)]
                 pgid: None,
                 #[cfg(target_os = "linux")]
@@ -2305,6 +2798,51 @@ mod tests {
     }
 
     #[test]
+    fn test_copy_chrome_profile_normalizes_crashed_exit_type() {
+        let compact = r#"{"a":1,"profile":{"exit_type":"Crashed","name":"x"}}"#;
+        let spaced = "{ \"profile\": { \"exit_type\" : \"Crashed\" } }";
+        for (name, prefs, normalized) in [
+            ("compact", Some(compact), true),
+            ("spaced", Some(spaced), true),
+            (
+                "normal",
+                Some(r#"{"profile":{"exit_type":"Normal"}}"#),
+                false,
+            ),
+            ("missing-field", Some(r#"{"profile":{}}"#), false),
+            (
+                "malformed",
+                Some(r#"{"profile":{"exit_type":"Crashed""#),
+                false,
+            ),
+            ("missing-file", None, false),
+        ] {
+            let src = TempDir::new(&format!("copy-exit-{name}"));
+            create_fake_local_state(&src, &[("Default", "Person 1")]);
+            create_fake_profile(&src, "Default");
+            if let Some(p) = prefs {
+                std::fs::write(src.join("Default/Preferences"), p).unwrap();
+            }
+            let temp = TempDir(copy_chrome_profile(&src, "Default").unwrap());
+            let copied = std::fs::read(temp.join("Default/Preferences")).ok();
+            match prefs {
+                None => assert!(copied.is_none(), "{name}"),
+                Some(p) if normalized => {
+                    let mut want: serde_json::Value = serde_json::from_str(p).unwrap();
+                    want["profile"]["exit_type"] = "Normal".into();
+                    let got: serde_json::Value = serde_json::from_slice(&copied.unwrap()).unwrap();
+                    assert_eq!(got, want, "{name}");
+                }
+                Some(p) => assert_eq!(copied.unwrap(), p.as_bytes(), "{name}"),
+            }
+            if let Some(p) = prefs {
+                let source = std::fs::read(src.join("Default/Preferences")).unwrap();
+                assert_eq!(source, p.as_bytes(), "{name}");
+            }
+        }
+    }
+
+    #[test]
     fn test_copy_chrome_profile_missing_source() {
         let src = TempDir::new("copy-missing-src");
         std::fs::create_dir_all(&*src).unwrap();
@@ -2449,6 +2987,39 @@ mod tests {
         server.await.unwrap();
     }
 
+    /// Chrome 144+ holds the WebSocket handshake while the remote-debugging
+    /// permission prompt is open. A handshake that completes after a few
+    /// seconds must still resolve through the exact ws_path (#1365).
+    #[tokio::test]
+    async fn test_resolve_cdp_from_active_port_waits_for_permission_prompt() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as WsMsg;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let ws_path = "/devtools/browser/prompt-uuid".to_string();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            if let Some(Ok(WsMsg::Text(text))) = ws.next().await {
+                let req: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let id = req.get("id").unwrap();
+                let reply = format!(
+                    r#"{{"id":{},"result":{{"protocolVersion":"1.3","product":"Chrome/148"}}}}"#,
+                    id
+                );
+                ws.send(WsMsg::Text(reply)).await.unwrap();
+            }
+            let _ = ws.close(None).await;
+        });
+
+        let result = resolve_cdp_from_active_port(port, &ws_path).await;
+        assert_eq!(result, Ok(format!("ws://127.0.0.1:{}{}", port, ws_path)));
+        server.await.unwrap();
+    }
+
     /// When the exact ws_path connection fails, `resolve_cdp_from_active_port`
     /// should fall back to HTTP discovery.
     #[tokio::test]
@@ -2498,6 +3069,44 @@ mod tests {
         drop(listener);
 
         let result = resolve_cdp_from_active_port(port, "/devtools/browser/dead").await;
-        assert!(result.is_err(), "should fail when nothing is listening");
+        assert!(
+            matches!(result, Err(ActivePortError::Unreachable(_))),
+            "should fail when nothing is listening: {:?}",
+            result
+        );
+    }
+
+    /// A handshake still held open when the timeout expires means Chrome is
+    /// showing the permission prompt. Resolution must stop without HTTP
+    /// discovery, which would open a second prompt (#1365).
+    #[tokio::test]
+    async fn test_resolve_cdp_from_active_port_stops_while_prompt_is_open() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (held, _) = listener.accept().await.unwrap();
+            let second = tokio::time::timeout(Duration::from_secs(2), listener.accept()).await;
+            drop(held);
+            second.is_ok()
+        });
+
+        let result = resolve_cdp_from_active_port_within(
+            port,
+            "/devtools/browser/prompt",
+            Duration::from_millis(300),
+        )
+        .await;
+        assert_eq!(result, Err(ActivePortError::AwaitingApproval));
+        assert!(
+            !server.await.unwrap(),
+            "HTTP discovery must not run while the prompt is open"
+        );
+    }
+
+    #[test]
+    fn auto_connect_wait_stays_below_client_read_timeout() {
+        let client_floor = crate::connection::read_timeout_for(&serde_json::json!({}));
+        assert!(AUTO_CONNECT_WS_VERIFY_TIMEOUT < client_floor);
     }
 }

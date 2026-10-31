@@ -484,10 +484,12 @@ pub struct DispatchKeyEventParams {
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unmodified_text: Option<String>,
+    /// There is deliberately no `nativeVirtualKeyCode`: Chrome reads it as a
+    /// platform-native code, so a Windows VK code there maps to a different
+    /// key on macOS (Escape 27 becomes Minus) and floods the page with
+    /// keydowns. `windowsVirtualKeyCode` alone works on every platform.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub windows_virtual_key_code: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub native_virtual_key_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modifiers: Option<i32>,
 }

@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Delayed WebMCP probe</title>
+  </head>
+  <body>
+    <script>
+      setTimeout(() => {
+        document.modelContext.registerTool({
+          name: "delayed_tool",
+          description: "Registers shortly after page load",
+          inputSchema: {
+            type: "object",
+            properties: {}
+          },
+          annotations: {
+            readOnlyHint: true,
+            untrustedContentHint: false
+          },
+          execute: async () => ({ ready: true })
+        });
+      }, 75);
+    </script>
+  </body>
+</html>

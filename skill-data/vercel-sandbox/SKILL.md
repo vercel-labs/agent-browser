@@ -89,7 +89,11 @@ export async function snapshotUrl(url: string) {
 The sandbox persists between commands, so you can run full automation sequences:
 
 ```ts
-export async function fillAndSubmitForm(url: string, data: Record<string, string>) {
+export async function fillAndSubmitForm(
+  url: string,
+  data: Record<string, string>,
+  postSubmitWaitArgs: string[],
+) {
   return withBrowser(async (sandbox) => {
     await runAgentBrowserCommand(sandbox, ["open", url]);
 
@@ -104,7 +108,9 @@ export async function fillAndSubmitForm(url: string, data: Record<string, string
     }
 
     await runAgentBrowserCommand(sandbox, ["click", "@e5"]);
-    await runAgentBrowserCommand(sandbox, ["wait", "--load", "networkidle"]);
+    // Pass an app-specific wait, such as ["--url", "**/checkout/complete"],
+    // ["--text", "Thanks"], or ["#confirmation"].
+    await runAgentBrowserCommand(sandbox, ["wait", ...postSubmitWaitArgs]);
 
     const ssResult = await runAgentBrowserCommand<{ data?: { path?: string } }>(sandbox, [
       "screenshot",
@@ -119,6 +125,24 @@ export async function fillAndSubmitForm(url: string, data: Record<string, string
     return { screenshot };
   });
 }
+```
+
+## MCP Server over stdin
+
+For many MCP tool calls in one sandbox, `startAgentBrowserMcp` keeps one `agent-browser mcp` process running and sends requests over the sandbox command's stdin. It requires `@vercel/sandbox` 3.7 or later, and `timeout` (milliseconds) applies to each request and to `close()`:
+
+```ts
+import { startAgentBrowserMcp, withAgentBrowserSandbox } from "@agent-browser/sandbox/vercel";
+
+const snapshot = await withAgentBrowserSandbox(async (sandbox) => {
+  const mcp = await startAgentBrowserMcp(sandbox, { timeout: 60_000 });
+  try {
+    await mcp.callTool("agent_browser_open", { url: "https://example.com" });
+    return await mcp.callTool("agent_browser_snapshot", { interactive: true });
+  } finally {
+    await mcp.close();
+  }
+});
 ```
 
 ## Sandbox Snapshots (Fast Startup)

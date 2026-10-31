@@ -460,13 +460,19 @@ pub fn validate_state_file(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Result<(), String> {
+/// Restore cookies and per-origin storage from a state file.
+///
+/// Storage is written through CDP DOMStorage, so no page script sees the values and Chrome only accepts the write when a frame is at the saved origin. Origins that redirect elsewhere or fail to load are skipped and returned.
+pub async fn load_state(
+    client: &CdpClient,
+    session_id: &str,
+    path: &str,
+) -> Result<Vec<String>, String> {
     let json_str = read_state_json(path)?;
 
     let state: StorageState =
         serde_json::from_str(&json_str).map_err(|e| format!("Invalid state file: {}", e))?;
 
-    // Load cookies
     if !state.cookies.is_empty() {
         let cookie_values: Vec<Value> = state
             .cookies
@@ -476,64 +482,63 @@ pub async fn load_state(client: &CdpClient, session_id: &str, path: &str) -> Res
         cookies::set_cookies(client, session_id, cookie_values, None).await?;
     }
 
-    // Load storage per origin
+    let mut skipped = Vec::new();
     for origin in &state.origins {
         if origin.local_storage.is_empty() && origin.session_storage.is_empty() {
             continue;
         }
-
-        // Navigate to origin to set storage
-        let navigate_url = format!("{}/", origin.origin.trim_end_matches('/'));
-        client
-            .send_command(
-                "Page.navigate",
-                Some(json!({ "url": navigate_url })),
-                Some(session_id),
-            )
-            .await?;
-
-        // Brief wait for navigation
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-        for entry in &origin.local_storage {
-            let js = format!(
-                "localStorage.setItem({}, {})",
-                serde_json::to_string(&entry.name).unwrap_or_default(),
-                serde_json::to_string(&entry.value).unwrap_or_default(),
-            );
-            let _ = client
-                .send_command_typed::<_, super::cdp::types::EvaluateResult>(
-                    "Runtime.evaluate",
-                    &EvaluateParams {
-                        expression: js,
-                        return_by_value: Some(true),
-                        await_promise: Some(false),
-                    },
-                    Some(session_id),
-                )
-                .await;
-        }
-
-        for entry in &origin.session_storage {
-            let js = format!(
-                "sessionStorage.setItem({}, {})",
-                serde_json::to_string(&entry.name).unwrap_or_default(),
-                serde_json::to_string(&entry.value).unwrap_or_default(),
-            );
-            let _ = client
-                .send_command_typed::<_, super::cdp::types::EvaluateResult>(
-                    "Runtime.evaluate",
-                    &EvaluateParams {
-                        expression: js,
-                        return_by_value: Some(true),
-                        await_promise: Some(false),
-                    },
-                    Some(session_id),
-                )
-                .await;
+        if restore_origin_storage(client, session_id, origin)
+            .await
+            .is_err()
+        {
+            skipped.push(origin.origin.clone());
         }
     }
 
+    Ok(skipped)
+}
+
+async fn restore_origin_storage(
+    client: &CdpClient,
+    session_id: &str,
+    origin: &OriginStorage,
+) -> Result<(), String> {
+    let security_origin = url::Url::parse(&origin.origin)
+        .ok()
+        .map(|u| u.origin())
+        .filter(|o| o.is_tuple())
+        .map(|o| o.ascii_serialization())
+        .unwrap_or_else(|| origin.origin.trim_end_matches('/').to_string());
+    client
+        .send_command(
+            "Page.navigate",
+            Some(json!({ "url": format!("{}/", security_origin) })),
+            Some(session_id),
+        )
+        .await?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    let entries = origin
+        .local_storage
+        .iter()
+        .map(|e| (true, e))
+        .chain(origin.session_storage.iter().map(|e| (false, e)));
+    for (is_local_storage, entry) in entries {
+        client
+            .send_command(
+                "DOMStorage.setDOMStorageItem",
+                Some(json!({
+                    "storageId": {
+                        "securityOrigin": security_origin,
+                        "isLocalStorage": is_local_storage,
+                    },
+                    "key": entry.name,
+                    "value": entry.value,
+                })),
+                Some(session_id),
+            )
+            .await?;
+    }
     Ok(())
 }
 

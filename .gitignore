@@ -49,9 +49,6 @@ yarn.lock
 !.env.example
 !.env.*.example
 
-# Windows debug instance config
-scripts/windows-debug/.instance
-
 # opensrc - source code for packages
 opensrc/
 

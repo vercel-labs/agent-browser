@@ -34,7 +34,7 @@ const SKILL_DIRS: &[&str] = &["skills", "skill-data"];
 /// Resolution order:
 /// 1. AGENT_BROWSER_SKILLS_DIR env var (points directly at a single directory)
 /// 2. ../  relative to the executable (npm installs: binary is in bin/)
-/// 3. Walk up from the executable to find a project root with skills/
+/// 3. Walk up from the executable to find a project root with skill-data/core/SKILL.md
 ///    (dev builds where binary is in target/debug/ or target/release/)
 fn find_package_root() -> Option<PathBuf> {
     if let Ok(exe) = env::current_exe() {
@@ -42,14 +42,14 @@ fn find_package_root() -> Option<PathBuf> {
         if let Some(parent) = exe.parent() {
             // npm install layout: bin/agent-browser-* -> ../
             let candidate = parent.join("..");
-            if candidate.join("skills").is_dir() {
+            if candidate.join("skill-data/core/SKILL.md").is_file() {
                 return Some(candidate.canonicalize().unwrap_or(candidate));
             }
 
             // dev build layout: walk up from target/debug/ or target/release/
             let mut dir = parent;
             loop {
-                if dir.join("skills").is_dir() {
+                if dir.join("skill-data/core/SKILL.md").is_file() {
                     return Some(dir.to_path_buf());
                 }
                 match dir.parent() {
@@ -63,7 +63,7 @@ fn find_package_root() -> Option<PathBuf> {
     None
 }
 
-/// Collect all skill directories to search, respecting the env var override.
+/// Collect skill directories, falling back to `~/.agent-browser` when package discovery fails.
 fn find_skills_dirs() -> Vec<PathBuf> {
     // Env var override: single directory, used as-is
     if let Ok(dir) = env::var("AGENT_BROWSER_SKILLS_DIR") {
@@ -73,7 +73,9 @@ fn find_skills_dirs() -> Vec<PathBuf> {
         }
     }
 
-    let Some(root) = find_package_root() else {
+    let Some(root) =
+        find_package_root().or_else(|| dirs::home_dir().map(|home| home.join(".agent-browser")))
+    else {
         return vec![];
     };
 
@@ -433,13 +435,13 @@ pub fn run_skills(args: &[String], json_mode: bool) {
                 "{}",
                 serde_json::to_string(&json!({
                     "success": false,
-                    "error": "Skills directory not found. Set AGENT_BROWSER_SKILLS_DIR or reinstall via npm.",
+                    "error": "Skills directory not found. Install skills under ~/.agent-browser/ or set AGENT_BROWSER_SKILLS_DIR.",
                 }))
                 .unwrap_or_default()
             );
         } else {
             eprintln!(
-                "{} Skills directory not found. Set AGENT_BROWSER_SKILLS_DIR or reinstall via npm.",
+                "{} Skills directory not found. Install skills under ~/.agent-browser/ or set AGENT_BROWSER_SKILLS_DIR.",
                 color::error_indicator()
             );
         }
