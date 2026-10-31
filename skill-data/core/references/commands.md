@@ -267,6 +267,7 @@ agent-browser tab new --label docs [url]       # New tab with a memorable label
 agent-browser tab t2                           # Switch to tab by id
 agent-browser tab docs                         # Switch to tab by label
 agent-browser tab close                        # Close current tab
+agent-browser bringtofront                     # Explicitly focus the working browser tab
 agent-browser tab close t2                     # Close tab by id
 agent-browser tab close docs                   # Close tab by label
 agent-browser window new                       # New window
@@ -292,7 +293,7 @@ Tabs opened through `tab new` or `click --new-tab` inherit the session's setup b
 
 `tab list --json` also reports each tab's CDP `targetId`, accepted anywhere a tab ref is accepted (`tab <targetId>`, `tab close <targetId>`). Target ids stay stable across daemon restarts, unlike `t<N>` ids, which are per-daemon counters. With `--pin-tab` the session is pinned to its bound tab: if that tab is closed, commands fail with a `tab_gone` error instead of falling back to another tab, and `tab new` or `tab list` recover. JSON errors include `code: "tab_gone"` and a recovery object with `data.targetId` plus optional sanitized `data.lastUrl`; batch uses `result` for the same object.
 
-Switching to a tab that the browser discarded to save memory reactivates it, since a discarded tab has no renderer to drive. Reactivation reloads the page and resets its unsaved state, and the switch result adds `"revived": true` so the reload is not silent. A tab whose page is paused by a JavaScript dialog is alive rather than discarded: the switch leaves it untouched and adds `"dialogBlocked": true`. Resolve the dialog with `dialog accept`/`dialog dismiss` and its state is preserved. Closing the active tab onto a discarded successor revives it the same way and reports `"activeTabRevived": true`.
+Opening and selecting tabs changes the agent's working tab without bringing Chrome to the foreground or selecting its visible tab. Use `agent-browser bringtofront` to explicitly focus the working tab. A discarded tab cannot answer commands; activate it in the browser and retry instead of relying on automatic activation. Browser launch and explicit foreground commands can still change focus. A tab paused by a JavaScript dialog remains selected without activation and reports `"dialogBlocked": true`; resolve the dialog with `dialog accept` or `dialog dismiss` before interacting.
 
 ## Frames
 

@@ -32,6 +32,18 @@
       {
         "from": "agent-browser network route <url> --body <json>  # Mock response",
         "to": "agent-browser network route <url> --body <json>  # Mock response\nagent-browser network route <url> --body <json> --allow-origin <origin>  # Mock readable cross-origin"
+      },
+      {
+        "from": "Browsers discard background tabs to save memory, leaving a tab with no renderer to drive. Switching to a discarded tab reactivates it, which reloads the page and resets its unsaved state; the switch result adds `\"revived\": true` so the reload is visible rather than silent. A tab whose page is paused by a JavaScript dialog is alive rather than discarded: the switch leaves it untouched and adds `\"dialogBlocked\": true`. Resolve the dialog with `dialog accept` or `dialog dismiss` and the tab keeps its state. Closing the active tab onto a discarded successor revives it the same way and reports `\"activeTabRevived\": true`.",
+        "to": "Opening and selecting tabs changes the agent's working tab without bringing Chrome to the foreground or selecting its visible tab. Use `agent-browser bringtofront` to explicitly focus the working tab. A discarded tab cannot answer commands; activate it in the browser and retry instead of relying on automatic activation. Browser launch and explicit foreground commands can still change focus. A tab paused by a JavaScript dialog remains selected without activation and reports `\"dialogBlocked\": true`; resolve the dialog with `dialog accept` or `dialog dismiss` before interacting."
+      },
+      {
+        "from": "Browsers discard background tabs to save memory, leaving a tab with no renderer to drive. Switching to a discarded tab reactivates it, which reloads the page and resets its unsaved state; the switch result adds \"revived\": true so the reload is visible rather than silent. A tab whose page is paused by a JavaScript dialog is alive rather than discarded: the switch leaves it untouched and adds \"dialogBlocked\": true. Resolve the dialog with dialog accept or dialog dismiss and the tab keeps its state. Closing the active tab onto a discarded successor revives it the same way and reports \"activeTabRevived\": true.",
+        "to": "Opening and selecting tabs changes the agent's working tab without bringing Chrome to the foreground or selecting its visible tab. Use agent-browser bringtofront to explicitly focus the working tab. A discarded tab cannot answer commands; activate it in the browser and retry instead of relying on automatic activation. Browser launch and explicit foreground commands can still change focus. A tab paused by a JavaScript dialog remains selected without activation and reports \"dialogBlocked\": true; resolve the dialog with dialog accept or dialog dismiss before interacting."
+      },
+      {
+        "from": "agent-browser tab close [t<N>|label]           # Close a tab (defaults to active)",
+        "to": "agent-browser tab close [t<N>|label]           # Close a tab (defaults to active)\nagent-browser bringtofront                     # Explicitly focus the working browser tab"
       }
     ],
     "/configuration": [

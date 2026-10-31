@@ -277,6 +277,7 @@ agent-browser tab new [url]                    # New tab
 agent-browser tab new --label docs [url]       # New tab with a user-assigned label
 agent-browser tab <t<N>|label>                 # Switch to a tab by id or label
 agent-browser tab close [t<N>|label]           # Close a tab (defaults to active)
+agent-browser bringtofront                     # Explicitly focus the working browser tab
 agent-browser window new                       # Open new browser window
 agent-browser frame <sel>                      # Switch to iframe by CSS selector
 agent-browser frame @e3                        # Switch to iframe by element ref
@@ -315,7 +316,7 @@ agent-browser click @e3         # uses docs's refs
 
 ### Discarded tab revival
 
-Browsers discard background tabs to save memory, leaving a tab with no renderer to drive. Switching to a discarded tab reactivates it, which reloads the page and resets its unsaved state; the switch result adds `"revived": true` so the reload is visible rather than silent. A tab whose page is paused by a JavaScript dialog is alive rather than discarded: the switch leaves it untouched and adds `"dialogBlocked": true`. Resolve the dialog with `dialog accept` or `dialog dismiss` and the tab keeps its state. Closing the active tab onto a discarded successor revives it the same way and reports `"activeTabRevived": true`.
+Opening and selecting tabs changes the agent's working tab without bringing Chrome to the foreground or selecting its visible tab. Use `agent-browser bringtofront` to explicitly focus the working tab. A discarded tab cannot answer commands; activate it in the browser and retry instead of relying on automatic activation. Browser launch and explicit foreground commands can still change focus. A tab paused by a JavaScript dialog remains selected without activation and reports `"dialogBlocked": true`; resolve the dialog with `dialog accept` or `dialog dismiss` before interacting.
 
 ### Snapshot deltas
 

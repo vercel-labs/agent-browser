@@ -1715,6 +1715,21 @@ Examples:
 "##
         }
 
+        "bringtofront" => {
+            r##"
+agent-browser bringtofront - Focus the working browser tab
+
+Usage: agent-browser bringtofront
+
+Explicitly brings the working tab and its browser window to the foreground.
+Opening and selecting Chrome tabs otherwise keeps browser focus unchanged.
+
+Examples:
+  agent-browser tab docs
+  agent-browser bringtofront
+"##
+        }
+
         "read" => {
             r##"
 agent-browser read - Fetch a URL as agent-readable text
@@ -2737,6 +2752,11 @@ accepted. A label starts with a letter and contains only letters, digits, `-`, o
 or `T<N>` tab-id form. CDP target ids (from `tab list --json`) are also accepted
 as tab refs; unlike `t<N>` ids they stay stable across daemon restarts.
 Rejected labels preserve the current tab's refs and selected frame.
+
+Opening and selecting Chrome tabs keeps browser focus unchanged. Use
+`agent-browser bringtofront` to explicitly focus the working tab. Discarded
+tabs require activation in the browser before retrying; they are not
+automatically activated. Launching a browser can still change focus.
 
 Tabs opened with `tab new` or `click --new-tab` inherit the session's user
 agent, headers, HTTP credentials, init scripts, routes, and emulation
@@ -3974,6 +3994,7 @@ Navigation:
   back                       Go back
   forward                    Go forward
   reload                     Reload page
+  bringtofront               Explicitly focus the working browser tab
 
 Get Info:  agent-browser get <what> [selector]
   text, html, value, attr <name>, title, url, count, box, styles, cdp-url
