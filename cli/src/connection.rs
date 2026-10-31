@@ -717,6 +717,16 @@ fn ignored_timeout_overrides(
     ignored
 }
 
+/// Default timeout the session's running daemon was started with, so a
+/// command that omits it waits on the client as long as the daemon does.
+pub fn running_daemon_default_timeout(session: &str) -> Option<u64> {
+    let stored = fs::read_to_string(get_config_path(session)).ok()?;
+    serde_json::from_str::<Value>(&stored)
+        .ok()?
+        .get("default_timeout")?
+        .as_u64()
+}
+
 fn warn_ignored_timeout_overrides(session: &str, opts: &DaemonOptions) {
     let Ok(stored) = fs::read_to_string(get_config_path(session)) else {
         return;
@@ -1944,6 +1954,24 @@ mod tests {
             &stored,
             &test_daemon_options(None, true, None)
         ));
+    }
+
+    #[test]
+    fn test_running_daemon_default_timeout_reads_stored_config() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_NAMESPACE"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        fs::create_dir_all(get_socket_dir()).unwrap();
+
+        let mut started = test_daemon_options(None, false, None);
+        started.default_timeout = Some(90_000);
+        write_daemon_config("timeout-set", &started);
+        write_daemon_config("timeout-unset", &test_daemon_options(None, false, None));
+
+        assert_eq!(running_daemon_default_timeout("timeout-set"), Some(90_000));
+        assert_eq!(running_daemon_default_timeout("timeout-unset"), None);
+        assert_eq!(running_daemon_default_timeout("missing"), None);
     }
 
     #[test]
