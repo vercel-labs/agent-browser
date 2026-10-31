@@ -425,6 +425,9 @@ pub(crate) fn extract_config_path(args: &[String]) -> Option<Option<String>> {
     ];
     let mut i = 0;
     while i < args.len() {
+        if args[i] == "--" {
+            break;
+        }
         if args[i] == "--config" {
             return Some(args.get(i + 1).cloned());
         }
@@ -823,6 +826,10 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
     let mut wait_command_seen = false;
     while i < args.len() {
         let arg = args[i].as_str();
+        // `--` ends option parsing; what follows is literal command data
+        if arg == "--" {
+            break;
+        }
         if !arg.starts_with('-') && looks_like_command(arg) {
             if !seen_command {
                 wait_command_seen = arg == "wait";
@@ -1290,6 +1297,11 @@ fn looks_like_command(value: &str) -> bool {
     crate::commands::is_top_level_command(value)
 }
 
+/// The args before a `--`; everything after it is literal command data.
+pub fn before_end_of_options(args: &[String]) -> &[String] {
+    &args[..args.iter().position(|a| a == "--").unwrap_or(args.len())]
+}
+
 pub fn clean_args(args: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     let mut skip_next = false;
@@ -1373,6 +1385,11 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             skip_next = false;
             i += 1;
             continue;
+        }
+        // keep `--` so the command parser knows where the literal data starts
+        if arg == "--" {
+            result.extend_from_slice(&args[i..]);
+            break;
         }
         if arg.starts_with("--restore=") {
             i += 1;
@@ -1612,6 +1629,16 @@ mod tests {
     fn test_parse_no_headers_flag() {
         let flags = parse_flags(&args("open example.com"));
         assert!(flags.headers.is_none());
+    }
+
+    #[test]
+    fn test_end_of_options_keeps_flag_shaped_text() {
+        let input = args("fill #field -- --json --session x");
+        assert_eq!(clean_args(&input), input);
+        assert_eq!(before_end_of_options(&input), &input[..2]);
+        let flags = parse_flags(&input);
+        assert!(!flags.json);
+        assert_eq!(flags.session, parse_flags(&args("fill #field")).session);
     }
 
     #[test]
