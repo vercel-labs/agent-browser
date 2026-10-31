@@ -6,7 +6,103 @@ use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AXNode, AXProperty, AXValue, EvaluateParams, EvaluateResult, GetFullAXTreeResult,
 };
-use super::element::{resolve_ax_session, RefMap};
+use super::element::{normalize_ax_role, resolve_ax_session, RefMap};
+
+#[cfg(test)]
+mod document_identity_regressions {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
+
+    async fn observe_documents(documents: &[Option<&str>], sessions: &[&str]) -> Vec<String> {
+        let document = Arc::new(Mutex::new(None::<String>));
+        let server_document = document.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                let Ok(text) = message.to_text() else {
+                    continue;
+                };
+                let request: Value = serde_json::from_str(text).unwrap();
+                let result = match request["method"].as_str().unwrap() {
+                    "Page.getFrameTree" => json!({"frameTree": {"frame": {
+                        "id": "child", "loaderId": server_document.lock().unwrap().clone()
+                    }}}),
+                    "Accessibility.getFullAXTree" => json!({"nodes": [{
+                        "nodeId": "1", "role": {"type": "role", "value": "button"},
+                        "name": {"type": "string", "value": "Buy"}, "backendDOMNodeId": 42
+                    }]}),
+                    "Runtime.evaluate" => json!({"result": {"type": "object", "value": []}}),
+                    _ => json!({}),
+                };
+                ws.send(tokio_tungstenite::tungstenite::Message::Text(
+                    json!({"id": request["id"], "result": result}).to_string(),
+                ))
+                .await
+                .unwrap();
+            }
+        });
+        let client = CdpClient::connect(&url).await.unwrap();
+        let mut refs = RefMap::new();
+        let mut observations = Vec::new();
+        for (loader, session) in documents.iter().zip(sessions) {
+            *document.lock().unwrap() = loader.map(str::to_string);
+            refs.begin_snapshot();
+            take_snapshot(
+                &client,
+                "parent-session",
+                &SnapshotOptions::default(),
+                &mut refs,
+                Some("child"),
+                &HashMap::from([("child".into(), session.to_string())]),
+            )
+            .await
+            .unwrap();
+            observations.push(refs.entries_sorted()[0].0.clone());
+        }
+        server.abort();
+        observations
+    }
+
+    #[tokio::test]
+    async fn durable_refs_invalidate_replaced_iframe_document() {
+        let refs =
+            observe_documents(&[Some("a"), Some("a"), Some("b")], &["child-session"; 3]).await;
+        assert_eq!(refs[0], refs[1], "same document should preserve refs");
+        assert_ne!(
+            refs[1], refs[2],
+            "replacement document must not reuse a ref for backend ID 42"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_refs_invalidate_replaced_iframe_session() {
+        let refs = observe_documents(&[Some("a"); 2], &["session-a", "session-b"]).await;
+        assert_ne!(
+            refs[0], refs[1],
+            "backend IDs belong to their effective CDP session"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_refs_do_not_share_unknown_document() {
+        let refs = observe_documents(
+            &[None, None, Some("a"), None, Some("a")],
+            &["child-session"; 5],
+        )
+        .await;
+        let unique: std::collections::HashSet<_> = refs.iter().collect();
+        assert_eq!(
+            unique.len(),
+            refs.len(),
+            "unknown identity must break continuity: {refs:?}"
+        );
+    }
+}
 
 const INTERACTIVE_ROLES: &[&str] = &[
     "button",
@@ -29,12 +125,10 @@ const INTERACTIVE_ROLES: &[&str] = &[
     "Iframe",
 ];
 
+const TABLE_CELL_ROLES: &[&str] = &["cell", "gridcell", "columnheader", "rowheader"];
+
 const CONTENT_ROLES: &[&str] = &[
     "heading",
-    "cell",
-    "gridcell",
-    "columnheader",
-    "rowheader",
     "listitem",
     "article",
     "region",
@@ -65,14 +159,23 @@ const STRUCTURAL_ROLES: &[&str] = &[
     "RootWebArea",
 ];
 
-const INVISIBLE_CHARS: &[char] = &[
+const ZERO_WIDTH_CHARS: &[char] = &[
     '\u{FEFF}', // BOM / Zero Width No-Break Space
     '\u{200B}', // Zero Width Space
     '\u{200C}', // Zero Width Non-Joiner
     '\u{200D}', // Zero Width Joiner
     '\u{2060}', // Word Joiner
-    '\u{00A0}', // Non-Breaking Space (&nbsp;)
 ];
+
+fn normalize_snapshot_name(name: &str) -> String {
+    name.chars()
+        .filter_map(|ch| match ch {
+            '\u{00A0}' => Some(' '),
+            ch if ZERO_WIDTH_CHARS.contains(&ch) => None,
+            ch => Some(ch),
+        })
+        .collect()
+}
 
 #[derive(Default)]
 pub struct SnapshotOptions {
@@ -269,12 +372,13 @@ pub async fn take_snapshot(
                 .object_id
                 .ok_or_else(|| format!("Selector '{}' did not match any element", selector))?;
 
-            // Request the full DOM subtree (depth: -1) so we can collect all
-            // backendNodeIds that live under the matched element.
+            // Request the full DOM subtree (depth: -1), including shadow roots
+            // (pierce), so we can collect all backendNodeIds that live under
+            // the matched element.
             let describe: Value = client
                 .send_command(
                     "DOM.describeNode",
-                    Some(serde_json::json!({ "objectId": object_id, "depth": -1 })),
+                    Some(serde_json::json!({ "objectId": object_id, "depth": -1, "pierce": true })),
                     Some(session_id),
                 )
                 .await?;
@@ -300,6 +404,17 @@ pub async fn take_snapshot(
 
     let (ax_params, effective_session_id) =
         resolve_ax_session(frame_id, session_id, iframe_sessions);
+    // Same-origin children share a CDP session but have separate loaders;
+    // out-of-process children also have their own effective session identity.
+    let frame_tree = client
+        .send_command_no_params("Page.getFrameTree", Some(effective_session_id))
+        .await
+        .ok();
+    let loader = frame_tree
+        .as_ref()
+        .and_then(|tree| frame_loader(&tree["frameTree"], frame_id));
+    let document_is_known =
+        ref_map.observe_document(session_id, frame_id, effective_session_id, loader);
     // Ensure domains are enabled on the iframe session (defensive fallback
     // in case the attach-time enable in execute_command was missed).
     if effective_session_id != session_id {
@@ -329,18 +444,23 @@ pub async fn take_snapshot(
             .map(|n| n.backend_node_id.is_some_and(|bid| id_set.contains(&bid)))
             .collect();
 
-        // An AX node is a "top-level" match if it is in the subtree but its
-        // parent (in the AX tree) is not.
-        let mut roots = Vec::new();
-        for (idx, node) in tree_nodes.iter().enumerate() {
-            if !in_subtree[idx] {
-                continue;
+        // An AX node is a "top-level" match if it is in the subtree but none
+        // of its ancestors (in the AX tree) are. Checking only the parent is
+        // not enough: ignored nodes lose their backendDOMNodeId in
+        // build_tree, so a wrapper <div> between two matched nodes would
+        // turn everything below it into an extra root and render it twice.
+        let has_ancestor_in_subtree = |mut idx: usize| {
+            while let Some(pidx) = tree_nodes[idx].parent_idx {
+                if in_subtree[pidx] {
+                    return true;
+                }
+                idx = pidx;
             }
-            let parent_in_subtree = node.parent_idx.is_some_and(|pidx| in_subtree[pidx]);
-            if !parent_in_subtree {
-                roots.push(idx);
-            }
-        }
+            false
+        };
+        let roots: Vec<usize> = (0..tree_nodes.len())
+            .filter(|&idx| in_subtree[idx] && !has_ancestor_in_subtree(idx))
+            .collect();
 
         if roots.is_empty() {
             return Err(format!(
@@ -368,13 +488,14 @@ pub async fn take_snapshot(
 
     for (idx, node) in tree_nodes.iter().enumerate() {
         let role = node.role.as_str();
-        let mut should_ref = if INTERACTIVE_ROLES.contains(&role) {
-            true
-        } else if CONTENT_ROLES.contains(&role) {
-            !node.name.is_empty()
-        } else {
-            false
-        };
+        let mut should_ref =
+            if INTERACTIVE_ROLES.contains(&role) || TABLE_CELL_ROLES.contains(&role) {
+                true
+            } else if CONTENT_ROLES.contains(&role) {
+                !node.name.is_empty()
+            } else {
+                false
+            };
 
         if node
             .backend_node_id
@@ -401,8 +522,23 @@ pub async fn take_snapshot(
             None
         };
 
-        let ref_id = format!("e{}", next_ref);
-        next_ref += 1;
+        let ref_id = if let Some(backend_node_id) = tree_nodes[*idx]
+            .backend_node_id
+            .filter(|_| document_is_known)
+        {
+            if let Some(existing) = ref_map.durable_ref(session_id, frame_id, backend_node_id) {
+                existing.to_string()
+            } else {
+                let allocated = format!("e{}", next_ref);
+                next_ref += 1;
+                ref_map.remember_durable_ref(session_id, frame_id, backend_node_id, &allocated);
+                allocated
+            }
+        } else {
+            let allocated = format!("e{}", next_ref);
+            next_ref += 1;
+            allocated
+        };
 
         ref_map.add_with_frame(
             ref_id.clone(),
@@ -588,6 +724,17 @@ pub async fn take_snapshot(
 }
 
 /// Resolve the child frame ID for an iframe element given its backendNodeId.
+fn frame_loader<'a>(tree: &'a Value, frame_id: Option<&str>) -> Option<&'a str> {
+    let frame = &tree["frame"];
+    if frame_id.is_none() || frame["id"].as_str() == frame_id {
+        return frame["loaderId"].as_str().filter(|id| !id.is_empty());
+    }
+    tree["childFrames"]
+        .as_array()?
+        .iter()
+        .find_map(|child| frame_loader(child, frame_id))
+}
+
 async fn resolve_iframe_frame_id(
     client: &CdpClient,
     session_id: &str,
@@ -943,7 +1090,7 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
     let mut id_to_idx: HashMap<String, usize> = HashMap::new();
 
     for (i, node) in nodes.iter().enumerate() {
-        let role = extract_ax_string(&node.role);
+        let role = normalize_ax_role(extract_ax_string(&node.role));
         let name = extract_ax_string(&node.name);
         let value_text = extract_ax_string_opt(&node.value);
 
@@ -1084,7 +1231,7 @@ fn render_tree(
     // Reduce unnecessary indentation and rendering
     if node.role.is_empty()
         || (node.role == "generic" && !node.has_ref && node.children.len() <= 1)
-        || (node.role == "StaticText" && node.name.replace(INVISIBLE_CHARS, "").is_empty())
+        || (node.role == "StaticText" && normalize_snapshot_name(&node.name).trim().is_empty())
     {
         // Ignored node -- still render children
         for &child in &node.children {
@@ -1133,8 +1280,10 @@ fn render_tree(
         &node.name
     };
     if !unescaped_display_name.is_empty() {
-        if let Ok(display_name) = serde_json::to_string(&unescaped_display_name) {
-            line.push_str(&format!(" {}", display_name.replace(INVISIBLE_CHARS, "")));
+        if let Ok(display_name) =
+            serde_json::to_string(&normalize_snapshot_name(unescaped_display_name))
+        {
+            line.push_str(&format!(" {}", display_name));
         }
     }
 
@@ -1202,6 +1351,7 @@ fn render_tree(
     }
 }
 
+/// Retain matching content and its direct ancestor chain, including visible text in noninteractive snapshots.
 fn compact_tree(tree: &str, interactive: bool) -> String {
     let lines: Vec<&str> = tree.lines().collect();
     if lines.is_empty() {
@@ -1211,14 +1361,15 @@ fn compact_tree(tree: &str, interactive: bool) -> String {
     let mut keep = vec![false; lines.len()];
 
     for (i, line) in lines.iter().enumerate() {
-        if line.contains("ref=") || line.contains(": ") {
+        if line.contains("ref=") || line.contains(": ") || (!interactive && line.contains(" \"")) {
             keep[i] = true;
             // Mark ancestors
-            let my_indent = count_indent(line);
+            let mut my_indent = count_indent(line);
             for j in (0..i).rev() {
                 let ancestor_indent = count_indent(lines[j]);
                 if ancestor_indent < my_indent {
                     keep[j] = true;
+                    my_indent = ancestor_indent;
                     if ancestor_indent == 0 {
                         break;
                     }
@@ -1360,6 +1511,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_normalize_snapshot_name_preserves_word_boundaries() {
+        assert_eq!(
+            normalize_snapshot_name("Capital\u{00A0}Federal"),
+            "Capital Federal"
+        );
+        assert_eq!(normalize_snapshot_name("zero\u{200B}width"), "zerowidth");
+    }
+
+    #[test]
     fn test_interactive_roles() {
         assert!(INTERACTIVE_ROLES.contains(&"button"));
         assert!(INTERACTIVE_ROLES.contains(&"textbox"));
@@ -1374,11 +1534,34 @@ mod tests {
 
     #[test]
     fn test_compact_tree_basic() {
-        let tree = "- navigation\n  - link \"Home\" [ref=e1]\n  - link \"About\" [ref=e2]\n- main\n  - heading \"Title\"\n  - paragraph\n    - text: Hello\n";
+        let tree = "- navigation\n  - link \"Home\" [ref=e1]\n  - link \"About\" [ref=e2]\n- main\n  - heading \"Title\"\n  - paragraph\n    - text: Hello\n- status\n  - StaticText \"Saved successfully\"\n- empty\n  - paragraph\n";
         let result = compact_tree(tree, false);
         assert!(result.contains("[ref=e1]"));
         assert!(result.contains("[ref=e2]"));
         assert!(result.contains("Hello"));
+        assert!(result.contains("- status\n  - StaticText \"Saved successfully\""));
+        assert!(!result.contains("- empty"));
+
+        let interactive = compact_tree(tree, true);
+        assert!(!interactive.contains("Saved successfully"));
+        assert!(interactive.contains("[ref=e1]"));
+        assert!(interactive.contains("Hello"));
+    }
+
+    #[test]
+    fn test_compact_tree_keeps_only_direct_ancestors() {
+        for (interactive, content) in [
+            (false, "StaticText \"Saved successfully\""),
+            (true, "button \"Save\" [ref=e1]"),
+        ] {
+            let tree = format!(
+                "- main\n  - empty-section\n    - empty-paragraph\n  - section\n    - empty-paragraph\n    - paragraph\n      - {content}\n  - trailing-section\n- empty-root\n"
+            );
+            assert_eq!(
+                compact_tree(&tree, interactive),
+                format!("- main\n  - section\n    - paragraph\n      - {content}")
+            );
+        }
     }
 
     #[test]

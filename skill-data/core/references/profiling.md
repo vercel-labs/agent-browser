@@ -63,7 +63,7 @@ Several `disabled-by-default-*` categories are also included for detailed timeli
 ```bash
 agent-browser profiler start
 agent-browser navigate https://app.example.com
-agent-browser wait --load networkidle
+agent-browser wait --load load
 agent-browser profiler stop ./page-load-profile.json
 ```
 
@@ -83,7 +83,7 @@ agent-browser profiler stop ./interaction-profile.json
 #!/bin/bash
 agent-browser profiler start
 agent-browser navigate https://app.example.com
-agent-browser wait --load networkidle
+agent-browser wait --load load
 agent-browser profiler stop "./profiles/build-${BUILD_ID}.json"
 ```
 

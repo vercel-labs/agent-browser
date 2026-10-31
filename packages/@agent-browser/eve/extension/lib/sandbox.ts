@@ -28,7 +28,6 @@ export interface EveSandboxCommandResult {
 }
 
 export interface EveSandboxSession {
-  readonly id: string;
   run(options: { readonly abortSignal?: AbortSignal; readonly command: string }): PromiseLike<EveSandboxCommandResult>;
 }
 
@@ -73,6 +72,7 @@ const APT_CHROMIUM_DEPENDENCIES: readonly (readonly [base: string, t64Variant?: 
   ["libfontconfig1"],
   ["libdbus-1-3", "libdbus-1-3t64"],
   ["libnss3"],
+  ["libnss3-tools"],
   ["libnspr4"],
   ["libatk-bridge2.0-0", "libatk-bridge2.0-0t64"],
   ["libdrm2"],
@@ -89,6 +89,7 @@ const APT_CHROMIUM_DEPENDENCIES: readonly (readonly [base: string, t64Variant?: 
 const DNF_CHROMIUM_DEPENDENCIES = [
   "glib2",
   "nss",
+  "nss-tools",
   "nspr",
   "libxkbcommon",
   "atk",
@@ -115,7 +116,7 @@ const DNF_CHROMIUM_DEPENDENCIES = [
   "dbus-libs",
 ] as const;
 
-const EVE_BOOTSTRAP_REVISION = "3";
+const EVE_BOOTSTRAP_REVISION = "4";
 
 export function agentBrowserRevalidationKey(options: AgentBrowserInstallOptions = {}): string {
   return [
@@ -172,7 +173,7 @@ export async function runAgentBrowser<TJson = unknown>(
     throw new Error("agent-browser requires an Eve sandbox. Configure agent/sandbox.ts first.");
   }
 
-  const session = options.session ?? defaultSessionName(options.sessionPrefix ?? "eve", sandbox.id);
+  const session = options.session ?? defaultSessionName(options.sessionPrefix ?? "eve", "default");
   const command = buildAgentBrowserCommand(args, { ...options, session });
   const result = await sandbox.run({ abortSignal: options.abortSignal, command });
 

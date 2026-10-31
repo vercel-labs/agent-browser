@@ -6,7 +6,9 @@ mod http;
 mod websocket;
 
 pub use cdp_loop::{ack_screencast_frame, start_screencast, stop_screencast};
-pub use dashboard::run_dashboard_server;
+pub use dashboard::{
+    is_valid_dashboard_access_token, normalize_dashboard_allowed_origins, run_dashboard_server,
+};
 
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -245,12 +247,6 @@ impl StreamServer {
         self.client_notify.notify_one();
     }
 
-    /// Update the active CDP page session ID used for screencast commands.
-    pub async fn set_cdp_session_id(&self, session_id: Option<String>) {
-        let mut guard = self.cdp_session_id.write().await;
-        *guard = session_id;
-    }
-
     /// Check whether the server currently has active screencast running.
     pub async fn is_screencasting(&self) -> bool {
         *self.screencasting.lock().await
@@ -266,6 +262,10 @@ impl StreamServer {
         }
         *vw = width;
         *vh = height;
+        // A cached frame still carries the previous dimensions. Clear it while
+        // holding the viewport locks so an in-flight CDP frame either publishes
+        // before this invalidation or observes the new dimensions and is dropped.
+        self.frame_watch.send_replace(None);
         drop(vw);
         drop(vh);
         self.client_notify.notify_one();
@@ -586,6 +586,32 @@ impl StreamServer {
         });
         let _ = self.frame_tx.send(msg.to_string());
     }
+
+    pub async fn bind_cdp_session_and_broadcast_tabs(
+        &self,
+        session_id: Option<String>,
+        tabs: &[Value],
+    ) {
+        let mut session_guard = self.cdp_session_id.write().await;
+        let mut tabs_guard = self.last_tabs.write().await;
+        let session_changed = *session_guard != session_id;
+        *session_guard = session_id;
+        *tabs_guard = tabs.to_vec();
+        // New WebSocket clients seed themselves from the frame watch before
+        // they notify the CDP loop. Never let that seed belong to another tab.
+        if session_changed {
+            self.frame_watch.send_replace(None);
+        }
+        let msg = json!({
+            "type": "tabs",
+            "tabs": tabs,
+            "timestamp": timestamp_ms(),
+        });
+        let _ = self.frame_tx.send(msg.to_string());
+        drop(tabs_guard);
+        drop(session_guard);
+        self.client_notify.notify_one();
+    }
 }
 
 pub(crate) fn timestamp_ms() -> u64 {
@@ -769,6 +795,51 @@ mod tests {
         let mut ws = connect_client(server.port()).await;
         let frame = next_frame(&mut ws).await;
         assert_eq!(frame.get("data").and_then(|v| v.as_str()), Some("fresh"));
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_session_rebind_does_not_seed_new_client_with_previous_frame() {
+        let (server, _slot) = StreamServer::start_without_client(
+            0,
+            "t15".to_string(),
+            true,
+            Arc::new(IdleActivity::new()),
+        )
+        .await
+        .expect("server start");
+
+        server
+            .bind_cdp_session_and_broadcast_tabs(Some("S-OLD".to_string()), &[])
+            .await;
+        server.broadcast_frame(r#"{"type":"frame","data":"old-tab"}"#);
+        server
+            .bind_cdp_session_and_broadcast_tabs(Some("S-NEW".to_string()), &[])
+            .await;
+
+        let mut ws = connect_client(server.port()).await;
+        expect_no_frame(&mut ws, 200).await;
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_viewport_rebind_does_not_seed_new_client_with_previous_frame() {
+        let (server, _slot) = StreamServer::start_without_client(
+            0,
+            "t16".to_string(),
+            true,
+            Arc::new(IdleActivity::new()),
+        )
+        .await
+        .expect("server start");
+
+        server.broadcast_frame(r#"{"type":"frame","data":"old-size"}"#);
+        server.set_viewport(800, 600).await;
+
+        let mut ws = connect_client(server.port()).await;
+        expect_no_frame(&mut ws, 200).await;
 
         server.shutdown().await;
     }
