@@ -137,6 +137,18 @@ fn attach_input_mode(cmd: &mut serde_json::Value, flags: &Flags) {
     }
 }
 
+fn effective_auto_connect_timeout_ms(flags: &Flags) -> u64 {
+    flags
+        .auto_connect_timeout
+        .unwrap_or(crate::native::cdp::chrome::DEFAULT_AUTO_CONNECT_TIMEOUT_MS)
+}
+
+/// Carry the effective timeout on every command so implicit recovery uses the
+/// current invocation's budget instead of the daemon's spawn-time environment.
+fn attach_auto_connect_timeout_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
+    cmd["autoConnectTimeout"] = json!(effective_auto_connect_timeout_ms(flags));
+}
+
 fn attach_plugins_to_command(cmd: &mut serde_json::Value, plugins: &[plugins::PluginConfig]) {
     cmd["plugins"] = json!(plugins);
 }
@@ -1738,6 +1750,7 @@ fn main() {
     attach_plugins_to_command(&mut cmd, &flags.plugins);
 
     attach_pin_tab_to_command(&mut cmd, &flags);
+    attach_auto_connect_timeout_to_command(&mut cmd, &flags);
     attach_restore_config_to_command(&mut cmd, &flags);
 
     // Validate restore/session persistence name before starting daemon
@@ -1877,6 +1890,7 @@ fn main() {
         pin_tab: flags.pin_tab,
         idle_timeout: flags.idle_timeout.as_deref(),
         default_timeout: flags.default_timeout,
+        auto_connect_timeout: flags.auto_connect_timeout,
         cdp: flags.cdp.as_deref(),
         cdp_headers: flags.cdp_headers.as_deref(),
         no_auto_dialog: flags.no_auto_dialog,
@@ -1924,6 +1938,8 @@ fn main() {
         if let Some(ref dp) = flags.download_path {
             launch_cmd["downloadPath"] = json!(dp);
         }
+
+        launch_cmd["autoConnectTimeout"] = json!(effective_auto_connect_timeout_ms(&flags));
 
         let err = match send_command(launch_cmd, &flags.session) {
             Ok(resp) if resp.success => None,
@@ -2411,6 +2427,7 @@ fn run_batch(
         attach_restore_config_to_command(&mut parsed, flags);
 
         attach_pin_tab_to_command(&mut parsed, flags);
+        attach_auto_connect_timeout_to_command(&mut parsed, flags);
 
         match send_command_with_respawn(parsed, &flags.session, daemon_opts) {
             Ok(resp) => {
@@ -2698,6 +2715,7 @@ mod tests {
         flags.cdp = None;
         flags.provider = None;
         flags.auto_connect = false;
+        flags.auto_connect_timeout = None;
         flags
     }
 
@@ -2733,6 +2751,19 @@ mod tests {
         let mut disabled_cmd = json!({ "action": "launch" });
         attach_pin_tab_to_command(&mut disabled_cmd, &flags);
         assert_eq!(disabled_cmd["pinTab"], false);
+    }
+
+    #[test]
+    fn test_attach_auto_connect_timeout_to_command_uses_default_when_omitted() {
+        let flags = neutral_launch_config_flags();
+        let mut cmd = json!({ "action": "evaluate" });
+
+        attach_auto_connect_timeout_to_command(&mut cmd, &flags);
+
+        assert_eq!(
+            cmd["autoConnectTimeout"],
+            crate::native::cdp::chrome::DEFAULT_AUTO_CONNECT_TIMEOUT_MS
+        );
     }
 
     #[test]
@@ -2838,6 +2869,25 @@ mod tests {
             root_schema["properties"]["clearCaCert"],
             docs_schema["properties"]["clearCaCert"]
         );
+    }
+
+    #[test]
+    fn test_published_schemas_default_auto_connect_timeout_matches_runtime() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("cli should have a repository parent");
+        for schema_path in ["agent-browser.schema.json", "docs/public/schema.json"] {
+            let schema: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(repo_root.join(schema_path)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                schema["properties"]["autoConnectTimeout"]["default"],
+                crate::native::cdp::chrome::DEFAULT_AUTO_CONNECT_TIMEOUT_MS,
+                "{} advertises a different autoConnectTimeout default than the runtime",
+                schema_path
+            );
+        }
     }
 
     #[test]

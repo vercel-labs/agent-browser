@@ -4298,6 +4298,9 @@ Environment:
                                  stopped. After daemon exit, inspect and stop the browser in Cloud.
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_PIN_TAB          Pin the session to its bound tab (strict tab binding)
+  AGENT_BROWSER_AUTO_CONNECT_TIMEOUT Auto-connect discovery and approval timeout in ms
+                                 (default: 20000 when omitted); changing or omitting it reuses
+                                 the existing session, including implicit recovery after disconnect
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
   AGENT_BROWSER_HIDE_SCROLLBARS  Hide scrollbars in headless Chromium screenshots (default: true)
   AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)
