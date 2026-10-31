@@ -3,7 +3,7 @@ title: "Configuration"
 navTitle: "Configuration"
 ---
 
-Create an `agent-browser.json` file to set persistent defaults instead of repeating flags on every command.
+Create `./agent-browser.json` to set persistent project defaults instead of repeating flags on every command.
 
 ## Config File Locations
 
@@ -15,15 +15,15 @@ agent-browser checks two locations, merged in priority order:
   </thead>
   <tbody>
     <tr><td>1 (lowest)</td><td><code>~/.agent-browser/config.json</code></td><td>User-level defaults</td></tr>
-    <tr><td>2</td><td><code>./agent-browser.json</code></td><td>Project-level overrides</td></tr>
+    <tr><td>2</td><td><code>./agent-browser.json</code></td><td>Allowlisted project defaults</td></tr>
     <tr><td>3</td><td><code>AGENT_BROWSER_*</code> env vars</td><td>Override config values</td></tr>
     <tr><td>4 (highest)</td><td>CLI flags</td><td>Override everything</td></tr>
   </tbody>
 </table>
 
-Project-level values override user-level values. Environment variables override both. CLI flags always win. The auto-discovered `./agent-browser.json` cannot set `executablePath`, `args` or `plugins` (they are ignored with a warning); set them in `~/.agent-browser/config.json`, env vars or flags, or load the file explicitly with `--config ./agent-browser.json`.
+Allowed project-level values override user-level values. Environment variables override both. CLI flags always win. The auto-discovered `./agent-browser.json` accepts only `headed`, `json`, `debug`, `userAgent`, `hideScrollbars`, `annotate`, `colorScheme`, `maxOutput`, `screenshotQuality`, `screenshotFormat`, and `idleTimeout`. Other runtime keys, including `extensions`, `initScripts`, state, trust, policy, session, connection, and path settings, are ignored with a warning. The `$schema` metadata key is ignored silently. Put advanced settings in `~/.agent-browser/config.json` or load a trusted file with `--config` or `AGENT_BROWSER_CONFIG`.
 
-Use `--config <path>` or the `AGENT_BROWSER_CONFIG` environment variable to load a specific config file instead of the default locations:
+Use `--config <path>` or the `AGENT_BROWSER_CONFIG` environment variable to load only a specific trusted config file, replacing default discovery. Environment variables and CLI flags still override its values:
 
 ```bash
 agent-browser --config ./ci-config.json open example.com
@@ -35,11 +35,13 @@ AGENT_BROWSER_CONFIG=./ci-config.json agent-browser open example.com
 ```json
 {
   "headed": true,
-  "proxy": "http://localhost:8080",
-  "profile": "./browser-data",
   "userAgent": "my-agent/1.0",
   "hideScrollbars": false,
-  "ignoreHttpsErrors": true
+  "colorScheme": "dark",
+  "maxOutput": 50000,
+  "screenshotQuality": 80,
+  "screenshotFormat": "png",
+  "idleTimeout": "30m"
 }
 ```
 
@@ -54,7 +56,7 @@ A [JSON Schema](https://agent-browser.dev/schema.json) is available for IDE auto
 
 ## All Options
 
-Global launch, output, provider, and chat options can be set in the config file using their camelCase equivalent. Command-scoped flags such as `screenshot --full` remain command arguments.
+Global options can be set in a trusted config file using their camelCase equivalent. Command-scoped flags such as `screenshot --full` remain command arguments. The auto-discovered project config accepts only the keys listed above.
 
 <table>
   <thead>
@@ -119,6 +121,8 @@ Global launch, output, provider, and chat options can be set in the config file 
 Values too large to convert to milliseconds produce a warning and are ignored.
 
 ## Common Configurations
+
+The examples below use settings outside the project config allowlist. Save them in `~/.agent-browser/config.json` or load the file explicitly with `--config`.
 
 ### Local Development
 
@@ -201,15 +205,13 @@ agent-browser --headed true open example.com  # explicit
 
 This applies to boolean flags such as `--headed`, `--debug`, `--json`, `--ignore-https-errors`, `--allow-file-access`, `--hide-scrollbars`, `--auto-connect`, `--annotate`, `--content-boundaries`, `--confirm-interactive`, and `--no-auto-dialog`.
 
-## Extensions Merging
+## Extensions
 
-Extensions from user-level and project-level configs are **concatenated**, not replaced. For example, if `~/.agent-browser/config.json` specifies `["/ext1"]` and `./agent-browser.json` specifies `["/ext2"]`, the result is `["/ext1", "/ext2"]`.
-
-The `AGENT_BROWSER_EXTENSIONS` environment variable and CLI `--extension` flags follow the standard priority rules (env replaces config, CLI appends).
+The auto-discovered project config ignores `extensions` with a warning. Put extension paths in user config or an explicitly loaded config, or set `AGENT_BROWSER_EXTENSIONS` or pass `--extension`.
 
 ## Plugins
 
-Configure external plugins with the `plugins` array:
+Configure external plugins with the `plugins` array in user config or a file loaded with `--config`:
 
 See [Plugins](/plugins) for the plugin author protocol and implementation examples. Use `agent-browser plugin add <ref>` to create this config automatically; it writes `~/.agent-browser/config.json` by default, and `--project` writes `./agent-browser.json` (only used with `--config`).
 
@@ -241,7 +243,7 @@ See [Plugins](/plugins) for the plugin author protocol and implementation exampl
 }
 ```
 
-Plugins from `~/.agent-browser/config.json` are used, and the auto-discovered `./agent-browser.json` cannot set `plugins`; load a project file explicitly with `--config` to use its plugin entries. `AGENT_BROWSER_PLUGINS` can replace config discovery with a JSON array using the same shape.
+The auto-discovered `./agent-browser.json` ignores `plugins` with a warning. To use a project file's plugin entries, load it with `--config`; that file replaces default discovery. `AGENT_BROWSER_PLUGINS` can replace config discovery with a JSON array using the same shape.
 
 Do not put vault tokens or passwords in plugin command args. Use the vault vendor's own login/session mechanism or environment outside agent-browser config.
 
@@ -304,6 +306,7 @@ These environment variables configure additional daemon and runtime behavior:
     <tr><td><code>AGENT_BROWSER_JSON</code></td><td>Use JSON output by default.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_ANNOTATE</code></td><td>Enable annotated screenshots by default.</td><td>(disabled)</td></tr>
     <tr><td><code>AGENT_BROWSER_CDP</code></td><td>Connect the daemon to a CDP port or WebSocket URL.</td><td>(none)</td></tr>
+    <tr><td><code>AGENT_BROWSER_CDP_HEADERS</code></td><td>JSON object of headers sent on CDP discovery and the WebSocket handshake, such as <code>Authorization</code>.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_STREAM_PORT</code></td><td>Override the WebSocket streaming port. By default, an OS-assigned port is used. Set this to bind to a specific port (e.g., <code>9223</code>).</td><td>OS-assigned</td></tr>
     <tr><td><code>AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS</code></td><td>Comma-separated exact HTTPS origins allowed for a reverse-proxied dashboard. Every entry must be valid or dashboard startup fails. Without this setting, only loopback origins are accepted. Loopback access does not require the external dashboard token.</td><td>(none)</td></tr>
     <tr><td><code>AGENT_BROWSER_STREAM_QUALITY</code></td><td>JPEG quality for streamed frames, 0 to 100. Lower values cut bandwidth: quality 20 costs about half the bytes of the default on a busy page.</td><td><code>80</code></td></tr>
@@ -342,6 +345,7 @@ Invalid `--max-output` and `AGENT_BROWSER_MAX_OUTPUT` values emit a warning and 
 - **Auto-discovered config files** (`~/.agent-browser/config.json`, `./agent-browser.json`) that are missing are silently ignored.
 - **`--config <path>`** with a missing or malformed file exits with an error.
 - **Malformed JSON** in auto-discovered files prints a warning to stderr and continues without that file.
-- **Unknown keys** are silently ignored for forward compatibility.
+- **Unsupported keys** in auto-discovered project config are ignored with a warning.
+- **Unknown keys** in user or explicitly loaded config are silently ignored for forward compatibility.
 
-> **Tip:** If your project-level `agent-browser.json` contains environment-specific values (paths, proxies), consider adding it to `.gitignore`.
+Existing project configs that use advanced keys must move those settings to user config or be loaded explicitly with `--config`.

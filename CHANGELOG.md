@@ -1,8 +1,31 @@
 # agent-browser
 
-## 0.41.0
+## 0.41.1
 
 <!-- release:start -->
+
+### Bug Fixes
+
+- Fixed **cookie attributes** so `cookies set` honors `--http-only` and `--same-site`, preserves the existing aliases, and rejects unknown arguments (#2256)
+- Fixed **page error clearing** so `errors --clear` removes captured errors (#2253)
+- Fixed **MCP selector waits** so bare integer selectors return an error instead of becoming timed waits (#2254)
+- Fixed **plugin error redaction** so sensitive operations omit unsupported protocol values (#2255)
+- Fixed **invalid limit handling** so overflowing idle timeouts and invalid output limits produce warnings instead of overflowing or being silently ignored (#2250, #2258)
+- Removed **unpinned npx execution permission** from the installed agent skill (#2249)
+
+### Documentation
+
+- Documented **stdin MCP connections** that reuse one server process in Vercel Sandbox (#2248)
+- Configured **desktop documentation routes** and the desktop sitemap for the docs site (#2278)
+
+### Contributors
+
+- @Railly
+- @lahfir
+
+<!-- release:end -->
+
+## 0.41.0
 
 ### Breaking Changes
 
@@ -25,8 +48,6 @@
 
 - @Railly
 - @lahfir
-
-<!-- release:end -->
 
 ## 0.40.0
 

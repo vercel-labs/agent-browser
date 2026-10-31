@@ -730,6 +730,9 @@ pub struct DaemonState {
     pub idle_activity: Arc<IdleActivity>,
     /// Hash of launch options used for the current browser, for relaunch detection.
     launch_hash: Option<u64>,
+    /// CDP endpoint and headers from the last explicit CDP launch, reused when
+    /// the daemon reconnects to that same endpoint on its own.
+    cdp_headers: Option<(String, Vec<(String, String)>)>,
     /// External browser this session attached to; target-less launches resolve to it.
     attached_target: Option<AttachedTarget>,
     effective_ca_cert: Option<EffectiveCaCert>,
@@ -871,6 +874,7 @@ impl DaemonState {
             stream_server: None,
             idle_activity: Arc::new(IdleActivity::new()),
             launch_hash: None,
+            cdp_headers: None,
             attached_target: None,
             effective_ca_cert: None,
             network_auto_attach_installed: false,
@@ -2734,6 +2738,7 @@ fn provider_plugin_launch_options_from_command(cmd: &Value) -> Value {
     Value::Object(options)
 }
 
+/// Returns whether an action can run without implicitly launching a browser.
 fn skip_launch_action(action: &str) -> bool {
     if action == INTERNAL_DAEMON_SHUTDOWN_ACTION {
         return true;
@@ -2765,6 +2770,7 @@ fn skip_launch_action(action: &str) -> bool {
             | "stream_disable"
             | "stream_status"
             | "session_info"
+            | "cdp_url"
             | "webmcp_result"
             | "webmcp_cancel"
     )
@@ -3190,7 +3196,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "navigate" => handle_navigate(cmd, state).await,
         "read" => handle_read(cmd, state).await,
         "url" => handle_url(state).await,
-        "cdp_url" => handle_cdp_url(state),
+        "cdp_url" => handle_cdp_url(state).await,
         "inspect" => handle_inspect(state).await,
         "title" => handle_title(state).await,
         "content" => handle_content(state).await,
@@ -4414,7 +4420,8 @@ async fn auto_launch_inner(
             restore_key: restore_key.as_deref(),
             storage_state,
         })?;
-        let mgr = BrowserManager::connect_cdp_when_listening(&cdp).await?;
+        let headers = cdp_headers_for(state, &cdp).or_else(cdp_headers_from_env);
+        let mgr = BrowserManager::connect_cdp_when_listening(&cdp, headers).await?;
         let hash = launch_hash(
             &options,
             &allowed_domains,
@@ -5132,6 +5139,68 @@ async fn try_load_storage_state(state: &mut DaemonState, path: &Option<String>) 
 // Phase 1 handlers
 // ---------------------------------------------------------------------------
 
+/// Optional WebSocket connect headers for generic CDP URLs (`cdpUrl` / `--cdp`).
+/// Headers from the last explicit CDP launch, when it named this endpoint.
+fn cdp_headers_for(state: &DaemonState, endpoint: &str) -> Option<Vec<(String, String)>> {
+    state
+        .cdp_headers
+        .as_ref()
+        .filter(|(saved, _)| saved == endpoint)
+        .map(|(_, headers)| headers.clone())
+}
+
+/// Headers the CLI passed to the daemon with `AGENT_BROWSER_CDP`.
+fn cdp_headers_from_env() -> Option<Vec<(String, String)>> {
+    let raw = env::var("AGENT_BROWSER_CDP_HEADERS").ok()?;
+    let headers: Value = serde_json::from_str(&raw).ok()?;
+    cdp_headers_from_command(&json!({ "cdpHeaders": headers }))
+}
+
+/// A relaunch rewritten to the attached CDP target keeps that target's headers.
+fn attach_saved_cdp_headers(launch: &mut Value, state: &DaemonState) {
+    let endpoint = match (launch.get("cdpUrl"), launch.get("cdpPort")) {
+        (Some(Value::String(url)), _) => url.clone(),
+        (_, Some(port)) => port.to_string(),
+        _ => return,
+    };
+    if let Some(headers) = cdp_headers_for(state, &endpoint) {
+        let map: serde_json::Map<String, Value> = headers
+            .into_iter()
+            .map(|(name, value)| (name, Value::String(value)))
+            .collect();
+        launch["cdpHeaders"] = Value::Object(map);
+    }
+}
+
+/// Distinct from page/origin `--headers` (Fetch interception).
+fn cdp_headers_from_command(cmd: &Value) -> Option<Vec<(String, String)>> {
+    let map = cmd.get("cdpHeaders")?.as_object()?;
+    if map.is_empty() {
+        return None;
+    }
+    let headers: Vec<(String, String)> = map
+        .iter()
+        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+        .collect();
+    if headers.is_empty() {
+        None
+    } else {
+        Some(headers)
+    }
+}
+
+/// CDP connect headers carry credentials, so a changed token must not reuse
+/// the existing connection.
+fn with_cdp_headers(target: Option<String>, cmd: &Value) -> Option<String> {
+    match (target, cdp_headers_from_command(cmd)) {
+        (Some(target), Some(mut headers)) => {
+            headers.sort();
+            Some(format!("{target}\n{headers:?}"))
+        }
+        (target, _) => target,
+    }
+}
+
 async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     handle_launch_with_deadline(cmd, state, BROWSER_USE_SETUP_DEADLINE).await
 }
@@ -5141,7 +5210,10 @@ async fn handle_launch_with_deadline(
     state: &mut DaemonState,
     deadline: std::time::Duration,
 ) -> Result<Value, String> {
-    let resolved = resolve_launch_target(cmd, state.attached_target.as_ref());
+    let mut resolved = resolve_launch_target(cmd, state.attached_target.as_ref());
+    if let Some(launch) = resolved.as_mut() {
+        attach_saved_cdp_headers(launch, state);
+    }
     let cmd = resolved.as_ref().unwrap_or(cmd);
     let result = handle_launch_for_target(cmd, state, deadline).await;
     if result.is_ok() {
@@ -5372,6 +5444,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
 
     let (connection_kind, connection_target) =
         launch_connection_identity(cdp_url, cdp_port, auto_connect, provider_name);
+    let connection_target = with_cdp_headers(connection_target, cmd);
     let new_hash = launch_hash(
         &launch_options,
         &allowed_domains,
@@ -5446,7 +5519,10 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
 
     if let Some(url) = cdp_url {
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_cdp_when_listening(url).await?);
+        let headers = cdp_headers_from_command(cmd);
+        state.browser =
+            Some(BrowserManager::connect_cdp_when_listening(url, headers.clone()).await?);
+        state.cdp_headers = headers.map(|headers| (url.to_string(), headers));
         state.launch_hash = Some(new_hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -5463,7 +5539,11 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
 
     if let Some(port) = cdp_port {
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_cdp_when_listening(&port.to_string()).await?);
+        let headers = cdp_headers_from_command(cmd);
+        state.browser = Some(
+            BrowserManager::connect_cdp_when_listening(&port.to_string(), headers.clone()).await?,
+        );
+        state.cdp_headers = headers.map(|headers| (port.to_string(), headers));
         state.launch_hash = Some(new_hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -5914,8 +5994,11 @@ async fn handle_read(cmd: &Value, state: &DaemonState) -> Result<Value, String> 
     ))
 }
 
-fn handle_cdp_url(state: &DaemonState) -> Result<Value, String> {
+async fn handle_cdp_url(state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    if !mgr.is_connection_alive().await {
+        return Err("Browser not launched".to_string());
+    }
     Ok(json!({ "cdpUrl": mgr.get_cdp_url() }))
 }
 
@@ -6002,9 +6085,17 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
         .and_then(|v| v.as_str())
         .ok_or("Missing 'script' parameter")?;
 
-    let result = mgr.evaluate(script, None).await?;
+    let result = mgr.evaluate_remote_object(script).await?;
+    let unserializable = result
+        .unserializable_value
+        .clone()
+        .or_else(|| (result.object_type == "undefined").then(|| "undefined".to_string()));
     let url = mgr.get_url().await.unwrap_or_default();
-    Ok(json!({ "result": result, "origin": url }))
+    let mut data = json!({ "result": result.value.unwrap_or(Value::Null), "origin": url });
+    if let Some(token) = unserializable {
+        data["unserializable"] = json!(token);
+    }
+    Ok(data)
 }
 
 async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
@@ -6998,7 +7089,7 @@ async fn handle_wait(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
 
     if let Some(load_state) = cmd.get("loadState").and_then(|v| v.as_str()) {
         let wait_until = WaitUntil::from_str(load_state);
-        mgr.wait_for_lifecycle_external(wait_until, &session_id)
+        mgr.wait_for_lifecycle_external(wait_until, &session_id, timeout_ms)
             .await?;
         return Ok(json!({ "waited": "load", "state": load_state }));
     }
@@ -7781,7 +7872,7 @@ async fn handle_auth_show(cmd: &Value) -> Result<Value, String> {
     auth::auth_show(name)
 }
 
-async fn handle_mouse(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+async fn handle_mouse(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
 
@@ -7807,9 +7898,15 @@ async fn handle_mouse(cmd: &Value, state: &DaemonState) -> Result<Value, String>
             Some(&session_id),
         )
         .await?;
+    state.mouse_state.x = x;
+    state.mouse_state.y = y;
+    match event_type {
+        "mousePressed" => state.mouse_state.buttons |= mouse_button_mask(button),
+        "mouseReleased" => state.mouse_state.buttons &= !mouse_button_mask(button),
+        _ => {}
+    }
     if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-        let buttons = i32::from(event_type == "mousePressed");
-        cursor.record(x, y, buttons);
+        cursor.record(x, y, i32::from(event_type == "mousePressed"));
     }
 
     Ok(json!({ "dispatched": event_type }))
@@ -7895,10 +7992,6 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
     let defer_url =
         defer_url_until_controls || (url.is_some() && session_setup_pending(state).await);
 
-    state.ref_map.begin_snapshot();
-    state.active_iframe_sessions.clear();
-    state.active_frame_id = None;
-    state.webmcp.clear_invocations();
     let (mut result, new_session_id) = {
         let mgr = state.browser.as_mut().ok_or("Browser not launched")?;
         let result = mgr
@@ -7906,6 +7999,11 @@ async fn handle_tab_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
             .await?;
         (result, mgr.active_session_id()?.to_string())
     };
+
+    state.ref_map.begin_snapshot();
+    state.active_iframe_sessions.clear();
+    state.active_frame_id = None;
+    state.webmcp.clear_invocations();
 
     apply_session_setup(state, &new_session_id).await?;
     install_network_controls_or_close(state, has_proxy_creds).await?;
@@ -9475,27 +9573,30 @@ async fn handle_clipboard(cmd: &Value, state: &DaemonState) -> Result<Value, Str
     }
 }
 
-async fn handle_wheel(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+/// Dispatches a wheel event and updates the tracked pointer only after CDP accepts it.
+async fn handle_wheel(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
-    let x = cmd.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let y = cmd.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let delta_x = cmd.get("deltaX").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let delta_y = cmd.get("deltaY").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let mut mouse_state = state.mouse_state;
+    let params = build_mouse_event_params(
+        &mut mouse_state,
+        "mouseWheel",
+        cmd.get("x").and_then(|v| v.as_f64()),
+        cmd.get("y").and_then(|v| v.as_f64()),
+        None,
+        None,
+        None,
+        Some(delta_x),
+        Some(delta_y),
+        None,
+    );
 
     mgr.client
-        .send_command(
-            "Input.dispatchMouseEvent",
-            Some(json!({
-                "type": "mouseWheel",
-                "x": x,
-                "y": y,
-                "deltaX": delta_x,
-                "deltaY": delta_y,
-            })),
-            Some(&session_id),
-        )
+        .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
+    state.mouse_state = mouse_state;
 
     Ok(json!({ "scrolled": true, "deltaX": delta_x, "deltaY": delta_y }))
 }
@@ -10118,6 +10219,7 @@ async fn handle_waitforurl(cmd: &Value, state: &DaemonState) -> Result<Value, St
     Ok(json!({ "url": url }))
 }
 
+/// Wait for a page lifecycle state and return an error when its timeout expires.
 async fn handle_waitforloadstate(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();
@@ -10125,12 +10227,8 @@ async fn handle_waitforloadstate(cmd: &Value, state: &DaemonState) -> Result<Val
     let timeout_ms = state.timeout_ms(cmd);
 
     let wait_until = WaitUntil::from_str(load_state);
-    let _ = tokio::time::timeout(
-        tokio::time::Duration::from_millis(timeout_ms),
-        mgr.wait_for_lifecycle_external(wait_until, &session_id),
-    )
-    .await
-    .map_err(|_| format!("Timeout waiting for load state: {}", load_state))?;
+    mgr.wait_for_lifecycle_external(wait_until, &session_id, timeout_ms)
+        .await?;
 
     Ok(json!({ "state": load_state }))
 }
@@ -11759,10 +11857,7 @@ async fn handle_har_start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let path = har_output_path(cmd.get("path").and_then(|v| v.as_str()));
 
-    state.har_recording = false;
-    state.har_body_total_bytes = 0;
-
-    let entries: Vec<Value> = state.har_entries.drain(..).map(har_entry_to_json).collect();
+    let entries: Vec<Value> = state.har_entries.iter().map(har_entry_to_json).collect();
     let request_count = entries.len();
     let browser = har_browser_metadata(state).await;
 
@@ -11783,6 +11878,10 @@ async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .map_err(|e| format!("Failed to serialize HAR: {}", e))?;
     std::fs::write(&path, har_str).map_err(|e| format!("Failed to write HAR: {}", e))?;
 
+    state.har_entries.clear();
+    state.har_recording = false;
+    state.har_body_total_bytes = 0;
+
     Ok(json!({ "path": path, "requestCount": request_count }))
 }
 
@@ -11791,7 +11890,7 @@ async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 // ---------------------------------------------------------------------------
 
 /// Convert a `HarEntry` (collected from CDP events) into a HAR 1.2 entry object.
-fn har_entry_to_json(e: HarEntry) -> Value {
+fn har_entry_to_json(e: &HarEntry) -> Value {
     let started_date_time = har_wall_time_to_rfc3339(e.wall_time);
 
     let request_cookies = e
@@ -11832,9 +11931,9 @@ fn har_entry_to_json(e: HarEntry) -> Value {
         har_compute_timings(e.cdp_timing.as_ref(), e.loading_finished_timestamp);
 
     let mime_type = if e.mime_type.is_empty() {
-        "application/octet-stream".to_string()
+        "application/octet-stream"
     } else {
-        e.mime_type
+        e.mime_type.as_str()
     };
 
     let post_content_type = e
@@ -11855,7 +11954,7 @@ fn har_entry_to_json(e: HarEntry) -> Value {
         "headersSize": -1,
         "bodySize": e.request_body_size,
     });
-    if let Some(body) = e.post_data {
+    if let Some(body) = &e.post_data {
         request["postData"] = json!({ "mimeType": post_content_type, "text": body });
     }
 
@@ -11863,7 +11962,7 @@ fn har_entry_to_json(e: HarEntry) -> Value {
         "size": e.response_body_size,
         "mimeType": mime_type,
     });
-    if let Some(body) = e.response_body {
+    if let Some(body) = &e.response_body {
         content["text"] = json!(body);
         if e.response_body_base64 {
             content["encoding"] = json!("base64");
@@ -13694,8 +13793,9 @@ async fn handle_input_mouse(cmd: &Value, state: &mut DaemonState) -> Result<Valu
         .get("type")
         .and_then(|v| v.as_str())
         .unwrap_or("mouseMoved");
+    let mut mouse_state = state.mouse_state;
     let params = build_mouse_event_params(
-        &mut state.mouse_state,
+        &mut mouse_state,
         event_type,
         cmd.get("x").and_then(|v| v.as_f64()),
         cmd.get("y").and_then(|v| v.as_f64()),
@@ -13716,12 +13816,9 @@ async fn handle_input_mouse(cmd: &Value, state: &mut DaemonState) -> Result<Valu
     mgr.client
         .send_command_typed::<_, Value>("Input.dispatchMouseEvent", &params, Some(&session_id))
         .await?;
+    state.mouse_state = mouse_state;
     if let Ok(mut cursor) = state.recording_state.shared_cursor.lock() {
-        cursor.record(
-            state.mouse_state.x,
-            state.mouse_state.y,
-            state.mouse_state.buttons,
-        );
+        cursor.record(mouse_state.x, mouse_state.y, mouse_state.buttons);
     }
     Ok(json!({ "dispatched": event_type }))
 }
@@ -14234,6 +14331,23 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn cdp_url_without_browser_does_not_launch() {
+        let mut state = super::DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+
+        let response = super::execute_command(
+            &serde_json::json!({ "id": "cdp", "action": "cdp_url" }),
+            &mut state,
+        )
+        .await;
+
+        assert_eq!(response["success"], false);
+        assert_eq!(response["error"], "Browser not launched");
+        assert!(state.browser.is_none());
+    }
+
     #[test]
     fn wedged_tab_replacement_follows_tab_policy() {
         let dir = tempfile::tempdir().unwrap();
@@ -14658,6 +14772,38 @@ mod tests {
     use std::fs;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_failed_wheel_dispatch_preserves_pointer() {
+        let mut state = DaemonState::new();
+        let response =
+            execute_command(&json!({ "action": "launch", "headless": true }), &mut state).await;
+        assert_eq!(response["success"], true, "{response}");
+        state.mouse_state = MouseState {
+            x: 50.0,
+            y: 60.0,
+            buttons: 1,
+        };
+        let mgr = state.browser.as_ref().unwrap();
+        mgr.client
+            .send_command(
+                "Target.detachFromTarget",
+                Some(json!({ "sessionId": mgr.active_session_id().unwrap() })),
+                None,
+            )
+            .await
+            .unwrap();
+        let result = handle_wheel(&json!({ "x": 200, "y": 300, "deltaY": 40 }), &mut state).await;
+        let pointer = state.mouse_state;
+        close_current_browser(&mut state).await.unwrap();
+
+        assert!(
+            result.is_err(),
+            "detached session accepted wheel: {result:?}"
+        );
+        assert_eq!((pointer.x, pointer.y, pointer.buttons), (50.0, 60.0, 1));
+    }
 
     #[test]
     fn screenshot_pixel_ratio_counts_changed_pixels() {
@@ -17547,6 +17693,49 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[test]
+    fn test_launch_hash_changes_with_cdp_headers() {
+        let opts = LaunchOptions::default();
+        let hash_for = |cmd: Value| {
+            let target = with_cdp_headers(Some("wss://example.com/cdp".to_string()), &cmd);
+            launch_hash(
+                &opts,
+                &[],
+                &[],
+                &[],
+                &[],
+                Some("chrome"),
+                "cdp-url",
+                target.as_deref(),
+            )
+        };
+        let a = hash_for(json!({ "cdpHeaders": { "Authorization": "Bearer a" } }));
+        let b = hash_for(json!({ "cdpHeaders": { "Authorization": "Bearer b" } }));
+        assert_ne!(a, b);
+        assert_eq!(
+            a,
+            hash_for(json!({ "cdpHeaders": { "Authorization": "Bearer a" } }))
+        );
+        assert_ne!(a, hash_for(json!({})));
+    }
+
+    #[test]
+    fn test_relaunch_keeps_cdp_headers_only_for_their_endpoint() {
+        let mut state = DaemonState::new();
+        state.cdp_headers = Some((
+            "wss://example.com/cdp".to_string(),
+            vec![("Authorization".to_string(), "Bearer a".to_string())],
+        ));
+
+        let mut same = json!({ "action": "launch", "cdpUrl": "wss://example.com/cdp" });
+        attach_saved_cdp_headers(&mut same, &state);
+        assert_eq!(same["cdpHeaders"]["Authorization"], "Bearer a");
+
+        let mut other = json!({ "action": "launch", "cdpUrl": "wss://other.example/cdp" });
+        attach_saved_cdp_headers(&mut other, &state);
+        assert!(other.get("cdpHeaders").is_none());
+    }
+
+    #[test]
     fn test_launch_hash_uses_ca_content_not_path() {
         let bundle = crate::ca_bundle::test_bundle(b"same");
         let first = EffectiveCaCert {
@@ -18489,7 +18678,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_base64: false,
         };
 
-        let har = har_entry_to_json(entry);
+        let har = har_entry_to_json(&entry);
         assert_eq!(har["startedDateTime"], "2026-03-15T12:00:00Z");
         assert_eq!(har["request"]["method"], "POST");
         assert_eq!(har["request"]["httpVersion"], "HTTP/2.0");
@@ -18539,13 +18728,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_base64: false,
         };
 
-        let har = har_entry_to_json(entry.clone());
+        let har = har_entry_to_json(&entry);
         assert_eq!(har["response"]["content"]["text"], r#"{"items":[1]}"#);
         assert!(har["response"]["content"].get("encoding").is_none());
 
         entry.response_body = Some("aGVsbG8=".to_string());
         entry.response_body_base64 = true;
-        let har = har_entry_to_json(entry);
+        let har = har_entry_to_json(&entry);
         assert_eq!(har["response"]["content"]["text"], "aGVsbG8=");
         assert_eq!(har["response"]["content"]["encoding"], "base64");
     }
@@ -18634,7 +18823,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body: None,
             response_body_base64: false,
         };
-        let har = har_entry_to_json(entry);
+        let har = har_entry_to_json(&entry);
         assert_eq!(har["response"]["cookies"][0]["name"], "token");
         assert_eq!(har["response"]["cookies"][0]["value"], "abc");
     }
@@ -18713,6 +18902,79 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[tokio::test]
+    async fn test_handle_har_stop_can_retry_after_write_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let invalid_path = dir.path().join("missing/retry.har");
+        let valid_path = dir.path().join("retry.har");
+        let response_body = r#"{"ok":true}"#;
+        let mut state = DaemonState::new();
+        state.har_recording = true;
+        state.har_body_total_bytes = 123;
+        state.har_entries.push(HarEntry {
+            request_id: "retry-request".to_string(),
+            wall_time: 1773576000.0,
+            method: "POST".to_string(),
+            url: "https://example.com/retry".to_string(),
+            request_headers: vec![],
+            post_data: Some("request body".to_string()),
+            request_body_size: 12,
+            resource_type: "XHR".to_string(),
+            status: Some(200),
+            status_text: "OK".to_string(),
+            http_version: "HTTP/1.1".to_string(),
+            response_headers: vec![],
+            mime_type: "application/json".to_string(),
+            redirect_url: String::new(),
+            response_body_size: response_body.len() as i64,
+            cdp_timing: None,
+            loading_finished_timestamp: None,
+            response_body: Some(response_body.to_string()),
+            response_body_base64: false,
+        });
+
+        let error = handle_har_stop(
+            &json!({ "path": invalid_path.to_string_lossy() }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("Failed to write HAR"));
+        assert!(state.har_recording);
+        assert_eq!(state.har_entries.len(), 1);
+        assert_eq!(
+            state.har_entries[0].response_body.as_deref(),
+            Some(response_body)
+        );
+        assert_eq!(state.har_body_total_bytes, 123);
+
+        let result = handle_har_stop(&json!({ "path": valid_path.to_string_lossy() }), &mut state)
+            .await
+            .unwrap();
+
+        assert_eq!(result["path"], valid_path.to_string_lossy().as_ref());
+        assert_eq!(result["requestCount"], 1);
+        assert!(!state.har_recording);
+        assert!(state.har_entries.is_empty());
+        assert_eq!(state.har_body_total_bytes, 0);
+
+        let har: Value = serde_json::from_str(&fs::read_to_string(valid_path).unwrap()).unwrap();
+        assert_eq!(har["log"]["entries"][0]["request"]["method"], "POST");
+        assert_eq!(
+            har["log"]["entries"][0]["request"]["url"],
+            "https://example.com/retry"
+        );
+        assert_eq!(
+            har["log"]["entries"][0]["request"]["postData"]["text"],
+            "request body"
+        );
+        assert_eq!(
+            har["log"]["entries"][0]["response"]["content"]["text"],
+            response_body
+        );
+    }
+
+    #[tokio::test]
     async fn test_execute_har_stop_skips_browser_auto_launch() {
         let path = std::env::temp_dir().join(format!(
             "agent-browser-har-stop-{}.har",
@@ -18788,6 +19050,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     #[tokio::test]
     async fn test_execute_unknown_command() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_CDP"]);
+        guard.remove("AGENT_BROWSER_CDP");
         let mut state = DaemonState::new();
         let cmd = json!({ "action": "unknown_action_xyz", "id": "test-1" });
         let result = execute_command(&cmd, &mut state).await;

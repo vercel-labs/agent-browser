@@ -76,6 +76,8 @@ agent-browser install --with-deps
 
 This exits nonzero if the package manager cannot install every required browser library.
 
+When run as root, this command calls the detected package manager directly. For non-root users, it uses `sudo`. If you are not root and `sudo` is unavailable, it reports that root privileges or `sudo` are required.
+
 ## Updating
 
 Upgrade to the latest version:

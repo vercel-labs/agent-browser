@@ -7,7 +7,7 @@ use tokio::sync::{broadcast, Mutex};
 
 use super::cdp::chrome::{auto_connect_cdp, launch_chrome, ChromeProcess, LaunchOptions};
 use super::cdp::client::CdpClient;
-use super::cdp::discovery::discover_cdp_url;
+use super::cdp::discovery::discover_cdp_url_with_headers;
 use super::cdp::lightpanda::{launch_lightpanda, LightpandaLaunchOptions, LightpandaProcess};
 use super::cdp::obscura::{
     launch_obscura, stealth_from_env as obscura_stealth_from_env, ObscuraLaunchOptions,
@@ -257,6 +257,11 @@ pub fn to_ai_friendly_error(error: &str) -> String {
         return "Another element is covering the target element. Try scrolling or closing overlays."
             .to_string();
     }
+    if lower.contains("waiting for load state") {
+        // Load-state timeouts already name the state and the budget that
+        // expired; the generic message below would hide both.
+        return error.to_string();
+    }
     if lower.contains("timeout") {
         return "Operation timed out. The page may still be loading or the element may not exist."
             .to_string();
@@ -401,6 +406,52 @@ impl WaitUntil {
             _ => Self::Load,
         }
     }
+
+    /// CLI-facing name for this state, used in wait errors.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Load => "load",
+            Self::DomContentLoaded => "domcontentloaded",
+            Self::NetworkIdle => "networkidle",
+            Self::None => "none",
+        }
+    }
+}
+
+/// Why a lifecycle wait stopped before reaching its state.
+#[derive(Debug, PartialEq, Eq)]
+enum LifecycleWaitError {
+    TimedOut,
+    StreamClosed,
+}
+
+/// Error returned when a load-state wait exceeds the caller's timeout budget.
+fn load_state_timeout_error(wait_until: WaitUntil, timeout: Duration) -> String {
+    format!(
+        "Timed out after {}ms waiting for load state '{}'",
+        timeout.as_millis(),
+        wait_until.label()
+    )
+}
+
+/// Turns a lifecycle wait failure into a message that reports the caller's
+/// configured budget rather than whatever slice of it remained.
+fn lifecycle_wait_error(
+    wait_until: WaitUntil,
+    timeout: Duration,
+    error: LifecycleWaitError,
+) -> String {
+    match error {
+        LifecycleWaitError::TimedOut => load_state_timeout_error(wait_until, timeout),
+        LifecycleWaitError::StreamClosed => "Event stream closed".to_string(),
+    }
+}
+
+/// Time left before `deadline`, never zero so a helper timeout still expires.
+fn remaining_budget(deadline: Instant) -> Duration {
+    deadline
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_millis(1))
 }
 
 pub enum BrowserProcess {
@@ -741,9 +792,12 @@ impl BrowserManager {
 
     /// Like [`Self::connect_cdp`], but first waits up to two seconds while the target
     /// port refuses connections, so attaching right after a browser starts succeeds.
-    pub async fn connect_cdp_when_listening(url: &str) -> Result<Self, String> {
+    pub async fn connect_cdp_when_listening(
+        url: &str,
+        headers: Option<Vec<(String, String)>>,
+    ) -> Result<Self, String> {
         wait_while_cdp_port_refuses(url, CDP_PORT_WAIT).await;
-        Self::connect_cdp(url).await
+        Self::connect_cdp_with_headers(url, headers).await
     }
 
     /// Connect to a provider CDP proxy where the WebSocket IS the page session.
@@ -764,7 +818,7 @@ impl BrowserManager {
         direct_page: bool,
         headers: Option<Vec<(String, String)>>,
     ) -> Result<Self, String> {
-        let ws_url = resolve_cdp_url(url).await?;
+        let ws_url = resolve_cdp_url(url, headers.as_deref().unwrap_or_default()).await?;
         let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
         let mut manager = Self {
             client,
@@ -1395,8 +1449,10 @@ impl BrowserManager {
         // If loader_id is None, it was a same-document navigation (e.g., hash routing)
         // which does not fire Page.loadEventFired or Page.domContentEventFired.
         if nav_result.loader_id.is_some() && wait_until != WaitUntil::None {
-            self.wait_for_lifecycle(wait_until, &session_id, &mut lifecycle_rx)
-                .await?;
+            let timeout = Duration::from_millis(self.default_timeout_ms);
+            self.wait_for_lifecycle(wait_until, &session_id, &mut lifecycle_rx, timeout)
+                .await
+                .map_err(|error| lifecycle_wait_error(wait_until, timeout, error))?;
         }
 
         let page_url = self.get_url().await.unwrap_or_else(|_| url.to_string());
@@ -1427,15 +1483,18 @@ impl BrowserManager {
         wait_until: WaitUntil,
         session_id: &str,
         rx: &mut broadcast::Receiver<CdpEvent>,
-    ) -> Result<(), String> {
+        timeout: Duration,
+    ) -> Result<(), LifecycleWaitError> {
         let event_name = match wait_until {
             WaitUntil::Load => "Page.loadEventFired",
             WaitUntil::DomContentLoaded => "Page.domContentEventFired",
-            WaitUntil::NetworkIdle => return self.wait_for_network_idle(session_id, rx).await,
+            WaitUntil::NetworkIdle => {
+                return poll_network_idle(session_id, rx, timeout)
+                    .await
+                    .map_err(|_| LifecycleWaitError::TimedOut)
+            }
             WaitUntil::None => return Ok(()),
         };
-
-        let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
 
         tokio::time::timeout(timeout, async {
             loop {
@@ -1448,22 +1507,14 @@ impl BrowserManager {
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Err(LifecycleWaitError::StreamClosed)
+                    }
                 }
             }
-            Err("Event stream closed".to_string())
         })
         .await
-        .map_err(|_| format!("Timeout waiting for {}", event_name))?
-    }
-
-    async fn wait_for_network_idle(
-        &self,
-        session_id: &str,
-        rx: &mut broadcast::Receiver<CdpEvent>,
-    ) -> Result<(), String> {
-        let timeout = tokio::time::Duration::from_millis(self.default_timeout_ms);
-        poll_network_idle(session_id, rx, timeout).await
+        .map_err(|_| LifecycleWaitError::TimedOut)?
     }
 
     pub async fn get_url(&self) -> Result<String, String> {
@@ -1484,6 +1535,15 @@ impl BrowserManager {
     }
 
     pub async fn evaluate(&self, script: &str, _args: Option<Value>) -> Result<Value, String> {
+        let result = self.evaluate_remote_object(script).await?;
+        Ok(result.value.unwrap_or(Value::Null))
+    }
+
+    /// Returns the raw CDP result so direct eval can preserve special values.
+    pub(crate) async fn evaluate_remote_object(
+        &self,
+        script: &str,
+    ) -> Result<RemoteObject, String> {
         let session_id = self.active_session_id()?.to_string();
 
         let result: EvaluateResult = self
@@ -1508,18 +1568,28 @@ impl BrowserManager {
             return Err(format!("Evaluation error: {}", msg));
         }
 
-        Ok(result.result.value.unwrap_or(Value::Null))
+        Ok(result.result)
     }
 
     async fn evaluate_simple(&self, expression: &str) -> Result<Value, String> {
         self.evaluate(expression, None).await
     }
 
+    /// Wait for a page lifecycle state using the caller's timeout budget.
+    ///
+    /// The caller owns the deadline: `wait --load` and `waitforloadstate` pass
+    /// the command timeout (explicit `--timeout` or the configured default)
+    /// instead of the browser's built-in default, so a larger budget is
+    /// actually waited out. The ready-state probe and the event wait share one
+    /// deadline, so a slow probe cannot extend the total wait past the budget.
     pub async fn wait_for_lifecycle_external(
         &self,
         wait_until: WaitUntil,
         session_id: &str,
+        timeout_ms: u64,
     ) -> Result<(), String> {
+        let timeout = Duration::from_millis(timeout_ms);
+        let deadline = Instant::now() + timeout;
         // Subscribe before probing so a lifecycle event that fires between
         // the probe and the wait cannot be missed.
         let mut rx = self.client.subscribe();
@@ -1539,28 +1609,34 @@ impl BrowserManager {
             WaitUntil::NetworkIdle | WaitUntil::None => None,
         };
         if let Some(expression) = already_reached {
-            let probe: Result<EvaluateResult, String> = self
+            let params = EvaluateParams {
+                expression: expression.to_string(),
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            };
+            let probe = self
                 .client
-                .send_command_typed(
+                .send_command_typed::<EvaluateParams, EvaluateResult>(
                     "Runtime.evaluate",
-                    &EvaluateParams {
-                        expression: expression.to_string(),
-                        return_by_value: Some(true),
-                        await_promise: Some(false),
-                    },
+                    &params,
                     Some(session_id),
-                )
-                .await;
-            // A failed probe is not fatal; fall back to waiting for the event.
-            if let Ok(result) = probe {
-                if result.result.value.as_ref().and_then(|v| v.as_bool()) == Some(true) {
-                    return Ok(());
+                );
+            // The probe draws from the same budget as the wait that follows.
+            match tokio::time::timeout(remaining_budget(deadline), probe).await {
+                Ok(Ok(result)) => {
+                    if result.result.value.as_ref().and_then(|v| v.as_bool()) == Some(true) {
+                        return Ok(());
+                    }
                 }
+                // A failed probe is not fatal; fall back to waiting for the event.
+                Ok(Err(_)) => {}
+                Err(_) => return Err(load_state_timeout_error(wait_until, timeout)),
             }
         }
 
-        self.wait_for_lifecycle(wait_until, session_id, &mut rx)
+        self.wait_for_lifecycle(wait_until, session_id, &mut rx, remaining_budget(deadline))
             .await
+            .map_err(|error| lifecycle_wait_error(wait_until, timeout, error))
     }
 
     pub async fn close(&mut self) -> Result<(), String> {
@@ -1828,6 +1904,8 @@ impl BrowserManager {
         self.pages.iter().any(|p| p.label.as_deref() == Some(label))
     }
 
+    /// Creates a tab with an optional unique label; `t<N>` forms are reserved for tab IDs.
+    /// Rejected labels preserve the current tab and its selection.
     pub async fn tab_new(
         &mut self,
         url: Option<&str>,
@@ -1838,6 +1916,12 @@ impl BrowserManager {
                 return Err(format!(
                     "Invalid tab label `{}`; labels must start with a letter and contain only \
                      letters, digits, `-`, and `_`",
+                    label
+                ));
+            }
+            if !matches!(TabRef::parse(label), Ok(TabRef::Label(_))) {
+                return Err(format!(
+                    "Tab label `{}` uses syntax reserved for tab IDs",
                     label
                 ));
             }
@@ -2514,8 +2598,8 @@ impl BrowserManager {
 async fn poll_network_idle(
     session_id: &str,
     rx: &mut broadcast::Receiver<CdpEvent>,
-    overall_timeout: tokio::time::Duration,
-) -> Result<(), String> {
+    overall_timeout: Duration,
+) -> Result<(), tokio::time::error::Elapsed> {
     let pending = Arc::new(Mutex::new(HashSet::<String>::new()));
 
     tokio::time::timeout(overall_timeout, async {
@@ -2569,15 +2653,12 @@ async fn poll_network_idle(
 
             if let Some(start) = idle_start {
                 if start.elapsed() >= tokio::time::Duration::from_millis(500) {
-                    return Ok(());
+                    return;
                 }
             }
         }
-
-        Ok(())
     })
     .await
-    .map_err(|_| "Timeout waiting for networkidle".to_string())?
 }
 
 async fn connect_cdp_with_retry(
@@ -2836,7 +2917,7 @@ async fn wait_while_cdp_port_refuses(input: &str, window: Duration) {
     }
 }
 
-async fn resolve_cdp_url(input: &str) -> Result<String, String> {
+async fn resolve_cdp_url(input: &str, headers: &[(String, String)]) -> Result<String, String> {
     if input.starts_with("ws://") || input.starts_with("wss://") {
         return Ok(input.to_string());
     }
@@ -2861,12 +2942,15 @@ async fn resolve_cdp_url(input: &str) -> Result<String, String> {
             .ok_or_else(|| format!("No host in CDP URL: {}", input))?;
         let port = parsed.port().unwrap_or(9222);
         let query = parsed.query().map(|q| q.to_string());
-        return discover_cdp_url(host, port, query.as_deref()).await;
+        // Preserve the input's encryption: an https:// CDP URL must discover
+        // over https/wss so CDP auth headers are never sent in plaintext.
+        let secure = parsed.scheme() == "https";
+        return discover_cdp_url_with_headers(host, port, query.as_deref(), headers, secure).await;
     }
 
     // Try as numeric port
     if let Ok(port) = input.parse::<u16>() {
-        return discover_cdp_url("127.0.0.1", port, None).await;
+        return discover_cdp_url_with_headers("127.0.0.1", port, None, headers, false).await;
     }
 
     Err(format!(
@@ -3292,6 +3376,14 @@ mod tests {
         );
     }
 
+    /// Load-state timeouts keep the state and budget they report instead of
+    /// being flattened into the generic timeout advice.
+    #[test]
+    fn test_to_ai_friendly_error_keeps_load_state_timeout_detail() {
+        let error = "Timed out after 30000ms waiting for load state 'networkidle'";
+        assert_eq!(to_ai_friendly_error(error), error);
+    }
+
     #[test]
     fn test_to_ai_friendly_error_miss_wins_over_keyword_in_name() {
         // A genuine locator miss whose echoed name contains a classifier keyword
@@ -3619,10 +3711,20 @@ mod tests {
             }
         });
         let client = CdpClient::connect(&format!("ws://{}", addr)).await.unwrap();
+        test_manager_from(client, format!("ws://{}", addr), pages)
+    }
+
+    /// Wraps an already connected client in a `BrowserManager` for mock CDP
+    /// servers, which own their own socket handling.
+    fn test_manager_from(
+        client: CdpClient,
+        ws_url: String,
+        pages: Vec<PageInfo>,
+    ) -> BrowserManager {
         BrowserManager {
             client: Arc::new(client),
             browser_process: None,
-            ws_url: format!("ws://{}", addr),
+            ws_url,
             pages,
             active_page_index: 0,
             default_timeout_ms: 25_000,
@@ -4596,11 +4698,185 @@ mod tests {
             }
         });
 
+        let start = Instant::now();
         let result = poll_network_idle(session, &mut rx, Duration::from_millis(800)).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("Timeout waiting for networkidle"));
+        assert!(
+            start.elapsed() >= Duration::from_millis(800),
+            "poller should run for its whole budget, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// The caller's budget is the one that counts: a wait budget larger than
+    /// the manager default must be waited out instead of failing at the
+    /// built-in default.
+    #[tokio::test]
+    async fn test_wait_for_lifecycle_uses_caller_budget_not_manager_default() {
+        let mut manager = test_manager(Vec::new()).await;
+        manager.default_timeout_ms = 100;
+        let (tx, mut rx) = broadcast::channel::<CdpEvent>(16);
+        tokio::spawn(async move {
+            sleep(Duration::from_millis(400)).await;
+            let _ = tx.send(cdp_event("Page.loadEventFired", "s1", json!({})));
+        });
+
+        manager
+            .wait_for_lifecycle(WaitUntil::Load, "s1", &mut rx, Duration::from_secs(5))
+            .await
+            .expect("caller budget should outlast the manager default");
+    }
+
+    /// A short caller budget stops on its own schedule.
+    #[tokio::test]
+    async fn test_wait_for_lifecycle_reports_caller_timeout() {
+        let manager = test_manager(Vec::new()).await;
+        let (_tx, mut rx) = broadcast::channel::<CdpEvent>(16);
+
+        let start = Instant::now();
+        let error = manager
+            .wait_for_lifecycle(
+                WaitUntil::DomContentLoaded,
+                "s1",
+                &mut rx,
+                Duration::from_millis(150),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "wait should stop at the caller budget, took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(error, LifecycleWaitError::TimedOut);
+    }
+
+    /// Network idle honors the caller budget too.
+    #[tokio::test]
+    async fn test_wait_for_lifecycle_network_idle_reports_caller_timeout() {
+        let manager = test_manager(Vec::new()).await;
+        let (tx, mut rx) = broadcast::channel::<CdpEvent>(16);
+        tokio::spawn(async move {
+            for i in 0u64.. {
+                let _ = tx.send(cdp_event(
+                    "Network.requestWillBeSent",
+                    "s1",
+                    json!({ "requestId": format!("r{}", i) }),
+                ));
+                sleep(Duration::from_millis(50)).await;
+            }
+        });
+
+        let start = Instant::now();
+        let error = manager
+            .wait_for_lifecycle(
+                WaitUntil::NetworkIdle,
+                "s1",
+                &mut rx,
+                Duration::from_millis(300),
+            )
+            .await
+            .unwrap_err();
+        assert!(start.elapsed() >= Duration::from_millis(300));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "wait should stop at the caller budget, took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(error, LifecycleWaitError::TimedOut);
+    }
+
+    /// The reported message keeps the configured budget and the state name.
+    #[test]
+    fn test_lifecycle_wait_error_names_state_and_budget() {
+        assert_eq!(
+            lifecycle_wait_error(
+                WaitUntil::NetworkIdle,
+                Duration::from_millis(30000),
+                LifecycleWaitError::TimedOut,
+            ),
+            "Timed out after 30000ms waiting for load state 'networkidle'"
+        );
+        assert_eq!(
+            lifecycle_wait_error(
+                WaitUntil::Load,
+                Duration::from_secs(1),
+                LifecycleWaitError::StreamClosed,
+            ),
+            "Event stream closed"
+        );
+    }
+
+    /// A probe that never answers draws from the same budget instead of
+    /// buying the following lifecycle wait a fresh full timeout.
+    #[tokio::test]
+    async fn test_wait_for_lifecycle_external_stops_at_budget_when_probe_stalls() {
+        let manager = test_manager(Vec::new()).await;
+
+        let start = Instant::now();
+        let error = manager
+            .wait_for_lifecycle_external(WaitUntil::Load, "session-1", 300)
+            .await
+            .unwrap_err();
+
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "probe and wait should share one 300ms budget, took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(error, "Timed out after 300ms waiting for load state 'load'");
+    }
+
+    /// A slow probe that answers "not reached" must leave only the remainder of
+    /// the budget, not restart it. Regression test for the review note on
+    /// #2251: a 500ms probe inside an 800ms budget must end near 800ms, not
+    /// near 1300ms.
+    #[tokio::test]
+    async fn test_wait_for_lifecycle_external_shares_budget_after_slow_probe() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            if let Some(Ok(Message::Text(text))) = ws.next().await {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let id = command["id"].clone();
+                // Answer the ready-state probe late with "not reached".
+                sleep(Duration::from_millis(500)).await;
+                let reply = json!({
+                    "id": id,
+                    "result": { "result": { "type": "boolean", "value": false } }
+                });
+                let _ = ws.send(Message::Text(reply.to_string())).await;
+                // Stay connected without a load event so the wait must expire.
+                sleep(Duration::from_secs(5)).await;
+            }
+        });
+
+        let client = CdpClient::connect(&format!("ws://{}", addr)).await.unwrap();
+        let manager = test_manager_from(client, format!("ws://{}", addr), Vec::new());
+
+        let start = Instant::now();
+        let error = manager
+            .wait_for_lifecycle_external(WaitUntil::Load, "session-1", 800)
+            .await
+            .unwrap_err();
+        let elapsed = start.elapsed();
+        server.abort();
+
+        assert_eq!(error, "Timed out after 800ms waiting for load state 'load'");
+        assert!(
+            elapsed >= Duration::from_millis(700),
+            "wait ended before its budget, took {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1150),
+            "probe restarted the budget, wait took {elapsed:?}"
+        );
     }
 
     // -----------------------------------------------------------------------

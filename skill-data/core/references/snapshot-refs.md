@@ -36,6 +36,8 @@ agent-browser snapshot
 agent-browser snapshot -i
 ```
 
+Compact snapshots (`-c`) keep visible text, status text, and their direct ancestors. Empty sibling branches are removed. Interactive snapshots (`-i`) filter out noninteractive content. MCP snapshots default to interactive; set `interactive: false` to retain visible text and status text.
+
 ### Snapshot Output Format
 
 ```
@@ -165,6 +167,8 @@ agent-browser snapshot @e9
 ```
 
 ## Iframes
+
+Presentational iframes use the same `Iframe` role for snapshots and stale-ref recovery.
 
 Snapshots automatically detect and inline iframe content. When the main-frame snapshot runs, each `Iframe` node is resolved and its child accessibility tree is included directly beneath it in the output. Refs assigned to elements inside iframes carry frame context, so interactions like `click`, `fill`, and `type` work without manually switching frames.
 
