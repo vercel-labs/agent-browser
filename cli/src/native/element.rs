@@ -909,7 +909,9 @@ fn select_unique_node_id(nodes: &[AXNode], role: &str, name: &str) -> Result<i64
         if node.ignored.unwrap_or(false) {
             continue;
         }
-        if extract_ax_string(&node.role) == role && extract_ax_string(&node.name) == name {
+        if normalize_ax_role(extract_ax_string(&node.role)) == role
+            && extract_ax_string(&node.name) == name
+        {
             if found.is_some() {
                 return Err(format!(
                     "Stale ref for role={} name={} cannot be recovered: several elements now match. Run snapshot again and use a fresh ref.",
@@ -931,6 +933,15 @@ fn select_unique_node_id(nodes: &[AXNode], role: &str, name: &str) -> Result<i64
             "Could not locate element with role={} name={}",
             role, name
         )),
+    }
+}
+
+/// Use the same iframe role for snapshot refs and stale-ref recovery.
+pub(super) fn normalize_ax_role(role: String) -> String {
+    if role == "IframePresentational" {
+        "Iframe".to_string()
+    } else {
+        role
     }
 }
 
@@ -1657,6 +1668,21 @@ mod tests {
             ax("button", "Reject", Some(8), false),
         ];
         assert_eq!(select_unique_node_id(&nodes, "button", "Approve"), Ok(7));
+    }
+
+    #[test]
+    fn test_select_unique_node_id_normalizes_presentational_iframes() {
+        let mut nodes = vec![
+            ax("IframePresentational", "", Some(1), true),
+            ax("IframePresentational", "", Some(7), false),
+            ax("Iframe", "Other", Some(8), false),
+        ];
+        assert_eq!(select_unique_node_id(&nodes, "Iframe", ""), Ok(7));
+
+        nodes.push(ax("Iframe", "", Some(9), false));
+        assert!(select_unique_node_id(&nodes, "Iframe", "")
+            .unwrap_err()
+            .contains("several elements now match"));
     }
 
     #[test]

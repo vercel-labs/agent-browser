@@ -328,6 +328,20 @@ fn parse_cookie_header(header: &str) -> Result<Vec<Value>, String> {
     Ok(out)
 }
 
+/// Parses `--cdp-headers`: a JSON object of string values sent on the CDP
+/// WebSocket handshake (distinct from page-level `--headers`).
+pub fn parse_cdp_headers(raw: &str) -> Result<Value, String> {
+    let headers = serde_json::from_str::<Value>(raw)
+        .map_err(|e| format!("Invalid JSON for --cdp-headers at column {}", e.column()))?;
+    let valid = headers
+        .as_object()
+        .is_some_and(|map| map.values().all(Value::is_string));
+    if !valid {
+        return Err("--cdp-headers must be a JSON object with string values".to_string());
+    }
+    Ok(headers)
+}
+
 /// Parses command arguments into normalized command data.
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
     let mut result = parse_command_inner(args, flags)?;
@@ -1290,7 +1304,15 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 || endpoint.starts_with("http://")
                 || endpoint.starts_with("https://")
             {
-                Ok(json!({ "id": id, "action": "launch", "cdpUrl": endpoint }))
+                let mut cmd = json!({ "id": id, "action": "launch", "cdpUrl": endpoint });
+                if let Some(ref raw) = flags.cdp_headers {
+                    cmd["cdpHeaders"] =
+                        parse_cdp_headers(raw).map_err(|message| ParseError::InvalidValue {
+                            message,
+                            usage: r#"connect <url> --cdp-headers '{"Authorization":"Bearer <token>"}'"#,
+                        })?;
+                }
+                Ok(cmd)
             } else {
                 // It's a port number - validate and use cdpPort field
                 let port: u16 = match endpoint.parse::<u32>() {
@@ -1320,7 +1342,15 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         });
                     }
                 };
-                Ok(json!({ "id": id, "action": "launch", "cdpPort": port }))
+                let mut cmd = json!({ "id": id, "action": "launch", "cdpPort": port });
+                if let Some(ref raw) = flags.cdp_headers {
+                    cmd["cdpHeaders"] =
+                        parse_cdp_headers(raw).map_err(|message| ParseError::InvalidValue {
+                            message,
+                            usage: r#"connect <port> --cdp-headers '{"Authorization":"Bearer <token>"}'"#,
+                        })?;
+                }
+                Ok(cmd)
             }
         }
 
@@ -3254,6 +3284,17 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     }
 }
 
+/// Parse a finite floating-point argument for JSON serialization.
+fn parse_finite_f64(raw: &str, what: &str, usage: &'static str) -> Result<f64, ParseError> {
+    raw.parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| ParseError::InvalidValue {
+            message: format!("{} expects a finite number, got '{}'", what, raw),
+            usage,
+        })
+}
+
 fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &[
         "viewport",
@@ -3291,12 +3332,11 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 })?;
             let mut cmd = json!({ "id": id, "action": "viewport", "width": w, "height": h });
             if let Some(scale_str) = rest.get(3) {
-                let scale = scale_str
-                    .parse::<f64>()
-                    .map_err(|_| ParseError::MissingArguments {
-                        context: "set viewport".to_string(),
-                        usage: "set viewport <width> <height> [scale]",
-                    })?;
+                let scale = parse_finite_f64(
+                    scale_str,
+                    "set viewport scale",
+                    "set viewport <width> <height> [scale]",
+                )?;
                 cmd["deviceScaleFactor"] = json!(scale);
             }
             Ok(cmd)
@@ -3317,18 +3357,16 @@ fn parse_set(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 context: "set geo".to_string(),
                 usage: "set geo <latitude> <longitude>",
             })?;
-            let lat = lat_str
-                .parse::<f64>()
-                .map_err(|_| ParseError::MissingArguments {
-                    context: "set geo".to_string(),
-                    usage: "set geo <latitude> <longitude>",
-                })?;
-            let lng = lng_str
-                .parse::<f64>()
-                .map_err(|_| ParseError::MissingArguments {
-                    context: "set geo".to_string(),
-                    usage: "set geo <latitude> <longitude>",
-                })?;
+            let lat = parse_finite_f64(
+                lat_str,
+                "set geo latitude",
+                "set geo <latitude> <longitude>",
+            )?;
+            let lng = parse_finite_f64(
+                lng_str,
+                "set geo longitude",
+                "set geo <latitude> <longitude>",
+            )?;
             Ok(json!({ "id": id, "action": "geolocation", "latitude": lat, "longitude": lng }))
         }
         Some("offline") => {
@@ -3618,6 +3656,7 @@ mod tests {
             init_scripts: Vec::new(),
             enable: Vec::new(),
             cdp: None,
+            cdp_headers: None,
             profile: None,
             state: None,
             proxy: None,
@@ -5697,6 +5736,25 @@ mod tests {
     }
 
     #[test]
+    fn test_set_rejects_non_finite_float_arguments() {
+        for command in [
+            "set viewport 800 600 nan",
+            "set viewport 800 600 inf",
+            "set geo nan 10",
+            "set geo 10 inf",
+        ] {
+            let error = parse_command(&args(command), &default_flags())
+                .unwrap_err()
+                .format();
+            assert!(
+                error.contains("finite number"),
+                "command should reject non-finite value: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
     fn test_find_first_no_value() {
         let cmd = parse_command(&args("find first a click"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "nth");
@@ -5895,6 +5953,45 @@ mod tests {
         assert_eq!(cmd["action"], "launch");
         assert_eq!(cmd["cdpPort"], 9222);
         assert!(cmd.get("cdpUrl").is_none());
+    }
+
+    #[test]
+    fn test_connect_with_cdp_headers() {
+        let mut flags = default_flags();
+        flags.cdp_headers = Some(r#"{"Authorization":"Bearer t"}"#.to_string());
+        let cmd = parse_command(&args("connect wss://example.com/cdp"), &flags).unwrap();
+        assert_eq!(cmd["action"], "launch");
+        assert_eq!(cmd["cdpUrl"], "wss://example.com/cdp");
+        assert_eq!(cmd["cdpHeaders"]["Authorization"], "Bearer t");
+    }
+
+    #[test]
+    fn test_connect_port_with_cdp_headers() {
+        let mut flags = default_flags();
+        flags.cdp_headers = Some(r#"{"Authorization":"Bearer t"}"#.to_string());
+        let cmd = parse_command(&args("connect 9222"), &flags).unwrap();
+        assert_eq!(cmd["cdpPort"], 9222);
+        assert_eq!(cmd["cdpHeaders"]["Authorization"], "Bearer t");
+    }
+
+    #[test]
+    fn test_parse_cdp_headers_rejects_invalid_shapes() {
+        assert!(parse_cdp_headers(r#"{"Authorization":"Bearer t"}"#).is_ok());
+        assert!(parse_cdp_headers("{bad").is_err());
+        assert!(parse_cdp_headers(r#"["x"]"#).is_err());
+        assert!(parse_cdp_headers(r#"{"Authorization":123}"#).is_err());
+    }
+
+    #[test]
+    fn test_parse_cdp_headers_errors_never_echo_values() {
+        for raw in [
+            r#"{"Authorization":"Bearer SECRET",}"#,
+            r#"{"Authorization":"Bearer SECRET","n":1}"#,
+            r#"["Bearer SECRET"]"#,
+        ] {
+            let err = parse_cdp_headers(raw).unwrap_err();
+            assert!(!err.contains("SECRET"), "{err}");
+        }
     }
 
     #[test]

@@ -547,7 +547,7 @@ pub fn run_mcp_call(args: &[String]) -> i32 {
 
 fn parse_mcp_call(args: &[String]) -> Result<(String, Value, McpConfig), String> {
     const USAGE: &str =
-        "Usage: agent-browser mcp call <tool> [<arguments-json> | -] [--tools <profiles>]";
+        "Usage: agent-browser mcp call <tool> [<arguments-json> | -] [--tools <profiles>] [--config <trusted-path>]";
     let Some(name) = args.first().filter(|name| !name.starts_with('-')) else {
         return Err(format!("Missing tool name\n{}", USAGE));
     };
@@ -625,7 +625,7 @@ fn parse_mcp_config(args: &[String]) -> Result<McpConfig, String> {
             i += 1;
         } else {
             return Err(format!(
-                "Unknown mcp option: {}\nUsage: agent-browser mcp [--tools <profiles>]",
+                "Unknown mcp option: {}\nUsage: agent-browser mcp [--tools <profiles>] [--config <trusted-path>]",
                 arg
             ));
         }
@@ -907,10 +907,10 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_SNAPSHOT,
             "Snapshot page",
-            "Return an accessibility-tree snapshot with reusable element refs. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref.",
+            "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref.",
             json!({
                 "interactive": { "type": "boolean", "default": true, "description": "Only include interactive elements." },
-                "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements." },
+                "compact": { "type": "boolean", "default": false, "description": "Remove empty structural elements, retaining only matching content and its direct ancestors. With interactive:false, retain visible text." },
                 "depth": { "type": "integer", "minimum": 0, "description": "Limit tree depth." },
                 "selector": { "type": "string", "description": "Scope the snapshot to a CSS selector." },
                 "includeUrls": { "type": "boolean", "default": false, "description": "Include href URLs on links." },
@@ -1002,7 +1002,7 @@ fn tools() -> Vec<Value> {
         ),
         wait_tool(TOOL_WAIT_FOR_TEXT, "Wait for text", "Wait for text to appear.", json!({ "text": { "type": "string" } }), &["text"]),
         wait_tool(TOOL_WAIT_FOR_URL, "Wait for URL", "Wait for the current URL to match a pattern.", json!({ "url": { "type": "string", "description": "URL glob or pattern." } }), &["url"]),
-        wait_tool(TOOL_WAIT_FOR_LOAD, "Wait for load state", "Wait for a page load state.", json!({ "state": { "type": "string", "enum": ["load", "domcontentloaded", "networkidle"] } }), &["state"]),
+        wait_tool(TOOL_WAIT_FOR_LOAD, "Wait for load state", "Wait for a page load state. Uses the full wait timeout and returns an error when it expires.", json!({ "state": { "type": "string", "enum": ["load", "domcontentloaded", "networkidle"] } }), &["state"]),
         wait_tool(TOOL_WAIT_FOR_FUNCTION, "Wait for function", "Wait for a JavaScript expression to become truthy.", json!({ "expression": { "type": "string" } }), &["expression"]),
         tool(
             TOOL_SCREENSHOT,
@@ -1026,7 +1026,13 @@ fn tools() -> Vec<Value> {
         tool(TOOL_GET_VALUE, "Get value", "Get an input value.", json!({ "selector": selector_schema() }), &["selector"]),
         tool(TOOL_GET_URL, "Get URL", "Get the current page URL.", json!({}), &[]),
         tool(TOOL_GET_TITLE, "Get title", "Get the current page title.", json!({}), &[]),
-        tool(TOOL_GET_CDP_URL, "Get CDP URL", "Get the current browser CDP URL.", json!({}), &[]),
+        tool(
+            TOOL_GET_CDP_URL,
+            "Get CDP URL",
+            "Get the CDP WebSocket URL of a running browser. Never launches a browser.",
+            json!({}),
+            &[],
+        ),
         tool(
             TOOL_EVAL,
             "Evaluate JavaScript",
@@ -1227,7 +1233,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SET_VIEWPORT,
             "Set viewport",
-            "Set viewport size.",
+            "Set viewport size. The optional scale must be finite.",
             json!({ "width": int_schema(), "height": int_schema(), "scale": number_schema() }),
             &["width", "height"],
         ),
@@ -1241,7 +1247,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SET_GEO,
             "Set geolocation",
-            "Set geolocation.",
+            "Set geolocation with finite latitude and longitude.",
             json!({ "latitude": number_schema(), "longitude": number_schema() }),
             &["latitude", "longitude"],
         ),
@@ -1707,14 +1713,14 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_BATCH,
             "Batch",
-            "Run multiple commands sequentially.",
+            "Run multiple commands sequentially. A batch containing only get cdp-url commands never launches a browser.",
             json!({ "commands": { "type": "array", "items": { "type": "array", "items": { "type": "string" }, "minItems": 1 }, "minItems": 1 }, "bail": { "type": "boolean" }, "omitCommand": { "type": "boolean", "description": "Replace only command arrays with a stable zero-based input index. Does not make output safe for secrets: errors and response data are unchanged; type echoes typed text, and get value/eval may return input values." } }),
             &["commands"],
         ),
         tool(
             TOOL_REACT_TREE,
             "React tree",
-            "Inspect React tree.",
+            "Inspect the React component tree and return its structured result.",
             json!({ "json": { "type": "boolean" } }),
             &[],
         ),
@@ -1953,7 +1959,7 @@ fn parity_tools() -> Vec<Value> {
             TOOL_INSTALL,
             "Install",
             "Install browser binaries.",
-            json!({ "withDeps": { "type": "boolean" } }),
+            json!({ "withDeps": { "type": "boolean", "description": "Install Linux system dependencies. The package manager runs directly as root; non-root uses sudo." } }),
             &[],
         ),
         tool(
@@ -3849,12 +3855,16 @@ fn call_dashboard_start(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool(arguments, dashboard_start_args(arguments)?, None)
 }
 
-fn call_install(arguments: &Value) -> Result<Value, ProtocolError> {
+fn install_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = vec!["install".to_string()];
     if optional_bool(arguments, "withDeps")?.unwrap_or(false) {
         args.push("--with-deps".to_string());
     }
-    call_cli_tool(arguments, args, None)
+    Ok(args)
+}
+
+fn call_install(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, install_args(arguments)?, None)
 }
 
 fn call_chat(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4230,6 +4240,7 @@ fn run_command(
     })
 }
 
+/// Run tools through the CLI, including its trust restrictions on automatically discovered project config.
 fn run_cli(args: &[String], stdin_body: Option<String>, timeout_ms: u64) -> Result<CliRun, String> {
     let exe = env::current_exe().map_err(|e| e.to_string())?;
     let mut command = Command::new(exe);
@@ -4512,6 +4523,7 @@ mod tests {
         for arguments in [
             json!({}),
             json!({"interactive": false, "selector": "#content"}),
+            json!({"compact": true, "interactive": false}),
         ] {
             let args = snapshot_command_args(&arguments).unwrap();
             let flags = crate::flags::parse_flags(&args);
@@ -4522,6 +4534,9 @@ mod tests {
                 command["interactive"].as_bool().unwrap_or(false),
                 arguments["interactive"].as_bool().unwrap_or(true)
             );
+            if arguments["compact"] == true {
+                assert_eq!(command["compact"], true);
+            }
         }
     }
 
@@ -4782,6 +4797,14 @@ mod tests {
         assert_eq!(
             doctor_args(&json!({ "debug": true })).unwrap(),
             vec!["doctor", "--debug", "true"]
+        );
+    }
+
+    #[test]
+    fn install_args_maps_with_deps_to_cli_flag() {
+        assert_eq!(
+            install_args(&json!({ "withDeps": true })).unwrap(),
+            vec!["install", "--with-deps"]
         );
     }
 
@@ -5098,11 +5121,14 @@ mod tests {
     }
 
     #[test]
-    fn react_json_uses_command_local_raw_json_flag() {
+    fn react_json_uses_structured_cli_mode_and_command_local_raw_json_flag() {
         let mut args = vec!["react".to_string(), "tree".to_string()];
         append_react_raw_json_arg(&json!({ "json": true }), &mut args).unwrap();
 
         assert_eq!(args, vec!["react", "tree", RAW_JSON_ARG]);
+        let cli_args = cli_tool_args(&json!({}), args, None).unwrap();
+
+        assert_eq!(cli_args, vec!["--json", "react", "tree", RAW_JSON_ARG]);
     }
 
     #[test]

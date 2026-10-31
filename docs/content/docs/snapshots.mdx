@@ -9,6 +9,8 @@ The `snapshot` command returns a compact accessibility tree with refs for elemen
 
 Filter output to reduce size:
 
+Compact snapshots (`-c`) keep visible text, status text, and their direct ancestors. Empty sibling branches are removed. Interactive snapshots (`-i`) filter out noninteractive content. MCP snapshots default to interactive; set `interactive: false` to retain visible text and status text.
+
 ```bash
 agent-browser snapshot                    # Full accessibility tree
 agent-browser snapshot -i                 # Interactive elements only (recommended)
@@ -86,6 +88,8 @@ Headless Chromium screenshots hide native scrollbars for consistent image output
 Annotated screenshots also cache refs, so you can interact with elements immediately. This is useful when the text snapshot is insufficient for unlabeled icons, canvas content, or visual layout verification.
 
 ## Iframes
+
+Presentational iframes use the same `Iframe` role for snapshots and stale-ref recovery.
 
 Snapshots automatically detect and inline iframe content. Each `Iframe` node in the main frame is resolved and its child accessibility tree is included directly beneath it. Refs assigned to elements inside iframes carry frame context, so interactions work without switching frames first.
 

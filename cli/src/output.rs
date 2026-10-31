@@ -127,6 +127,23 @@ fn format_storage_text(data: &serde_json::Value) -> Option<String> {
     Some(format!("{}: {}", key, format_storage_value(value)))
 }
 
+/// Formats the daemon's preformatted React tree, including an empty-tree hint.
+fn format_react_tree_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
+    if action != Some("react_tree") {
+        return None;
+    }
+
+    let tree = data.get("tree")?.as_str()?;
+    if tree
+        .lines()
+        .any(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+    {
+        Some(tree.to_string())
+    } else {
+        Some("No React component tree found. Confirm that a React root has mounted.".to_string())
+    }
+}
+
 fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
     match action {
         Some("stream_disable") => data
@@ -578,6 +595,10 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         }
         if let Some(output) = format_stream_status_text(action, data) {
             println!("{}", output);
+            return;
+        }
+        if let Some(output) = format_react_tree_text(action, data) {
+            print_with_boundaries(&output, boundary_origin(data), opts);
             return;
         }
         if action == Some("webmcp_list") {
@@ -2151,6 +2172,8 @@ Modes:
   --text <text>        Wait for text to appear on page (substring match)
   --download [path]    Wait for a download to complete (optionally save to path)
 
+A load-state wait uses --timeout (or AGENT_BROWSER_DEFAULT_TIMEOUT) and fails when it expires.
+
 Download Options (with --download):
   --timeout <ms>       Timeout in milliseconds for download to start
 
@@ -2254,6 +2277,7 @@ references (like @e1, @e2) that can be used in subsequent commands.
 Refs can be reused across snapshots. Take a fresh snapshot after navigation.
 If a ref's element was replaced, the action uses the one element with the same
 role and name. If that is ambiguous, it fails: run snapshot again.
+Presentational iframes use the Iframe role for snapshots and stale-ref recovery.
 
 Options:
   -i, --interactive    Only include interactive elements
@@ -2264,6 +2288,10 @@ Options:
       --delta          Return full state once, then unchanged or structural deltas
                        Deltas include ref changes and an exact treeChange line splice
       --full           Force full state and update the delta baseline
+
+Compact snapshots keep visible text, status text, and their direct ancestors.
+Empty sibling branches are removed. Interactive snapshots filter out noninteractive content. MCP snapshots default to interactive; set
+interactive to false to retain visible text and status text.
 
 Global Options:
   --json               Output as JSON
@@ -2374,7 +2402,8 @@ Subcommands:
   count <selector>           Count matching elements
   box <selector>             Get bounding box (x, y, width, height)
   styles <selector>          Get computed styles of elements
-  cdp-url                    Get Chrome DevTools Protocol WebSocket URL
+  cdp-url                    Get CDP WebSocket URL of a running browser
+                             Never launches a browser, including metadata-only batches
 
 Global Options:
   --json               Output as JSON
@@ -2514,9 +2543,10 @@ Usage: agent-browser set <setting> [args]
 Configures various browser settings and emulation options.
 
 Settings:
-  viewport <w> <h> [scale]   Set viewport size (scale = deviceScaleFactor, e.g. 2 for retina)
+  viewport <w> <h> [scale]   Set viewport size (scale = deviceScaleFactor, e.g. 2 for retina;
+                             scale must be finite)
   device <name>              Emulate device (e.g., "iPhone 12")
-  geo <lat> <lng>            Set geolocation
+  geo <lat> <lng>            Set geolocation (coordinates must be finite)
   offline [on|off]           Toggle offline mode; off restores the new-tab default
   headers <json>             Set extra HTTP headers; use {} to clear them for new tabs
   credentials <user> <pass>  Set HTTP authentication for current and future tabs
@@ -3189,7 +3219,8 @@ Usage: agent-browser install [--with-deps]
 Downloads and installs browser binaries required for automation.
 
 Options:
-  -d, --with-deps      Also install system dependencies (Linux only; fails if deps fail)
+  -d, --with-deps      Also install Linux system dependencies. The package manager runs
+                       directly as root; non-root uses sudo.
 
 Examples:
   agent-browser install
@@ -3328,6 +3359,9 @@ Supported URL formats:
   - Remote service: wss://remote-browser.example.com/cdp?token=...
   - Root endpoint: wss://remote-browser.example.com?token=... (slash optional)
 
+Options:
+  --cdp-headers <json>  Headers for CDP discovery and handshake, e.g. Authorization
+
 Global Options:
   --json               Output as JSON
   --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
@@ -3342,6 +3376,10 @@ Examples:
 
   # Connect to remote browser service
   agent-browser connect "wss://browser-service.example.com/cdp?token=xyz"
+
+  # Connect to a service that authenticates the WebSocket handshake
+  agent-browser connect "wss://browser-service.example.com/cdp" \
+    --cdp-headers '{"Authorization":"Bearer <token>"}'
 
   # After connecting, run commands normally
   agent-browser snapshot
@@ -3656,8 +3694,9 @@ Examples:
             r##"
 agent-browser mcp - Start an MCP stdio server
 
-Usage: agent-browser mcp [--tools <profiles>]
-       agent-browser mcp call <tool> [<arguments-json> | -] [--tools <profiles>]
+Usage: agent-browser mcp [--tools <profiles>] [--config <trusted-path>]
+       agent-browser mcp call <tool> [<arguments-json> | -]
+         [--tools <profiles>] [--config <trusted-path>]
 
 Starts a Model Context Protocol server over stdio. MCP clients launch this
 command as a subprocess and communicate with newline-delimited JSON-RPC.
@@ -3670,6 +3709,12 @@ result as JSON, with the agent-browser version in _meta.agentBrowserVersion.
 Pass the arguments as a JSON object, or - to read them from stdin. Every tool
 is available unless --tools limits the call. Exit code: 0 on success, 1 when
 the tool reports an error, 2 for an unknown tool or invalid arguments.
+
+Pass --config <trusted-path> to agent-browser mcp or agent-browser mcp call to
+select one trusted config file. MCP tool child processes load only that file,
+replacing default user/project discovery. Put required safety policy in it.
+Environment variables and accepted per-tool CLI arguments still override its
+values.
 
 The default tools profile is core, which keeps MCP context small for everyday
 browser automation. Use --tools all for the full typed CLI parity surface, or
@@ -3700,11 +3745,10 @@ Common tools include:
 
 Each tool has typed fields such as url, selector, text, key, and session.
 Each tool also accepts extraArgs for per-command options and display or emulation
-flags such as --engine. Global flags that change network, file, policy, or host
-access (such as --allowed-domains, --action-policy, --executable-path, --args,
-and --config) are rejected in extraArgs and must be set in the MCP server's
-environment or config, and structured allowedDomains is rejected when the server
-already sets allowed domains.
+flags such as --engine. extraArgs cannot set --config or global flags that change
+network, file, policy, or host access. Set host-wide options in the MCP server's
+environment or selected config. Structured allowedDomains is rejected when the
+server already sets allowed domains.
 Tool discovery is paginated and includes read-only/open-world annotations so
 modern MCP clients can load the large typed surface incrementally.
 Use agent_browser_snapshot after navigation to get fresh refs before clicking.
@@ -3964,7 +4008,7 @@ WebMCP (experimental):
   Brief untrusted summaries appear only on discovery or change; no schemas
 
 React (requires `open --enable react-devtools`):
-  react tree                 Full React component tree (depth id parent name columns)
+  react tree                 Full React component tree (enable with open --enable react-devtools)
   react inspect <id>         Inspect one fiber (props, hooks, state, source)
   react renders start        Start recording re-renders via onCommitFiberRoot
   react renders stop [--json] Stop and print render profile
@@ -4113,6 +4157,8 @@ Options:
   --no-webmcp                Disable default experimental WebMCP support for locally launched Chrome
                              (or AGENT_BROWSER_NO_WEBMCP env)
   --cdp <port|url>           Connect via CDP; root WebSocket query slash is optional
+  --cdp-headers <json>       Headers for --cdp discovery and handshake, e.g. Authorization
+                             (or AGENT_BROWSER_CDP_HEADERS env)
   --pin-tab                  Pin the session to its bound tab (or AGENT_BROWSER_PIN_TAB env)
                              Commands fail with a tab_gone error instead of falling back
                              to another tab when the bound tab is closed. JSON includes
@@ -4149,31 +4195,40 @@ Options:
   --version, -V              Show version
 
 Configuration:
-  agent-browser looks for agent-browser.json in these locations (lowest to highest priority):
+  Default discovery loads config from these locations (lowest to highest priority):
     1. ~/.agent-browser/config.json      User-level defaults
-    2. ./agent-browser.json              Project-level overrides
+    2. ./agent-browser.json              Allowlisted project defaults
     3. Environment variables             Override config file values
     4. CLI flags                         Override everything
 
-  Use --config <path> to load a specific config file instead of the defaults.
+  Use --config <path> to load only that config file instead of default discovery.
+  AGENT_BROWSER_CONFIG has the same effect. Environment variables and CLI flags
+  still override values from the selected config file.
   If --config points to a missing or invalid file, agent-browser exits with an error.
-  The auto-discovered ./agent-browser.json cannot set executablePath, args or plugins (they are ignored with a warning); set them in ~/.agent-browser/config.json, env vars or flags, or load the file explicitly with --config ./agent-browser.json.
+  The auto-discovered ./agent-browser.json accepts only:
+    {project_config_keys}.
+  Other runtime keys, including extensions, initScripts, state, trust, policy,
+  session, connection, and path settings, are ignored with a warning.
+  The $schema metadata key is ignored silently.
+  Put advanced settings in ~/.agent-browser/config.json or load a trusted file
+  with --config or AGENT_BROWSER_CONFIG.
 
   Boolean flags accept an optional true/false value to override config:
     --headed           (same as --headed true)
     --headed false     (disables "headed": true from config)
     --hide-scrollbars false (keeps native scrollbars visible in headless Chromium screenshots)
 
-  Extensions from user and project configs are merged (not replaced).
+  The auto-discovered project config ignores extensions. Use the user config, an
+  explicitly loaded config file, AGENT_BROWSER_EXTENSIONS, or --extension.
 
   On Windows, headless Chrome runs on a private desktop to prevent stray desktop
   rectangles. Owned Chrome processes close with their daemon, even if it is killed.
   Headed browsers use the interactive desktop; externally connected browsers are not owned.
 
-  Example agent-browser.json:
-    {{"headed": true, "hideScrollbars": false, "proxy": "http://localhost:8080"}}
+  Example auto-discovered agent-browser.json:
+    {{"headed": true, "hideScrollbars": false, "userAgent": "my-agent/1.0", "colorScheme": "dark"}}
 
-  Plugin example:
+  Trusted config example (user config or a file loaded with --config):
     {{"plugins":[{{"name":"vault","command":"agent-browser-plugin-vault","capabilities":["credential.read"]}},{{"name":"stealth","command":"agent-browser-plugin-stealth","capabilities":["launch.mutate"]}}]}}
 
 Environment:
@@ -4303,7 +4358,12 @@ iOS Simulator (requires Xcode and Appium):
   agent-browser -p ios device list                         # List simulators
   agent-browser -p ios swipe up                            # Swipe gesture
   agent-browser -p ios tap @e1                             # Touch element
-"#
+"#,
+        project_config_keys = crate::flags::PROJECT_CONFIG_ALLOWED_KEYS
+            .chunks(4)
+            .map(|keys| keys.join(", "))
+            .collect::<Vec<_>>()
+            .join(",\n    ")
     );
 }
 
@@ -4390,11 +4450,57 @@ pub fn print_version() {
 #[cfg(test)]
 mod tests {
     use super::{
-        boundary_origin, format_a11y_text, format_snapshot_delta, format_storage_text,
-        format_vitals_text, format_webmcp_context, format_webmcp_text, format_webmcp_tool_text,
-        format_with_boundaries, OutputOptions,
+        boundary_origin, format_a11y_text, format_react_tree_text, format_snapshot_delta,
+        format_storage_text, format_vitals_text, format_webmcp_context, format_webmcp_text,
+        format_webmcp_tool_text, format_with_boundaries, OutputOptions,
     };
     use serde_json::json;
+
+    #[test]
+    fn test_format_react_tree_text_preserves_populated_tree() {
+        let tree =
+            "# React component tree\n# Columns: depth id parent name\n0 1 - App\n  1 2 1 Button\n";
+        let data = json!({ "tree": tree });
+
+        assert_eq!(
+            format_react_tree_text(Some("react_tree"), &data).as_deref(),
+            Some(tree)
+        );
+    }
+
+    #[test]
+    fn test_format_react_tree_text_reports_empty_tree() {
+        let header_only = json!({
+            "tree": "# React component tree\n# Columns: depth id parent name [key=...]\n# Use `react inspect <id>` for props/hooks/state. IDs valid until next navigation."
+        });
+        let whitespace_only = json!({ "tree": " \n\t\n" });
+        let expected = "No React component tree found. Confirm that a React root has mounted.";
+
+        assert_eq!(
+            format_react_tree_text(Some("react_tree"), &header_only).as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            format_react_tree_text(Some("react_tree"), &whitespace_only).as_deref(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn test_format_react_tree_text_ignores_other_actions() {
+        let data = json!({ "tree": "component tree" });
+
+        assert_eq!(format_react_tree_text(Some("snapshot"), &data), None);
+    }
+
+    #[test]
+    fn test_format_react_tree_text_ignores_missing_or_invalid_tree() {
+        assert_eq!(format_react_tree_text(Some("react_tree"), &json!({})), None);
+        assert_eq!(
+            format_react_tree_text(Some("react_tree"), &json!({ "tree": ["App"] })),
+            None
+        );
+    }
 
     #[test]
     fn test_format_stream_status_text_for_enabled_stream() {
