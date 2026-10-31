@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CHROMIUM_SYSTEM_DEPS,
   createAgentBrowserSandbox,
   createAgentBrowserSnapshot,
   getSandboxCredentials,
@@ -9,6 +10,10 @@ import {
   runAgentBrowserCommand,
   withAgentBrowserSandbox,
 } from "../dist/vercel.js";
+
+test("default Vercel dependencies include certutil", () => {
+  assert.ok(CHROMIUM_SYSTEM_DEPS.includes("nss-tools"));
+});
 
 function commandResult(stdout = "{}", stderr = "", exitCode = 0) {
   return {

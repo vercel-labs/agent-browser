@@ -46,6 +46,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn session_name_validation_accepts_supported_names() {
+        for name in ["default", "next-loop", "next_loop", "café-東京_7"] {
+            assert!(is_valid_session_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn session_name_validation_rejects_empty_and_spaces() {
+        for name in ["", "bad name"] {
+            assert!(!is_valid_session_name(name), "{name}");
+        }
+    }
+
+    #[test]
     fn sanitize_session_component_produces_valid_component() {
         let value = sanitize_session_component("Next Dev Loop: /Users/me/worktree!");
 

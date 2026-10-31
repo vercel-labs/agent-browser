@@ -1,15 +1,4 @@
-import { defineTool } from "eve/tools";
-import { z } from "zod";
+import { catalogTool } from "../lib/catalog";
 
-import { runBrowser, SELECTOR_HINT } from "../lib/browser";
-
-export default defineTool({
-  description: "Drag an element and drop it onto another element.",
-  inputSchema: z.object({
-    source: z.string().describe(`Element to drag. ${SELECTOR_HINT}`),
-    target: z.string().describe(`Element to drop onto. ${SELECTOR_HINT}`),
-  }),
-  async execute({ source, target }, ctx) {
-    return await runBrowser(ctx, ["drag", source, target]);
-  },
-});
+// Outside the `core` profile: found with eve__search instead of listed every turn.
+export default catalogTool("drag", { deferred: true });

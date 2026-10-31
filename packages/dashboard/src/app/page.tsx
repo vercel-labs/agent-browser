@@ -7,6 +7,7 @@ import { useStreamSync, hasConsoleErrorsAtom, consoleLogsAtom } from "@/store/st
 import { useActivitySync } from "@/store/activity";
 import { activeExtensionsAtom } from "@/store/sessions";
 import { useChatStatusSync } from "@/store/chat";
+import { initializeDashboardAccessToken } from "@/lib/dashboard-routes";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { Viewport } from "@/components/viewport";
 import { ActivityFeed } from "@/components/activity-feed";
@@ -26,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { Plus } from "lucide-react";
 
 export default function DashboardPage() {
+  initializeDashboardAccessToken();
   const activePort = useAtomValue(activePortAtom);
   useStreamSync(activePort);
   useSessionsSync();

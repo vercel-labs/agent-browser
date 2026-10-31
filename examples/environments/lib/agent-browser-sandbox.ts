@@ -28,6 +28,7 @@ const SNAPSHOT_ID = process.env.AGENT_BROWSER_SNAPSHOT_ID;
 
 const CHROMIUM_SYSTEM_DEPS = [
   "nss",
+  "nss-tools",
   "nspr",
   "libxkbcommon",
   "atk",
