@@ -357,7 +357,7 @@ Runtime init-script identifiers are session-wide. Removing one clears it from ev
 
 Switching has two special cases worth knowing:
 
-- **Discarded tab (Chrome Memory Saver).** A backgrounded tab may have its renderer dropped. Switching to it reactivates the tab, which reloads the page and discards unsaved state (form input, scroll position). The switch result then includes `"revived": true`, so treat prior in-page state as gone and re-snapshot. Closing the active tab onto a discarded successor reports `"activeTabRevived": true` for the same reason.
+- **Background tabs and focus.** Opening and selecting tabs changes the agent's working tab without bringing Chrome to the foreground or selecting its visible tab. Use `agent-browser bringtofront` to explicitly focus the working tab. A discarded tab cannot answer commands; activate it in the browser and retry instead of relying on automatic activation. Browser launch and explicit foreground commands can still change focus.
 - **Tab blocked by a dialog.** If the target tab has an open dialog (`confirm`/`prompt`, or `alert`/`beforeunload` under `--no-auto-dialog`) its renderer is paused, not discarded, so the switch leaves it untouched and reports `"dialogBlocked": true`. Resolve the dialog with `dialog accept`/`dialog dismiss` before interacting with the page.
 
 ### Run multiple browsers in parallel

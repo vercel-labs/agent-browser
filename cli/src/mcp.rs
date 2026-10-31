@@ -28,6 +28,7 @@ const TOOL_READ: &str = "agent_browser_read";
 const TOOL_BACK: &str = "agent_browser_back";
 const TOOL_FORWARD: &str = "agent_browser_forward";
 const TOOL_RELOAD: &str = "agent_browser_reload";
+const TOOL_BRING_TO_FRONT: &str = "agent_browser_bring_to_front";
 const TOOL_SNAPSHOT: &str = "agent_browser_snapshot";
 const TOOL_CLICK: &str = "agent_browser_click";
 const TOOL_DBLCLICK: &str = "agent_browser_dblclick";
@@ -470,6 +471,7 @@ const TABS_PROFILE_TOOLS: &[&str] = &[
     TOOL_TAB_SWITCH,
     TOOL_TAB_CLOSE,
     TOOL_WINDOW_NEW,
+    TOOL_BRING_TO_FRONT,
     TOOL_FRAME_SWITCH,
     TOOL_FRAME_MAIN,
     TOOL_DIALOG_STATUS,
@@ -841,7 +843,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_OPEN,
             "Open page",
-            "Launch the browser and optionally navigate to a URL. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
+            "Launch the browser and optionally navigate to a URL. Attaching to Chrome and opening tabs does not focus it; browser launch can still change focus. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
             json!({
                 "url": { "type": "string", "description": "URL to open. Omit to launch about:blank." },
                 "headed": { "type": "boolean", "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults." },
@@ -1059,6 +1061,7 @@ fn tools() -> Vec<Value> {
 
 fn parity_tools() -> Vec<Value> {
     vec![
+        tool(TOOL_BRING_TO_FRONT, "Bring to front", "Explicitly focus the working browser tab and bring Chrome to the foreground.", json!({}), &[]),
         tool(TOOL_BACK, "Back", "Navigate back.", json!({}), &[]),
         tool(TOOL_FORWARD, "Forward", "Navigate forward.", json!({}), &[]),
         tool(TOOL_RELOAD, "Reload", "Reload the page.", json!({}), &[]),
@@ -1374,7 +1377,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_TAB_NEW,
             "Tab new",
-            "Open a new tab after applying session setup before its first navigation. Rejected labels preserve the current tab's refs and selected frame.",
+            "Open a new background tab without focusing Chrome, after applying session setup before its first navigation. Rejected labels preserve the current tab's refs and selected frame.",
             json!({
                 "url": { "type": "string" },
                 "label": {
@@ -1389,7 +1392,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_TAB_SWITCH,
             "Tab switch",
-            "Switch to a tab by id (t1), label, or CDP target id. Switching also binds the session to that tab.",
+            "Switch to a tab by id (t1), label, or CDP target id. Switching also binds the session to that tab without focusing Chrome. Discarded tabs require activation in the browser before retrying.",
             json!({ "tab": { "type": "string", "description": "Tab id (t1), label, or CDP target id." } }),
             &["tab"],
         ),
@@ -1403,7 +1406,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_WINDOW_NEW,
             "Window new",
-            "Open a new browser window.",
+            "Open a new browser window without focusing Chrome.",
             json!({}),
             &[],
         ),
@@ -2362,6 +2365,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_BACK => call_literal(arguments, &["back"]),
         TOOL_FORWARD => call_literal(arguments, &["forward"]),
         TOOL_RELOAD => call_literal(arguments, &["reload"]),
+        TOOL_BRING_TO_FRONT => call_literal(arguments, &["bringtofront"]),
         TOOL_DBLCLICK => call_simple_selector(arguments, "dblclick"),
         TOOL_FILL => call_fill(arguments),
         TOOL_TYPE => call_type(arguments),

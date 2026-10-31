@@ -416,6 +416,7 @@ agent-browser tab new [url]                    # New tab (optionally with URL)
 agent-browser tab new --label docs [url]       # New tab with a user-assigned label
 agent-browser tab <t<N>|label>                 # Switch to a tab by id or label
 agent-browser tab close [t<N>|label]           # Close a tab (defaults to active)
+agent-browser bringtofront                     # Explicitly focus the working browser tab
 agent-browser window new                       # New window
 ```
 
@@ -437,7 +438,7 @@ Tabs opened through `tab new` or `click --new-tab` inherit the session's user ag
 
 `tab list --json` also reports each tab's CDP `targetId`, and target ids are accepted anywhere a tab ref is accepted (`tab <targetId>`, `tab close <targetId>`). Unlike `t<N>` ids, which are per-daemon counters, target ids stay stable across daemon restarts, so they're the right handle for scripts coordinating multiple sessions on one browser.
 
-Switching to a tab discarded by Chrome's Memory Saver reactivates it, since a discarded tab has no renderer to drive. Reactivation reloads the discarded page and resets its unsaved state, and the switch result reports `"revived": true`. A tab whose page is paused by a JavaScript dialog is alive rather than discarded, so the switch leaves it untouched and reports `"dialogBlocked": true`; resolve the dialog with `dialog accept` or `dialog dismiss` before interacting. Closing the active tab onto a discarded successor revives it the same way and reports `"activeTabRevived": true`.
+Opening and selecting tabs changes the agent's working tab without bringing Chrome to the foreground or selecting its visible tab. Use `agent-browser bringtofront` to explicitly focus the working tab. A discarded tab cannot answer commands; activate it in the browser and retry instead of relying on automatic activation. Browser launch and explicit foreground commands can still change focus. A tab paused by a JavaScript dialog remains selected without activation and reports `"dialogBlocked": true`; resolve the dialog with `dialog accept` or `dialog dismiss` before interacting.
 
 ### Frames
 
@@ -1128,7 +1129,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--headed` | Show browser window on the interactive desktop (or `AGENT_BROWSER_HEADED` env) |
 | `--webgpu` | Enable WebGPU; SwiftShader software Vulkan on Linux, no GPU required (or `AGENT_BROWSER_WEBGPU` env) |
 | `--no-webmcp` | Disable experimental WebMCP support, which is enabled by default for locally launched Chrome (or `AGENT_BROWSER_NO_WEBMCP` env) |
-| `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) |
+| `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) without focusing Chrome |
 | `--cdp-headers <json>` | Headers sent on CDP discovery and the WebSocket handshake, such as `Authorization` (or `AGENT_BROWSER_CDP_HEADERS` env) |
 | `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
 | `--pin-tab` | Pin the session to its bound tab; fail with `tab_gone` instead of falling back to another tab (or `AGENT_BROWSER_PIN_TAB` env) |

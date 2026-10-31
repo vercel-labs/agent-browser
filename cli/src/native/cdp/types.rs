@@ -141,6 +141,8 @@ pub struct SetDiscoverTargetsParams {
 #[serde(rename_all = "camelCase")]
 pub struct CreateTargetParams {
     pub url: String,
+    /// Keep target creation from activating the browser or selecting a visible tab.
+    pub background: bool,
 }
 
 #[derive(Debug, Deserialize)]

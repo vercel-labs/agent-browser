@@ -843,6 +843,100 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
+      "description": "Explicitly focus the working browser tab and bring Chrome to the foreground.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "allowedDomains": {
+            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "caCert": {
+            "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
+            "type": "string"
+          },
+          "clearCaCert": {
+            "description": "Explicitly clear CA trust retained by the running browser session.",
+            "type": "boolean"
+          },
+          "extraArgs": {
+            "description": "Advanced: extra CLI arguments, including --engine chrome|lightpanda|obscura. Global flags that change network, file, policy, or host access (such as --allowed-domains, --executable-path, --args, --config) are rejected; set them in the MCP server environment or config. Obscura is experimental and rejects --proxy-bypass (including resolved config/environment settings). Explicit Obscura launches send this invocation's resolved bypass setting even to an existing daemon.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "idleTimeout": {
+            "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Values too large to convert to milliseconds produce a warning and are ignored. Defaults to 1h; 0 disables idle shutdown.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
+            "type": "string"
+          },
+          "restore": {
+            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          },
+          "restoreCheckFn": {
+            "description": "Optional JavaScript expression that must evaluate truthy after restore.",
+            "type": "string"
+          },
+          "restoreCheckText": {
+            "description": "Optional page text that restored state must expose.",
+            "type": "string"
+          },
+          "restoreCheckUrl": {
+            "description": "Optional URL pattern that restored state must match.",
+            "type": "string"
+          },
+          "restoreSave": {
+            "description": "Auto-save policy for restored state.",
+            "enum": [
+              "auto",
+              "always",
+              "never"
+            ],
+            "type": "string"
+          },
+          "session": {
+            "description": "Optional isolated browser session name. Accepts Unicode letters and numbers, hyphens, and underscores only; spaces are rejected.",
+            "type": "string"
+          },
+          "timeoutMs": {
+            "default": 120000,
+            "description": "Maximum time to wait for this tool call.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "useSystemCa": {
+            "description": "Use the operating system trust store instead of the built-in roots for the CLI's own HTTPS requests. Does not affect the browser.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "agent_browser_bring_to_front",
+      "profiles": [
+        "tabs"
+      ],
+      "title": "Bring to front"
+    },
+    {
+      "annotations": {
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
       "description": "Run a single-shot natural-language browser instruction.",
       "inputSchema": {
         "additionalProperties": false,
@@ -7771,7 +7865,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Launch the browser and optionally navigate to a URL. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
+      "description": "Launch the browser and optionally navigate to a URL. Attaching to Chrome and opening tabs does not focus it; browser launch can still change focus. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -13672,7 +13766,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Open a new tab after applying session setup before its first navigation. Rejected labels preserve the current tab's refs and selected frame.",
+      "description": "Open a new background tab without focusing Chrome, after applying session setup before its first navigation. Rejected labels preserve the current tab's refs and selected frame.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -13775,7 +13869,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Switch to a tab by id (t1), label, or CDP target id. Switching also binds the session to that tab.",
+      "description": "Switch to a tab by id (t1), label, or CDP target id. Switching also binds the session to that tab without focusing Chrome. Discarded tabs require activation in the browser before retrying.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -15943,7 +16037,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Open a new browser window.",
+      "description": "Open a new browser window without focusing Chrome.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
