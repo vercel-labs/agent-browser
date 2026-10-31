@@ -710,7 +710,15 @@ impl BrowserManager {
         } else if engine == "obscura" {
             initialize_obscura_manager(ws_url, process).await?
         } else {
-            let client = Arc::new(CdpClient::connect(&ws_url).await?);
+            let client = match CdpClient::connect(&ws_url).await {
+                Ok(client) => Arc::new(client),
+                Err(error) => {
+                    // Dropping Chrome can wait for it to quit; keep that off
+                    // the async worker.
+                    let _ = tokio::task::spawn_blocking(move || drop(process)).await;
+                    return Err(error);
+                }
+            };
             let mut manager = Self {
                 client,
                 browser_process: Some(process),

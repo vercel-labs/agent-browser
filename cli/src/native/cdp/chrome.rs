@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use super::discovery::discover_cdp_url;
 use crate::ca_bundle::CaBundle;
@@ -62,6 +64,8 @@ impl PreparedNssHome {
 
 impl ChromeProcess {
     pub fn kill(&mut self) {
+        #[cfg(unix)]
+        interrupt_chrome(&mut self.child);
         let _ = self.child.kill();
         // On Unix, kill the entire process group to ensure Chrome helper
         // processes (GPU, renderer, utility, crashpad) are also terminated.
@@ -701,7 +705,35 @@ fn run_certutil(args: &[&str], action: &str) -> Result<(), String> {
     }
 }
 
+#[cfg(unix)]
+const CHROME_QUIT_GRACE: Duration = Duration::from_secs(2);
+
+// SIGKILL skips Chrome's shutdown, so branded Chrome on macOS leaks the
+// app bundle clone it makes at launch. SIGINT takes Chrome's normal quit
+// path, allowing it to clean up the clone. SIGTERM is not used because
+// Chrome treats it as the session ending and exits without teardown.
+// The group SIGKILL sweep still follows to clean up orphan helpers (#1113).
+#[cfg(unix)]
+fn interrupt_chrome(child: &mut Child) {
+    if !matches!(child.try_wait(), Ok(None)) {
+        return;
+    }
+
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGINT);
+    }
+    let start = Instant::now();
+    while start.elapsed() < CHROME_QUIT_GRACE {
+        match child.try_wait() {
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            _ => return,
+        }
+    }
+}
+
 fn terminate_launched_chrome(child: &mut Child) {
+    #[cfg(unix)]
+    interrupt_chrome(child);
     let _ = child.kill();
     #[cfg(unix)]
     unsafe {
@@ -2522,6 +2554,76 @@ exec sleep 60
         }
 
         assert!(!dir.exists(), "Temp dir should be cleaned up on drop");
+    }
+
+    /// Spawns `sh -c <script> <arg>` in its own process group as a stand-in
+    /// for Chrome, and returns once the script has printed "ready".
+    #[cfg(unix)]
+    fn spawn_fake_chrome(script: &str, arg: &Path) -> ChromeProcess {
+        use std::os::unix::process::CommandExt;
+
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(script)
+            .arg(arg)
+            .stdout(Stdio::piped());
+        unsafe {
+            command.pre_exec(|| {
+                // A non-interactive sh cannot trap a signal ignored on entry.
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        let mut ready = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready.trim(), "ready");
+        let pgid = Some(child.id() as i32);
+        ChromeProcess {
+            child,
+            ws_url: String::new(),
+            temp_user_data_dir: None,
+            temp_nss_home: None,
+            pgid,
+            #[cfg(target_os = "linux")]
+            xvfb: None,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_chrome_process_kill_sends_sigint_first() {
+        let marker = std::env::temp_dir().join(format!(
+            "agent-browser-chrome-quit-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut process = spawn_fake_chrome(
+            r#"trap 'touch "$0"; exit 0' INT; echo ready; while :; do sleep 0.05; done"#,
+            &marker,
+        );
+
+        process.kill();
+        assert!(marker.exists(), "SIGINT should reach Chrome before SIGKILL");
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_chrome_process_kill_falls_back_to_sigkill() {
+        let mut process = spawn_fake_chrome(
+            r#"trap '' INT; echo ready; while :; do sleep 0.05; done"#,
+            Path::new(""),
+        );
+        let pid = process.id() as i32;
+
+        let start = Instant::now();
+        process.kill();
+        assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "child should be gone");
+        assert!(start.elapsed() >= CHROME_QUIT_GRACE - Duration::from_millis(100));
     }
 
     #[cfg(target_os = "linux")]
