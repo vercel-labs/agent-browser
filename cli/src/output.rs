@@ -649,6 +649,24 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             }
             return;
         }
+        // Network wait result (check before generic URL handler since it also has a "url" field)
+        if action == Some("network_wait") {
+            if let (Some(method), Some(url), Some(status)) = (
+                data.get("method").and_then(|v| v.as_str()),
+                data.get("url").and_then(|v| v.as_str()),
+                data.get("status").and_then(|v| v.as_i64()),
+            ) {
+                let resource_type = data
+                    .get("resourceType")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Other");
+                println!(
+                    "Matched: {} {} -> {} ({})",
+                    method, url, status, resource_type
+                );
+                return;
+            }
+        }
         if action == Some("read") {
             if let Some(content) = data.get("content").and_then(|v| v.as_str()) {
                 let origin = data
@@ -1016,6 +1034,7 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             return;
         }
         // Cleared (cookies, console, or request log)
+        // Cleared (cookies or request log)
         if let Some(cleared) = data.get("cleared").and_then(|v| v.as_bool()) {
             if cleared {
                 let label = match action {
@@ -2611,6 +2630,10 @@ Subcommands:
     --content <mode>         Response bodies to embed on start: text (default), all, none
     If export fails, recording and captured requests remain available. Fix the
     destination and retry stop.
+  wait <url-pattern>         Wait for a response matching URL pattern
+    --status <code>          Match only this HTTP status code
+    --method <method>        Match only this HTTP method (GET, POST, etc.)
+    --timeout <ms>           Timeout in milliseconds (default: 30000)
 
 Global Options:
   --json               Output as JSON
@@ -2629,6 +2652,8 @@ Examples:
   agent-browser network har start
   agent-browser network har start --content all
   agent-browser network har stop ./capture.har
+  agent-browser network wait "/api/login" --status 200
+  agent-browser network wait "/api/data" --method POST --timeout 10000
 "##
         }
 
@@ -3997,6 +4022,7 @@ Network:  agent-browser network <action>
   unroute [url]
   requests [--clear] [--filter <pattern>]
   har <start|stop> [path]
+  wait <url-pattern> [--status <code>] [--method <method>] [--timeout <ms>]
 
 Storage:
   cookies [get|set|clear]    Manage cookies (set supports --url, --domain, --path, --http-only, --secure, --same-site, --expires)
