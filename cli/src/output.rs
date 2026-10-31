@@ -1826,6 +1826,8 @@ Usage: agent-browser fill <selector> <text>
 
 Clears the input field and fills it with the specified text.
 This replaces any existing content in the field.
+Date, time, color and range inputs get the value set directly (e.g. 2024-01-15).
+Selects, checkboxes, buttons and disabled fields are refused (use select or check).
 
 Global Options:
   --json               Output as JSON
@@ -1845,6 +1847,7 @@ Usage: agent-browser type <selector> <text>
 
 Types text into the specified element character by character.
 Unlike fill, this does not clear existing content first.
+Refuses selects, buttons, non-text inputs and disabled fields; use fill for date, time, color and range inputs.
 
 Global Options:
   --json               Output as JSON
