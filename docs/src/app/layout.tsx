@@ -1,26 +1,19 @@
-import type { Metadata } from "next";
-import { Inter, Geist_Mono } from "next/font/google";
+import type { Metadata, Viewport } from "next";
+import { Footer } from "@vercel/geistdocs/footer";
+import { GeistdocsThemeScript } from "@vercel/geistdocs/layout";
+import { Navbar } from "@vercel/geistdocs/navbar";
+import { GeistSans } from "geist/font/sans";
+import { GeistMono } from "geist/font/mono";
 import { GeistPixelSquare } from "geist/font/pixel";
-import "./globals.css";
-import { ThemeProvider } from "@/components/theme-provider";
-import { Header } from "@/components/header";
-import { DocsSidebar } from "@/components/docs-sidebar";
-import { DocsMobileNav } from "@/components/docs-mobile-nav";
-import { CopyPageButton } from "@/components/copy-page-button";
-import { DocsChat } from "@/components/docs-chat";
 import { cookies } from "next/headers";
 import { SpeedInsights } from "@vercel/speed-insights/next";
 import { Analytics } from "@vercel/analytics/next";
+import { DocsProvider } from "@/components/geistdocs-provider";
+import { DocsChat } from "@/components/docs-chat";
+import { config } from "@/lib/geistdocs/config";
+import "./globals.css";
 
-const inter = Inter({
-  variable: "--font-inter",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
+export const viewport: Viewport = { viewportFit: "cover" };
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://agent-browser.dev"),
@@ -53,38 +46,35 @@ export default async function RootLayout({
 }>) {
   const cookieStore = await cookies();
   const chatOpen = cookieStore.get("docs-chat-open")?.value === "true";
-  const chatWidth = Number(cookieStore.get("docs-chat-width")?.value) || 400;
+  const storedWidth = Number(cookieStore.get("docs-chat-width")?.value);
+  const chatWidth =
+    Number.isFinite(storedWidth) && storedWidth > 0
+      ? Math.min(700, Math.max(300, storedWidth))
+      : 400;
 
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html
+      lang="en"
+      suppressHydrationWarning
+      className={`${GeistSans.variable} ${GeistMono.variable} ${GeistPixelSquare.variable} antialiased`}
+    >
       <head>
+        <GeistdocsThemeScript />
         {chatOpen && (
           <style
             dangerouslySetInnerHTML={{
-              __html: `@media(min-width:640px){body{padding-right:${chatWidth}px}}`,
+              __html: `@media(min-width:1280px){body{padding-right:${chatWidth}px}}`,
             }}
           />
         )}
       </head>
-      <body
-        className={`${inter.variable} ${geistMono.variable} ${GeistPixelSquare.variable} bg-white text-neutral-900 antialiased dark:bg-neutral-950 dark:text-neutral-100`}
-      >
-        <ThemeProvider>
-          <Header />
-          <DocsMobileNav />
-          <div className="max-w-5xl mx-auto px-6 py-8 lg:py-12 flex gap-16">
-            <aside className="w-48 shrink-0 hidden lg:block sticky top-28 h-[calc(100vh-7rem)] overflow-y-auto">
-              <DocsSidebar />
-            </aside>
-            <div className="flex-1 min-w-0 max-w-2xl pb-20">
-              <div className="flex justify-end mb-4">
-                <CopyPageButton />
-              </div>
-              <article className="prose">{children}</article>
-            </div>
-          </div>
+      <body>
+        <DocsProvider>
+          <Navbar config={config} />
+          {children}
+          <Footer />
           <DocsChat defaultOpen={chatOpen} defaultWidth={chatWidth} />
-        </ThemeProvider>
+        </DocsProvider>
         <SpeedInsights />
         <Analytics />
       </body>

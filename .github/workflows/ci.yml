@@ -41,6 +41,42 @@ jobs:
       - name: Run launcher tests
         run: pnpm run test:launcher
 
+  docs:
+    name: Docs (${{ matrix.environment }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: [production, preview]
+    env:
+      VERCEL_ENV: ${{ matrix.environment }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test original documentation contract
+        run: pnpm --filter docs test
+
+      - name: Typecheck documentation
+        run: pnpm --filter docs type-check
+
+      - name: Build documentation
+        run: pnpm --filter docs build
+
+      - name: Verify public documentation routes
+        run: pnpm --filter docs test:routes ${{ matrix.environment == 'preview' && '--preview' || '' }}
+
   rust:
     name: Rust
     runs-on: ubuntu-latest
@@ -191,6 +227,13 @@ jobs:
 
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install Obscura
+        run: |
+          mkdir -p "$RUNNER_TEMP/obscura"
+          curl -fsSL https://github.com/h4ckf0r0day/obscura/releases/download/v0.2.4/obscura-x86_64-linux.tar.gz \
+            | tar xz -C "$RUNNER_TEMP/obscura"
+          echo "OBSCURA_BIN=$RUNNER_TEMP/obscura/obscura" >> "$GITHUB_ENV"
 
       - name: Run e2e tests
         run: cargo test --profile ci --manifest-path cli/Cargo.toml e2e -- --ignored --test-threads=1

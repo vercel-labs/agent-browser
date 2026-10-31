@@ -68,7 +68,15 @@ agent-browser click @e5                        # click a result
 agent-browser screenshot result.png
 ```
 
+On Linux, `agent-browser install --with-deps` calls the detected package manager directly when run as root and uses `sudo` for non-root users. If you are not root and `sudo` is unavailable, it reports that root privileges or `sudo` are required.
+
 The browser stays running across commands so these feel like a single session. By default, an inactive daemon saves configured restore state, closes its headless browser, and exits after one hour; the next command starts it again. Without `--restore` or another restore key, shutdown discards transient browser state and open tabs. Dashboard mouse, keyboard, and touch input count as activity. Headed browsers, Safari and iOS WebDriver sessions, and user-attached browsers are exempt from the default; provider-owned cloud browsers are not. Use `--idle-timeout <time>` or `AGENT_BROWSER_IDLE_TIMEOUT_MS` to tune the timeout, and use `0` to disable it. Still run `agent-browser close` (or `close --all`) when you're done.
+
+On macOS versions below 13, `agent-browser install` stops before downloading Chrome for Testing and prints instructions to update macOS or install Chrome manually. If `sw_vers -productVersion` is unavailable, exits with an error, returns no version, or returns a malformed version, the command reports a detection error and stops before making a network request.
+
+## Configuration
+
+The auto-discovered `./agent-browser.json` accepts only `headed`, `json`, `debug`, `userAgent`, `hideScrollbars`, `annotate`, `colorScheme`, `maxOutput`, `screenshotQuality`, `screenshotFormat`, and `idleTimeout`. Other runtime keys, including `extensions`, `initScripts`, state, trust, policy, session, connection, and path settings, are ignored with a warning. The `$schema` metadata key is ignored silently. Put advanced settings in `~/.agent-browser/config.json` or load a trusted file with `--config` or `AGENT_BROWSER_CONFIG`. An explicit config replaces default discovery and loads only that file.
 
 ## MCP integration
 
@@ -78,13 +86,15 @@ For tools that support Model Context Protocol servers, start the stdio server:
 agent-browser mcp
 agent-browser mcp --tools all
 agent-browser mcp --tools core,network,react
+agent-browser mcp call agent_browser_open '{"url":"https://example.com"}'
+echo '{"selector":"@e2"}' | agent-browser mcp call agent_browser_click -
 ```
 
-Configure the MCP client to launch `agent-browser` with `["mcp"]`. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization. The default tools profile is `core`, which keeps MCP context small for everyday browser automation. Use `--tools all` for the full typed CLI parity surface, or combine profiles with commas, such as `--tools core,network,react`. Profiles are `core`, `network`, `state`, `debug`, `tabs`, `react`, `mobile`, and `all`; the `debug` profile includes accessibility audits, plugin registry, and command.run tools. Each tool accepts typed arguments plus `extraArgs` for advanced CLI flags and exact CLI parity. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions, while `idleTimeout` maps to `--idle-timeout`. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the tool `session` argument or `AGENT_BROWSER_SESSION` to isolate browser sessions.
+Configure the MCP client to launch `agent-browser` with `["mcp"]`. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization. The default tools profile is `core`, which keeps MCP context small for everyday browser automation. Use `--tools all` for the full typed CLI parity surface, or combine profiles with commas, such as `--tools core,network,react`. Profiles are `core`, `network`, `state`, `debug`, `tabs`, `react`, `mobile`, and `all`; the `debug` profile includes accessibility audits, plugin registry, and command.run tools. Each tool accepts typed arguments plus `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config, and structured `allowedDomains` is rejected when the server already sets allowed domains. Undeclared argument keys are rejected with an invalid-params error that names them. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions, while `idleTimeout` maps to `--idle-timeout`. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the tool `session` argument or `AGENT_BROWSER_SESSION` to isolate browser sessions. `mcp call` runs one MCP tool without a stdio session and prints its `tools/call` result as JSON, with the agent-browser version in `_meta.agentBrowserVersion`. Pass the tool arguments as a JSON object, or `-` to read them from stdin. Every tool is available unless `--tools` limits the call to profiles. The exit code is 0 on success, 1 when the tool reports an error, and 2 for an unknown tool or invalid arguments. Use it from runtimes that cannot keep a stdio session open between tool calls, such as serverless agents. Access settings such as `AGENT_BROWSER_ALLOWED_DOMAINS` come from the environment, as with the server. Pass `--config <trusted-path>` to `agent-browser mcp` or `agent-browser mcp call` to select one trusted config file. MCP tool child processes load only that file, replacing default user/project discovery. Put required safety policy in it. Environment variables and accepted per-tool CLI arguments keep their normal precedence. In a Vercel Sandbox, `startAgentBrowserMcp` from `@agent-browser/sandbox/vercel` runs the server over that command's stdin.
 
 ## eve agent integration
 
-For eve agents, mount the `@agent-browser/eve` extension instead of hand-writing browser tools. It adds namespaced tools such as `browser__navigate`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, and `browser__screenshot`, all backed by agent-browser running inside the eve sandbox. The sandbox bootstrap helpers (`installAgentBrowser`, `agentBrowserRevalidationKey`) ship with the same package under `@agent-browser/eve/sandbox`, so `agent/sandbox.ts` needs no extra dependency.
+For eve agents, mount the `@agent-browser/eve` extension instead of hand-writing browser tools. It adds namespaced tools such as `browser__open`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, and `browser__screenshot`, all backed by agent-browser running inside the eve sandbox. The sandbox bootstrap helpers (`installAgentBrowser`, `agentBrowserRevalidationKey`) ship with the same package under `@agent-browser/eve/sandbox`, so `agent/sandbox.ts` needs no extra dependency.
 
 ## Reading a page
 
@@ -212,6 +222,8 @@ After any page-changing action, pick one:
 
 Avoid using `networkidle` as a generic post-navigation or SPA wait. Server-sent events (SSE), WebSockets, polling, and long-polling can keep network activity alive indefinitely, causing the wait to time out even when the UI is ready. Use `networkidle` only for pages that are known to become quiet after navigation.
 
+A load-state wait runs for its whole timeout budget, taken from `--timeout` or `AGENT_BROWSER_DEFAULT_TIMEOUT`, and returns an error when it expires.
+
 Avoid bare `wait 2000` except when debugging — it makes scripts slow and flaky. Timeouts default to 25 seconds.
 
 ## Common workflows
@@ -337,6 +349,8 @@ agent-browser tab close t2             # close tab t2
 
 Stable `tabId`s mean `t2` points at the same tab across commands even when other tabs open or close. After switching, refs from a prior snapshot on a different tab no longer apply — re-snapshot. `tab list --json` also reports each tab's CDP `targetId`, accepted anywhere a tab ref is accepted; target ids stay stable across daemon restarts, unlike `t<N>` ids.
 
+A label starts with a letter and contains only letters, digits, `-`, or `_`. Labels must be unique within a session and cannot use the reserved `t<N>` or `T<N>` tab-id form. Rejected labels preserve the current tab's refs and selected frame.
+
 Tabs opened through `tab new` or `click --new-tab` inherit the session's user agent, headers, HTTP credentials, init scripts, routes, and emulation overrides before their first document loads.
 
 Runtime init-script identifiers are session-wide. Removing one clears it from every open tab where it was registered and from the setup replayed into future tabs.
@@ -358,6 +372,8 @@ agent-browser --session b fill @e1 "bob@test.com"
 ```
 
 `AGENT_BROWSER_SESSION=myapp` sets the default session for the current shell.
+
+Session names accept Unicode letters and numbers, hyphens, and underscores only. For example, `café-東京_7` is valid, while `my session` is rejected because it contains a space.
 
 When several sessions share one Chrome over `--cdp <port>`, add `--pin-tab` so each session sticks to its own tab. Every session remembers its bound tab across daemon restarts; with `--pin-tab` a command whose bound tab was closed fails with a `tab_gone` error instead of acting on another session's tab. JSON output includes `"code": "tab_gone"`, `data.targetId`, and an optional sanitized `data.lastUrl` for recovery. Recover with `tab new <url>` or pick a tab from `tab list`. The flag is sticky per session, so pass it once (`--no-pin-tab` turns it off again). See `references/session-management.md` for details.
 
@@ -386,7 +402,7 @@ agent-browser click @e3
 agent-browser record stop
 ```
 
-Recording uses the active tab. Use `--cursor` for an animated pointer, `--contact-sheet` for a visual summary, and `--fps 60` for motion-heavy recordings.
+Recording uses the active tab. Use `--cursor` for an animated pointer, `--contact-sheet` for a visual summary, and `--fps 60` for motion-heavy recordings. The cursor renders with the page so drags stay synchronized. Its inert overlay is hidden from accessibility snapshots, included in screenshots while recording, and removed on stop.
 
 See [references/video-recording.md](references/video-recording.md) for frame rate guidance, codec options, and more.
 
@@ -442,6 +458,10 @@ agent-browser doctor --json              # structured output for programmatic co
 
 **"Ref not found" / "Element not found: @eN"** Page changed since the snapshot. Run `agent-browser snapshot -i` again, then use the new refs.
 
+**`page_wedged` error or warning** The page stopped responding, for example a script stuck in a loop. When agent-browser launched the browser and the tab times out twice in a row, it is replaced by a blank one: navigate again and take a fresh snapshot. With `--cdp` or `--auto-connect`, or when policy gates `tab_new` or `tab_close`, the tab is left alone; close it or switch tabs.
+
+**"Stale ref ... cannot be recovered"** The element was replaced and duplicates make the match ambiguous, so the action did not run. Run `agent-browser snapshot -i` and use a fresh ref.
+
 **Element exists in the DOM but not in the snapshot** It's probably off-screen or not yet rendered. Try:
 
 ```bash
@@ -486,19 +506,24 @@ EOF
 --session <name>        # isolated browser session
 --json                  # JSON output (for machine parsing)
 --headed                # show the window (default is headless)
+--engine <name>         # chrome (default), lightpanda, obscura (experimental)
 --webgpu                # enable WebGPU (software Vulkan on Linux, no GPU needed)
 --auto-connect          # connect to an already-running Chrome
 --cdp <port|url>        # connect to a CDP port or WebSocket URL; root query slash is optional
+--cdp-headers <json>    # headers for --cdp discovery and handshake, e.g. Authorization
 --profile <name|path>   # use a Chrome profile (login state survives)
 --headers <json>        # HTTP headers scoped to the URL's origin
 --proxy <url>           # proxy server
---ca-cert <path>        # trust a CA in local Chromium on Linux (install --with-deps provides certutil)
+--ca-cert <path>        # trust a CA for CLI requests, and in local Chromium on Linux (install --with-deps provides certutil)
 --no-ca-cert            # clear CA trust retained by the running session
+--use-system-ca         # OS trust store for CLI requests (read, install, upgrade, doctor)
 --state <path>          # load saved auth state from JSON
 --restore [name]        # auto-save/restore session state, defaults to --session
 --restore-save <policy> # auto, always, or never
 --namespace <name>      # isolate daemon sockets and restore-state directories
 ```
+
+Engine setup and limits: [Lightpanda](https://agent-browser.dev/engines/lightpanda), [Obscura (experimental)](https://agent-browser.dev/engines/obscura).
 
 ## When to load another skill
 
@@ -525,11 +550,11 @@ The default output lists violations and incomplete checks with failing selector 
 
 ## React / Web Vitals (built-in, any React app)
 
-agent-browser ships with first-class React introspection. Works on any React app — Next.js, Remix, Vite+React, CRA, TanStack Start, React Native Web, etc. The `react …` commands require the React DevTools hook to be installed at launch via `--enable react-devtools`:
+agent-browser ships with first-class React introspection. Works on any React app — Next.js, Remix, Vite+React, CRA, TanStack Start, React Native Web, etc. The `react …` commands require the React DevTools hook to be installed at launch via `--enable react-devtools`. Without it, they error with `React DevTools hook not installed` and tell you to relaunch with `--enable react-devtools`:
 
 ```bash
 agent-browser open --enable react-devtools http://localhost:3000
-agent-browser react tree                         # component tree
+agent-browser react tree                         # print the component tree
 agent-browser react inspect <fiberId>            # props, hooks, state, source
 agent-browser react renders start                # begin re-render recording
 agent-browser react renders stop                 # print render profile
@@ -538,7 +563,7 @@ agent-browser vitals [url]                       # LCP/CLS/TTFB/FCP/INP + hydrat
 agent-browser pushstate <url>                    # SPA navigation (auto-detects Next router)
 ```
 
-Without `--enable react-devtools`, the `react …` commands error. `vitals` and `pushstate` work on any site regardless of framework. `vitals` prints a summary by default; use `--json` for the full structured payload.
+`react tree` prints the component tree when the output includes one. A header-only result means no component tree was collected; confirm the page uses React and that a React root has mounted. `vitals` and `pushstate` work on any site regardless of framework. `vitals` prints a summary by default; use `--json` for the full structured payload.
 
 ## Working safely
 
@@ -556,6 +581,8 @@ agent-browser dashboard start --allowed-origins https://dashboard.example.com
 Use comma-separated origins only when each is a trusted dashboard URL. Every origin must be a valid exact HTTPS origin, and custom ports must be integers from 1 to 65535. Invalid dashboard options fail without starting the server. When external origins are configured, the command prints private tokenized access URLs only for them. Open the matching URL once to establish the browser session and do not share it; its unguessable token is carried in the initial fragment, then stored in a Secure, host-bound, same-site cookie for dashboard API and stream requests. Loopback URLs require no token and should be opened directly as `http://localhost:<port>`. Configure the reverse proxy to redact cookies from logs. The dashboard rejects requests with missing or cross-origin browser provenance. Repeated starts reuse a running dashboard only when the port and allowed origins match; run `agent-browser dashboard stop` before changing either setting.
 
 ## Full reference
+
+When no package root is found, the CLI reads manually installed skills from `~/.agent-browser/skills` and `~/.agent-browser/skill-data`. Package discovery looks for the bundled `skill-data/core/SKILL.md` file.
 
 Everything covered here plus the complete command/flag/env listing:
 

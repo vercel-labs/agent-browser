@@ -127,6 +127,23 @@ fn format_storage_text(data: &serde_json::Value) -> Option<String> {
     Some(format!("{}: {}", key, format_storage_value(value)))
 }
 
+/// Formats the daemon's preformatted React tree, including an empty-tree hint.
+fn format_react_tree_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
+    if action != Some("react_tree") {
+        return None;
+    }
+
+    let tree = data.get("tree")?.as_str()?;
+    if tree
+        .lines()
+        .any(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+    {
+        Some(tree.to_string())
+    } else {
+        Some("No React component tree found. Confirm that a React root has mounted.".to_string())
+    }
+}
+
 fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
     match action {
         Some("stream_disable") => data
@@ -544,6 +561,9 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         return;
     }
 
+    // Printed before the per-action formatting, most of which returns early.
+    print_warning(resp);
+
     if let Some(data) = &resp.data {
         print_lifecycle_note(data);
 
@@ -570,12 +590,15 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                 } else {
                     println!("{} No dialog is currently open", color::success_indicator());
                 }
-                print_warning(resp);
                 return;
             }
         }
         if let Some(output) = format_stream_status_text(action, data) {
             println!("{}", output);
+            return;
+        }
+        if let Some(output) = format_react_tree_text(action, data) {
+            print_with_boundaries(&output, boundary_origin(data), opts);
             return;
         }
         if action == Some("webmcp_list") {
@@ -770,6 +793,10 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         }
         // Eval result
         if let Some(result) = data.get("result") {
+            if let Some(token) = data.get("unserializable").and_then(|v| v.as_str()) {
+                print_with_boundaries(token, origin, opts);
+                return;
+            }
             let formatted = serde_json::to_string_pretty(result).unwrap_or_default();
             print_with_boundaries(&formatted, origin, opts);
             return;
@@ -994,6 +1021,7 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                 let label = match action {
                     Some("cookies_clear") => "Cookies cleared",
                     Some("console") => "Console log cleared",
+                    Some("errors") => "Page errors cleared",
                     _ => "Request log cleared",
                 };
                 println!("{} {}", color::success_indicator(), label);
@@ -1301,6 +1329,15 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                         color::success_indicator(),
                         color::green(path)
                     );
+                    if let Some(skipped) = data.get("skippedOrigins").and_then(|v| v.as_array()) {
+                        for origin in skipped.iter().filter_map(|v| v.as_str()) {
+                            println!(
+                                "{} Skipped storage for {} (page did not stay on that origin)",
+                                color::warning_indicator(),
+                                origin
+                            );
+                        }
+                    }
                 }
                 // video_start and other commands that provide a path with a note
                 "video_start" => {
@@ -1530,8 +1567,6 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         // Default success
         println!("{} Done", color::success_indicator());
     }
-
-    print_warning(resp);
 }
 
 fn print_lifecycle_note(data: &serde_json::Value) {
@@ -1607,7 +1642,7 @@ The `goto` and `navigate` aliases still require a URL.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
   --headers <json>     Set HTTP headers (scoped to this origin)
   --headed             Show browser window
   --enable react-devtools   Inject the React DevTools hook before any page JS
@@ -1623,9 +1658,9 @@ Examples:
 
   # Pre-navigation setup in one turn:
   agent-browser batch \
-    '["open"]' \
-    '["network","route","*","--abort","--resource-type","script"]' \
-    '["navigate","http://localhost:3000/target"]'
+    "open" \
+    "network route * --abort --resource-type script" \
+    "navigate http://localhost:3000/target"
 "##
         }
         "back" => {
@@ -1639,7 +1674,7 @@ the browser's back button.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser back
@@ -1656,7 +1691,7 @@ the browser's forward button.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser forward
@@ -1673,7 +1708,7 @@ the browser's reload button.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser reload
@@ -1710,6 +1745,8 @@ Global Options:
   --allowed-domains <list>  Restrict read fetches and redirects to allowed domains
   --content-boundaries Wrap read output in boundary markers
   --max-output <chars> Truncate read output to N chars
+  Invalid --max-output and AGENT_BROWSER_MAX_OUTPUT values warn and leave the
+  existing output limit unchanged.
 
 Examples:
   agent-browser read
@@ -1736,6 +1773,10 @@ XPath, or an element reference from snapshot (e.g., @e1).
 If another element covers the click point, agent-browser reports the
 covering element instead of dispatching a click to the wrong target.
 
+Click and dblclick fail, instead of reporting success, when the element
+is hidden, disabled, or outside the viewport. With --new-tab, click opens
+the link's URL directly, so these checks do not apply.
+
 Options:
   --new-tab            Open link in a new tab instead of navigating current tab.
                        The new tab inherits session setup before its first load.
@@ -1745,7 +1786,7 @@ Options:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser click "#submit-button"
@@ -1765,9 +1806,12 @@ Usage: agent-browser dblclick <selector>
 Double-clicks on the specified element. Useful for text selection
 or triggering double-click handlers.
 
+Double-click fails, instead of reporting success, when the element is
+hidden, disabled, or outside the viewport.
+
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser dblclick "#editable-text"
@@ -1785,7 +1829,7 @@ This replaces any existing content in the field.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser fill "#email" "user@example.com"
@@ -1804,7 +1848,7 @@ Unlike fill, this does not clear existing content first.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser type "#search" "hello"
@@ -1827,7 +1871,7 @@ triggering hover states or dropdown menus.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser hover "#dropdown-trigger"
@@ -1844,7 +1888,7 @@ Sets keyboard focus to the specified element.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser focus "#input-field"
@@ -1861,7 +1905,7 @@ Checks a checkbox element. If already checked, no action is taken.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser check "#terms-checkbox"
@@ -1878,7 +1922,7 @@ Unchecks a checkbox element. If already unchecked, no action is taken.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser uncheck "#newsletter-opt-in"
@@ -1896,7 +1940,7 @@ Label matching normalizes whitespace such as non-breaking spaces.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser select "#country" "US"
@@ -1914,7 +1958,7 @@ Drags an element from source to target location.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser drag "#draggable" "#drop-zone"
@@ -1932,7 +1976,7 @@ Uploads one or more files to a file input element.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser upload "#file-input" ./document.pdf
@@ -1953,7 +1997,7 @@ Arguments:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser download "#download-btn" ./file.pdf
@@ -1984,7 +2028,7 @@ Modifiers (combine with +):
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser press Enter
@@ -2005,7 +2049,7 @@ Useful for holding modifier keys.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser keydown Shift
@@ -2022,7 +2066,7 @@ Releases a key that was pressed with keydown.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser keyup Shift
@@ -2050,7 +2094,7 @@ directly — it already operates on the current focus.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser keyboard type "Hello, World!"
@@ -2084,7 +2128,7 @@ Options:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser scroll
@@ -2106,7 +2150,7 @@ Aliases: scrollinto
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser scrollintoview "#footer"
@@ -2132,6 +2176,14 @@ Modes:
   --text <text>        Wait for text to appear on page (substring match)
   --download [path]    Wait for a download to complete (optionally save to path)
 
+Selector Wait Options:
+  --state <state>      visible, hidden, attached, or detached
+                       Selector waits only; rejected with --url, --load, --fn,
+                       --text, --download, or millisecond waits
+  --state <path>       Global auth state option when placed before wait
+
+A load-state wait uses --timeout (or AGENT_BROWSER_DEFAULT_TIMEOUT) and fails when it expires.
+
 Download Options (with --download):
   --timeout <ms>       Timeout in milliseconds for download to start
 
@@ -2143,11 +2195,14 @@ Wait for text to disappear:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser wait "#loading-spinner"
+  agent-browser wait "#loading-spinner" --state visible
+  agent-browser wait "#loading-spinner" --state attached
   agent-browser wait 2000
+  agent-browser --state ./auth-state.json wait "#loading-spinner"
   agent-browser wait --url "**/dashboard"
   # Use networkidle only for pages known to become quiet:
   agent-browser wait --load networkidle
@@ -2190,7 +2245,7 @@ Options:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser screenshot
@@ -2215,7 +2270,7 @@ Saves the current page as a PDF file.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser pdf ./page.pdf
@@ -2233,6 +2288,9 @@ Usage: agent-browser snapshot [options]
 Returns an accessibility tree representation of the page with element
 references (like @e1, @e2) that can be used in subsequent commands.
 Refs can be reused across snapshots. Take a fresh snapshot after navigation.
+If a ref's element was replaced, the action uses the one element with the same
+role and name. If that is ambiguous, it fails: run snapshot again.
+Presentational iframes use the Iframe role for snapshots and stale-ref recovery.
 
 Options:
   -i, --interactive    Only include interactive elements
@@ -2244,9 +2302,13 @@ Options:
                        Deltas include ref changes and an exact treeChange line splice
       --full           Force full state and update the delta baseline
 
+Compact snapshots keep visible text, status text, and their direct ancestors.
+Empty sibling branches are removed. Interactive snapshots filter out noninteractive content. MCP snapshots default to interactive; set
+interactive to false to retain visible text and status text.
+
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser snapshot
@@ -2267,6 +2329,7 @@ agent-browser eval - Execute JavaScript
 Usage: agent-browser eval [options] <script>
 
 Executes JavaScript code in the browser context and returns the result.
+For a top-level Chrome result JSON cannot represent, plain output prints its JavaScript token and JSON output includes data.unserializable.
 
 Options:
   -b, --base64         Decode script from base64 (avoids shell escaping issues)
@@ -2274,7 +2337,7 @@ Options:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser eval "document.title"
@@ -2306,7 +2369,7 @@ Options:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser close
@@ -2353,11 +2416,12 @@ Subcommands:
   count <selector>           Count matching elements
   box <selector>             Get bounding box (x, y, width, height)
   styles <selector>          Get computed styles of elements
-  cdp-url                    Get Chrome DevTools Protocol WebSocket URL
+  cdp-url                    Get CDP WebSocket URL of a running browser
+                             Never launches a browser, including metadata-only batches
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser get text @e1
@@ -2389,7 +2453,7 @@ Subcommands:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser is visible "#modal"
@@ -2430,7 +2494,7 @@ Options:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser find role button click --name Submit
@@ -2457,20 +2521,29 @@ Subcommands:
   move <x> <y>         Move mouse to coordinates
   down [button]        Press mouse button (left, right, middle)
   up [button]          Release mouse button
-  wheel <dy> [dx]      Scroll mouse wheel
+  wheel <dy> [dx]      Scroll at current tracked pointer (starts at 0,0)
+
+Movement Options:
+  --duration <ms>       Target total duration, including browser response time
+  --steps <n>           Number of movement events (1-240)
+  --human               Use a reproducible eased curve
+  --seed <n>            Seed for the human movement path
+
+Steps share one schedule; a slow browser can extend the requested duration.
+Failed wheel dispatches leave the tracked pointer unchanged.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser mouse move 100 200
+  agent-browser mouse wheel 100
   agent-browser mouse move 600 400 --duration 250 --steps 24
   agent-browser mouse move 600 400 --human --seed 42
   agent-browser mouse down
   agent-browser mouse up
   agent-browser mouse down right
-  agent-browser mouse wheel 100
   agent-browser mouse wheel -50 0
 "##
         }
@@ -2485,9 +2558,10 @@ Usage: agent-browser set <setting> [args]
 Configures various browser settings and emulation options.
 
 Settings:
-  viewport <w> <h> [scale]   Set viewport size (scale = deviceScaleFactor, e.g. 2 for retina)
+  viewport <w> <h> [scale]   Set viewport size (scale = deviceScaleFactor, e.g. 2 for retina;
+                             scale must be finite)
   device <name>              Emulate device (e.g., "iPhone 12")
-  geo <lat> <lng>            Set geolocation
+  geo <lat> <lng>            Set geolocation (coordinates must be finite)
   offline [on|off]           Toggle offline mode; off restores the new-tab default
   headers <json>             Set extra HTTP headers; use {} to clear them for new tabs
   credentials <user> <pass>  Set HTTP authentication for current and future tabs
@@ -2496,7 +2570,7 @@ Settings:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser set viewport 1920 1080
@@ -2524,6 +2598,7 @@ Subcommands:
   route <url> [options]      Intercept requests matching URL pattern
     --abort                  Abort matching requests
     --body <json>            Respond with custom body
+    --allow-origin <origin>  Let a page on <origin> read the mocked body cross-origin
   unroute [url]              Remove route (all if no URL)
   requests [options]         List captured requests
     --clear                  Clear request log
@@ -2534,10 +2609,12 @@ Subcommands:
   request <requestId>        View full request/response detail (including body)
   har <start|stop> [path]    Record and export a HAR file
     --content <mode>         Response bodies to embed on start: text (default), all, none
+    If export fails, recording and captured requests remain available. Fix the
+    destination and retry stop.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser network route "**/api/*" --abort
@@ -2560,9 +2637,10 @@ Examples:
             r##"
 agent-browser storage - Manage web storage
 
-Usage: agent-browser storage <type> [operation] [key] [value]
+Usage: agent-browser storage <type> [get [key] | set <key> <value> | clear | <key>]
 
 Manage localStorage and sessionStorage.
+Reads accept at most one key, sets require one key and one value, and clears take no operands. A bare key is shorthand for a one-key read.
 
 Types:
   local                localStorage
@@ -2575,7 +2653,7 @@ Operations:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser storage local
@@ -2604,17 +2682,20 @@ Cookie Set Options:
   --url <url>                        URL for the cookie (allows setting before page load)
   --domain <domain>                  Cookie domain (e.g., ".example.com")
   --path <path>                      Cookie path (e.g., "/api")
-  --httpOnly                         Set HttpOnly flag (prevents JavaScript access)
+  --http-only                        Set HttpOnly flag (prevents JavaScript access)
   --secure                           Set Secure flag (HTTPS only)
-  --sameSite <Strict|Lax|None>       SameSite policy
+  --same-site <Strict|Lax|None>      SameSite policy
   --expires <timestamp>              Expiration time (Unix timestamp in seconds)
+
+The legacy camelCase spellings --httpOnly and --sameSite are still accepted.
+When setting one cookie, unknown flags and extra arguments return an error.
 
 Note: If --url, --domain, and --path are all omitted, the cookie will be set
 for the current page URL.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   # Simple cookie for current page
@@ -2623,11 +2704,11 @@ Examples:
   # Set cookie for a URL before loading it (useful for authentication)
   agent-browser cookies set session_id "abc123" --url https://app.example.com
 
-  # Set secure, httpOnly cookie with domain and path
-  agent-browser cookies set auth_token "xyz789" --domain example.com --path /api --httpOnly --secure
+  # Set secure, HttpOnly cookie with domain and path
+  agent-browser cookies set auth_token "xyz789" --domain example.com --path /api --http-only --secure
 
   # Set cookie with SameSite policy
-  agent-browser cookies set tracking_consent "yes" --sameSite Strict
+  agent-browser cookies set tracking_consent "yes" --same-site Strict
 
   # Set cookie with expiration (Unix timestamp)
   agent-browser cookies set temp_token "temp123" --expires 1735689600
@@ -2651,8 +2732,11 @@ Manage browser tabs in the current window. Stable tab ids look like `t1`,
 `t2`, `t3`. An id is never reused within a session, so scripts can keep
 referring to the same tab across commands. Optional user-assigned labels
 (e.g. `docs`, `app`) are interchangeable with ids everywhere a tab ref is
-accepted. CDP target ids (from `tab list --json`) are also accepted as tab
-refs; unlike `t<N>` ids they stay stable across daemon restarts.
+accepted. A label starts with a letter and contains only letters, digits, `-`, or
+`_`. Labels must be unique within a session and cannot use the reserved `t<N>`
+or `T<N>` tab-id form. CDP target ids (from `tab list --json`) are also accepted
+as tab refs; unlike `t<N>` ids they stay stable across daemon restarts.
+Rejected labels preserve the current tab's refs and selected frame.
 
 Tabs opened with `tab new` or `click --new-tab` inherit the session's user
 agent, headers, HTTP credentials, init scripts, routes, and emulation
@@ -2675,7 +2759,7 @@ Operations:
 
 Global Options:
   --json               Output as JSON (includes each tab's targetId)
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser tab
@@ -2707,7 +2791,7 @@ Operations:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser window new
@@ -2729,7 +2813,7 @@ Arguments:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser frame "#embed-iframe"
@@ -2774,12 +2858,15 @@ Login behavior:
   auth login navigates, then waits for form selectors before filling/clicking.
   --no-navigate preserves the active top-level page and checks its origin
   against the effective credential URL. Submit-triggered navigation is allowed.
+  Matches are checked for size, computed visibility/opacity, and disabled/readonly
+  state, including custom selectors.
+  Replaced or focus-redirected credential fields fail without submitting.
   Selector wait timeout follows the default action timeout.
   Plugin credentials are resolved just-in-time and are not saved locally.
 
 Global Options:
   --json                   Output as JSON
-  --session <name>         Use specific session
+  --session <name>         Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin
@@ -2830,7 +2917,7 @@ Operations:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser dialog accept
@@ -2856,7 +2943,7 @@ Operations:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser trace start
@@ -2886,7 +2973,7 @@ Start Options:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   # Basic profiling
@@ -2930,6 +3017,10 @@ Recording captures 30 fps, which keeps scrolls and CSS transitions smooth.
 Raise it to 60 for short, motion-heavy takes (drag interactions, animation
 work); lower it for long sessions where file size matters more than motion.
 
+With --cursor, an inert overlay renders the pointer and page together so
+drags stay synchronized. It is hidden from accessibility snapshots and
+removed on stop. Screenshots taken while recording include the overlay.
+
 Operations:
   start <path> [url]     Start recording the active page (navigates first if url given)
   stop                   Stop recording and save video
@@ -2943,7 +3034,7 @@ Options:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   # Record the page you are on (keeps login state and page state)
@@ -2988,7 +3079,7 @@ Options:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser console
@@ -3008,7 +3099,7 @@ Options:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser errors
@@ -3027,7 +3118,7 @@ Visually highlights an element on the page for debugging.
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser highlight "#target-element"
@@ -3052,7 +3143,7 @@ Operations:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser clipboard read
@@ -3073,7 +3164,8 @@ Save, restore, list, and manage browser state (cookies, localStorage, sessionSto
 
 Operations:
   save <path>                        Save current state to file
-  load <path>                        Load state from file
+  load <path>                        Load state from file (origins that redirect
+                                     elsewhere are skipped and listed)
   list                               List saved state files
   show <filename>                    Show state summary
   rename <old-name> <new-name>       Rename state file
@@ -3091,7 +3183,7 @@ State Encryption:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser state save ./auth-state.json
@@ -3126,7 +3218,7 @@ Environment:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
   --namespace <name>   Use specific namespace
 
 Examples:
@@ -3147,8 +3239,15 @@ Usage: agent-browser install [--with-deps]
 
 Downloads and installs browser binaries required for automation.
 
+On macOS versions below 13, the command stops before downloading Chrome for
+Testing and prints instructions to update macOS or install Chrome manually. If
+`sw_vers -productVersion` is unavailable, exits with an error, returns no
+version, or returns a malformed version, the command reports a detection error
+and stops before making a network request.
+
 Options:
-  -d, --with-deps      Also install system dependencies (Linux only; fails if deps fail)
+  -d, --with-deps      Also install Linux system dependencies. The package manager runs
+                       directly as root; non-root uses sudo.
 
 Examples:
   agent-browser install
@@ -3287,9 +3386,12 @@ Supported URL formats:
   - Remote service: wss://remote-browser.example.com/cdp?token=...
   - Root endpoint: wss://remote-browser.example.com?token=... (slash optional)
 
+Options:
+  --cdp-headers <json>  Headers for CDP discovery and handshake, e.g. Authorization
+
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   # Connect to local Chrome with remote debugging
@@ -3301,6 +3403,10 @@ Examples:
 
   # Connect to remote browser service
   agent-browser connect "wss://browser-service.example.com/cdp?token=xyz"
+
+  # Connect to a service that authenticates the WebSocket handshake
+  agent-browser connect "wss://browser-service.example.com/cdp" \
+    --cdp-headers '{"Authorization":"Bearer <token>"}'
 
   # After connecting, run commands normally
   agent-browser snapshot
@@ -3347,7 +3453,7 @@ Notes:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser stream status
@@ -3369,7 +3475,7 @@ for touch-based interfaces like iOS Safari.
 
 Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser tap "#submit-button"
@@ -3392,7 +3498,7 @@ Arguments:
 
 Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser -p ios swipe up
@@ -3411,7 +3517,7 @@ Subcommands:
 
 Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser device list
@@ -3466,7 +3572,7 @@ URL Diff:
 
 Global Options:
   --json               Output as JSON
-  --session <name>     Use specific session
+  --session <name>     Session name: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser diff snapshot
@@ -3492,6 +3598,7 @@ separated by blank lines (or as a JSON array with --json).
 Options:
   --bail               Stop on first error (default: continue all commands)
   --json               Output results as a JSON array
+  --omit-command       With --json, replace each command array with a zero-based `index` field
 
 Argument Mode:
   Each quoted argument is a full command string:
@@ -3511,7 +3618,10 @@ Examples:
   agent-browser batch "open https://example.com" "screenshot"
   agent-browser batch --bail "open https://example.com" "click @e1" "screenshot"
   echo '[["open", "https://example.com"], ["snapshot"]]' | agent-browser batch
+  echo '[["fill", "#password", "secret"]]' | agent-browser batch --json --omit-command
   agent-browser batch --bail < commands.json
+
+With --json --omit-command, each row replaces its command array with a stable zero-based `index` field on success, failure, or --bail. This only removes command arrays and does not make output safe for secrets. Errors and response data are unchanged: type echoes typed text, and get value/eval may return input values.
 "##
         }
 
@@ -3585,9 +3695,17 @@ Chat Options:
   -v, --verbose          Show tool commands and their raw output
   -q, --quiet            Show only the AI text response (hide tool calls)
 
+Each tool call runs one agent-browser command. Chat can load bundled skills
+(skills get <name>) and use page WebMCP tools, fetching a tool's schema with
+webmcp list <tool> --frame <frame-id> --json before invoking it in that frame.
+Chat runs in the session you select and cannot create or switch sessions. To use
+another engine, open the session first with
+agent-browser --session <name> --engine <engine> open <url>, then pass --session <name> to chat.
+Chat commands cannot set global flags other than --json and --annotate.
+
 Global Options:
   --json                 Structured JSON output per turn
-  --session <name>       Target session for commands
+  --session <name>       Target session: Unicode letters/numbers, hyphens, and underscores only
 
 Examples:
   agent-browser chat "open google.com and search for cats"
@@ -3603,13 +3721,27 @@ Examples:
             r##"
 agent-browser mcp - Start an MCP stdio server
 
-Usage: agent-browser mcp [--tools <profiles>]
+Usage: agent-browser mcp [--tools <profiles>] [--config <trusted-path>]
+       agent-browser mcp call <tool> [<arguments-json> | -]
+         [--tools <profiles>] [--config <trusted-path>]
 
 Starts a Model Context Protocol server over stdio. MCP clients launch this
 command as a subprocess and communicate with newline-delimited JSON-RPC.
 stdout is reserved for MCP protocol messages; logs and diagnostics use stderr.
 The server defaults to MCP protocol 2025-11-25 and accepts older supported
 client protocol versions during initialization.
+
+mcp call runs one tool without a stdio session and prints its tools/call
+result as JSON, with the agent-browser version in _meta.agentBrowserVersion.
+Pass the arguments as a JSON object, or - to read them from stdin. Every tool
+is available unless --tools limits the call. Exit code: 0 on success, 1 when
+the tool reports an error, 2 for an unknown tool or invalid arguments.
+
+Pass --config <trusted-path> to agent-browser mcp or agent-browser mcp call to
+select one trusted config file. MCP tool child processes load only that file,
+replacing default user/project discovery. Put required safety policy in it.
+Environment variables and accepted per-tool CLI arguments still override its
+values.
 
 The default tools profile is core, which keeps MCP context small for everyday
 browser automation. Use --tools all for the full typed CLI parity surface, or
@@ -3639,7 +3771,11 @@ Common tools include:
   agent_browser_close      Close the browser session
 
 Each tool has typed fields such as url, selector, text, key, and session.
-Each tool also accepts extraArgs for advanced CLI flags and exact CLI parity.
+Each tool also accepts extraArgs for per-command options and display or emulation
+flags such as --engine. extraArgs cannot set --config or global flags that change
+network, file, policy, or host access. Set host-wide options in the MCP server's
+environment or selected config. Structured allowedDomains is rejected when the
+server already sets allowed domains.
 Tool discovery is paginated and includes read-only/open-world annotations so
 modern MCP clients can load the large typed surface incrementally.
 Use agent_browser_snapshot after navigation to get fresh refs before clicking.
@@ -3690,6 +3826,8 @@ Options:
 The skills command serves bundled skill content that always matches the
 installed CLI version. Agents should use this to get current instructions
 rather than relying on cached copies.
+When no package root is found, the CLI reads manually installed skills from ~/.agent-browser/skills and ~/.agent-browser/skill-data.
+Package discovery looks for the bundled skill-data/core/SKILL.md file.
 
 Examples:
   agent-browser skills
@@ -3719,9 +3857,12 @@ Subcommands:
   show <name>              Show one configured plugin
   run <name> <type>        Run a command.run or custom plugin request
 
-Plugins are configured in agent-browser.json. A plugin entry declares a name,
-an executable command, optional args, and capabilities. Plugins run as
-external processes over the agent-browser.plugin.v1 stdio JSON protocol.
+Plugins are configured in ~/.agent-browser/config.json or a file loaded with
+--config. A plugin entry declares a name, an executable command, optional args,
+and capabilities. Plugins run as external processes over the
+agent-browser.plugin.v1 stdio JSON protocol.
+plugin add writes ~/.agent-browser/config.json by default; use --project for
+./agent-browser.json (only used with --config).
 
 Add sources:
   <name>                   npm package, e.g. agent-browser-plugin-captcha
@@ -3731,7 +3872,7 @@ Add sources:
 Add options:
   --name <name>            Override the configured plugin name
   --capability <name>      Declare a capability if the plugin has no manifest
-  --global                 Write ~/.agent-browser/config.json instead of ./agent-browser.json
+  --project                Write ./agent-browser.json instead of ~/.agent-browser/config.json
   --no-manifest            Skip plugin.manifest discovery
 
 plugin add asks the package for plugin.manifest to discover name and
@@ -3746,6 +3887,9 @@ Capabilities:
 Core capabilities and protocol request types use dedicated command paths.
 Use auth login for credential.read, --provider for browser.provider, and
 a local launch for launch.mutate.
+Credential, browser-provider, and launch-mutation errors omit response error
+text and unsupported protocol values. Manifest discovery and plugin run retain
+detailed errors.
 
 Example config:
   {{
@@ -3849,13 +3993,13 @@ Browser Settings:  agent-browser set <setting> [value]
   media [dark|light] [reduced-motion]
 
 Network:  agent-browser network <action>
-  route <url> [--abort|--body <json>] [--resource-type <csv>]
+  route <url> [--abort|--body <json> [--allow-origin <origin>]] [--resource-type <csv>]
   unroute [url]
   requests [--clear] [--filter <pattern>]
   har <start|stop> [path]
 
 Storage:
-  cookies [get|set|clear]    Manage cookies (set supports --url, --domain, --path, --httpOnly, --secure, --sameSite, --expires)
+  cookies [get|set|clear]    Manage cookies (set supports --url, --domain, --path, --http-only, --secure, --same-site, --expires)
                              Or:  cookies set --curl <file> [--domain <host>] (auto-detects JSON/cURL/Cookie-header files)
   storage <local|session>    Manage web storage
 
@@ -3893,7 +4037,7 @@ WebMCP (experimental):
   Brief untrusted summaries appear only on discovery or change; no schemas
 
 React (requires `open --enable react-devtools`):
-  react tree                 Full React component tree (depth id parent name columns)
+  react tree                 Full React component tree (enable with open --enable react-devtools)
   react inspect <id>         Inspect one fiber (props, hooks, state, source)
   react renders start        Start recording re-renders via onCommitFiberRoot
   react renders stop [--json] Stop and print render profile
@@ -3920,8 +4064,9 @@ Init scripts:
   removeinitscript <id>      Remove a registered script from every tab in the session
 
 Batch:
-  batch [--bail] ["cmd" ...]  Execute multiple commands sequentially (args or stdin)
+  batch [options] ["cmd" ...] Execute multiple commands sequentially (args or stdin)
                               --bail stops on first error (default: continue all)
+                              --omit-command uses a zero-based `index` field with --json
 
 Auth Vault:
   auth save <name> [opts]    Save auth profile (--url, --username, --password/--password-stdin)
@@ -3985,7 +4130,9 @@ Authentication:
                              (or AGENT_BROWSER_PROFILE env)
   --restore [name]           Auto-save/restore cookies and localStorage.
                              Without a name, uses --session as the restore key
-                             (or AGENT_BROWSER_RESTORE env)
+                             (or AGENT_BROWSER_RESTORE env). Session and restore names
+                             accept Unicode letters and numbers, hyphens, and underscores
+                             only; spaces such as "my session" are rejected.
   --restore-save <policy>    Restore auto-save policy: auto, always, never (default: auto)
   --restore-check-url <glob> Validate restored state against current URL pattern
   --restore-check-text <txt> Validate restored state against visible page text
@@ -3999,7 +4146,7 @@ Authentication:
   --headers <json>           HTTP headers scoped to URL's origin (e.g., Authorization bearer token)
 
 Options:
-  --session <name>           Isolated session (or AGENT_BROWSER_SESSION env)
+  --session <name>           Isolated session: Unicode letters/numbers, hyphens, and underscores only (or AGENT_BROWSER_SESSION env)
   --context <name>           Isolated BrowserContext for cookie/storage isolation
                              in a shared Chrome (or AGENT_BROWSER_CONTEXT env)
   --namespace <name>         Isolate daemon sockets and restore-state directories
@@ -4010,17 +4157,22 @@ Options:
                              (or AGENT_BROWSER_INIT_SCRIPTS env, comma-separated)
   --enable <feature>         Built-in init scripts: react-devtools (repeatable or comma-separated)
                              (or AGENT_BROWSER_ENABLE env)
-  --args <args>              Browser launch args, comma or newline separated (or AGENT_BROWSER_ARGS)
-                             e.g., --args "--no-sandbox,--disable-blink-features=AutomationControlled"
+  --args <args>              Browser launch args, newline separated, or comma separated before another flag
+                             (or AGENT_BROWSER_ARGS). Commas inside a value are kept.
+                             e.g., --args "--no-sandbox,--disable-features=Translate,HttpsUpgrades"
   --user-agent <ua>          Custom User-Agent (or AGENT_BROWSER_USER_AGENT)
   --proxy <server>           Proxy server URL (or AGENT_BROWSER_PROXY, HTTP_PROXY, HTTPS_PROXY, ALL_PROXY)
+                             When launching Chrome, agent-browser accepts a proxy URL with a trailing slash.
                              Supports authenticated proxies: --proxy "http://user:pass@127.0.0.1:7890"
   --proxy-bypass <hosts>     Bypass proxy for these hosts (or AGENT_BROWSER_PROXY_BYPASS, NO_PROXY)
                              e.g., --proxy-bypass "localhost,*.internal.com"
   --ignore-https-errors      Ignore HTTPS certificate errors
   --ca-cert <path>           Trust a specific CA certificate for HTTPS interception proxies
-                             (or AGENT_BROWSER_CA_CERT; local Chromium on Linux; install --with-deps provides certutil)
+                             (or AGENT_BROWSER_CA_CERT; CLI requests everywhere, local Chromium on Linux;
+                             install --with-deps provides certutil)
   --no-ca-cert               Clear CA trust retained by the running browser session
+  --use-system-ca            Use the OS trust store for CLI requests (read, install, upgrade, doctor)
+                             (or AGENT_BROWSER_USE_SYSTEM_CA)
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
   --hide-scrollbars <bool>   Hide native scrollbars in headless Chromium screenshots (default: true)
                              Use --hide-scrollbars false to keep scrollbars visible
@@ -4037,6 +4189,8 @@ Options:
   --no-webmcp                Disable default experimental WebMCP support for locally launched Chrome
                              (or AGENT_BROWSER_NO_WEBMCP env)
   --cdp <port|url>           Connect via CDP; root WebSocket query slash is optional
+  --cdp-headers <json>       Headers for --cdp discovery and handshake, e.g. Authorization
+                             (or AGENT_BROWSER_CDP_HEADERS env)
   --pin-tab                  Pin the session to its bound tab (or AGENT_BROWSER_PIN_TAB env)
                              Commands fail with a tab_gone error instead of falling back
                              to another tab when the bound tab is closed. JSON includes
@@ -4046,13 +4200,24 @@ Options:
   --download-path <path>     Default download directory (or AGENT_BROWSER_DOWNLOAD_PATH)
   --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
   --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
+                             Invalid values warn and leave the existing output limit unchanged.
   --allowed-domains <list>   Restrict network domains; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
   --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
-  --engine <name>            Browser engine: chrome (default), lightpanda (or AGENT_BROWSER_ENGINE)
   --idle-timeout <time>      Shut down daemon after inactivity: 10s, 3m, 1h, or raw ms
                              (default: 1h; 0 disables; dashboard input resets the timer)
+                             Values too large to convert to milliseconds produce a warning and are ignored
+  --engine <name>            Browser engine: chrome (default), lightpanda, obscura (experimental)
+                             (or AGENT_BROWSER_ENGINE); Obscura rejects --proxy-bypass,
+                             proxyBypass config, AGENT_BROWSER_PROXY_BYPASS, NO_PROXY/no_proxy,
+                             --webgpu, --ca-cert, --args, profiles, state, extensions,
+                             headed mode, and file access. Discovery and CDP initialization
+                             each have a 10s deadline plus bounded failure cleanup.
+                             Explicit Obscura launches validate this invocation's resolved
+                             bypass settings, even with an existing daemon; stale daemon
+                             environment values are not reused when bypass is cleared.
+                             Obscura has accessibility, iframe, and screenshot fidelity gaps.
   --no-auto-dialog           Disable automatic dismissal of alert/beforeunload dialogs (or AGENT_BROWSER_NO_AUTO_DIALOG)
   --model <name>             AI model for chat (or AI_GATEWAY_MODEL env)
   -v, --verbose              Show tool commands and their raw output
@@ -4062,30 +4227,40 @@ Options:
   --version, -V              Show version
 
 Configuration:
-  agent-browser looks for agent-browser.json in these locations (lowest to highest priority):
+  Default discovery loads config from these locations (lowest to highest priority):
     1. ~/.agent-browser/config.json      User-level defaults
-    2. ./agent-browser.json              Project-level overrides
+    2. ./agent-browser.json              Allowlisted project defaults
     3. Environment variables             Override config file values
     4. CLI flags                         Override everything
 
-  Use --config <path> to load a specific config file instead of the defaults.
+  Use --config <path> to load only that config file instead of default discovery.
+  AGENT_BROWSER_CONFIG has the same effect. Environment variables and CLI flags
+  still override values from the selected config file.
   If --config points to a missing or invalid file, agent-browser exits with an error.
+  The auto-discovered ./agent-browser.json accepts only:
+    {project_config_keys}.
+  Other runtime keys, including extensions, initScripts, state, trust, policy,
+  session, connection, and path settings, are ignored with a warning.
+  The $schema metadata key is ignored silently.
+  Put advanced settings in ~/.agent-browser/config.json or load a trusted file
+  with --config or AGENT_BROWSER_CONFIG.
 
   Boolean flags accept an optional true/false value to override config:
     --headed           (same as --headed true)
     --headed false     (disables "headed": true from config)
     --hide-scrollbars false (keeps native scrollbars visible in headless Chromium screenshots)
 
-  Extensions from user and project configs are merged (not replaced).
+  The auto-discovered project config ignores extensions. Use the user config, an
+  explicitly loaded config file, AGENT_BROWSER_EXTENSIONS, or --extension.
 
   On Windows, headless Chrome runs on a private desktop to prevent stray desktop
   rectangles. Owned Chrome processes close with their daemon, even if it is killed.
   Headed browsers use the interactive desktop; externally connected browsers are not owned.
 
-  Example agent-browser.json:
-    {{"headed": true, "hideScrollbars": false, "proxy": "http://localhost:8080"}}
+  Example auto-discovered agent-browser.json:
+    {{"headed": true, "hideScrollbars": false, "userAgent": "my-agent/1.0", "colorScheme": "dark"}}
 
-  Plugin example:
+  Trusted config example (user config or a file loaded with --config):
     {{"plugins":[{{"name":"vault","command":"agent-browser-plugin-vault","capabilities":["credential.read"]}},{{"name":"stealth","command":"agent-browser-plugin-stealth","capabilities":["launch.mutate"]}}]}}
 
 Environment:
@@ -4115,7 +4290,15 @@ Environment:
   AGENT_BROWSER_IGNORE_HTTPS_ERRORS Ignore HTTPS certificate errors
   AGENT_BROWSER_CA_CERT          Path to CA certificate to trust (HTTPS interception proxies)
   AGENT_BROWSER_CLEAR_CA_CERT    Clear CA trust retained by the running browser session
+  AGENT_BROWSER_USE_SYSTEM_CA    Use the OS trust store for CLI requests
   AGENT_BROWSER_PROVIDER         Browser provider (ios, browserbase, kernel, browseruse, browserless, agentcore, or plugin name)
+  BROWSER_USE_API_KEY            Browser Use Cloud API key
+  BROWSER_USE_PROFILE_ID         Browser Use profile UUID
+  BROWSER_USE_PROXY_COUNTRY      Managed proxy country; none/direct disables proxy
+  BROWSER_USE_ENABLE_RECORDING   Record the Browser Use Cloud session
+                                 Browser Use setup: 18s total, plus up to 4s timeout cleanup.
+                                 close fails and stays retryable until the Cloud session confirms it
+                                 stopped. After daemon exit, inspect and stop the browser in Cloud.
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_PIN_TAB          Pin the session to its bound tab (strict tab binding)
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
@@ -4144,8 +4327,14 @@ Environment:
   AGENT_BROWSER_CONFIRM_ACTIONS  Action categories requiring confirmation
   AGENT_BROWSER_CONFIRM_INTERACTIVE Enable interactive confirmation prompts
   AGENT_BROWSER_NO_AUTO_DIALOG   Disable automatic dismissal of alert/beforeunload dialogs
-  AGENT_BROWSER_ENGINE           Browser engine: chrome (default), lightpanda
   AGENT_BROWSER_PLUGINS          JSON plugin registry override
+  AGENT_BROWSER_ENGINE           Browser engine: chrome (default), lightpanda, obscura (experimental)
+  OBSCURA_BIN                   Source E2E tests only: required executable path when explicitly
+                                running cargo test e2e_obscura -- --ignored --test-threads=1
+                                Tests clear AGENT_BROWSER_CDP, AGENT_BROWSER_AUTO_CONNECT,
+                                and AGENT_BROWSER_PROVIDER and require an owned Obscura process.
+  OBSCURA_ALLOW_PRIVATE_NETWORK Allow Obscura to access local/private pages (set before launch)
+  AGENT_BROWSER_OBSCURA_STEALTH  Run the Obscura engine in stealth mode (consistent fingerprint, tracker blocking)
   HTTP_PROXY / HTTPS_PROXY       Standard proxy env vars (fallback if AGENT_BROWSER_PROXY not set)
   ALL_PROXY                      SOCKS proxy (fallback for proxy)
   NO_PROXY                       Bypass proxy for hosts (fallback for proxy-bypass)
@@ -4164,6 +4353,7 @@ Install:
 
 Examples:
   agent-browser open example.com
+  agent-browser --engine obscura --executable-path /path/to/obscura open example.com
   agent-browser snapshot -i              # Interactive elements only
   agent-browser click @e2                # Click by ref from snapshot
   agent-browser fill @e3 "test@example.com"
@@ -4201,7 +4391,12 @@ iOS Simulator (requires Xcode and Appium):
   agent-browser -p ios device list                         # List simulators
   agent-browser -p ios swipe up                            # Swipe gesture
   agent-browser -p ios tap @e1                             # Touch element
-"#
+"#,
+        project_config_keys = crate::flags::PROJECT_CONFIG_ALLOWED_KEYS
+            .chunks(4)
+            .map(|keys| keys.join(", "))
+            .collect::<Vec<_>>()
+            .join(",\n    ")
     );
 }
 
@@ -4288,11 +4483,57 @@ pub fn print_version() {
 #[cfg(test)]
 mod tests {
     use super::{
-        boundary_origin, format_a11y_text, format_snapshot_delta, format_storage_text,
-        format_vitals_text, format_webmcp_context, format_webmcp_text, format_webmcp_tool_text,
-        format_with_boundaries, OutputOptions,
+        boundary_origin, format_a11y_text, format_react_tree_text, format_snapshot_delta,
+        format_storage_text, format_vitals_text, format_webmcp_context, format_webmcp_text,
+        format_webmcp_tool_text, format_with_boundaries, OutputOptions,
     };
     use serde_json::json;
+
+    #[test]
+    fn test_format_react_tree_text_preserves_populated_tree() {
+        let tree =
+            "# React component tree\n# Columns: depth id parent name\n0 1 - App\n  1 2 1 Button\n";
+        let data = json!({ "tree": tree });
+
+        assert_eq!(
+            format_react_tree_text(Some("react_tree"), &data).as_deref(),
+            Some(tree)
+        );
+    }
+
+    #[test]
+    fn test_format_react_tree_text_reports_empty_tree() {
+        let header_only = json!({
+            "tree": "# React component tree\n# Columns: depth id parent name [key=...]\n# Use `react inspect <id>` for props/hooks/state. IDs valid until next navigation."
+        });
+        let whitespace_only = json!({ "tree": " \n\t\n" });
+        let expected = "No React component tree found. Confirm that a React root has mounted.";
+
+        assert_eq!(
+            format_react_tree_text(Some("react_tree"), &header_only).as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            format_react_tree_text(Some("react_tree"), &whitespace_only).as_deref(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn test_format_react_tree_text_ignores_other_actions() {
+        let data = json!({ "tree": "component tree" });
+
+        assert_eq!(format_react_tree_text(Some("snapshot"), &data), None);
+    }
+
+    #[test]
+    fn test_format_react_tree_text_ignores_missing_or_invalid_tree() {
+        assert_eq!(format_react_tree_text(Some("react_tree"), &json!({})), None);
+        assert_eq!(
+            format_react_tree_text(Some("react_tree"), &json!({ "tree": ["App"] })),
+            None
+        );
+    }
 
     #[test]
     fn test_format_stream_status_text_for_enabled_stream() {

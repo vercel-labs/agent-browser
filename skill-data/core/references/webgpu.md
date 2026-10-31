@@ -10,7 +10,7 @@ agent-browser --webgpu open https://my-webgpu-app.example.com
 agent-browser screenshot app.png
 ```
 
-`--webgpu` (or `AGENT_BROWSER_WEBGPU=1`, or `"webgpu": true` in agent-browser.json) applies a launch preset:
+`--webgpu` (or `AGENT_BROWSER_WEBGPU=1`, or `"webgpu": true` in `~/.agent-browser/config.json` or a file loaded with `--config`) applies a launch preset:
 
 - everywhere: `--enable-unsafe-webgpu` (WebGPU is hidden in headless/blocklisted environments by default)
 - Linux only: `--enable-features=Vulkan --use-angle=vulkan --use-vulkan=swiftshader --use-webgpu-adapter=swiftshader --disable-vulkan-surface` — routes WebGPU through SwiftShader's software Vulkan, so it works with no GPU (containers, CI)
