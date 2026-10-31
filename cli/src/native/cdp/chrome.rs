@@ -717,6 +717,85 @@ fn terminate_launched_chrome(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// A launch failure, split by how the caller has to react.
+///
+/// `ProfileInUse` means Chrome refused to start because another instance
+/// already owns the profile. Retrying spawns another Chrome process against
+/// that profile, which either hands the launch over to the running instance
+/// (opening yet another window in it) or aborts with the same error, so this
+/// failure must not be retried.
+#[derive(Debug)]
+enum LaunchError {
+    ProfileInUse(String),
+    Other(String),
+}
+
+impl LaunchError {
+    fn message(&self) -> &str {
+        match self {
+            LaunchError::ProfileInUse(message) | LaunchError::Other(message) => message,
+        }
+    }
+
+    fn is_profile_in_use(&self) -> bool {
+        matches!(self, LaunchError::ProfileInUse(_))
+    }
+}
+
+impl From<String> for LaunchError {
+    fn from(message: String) -> Self {
+        LaunchError::Other(message)
+    }
+}
+
+/// Whether another launch attempt makes sense for this failure.
+fn should_retry_launch(error: &LaunchError) -> bool {
+    !error.is_profile_in_use()
+}
+
+/// Pid of the Chrome instance that owns `user_data_dir`, when it is still alive.
+///
+/// Chrome's POSIX process singleton keeps a `SingletonLock` symlink pointing at
+/// `<hostname>-<pid>` while it owns the profile. A stale lock left behind by a
+/// crashed instance is ignored, matching Chrome's own behaviour.
+#[cfg(unix)]
+fn profile_lock_pid(user_data_dir: &Path) -> Option<u32> {
+    let target = std::fs::read_link(user_data_dir.join("SingletonLock")).ok()?;
+    let name = target.file_name()?.to_string_lossy().into_owned();
+    let pid: u32 = name.rsplit('-').next()?.parse().ok()?;
+    if process_is_alive(pid) {
+        Some(pid)
+    } else {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: kill(pid, 0) performs the existence/permission check only and
+    // does not signal the process.
+    let result = unsafe { libc::kill(pid as i32, 0) };
+    if result == 0 {
+        return true;
+    }
+    // EPERM means the process exists but belongs to another user.
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Chrome reports a profile clash on stderr. These markers cover the headless
+/// variant (it aborts instead of handing the launch over); the headed variant
+/// is detected by its exit code instead, because its message is localized.
+fn stderr_indicates_profile_in_use(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("processsingleton")
+        || lower.contains("singletonlock")
+        || lower.contains("existing browser session")
+        || lower.contains("profile corruption")
+}
+
 pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
     let chrome_path = match &options.executable_path {
         Some(p) => PathBuf::from(p),
@@ -776,7 +855,17 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
                 return Ok(process);
             }
             Err(e) => {
-                last_err = e;
+                if !should_retry_launch(&e) {
+                    // Another instance owns the profile. Retrying spawns yet
+                    // another Chrome process against it, which opens another
+                    // window in that instance (headed) or fails identically
+                    // (headless).
+                    if let Some(ref dir) = profile_temp_dir {
+                        let _ = std::fs::remove_dir_all(dir);
+                    }
+                    return Err(e.message().to_string());
+                }
+                last_err = e.message().to_string();
                 if attempt < max_attempts {
                     // Use write! instead of eprintln! to avoid panicking
                     // if the daemon's stderr pipe is broken (parent dropped it).
@@ -800,16 +889,15 @@ pub fn launch_chrome(options: &LaunchOptions) -> Result<ChromeProcess, String> {
     Err(last_err)
 }
 
-fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<ChromeProcess, String> {
+fn try_launch_chrome(
+    chrome_path: &Path,
+    options: &LaunchOptions,
+) -> Result<ChromeProcess, LaunchError> {
     let ChromeArgs {
         args,
         user_data_dir,
         temp_user_data_dir,
     } = build_chrome_args(options)?;
-
-    // Mitigate stale DevToolsActivePort risk (e.g., previous crash left it behind).
-    // Puppeteer does similar cleanup before spawning.
-    let _ = std::fs::remove_file(user_data_dir.join("DevToolsActivePort"));
 
     let cleanup_temp_dir = |dir: &Option<PathBuf>| {
         if let Some(ref d) = dir {
@@ -817,12 +905,32 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
         }
     };
 
+    // Another Chrome instance already owns this profile. A second process
+    // against it hands the launch over to that instance (headed, which opens
+    // another window there) or aborts (headless), so refuse before touching
+    // the profile: DevToolsActivePort belongs to the running instance.
+    #[cfg(unix)]
+    if let Some(pid) = profile_lock_pid(&user_data_dir) {
+        cleanup_temp_dir(&temp_user_data_dir);
+        return Err(LaunchError::ProfileInUse(format!(
+            "Chrome profile {} is already in use by another Chrome instance (pid {}). \
+             Launch a new browser with its own profile directory, or attach to the \
+             running instance instead.",
+            user_data_dir.display(),
+            pid
+        )));
+    }
+
+    // Mitigate stale DevToolsActivePort risk (e.g., previous crash left it behind).
+    // Puppeteer does similar cleanup before spawning.
+    let _ = std::fs::remove_file(user_data_dir.join("DevToolsActivePort"));
+
     #[cfg(target_os = "linux")]
     let temp_nss_home = match resolve_prepared_nss_home(options) {
         Ok(home) => home,
         Err(error) => {
             cleanup_temp_dir(&temp_user_data_dir);
-            return Err(error);
+            return Err(error.into());
         }
     };
     #[cfg(not(target_os = "linux"))]
@@ -879,7 +987,10 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
     let spawned = Child::spawn(chrome_path, &args, options.effectively_headless());
     let mut child = spawned.map_err(|e| {
         cleanup_temp_dir(&temp_user_data_dir);
-        format!("Failed to launch Chrome at {:?}: {}", chrome_path, e)
+        LaunchError::Other(format!(
+            "Failed to launch Chrome at {:?}: {}",
+            chrome_path, e
+        ))
     })?;
 
     // Shared overall deadline so we don't double-wait (poll + stderr fallback).
@@ -895,7 +1006,7 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
             let stderr = child.stderr.take().ok_or_else(|| {
                 terminate_launched_chrome(&mut child);
                 cleanup_temp_dir(&temp_user_data_dir);
-                "Failed to capture Chrome stderr".to_string()
+                LaunchError::Other("Failed to capture Chrome stderr".to_string())
             })?;
             let reader = BufReader::new(stderr);
             match wait_for_ws_url_until(reader, deadline) {
@@ -903,10 +1014,15 @@ fn try_launch_chrome(chrome_path: &Path, options: &LaunchOptions) -> Result<Chro
                 Err(fallback_err) => {
                     terminate_launched_chrome(&mut child);
                     cleanup_temp_dir(&temp_user_data_dir);
-                    return Err(format!(
+                    let combined = format!(
                         "{}\n(also tried parsing stderr) {}",
-                        primary_err, fallback_err
-                    ));
+                        primary_err.message(),
+                        fallback_err
+                    );
+                    if stderr_indicates_profile_in_use(&combined) {
+                        return Err(LaunchError::ProfileInUse(combined));
+                    }
+                    return Err(LaunchError::Other(combined));
                 }
             }
         }
@@ -947,7 +1063,7 @@ fn wait_for_devtools_active_port(
     child: &mut Child,
     user_data_dir: &Path,
     deadline: std::time::Instant,
-) -> Result<String, String> {
+) -> Result<String, LaunchError> {
     let poll_interval = Duration::from_millis(50);
 
     while std::time::Instant::now() <= deadline {
@@ -958,10 +1074,20 @@ fn wait_for_devtools_active_port(
                 .code()
                 .map(|c| format!("{}", c))
                 .unwrap_or_else(|| "unknown".to_string());
-            return Err(format!(
+            // Exit code 0 without a DevTools port means the launch was handed
+            // over to an already running Chrome instance (the headed
+            // singleton handoff). Retrying would open another window there.
+            if code == "0" {
+                return Err(LaunchError::ProfileInUse(
+                    "Chrome handed the launch to the running Chrome instance (exit code 0) \
+                     without writing DevToolsActivePort"
+                        .to_string(),
+                ));
+            }
+            return Err(LaunchError::Other(format!(
                 "Chrome exited early (exit code: {}) without writing DevToolsActivePort",
                 code
-            ));
+            )));
         }
 
         if let Some((port, ws_path)) = read_devtools_active_port(user_data_dir) {
@@ -972,7 +1098,9 @@ fn wait_for_devtools_active_port(
         std::thread::sleep(poll_interval);
     }
 
-    Err("Timeout waiting for DevToolsActivePort".to_string())
+    Err(LaunchError::Other(
+        "Timeout waiting for DevToolsActivePort".to_string(),
+    ))
 }
 
 fn wait_for_ws_url_until(
@@ -1856,6 +1984,110 @@ fn expand_tilde(path: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
+
+    #[cfg(unix)]
+    #[test]
+    fn test_profile_lock_pid_detects_live_owner() {
+        let fixture = tempfile::tempdir().unwrap();
+        let pid = std::process::id();
+        let link = fixture.path().join("SingletonLock");
+        std::os::unix::fs::symlink(format!("test-host-{}", pid), &link).unwrap();
+        assert_eq!(profile_lock_pid(fixture.path()), Some(pid));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_profile_lock_pid_ignores_stale_lock() {
+        let fixture = tempfile::tempdir().unwrap();
+        // Pid 0 is never a valid owner, so the lock counts as stale.
+        let link = fixture.path().join("SingletonLock");
+        std::os::unix::fs::symlink("test-host-0", &link).unwrap();
+        assert_eq!(profile_lock_pid(fixture.path()), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_profile_lock_pid_ignores_unparsable_lock() {
+        let fixture = tempfile::tempdir().unwrap();
+        let link = fixture.path().join("SingletonLock");
+        std::os::unix::fs::symlink("not-a-pid", &link).unwrap();
+        assert_eq!(profile_lock_pid(fixture.path()), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_profile_lock_pid_missing_lock() {
+        let fixture = tempfile::tempdir().unwrap();
+        assert_eq!(profile_lock_pid(fixture.path()), None);
+    }
+
+    #[test]
+    fn test_stderr_indicates_profile_in_use() {
+        assert!(stderr_indicates_profile_in_use(
+            "Failed to create a ProcessSingleton for your profile directory"
+        ));
+        assert!(stderr_indicates_profile_in_use(
+            "Failed to create /tmp/p/SingletonLock: File exists (17)"
+        ));
+        assert!(stderr_indicates_profile_in_use(
+            "Opening in existing browser session"
+        ));
+        assert!(!stderr_indicates_profile_in_use(
+            "Failed to move to new namespace: PID namespaces supported"
+        ));
+    }
+
+    #[test]
+    fn test_profile_in_use_failure_is_not_retried() {
+        let in_use = LaunchError::ProfileInUse("profile busy".to_string());
+        assert!(!should_retry_launch(&in_use));
+        assert!(in_use.is_profile_in_use());
+
+        let other = LaunchError::Other("socket timeout".to_string());
+        assert!(should_retry_launch(&other));
+        assert!(!other.is_profile_in_use());
+    }
+
+    /// Requires a real Chrome: starts one against a profile directory, then
+    /// tries to start a second browser against the same profile. The second
+    /// launch has to fail with a profile-in-use error instead of retrying, and
+    /// the running instance has to keep its DevToolsActivePort file.
+    #[test]
+    #[ignore]
+    fn test_second_launch_against_same_profile_is_refused() {
+        assert!(find_chrome().is_some(), "Chrome not found");
+        let fixture = tempfile::tempdir().unwrap();
+        let profile = fixture.path().join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        let options = LaunchOptions {
+            headless: true,
+            profile: Some(profile.display().to_string()),
+            ..Default::default()
+        };
+
+        let first = launch_chrome(&options).expect("first launch");
+        let port_file = profile.join("DevToolsActivePort");
+        assert!(
+            port_file.exists(),
+            "first launch wrote no DevToolsActivePort"
+        );
+
+        let error = match launch_chrome(&options) {
+            Ok(_) => panic!("second launch must fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("already in use"),
+            "unexpected error: {}",
+            error
+        );
+        assert!(
+            port_file.exists(),
+            "DevToolsActivePort of the running instance was removed"
+        );
+
+        drop(first);
+    }
 
     #[test]
     fn test_dev_shm_capacity_threshold() {
