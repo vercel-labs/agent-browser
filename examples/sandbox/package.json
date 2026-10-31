@@ -1,0 +1,10 @@
+{
+  "name": "agent-browser-sandbox-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@agent-browser/sandbox": "file:../../packages/@agent-browser/sandbox",
+    "@vercel/sandbox": "^1.0.0"
+  }
+}

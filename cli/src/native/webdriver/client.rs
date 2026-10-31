@@ -79,13 +79,7 @@ impl WebDriverClient {
             .await?;
 
         let element_value = response.get("value").ok_or("No element in response")?;
-
-        element_value
-            .get("element-6066-11e4-a52e-4f735466cecf")
-            .or_else(|| element_value.get("ELEMENT"))
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .ok_or("No element ID in response".to_string())
+        element_id_from_value(element_value, using, value)
     }
 
     pub async fn click_element(&self, element_id: &str) -> Result<(), String> {
@@ -212,6 +206,36 @@ impl WebDriverClient {
     }
 }
 
+/// Extract the element id from a WebDriver find-element `value` payload.
+///
+/// A genuine locator miss arrives as a WebDriver error payload
+/// ("no such element"), not as a malformed response. It is translated to the
+/// anchored locator-miss shape the rest of the CLI produces, so it keeps the
+/// selector detail and receives the AI-friendly guidance that
+/// `to_ai_friendly_error` reserves for locator misses. A payload with
+/// neither an error nor an element id is genuinely malformed and keeps the
+/// protocol-shaped message.
+fn element_id_from_value(
+    element_value: &Value,
+    using: &str,
+    value: &str,
+) -> Result<String, String> {
+    if element_value
+        .get("error")
+        .and_then(|e| e.as_str())
+        .is_some_and(|e| e == "no such element")
+    {
+        return Err(format!("No element found by {} '{}'", using, value));
+    }
+
+    element_value
+        .get("element-6066-11e4-a52e-4f735466cecf")
+        .or_else(|| element_value.get("ELEMENT"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or("No element ID in response".to_string())
+}
+
 async fn http_request(method: &str, url: &str, body: Option<&Value>) -> Result<Value, String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {}", e))?;
     let host = parsed.host_str().unwrap_or("127.0.0.1");
@@ -314,5 +338,40 @@ mod tests {
     fn test_client_custom_port() {
         let client = WebDriverClient::new(9515);
         assert_eq!(client.base_url, "http://127.0.0.1:9515");
+    }
+
+    /// In the WebDriver engine a genuine locator miss surfaces as a
+    /// "no such element" error payload; it must translate to the anchored
+    /// locator-miss shape (selector included) so `to_ai_friendly_error`
+    /// appends its guidance, exactly as the CDP engine's misses do.
+    #[test]
+    fn test_find_element_miss_translates_to_locator_miss() {
+        let payload = json!({
+            "error": "no such element",
+            "message": "An element could not be located on the page using the given search parameters.",
+        });
+        let err = element_id_from_value(&payload, "css selector", ".missing")
+            .expect_err("an error payload is a miss, not an element");
+        assert_eq!(err, "No element found by css selector '.missing'");
+    }
+
+    #[test]
+    fn test_find_element_id_extracted_from_w3c_payload() {
+        let payload = json!({ "element-6066-11e4-a52e-4f735466cecf": "abc123" });
+        assert_eq!(
+            element_id_from_value(&payload, "css selector", "#x").unwrap(),
+            "abc123"
+        );
+    }
+
+    /// A payload with neither an error nor an element id is genuinely
+    /// malformed; it keeps the protocol-shaped message, which
+    /// `to_ai_friendly_error` deliberately passes through unchanged.
+    #[test]
+    fn test_find_element_malformed_payload_keeps_protocol_message() {
+        let payload = json!({ "unexpected": true });
+        let err = element_id_from_value(&payload, "css selector", "#x")
+            .expect_err("no id and no error is malformed");
+        assert_eq!(err, "No element ID in response");
     }
 }

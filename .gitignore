@@ -6,6 +6,7 @@ dist/
 
 # Native binaries (keep the launcher scripts)
 bin/agent-browser-*
+bin/.install-method
 !bin/agent-browser
 !bin/agent-browser.cmd
 
@@ -44,6 +45,9 @@ yarn.lock
 # Environment
 .env
 .env.local
+.env.*
+!.env.example
+!.env.*.example
 
 # opensrc - source code for packages
 opensrc/
@@ -56,3 +60,11 @@ docs/package-lock.json
 
 # pnpm
 .pnpm-store/
+
+# TypeScript
+*.tsbuildinfo
+
+# next
+.next/
+out/
+next-env.d.ts

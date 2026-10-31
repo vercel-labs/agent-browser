@@ -44,6 +44,62 @@ if (cargoVersionRegex.test(cargoToml)) {
   process.exit(1);
 }
 
+// Update packages/dashboard/package.json
+const dashboardPkgPath = join(rootDir, "packages", "dashboard", "package.json");
+const dashboardPkg = JSON.parse(readFileSync(dashboardPkgPath, "utf-8"));
+if (dashboardPkg.version !== version) {
+  const oldVersion = dashboardPkg.version;
+  dashboardPkg.version = version;
+  writeFileSync(dashboardPkgPath, JSON.stringify(dashboardPkg, null, 2) + "\n");
+  console.log(`  Updated packages/dashboard/package.json: ${oldVersion} -> ${version}`);
+} else {
+  console.log(`  packages/dashboard/package.json already up to date`);
+}
+
+// Update packages/@agent-browser/sandbox/package.json
+const sandboxPkgPath = join(rootDir, "packages", "@agent-browser", "sandbox", "package.json");
+const sandboxPkg = JSON.parse(readFileSync(sandboxPkgPath, "utf-8"));
+if (sandboxPkg.version !== version) {
+  const oldVersion = sandboxPkg.version;
+  sandboxPkg.version = version;
+  writeFileSync(sandboxPkgPath, JSON.stringify(sandboxPkg, null, 2) + "\n");
+  console.log(`  Updated packages/@agent-browser/sandbox/package.json: ${oldVersion} -> ${version}`);
+} else {
+  console.log(`  packages/@agent-browser/sandbox/package.json already up to date`);
+}
+
+// Update packages/@agent-browser/eve/package.json (version + workspace sandbox dependency)
+const evePkgPath = join(rootDir, "packages", "@agent-browser", "eve", "package.json");
+const evePkg = JSON.parse(readFileSync(evePkgPath, "utf-8"));
+const eveSandboxDependency = "workspace:^";
+if (evePkg.version !== version || evePkg.dependencies["@agent-browser/sandbox"] !== eveSandboxDependency) {
+  const oldVersion = evePkg.version;
+  evePkg.version = version;
+  evePkg.dependencies["@agent-browser/sandbox"] = eveSandboxDependency;
+  writeFileSync(evePkgPath, JSON.stringify(evePkg, null, 2) + "\n");
+  console.log(`  Updated packages/@agent-browser/eve/package.json: ${oldVersion} -> ${version}`);
+} else {
+  console.log(`  packages/@agent-browser/eve/package.json already up to date`);
+}
+
+// Update package runtime version constant
+const sandboxVersionPath = join(
+  rootDir,
+  "packages",
+  "@agent-browser",
+  "sandbox",
+  "src",
+  "version.ts",
+);
+const sandboxVersionSource = `export const AGENT_BROWSER_SANDBOX_VERSION = "${version}";\n`;
+const currentSandboxVersionSource = readFileSync(sandboxVersionPath, "utf-8");
+if (currentSandboxVersionSource !== sandboxVersionSource) {
+  writeFileSync(sandboxVersionPath, sandboxVersionSource);
+  console.log(`  Updated packages/@agent-browser/sandbox/src/version.ts -> ${version}`);
+} else {
+  console.log(`  packages/@agent-browser/sandbox/src/version.ts already up to date`);
+}
+
 // Update Cargo.lock to match Cargo.toml
 if (cargoTomlUpdated) {
   try {

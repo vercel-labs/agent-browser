@@ -1,18 +1,15 @@
-import { readFile } from "fs/promises";
-import { join } from "path";
 import { convertToModelMessages, stepCountIs, streamText } from "ai";
 import type { ModelMessage, UIMessage } from "ai";
 import { createBashTool } from "bash-tool";
 import { headers } from "next/headers";
-import { allDocsPages } from "@/lib/docs-navigation";
-import { mdxToCleanMarkdown } from "@/lib/mdx-to-markdown";
+import { loadAllDocsSources } from "@/lib/docs-source";
 import { minuteRateLimit, dailyRateLimit } from "@/lib/rate-limit";
 
 export const maxDuration = 60;
 
-const DEFAULT_MODEL = "anthropic/claude-haiku-4.5";
+const DEFAULT_MODEL = "anthropic/claude-sonnet-4.6";
 
-const SYSTEM_PROMPT = `You are a helpful documentation assistant for agent-browser, a headless browser automation CLI designed for AI agents.
+const SYSTEM_PROMPT = `You are a helpful documentation assistant for agent-browser, a browser automation CLI designed for AI agents.
 
 GitHub repository: https://github.com/vercel-labs/agent-browser
 Documentation: https://agent-browser.dev
@@ -31,29 +28,10 @@ When answering questions:
 - Do NOT use emojis in your responses`;
 
 async function loadDocsFiles(): Promise<Record<string, string>> {
-  const files: Record<string, string> = {};
-
-  const results = await Promise.allSettled(
-    allDocsPages.map(async (page) => {
-      const slug = page.href === "/" ? "" : page.href.replace(/^\//, "");
-      const filePath = slug
-        ? join(process.cwd(), "src", "app", slug, "page.mdx")
-        : join(process.cwd(), "src", "app", "page.mdx");
-
-      const raw = await readFile(filePath, "utf-8");
-      const md = mdxToCleanMarkdown(raw);
-      const fileName = slug ? `/${slug}.md` : "/index.md";
-      return { fileName, md };
-    }),
+  const sources = await loadAllDocsSources();
+  return Object.fromEntries(
+    sources.map((source) => [source.markdownHref, source.markdown]),
   );
-
-  for (const result of results) {
-    if (result.status === "fulfilled") {
-      files[result.value.fileName] = result.value.md;
-    }
-  }
-
-  return files;
 }
 
 function addCacheControl(messages: ModelMessage[]): ModelMessage[] {
@@ -105,6 +83,10 @@ export async function POST(req: Request) {
   } = await createBashTool({ files: docsFiles });
 
   const result = streamText({
+    headers: {
+      "http-referer": "https://agent-browser.dev",
+      "x-title": "agent-browser",
+    },
     model: DEFAULT_MODEL,
     system: SYSTEM_PROMPT,
     messages: await convertToModelMessages(messages),

@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "agent-browser",
-  "description": "Headless browser automation for AI agents",
+  "description": "Browser automation for AI agents",
   "owner": {
     "name": "Vercel",
     "email": "support@vercel.com"
