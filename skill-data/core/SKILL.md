@@ -544,11 +544,11 @@ The default output lists violations and incomplete checks with failing selector 
 
 ## React / Web Vitals (built-in, any React app)
 
-agent-browser ships with first-class React introspection. Works on any React app — Next.js, Remix, Vite+React, CRA, TanStack Start, React Native Web, etc. The `react …` commands require the React DevTools hook to be installed at launch via `--enable react-devtools`:
+agent-browser ships with first-class React introspection. Works on any React app — Next.js, Remix, Vite+React, CRA, TanStack Start, React Native Web, etc. The `react …` commands require the React DevTools hook to be installed at launch via `--enable react-devtools`. Without it, they error with `React DevTools hook not installed` and tell you to relaunch with `--enable react-devtools`:
 
 ```bash
 agent-browser open --enable react-devtools http://localhost:3000
-agent-browser react tree                         # component tree
+agent-browser react tree                         # print the component tree
 agent-browser react inspect <fiberId>            # props, hooks, state, source
 agent-browser react renders start                # begin re-render recording
 agent-browser react renders stop                 # print render profile
@@ -557,7 +557,7 @@ agent-browser vitals [url]                       # LCP/CLS/TTFB/FCP/INP + hydrat
 agent-browser pushstate <url>                    # SPA navigation (auto-detects Next router)
 ```
 
-Without `--enable react-devtools`, the `react …` commands error. `vitals` and `pushstate` work on any site regardless of framework. `vitals` prints a summary by default; use `--json` for the full structured payload.
+`react tree` prints the component tree when the output includes one. A header-only result means no component tree was collected; confirm the page uses React and that a React root has mounted. `vitals` and `pushstate` work on any site regardless of framework. `vitals` prints a summary by default; use `--json` for the full structured payload.
 
 ## Working safely
 

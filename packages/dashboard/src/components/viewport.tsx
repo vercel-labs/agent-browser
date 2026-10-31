@@ -470,7 +470,7 @@ export function Viewport() {
                 value={addressValue}
                 onChange={(e) => setAddressValue(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") {
+                  if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                     e.preventDefault();
                     handleNavigate();
                   }
@@ -698,7 +698,7 @@ export function Viewport() {
             value={customValue}
             onChange={(e) => setCustomValue(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") {
+              if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                 e.preventDefault();
                 submitCustomDimensions();
               }
@@ -728,7 +728,7 @@ export function Viewport() {
             value={recordPath}
             onChange={(e) => setRecordPath(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") {
+              if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229) {
                 e.preventDefault();
                 handleRecordStart();
               }

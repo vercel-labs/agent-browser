@@ -125,12 +125,10 @@ const INTERACTIVE_ROLES: &[&str] = &[
     "Iframe",
 ];
 
+const TABLE_CELL_ROLES: &[&str] = &["cell", "gridcell", "columnheader", "rowheader"];
+
 const CONTENT_ROLES: &[&str] = &[
     "heading",
-    "cell",
-    "gridcell",
-    "columnheader",
-    "rowheader",
     "listitem",
     "article",
     "region",
@@ -490,13 +488,14 @@ pub async fn take_snapshot(
 
     for (idx, node) in tree_nodes.iter().enumerate() {
         let role = node.role.as_str();
-        let mut should_ref = if INTERACTIVE_ROLES.contains(&role) {
-            true
-        } else if CONTENT_ROLES.contains(&role) {
-            !node.name.is_empty()
-        } else {
-            false
-        };
+        let mut should_ref =
+            if INTERACTIVE_ROLES.contains(&role) || TABLE_CELL_ROLES.contains(&role) {
+                true
+            } else if CONTENT_ROLES.contains(&role) {
+                !node.name.is_empty()
+            } else {
+                false
+            };
 
         if node
             .backend_node_id

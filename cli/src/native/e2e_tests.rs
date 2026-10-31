@@ -66,9 +66,80 @@ fn assert_error_code(resp: &Value, code: &str) {
     assert_eq!(resp.get("code").and_then(Value::as_str), Some(code));
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_empty_table_cell_refs_resolve() {
+    let html = r#"<!doctype html><table role="table"><tbody><tr>
+<td role="cell" id="empty-cell"></td>
+<td role="cell" id="named-cell">Named cell</td>
+<td role="cell" id="nbsp-cell">&nbsp;</td>
+<th role="columnheader" id="empty-columnheader"></th>
+<th role="rowheader" id="empty-rowheader"></th>
+</tr></tbody></table><div role="grid"><div role="row"><div role="gridcell" id="empty-gridcell"></div></div></div>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let refs = get_data(&resp)["refs"]
+        .as_object()
+        .expect("snapshot refs should be an object");
+    let mut resolved = Vec::new();
+    for (reference, metadata) in refs {
+        let role = metadata["role"].as_str().unwrap_or_default();
+        if ["cell", "gridcell", "columnheader", "rowheader"].contains(&role) {
+            let resp = execute_command(
+                &json!({
+                    "id": format!("resolve-{reference}"),
+                    "action": "getattribute",
+                    "selector": format!("@{reference}"),
+                    "attribute": "id"
+                }),
+                &mut state,
+            )
+            .await;
+            assert_success(&resp);
+            resolved.push((
+                get_data(&resp)["value"].as_str().unwrap().to_string(),
+                role.to_string(),
+            ));
+        }
+    }
+    resolved.sort();
+    assert_eq!(
+        resolved,
+        [
+            ("empty-cell".to_string(), "cell".to_string()),
+            ("empty-columnheader".to_string(), "columnheader".to_string()),
+            ("empty-gridcell".to_string(), "gridcell".to_string()),
+            ("empty-rowheader".to_string(), "rowheader".to_string()),
+            ("named-cell".to_string(), "cell".to_string()),
+            ("nbsp-cell".to_string(), "cell".to_string()),
+        ]
+    );
+
+    let resp = execute_command(&json!({ "id": "close", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
+        "wheel_probe" => include_str!("test_fixtures/wheel_probe.html"),
         "html5_drag_probe" => include_str!("test_fixtures/html5_drag_probe.html"),
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
         "snapshot_diff_probe" => include_str!("test_fixtures/snapshot_diff_probe.html"),
@@ -3760,6 +3831,304 @@ async fn e2e_press_dispatches_single_keystroke() {
 // ---------------------------------------------------------------------------
 // Raw mouse regressions
 // ---------------------------------------------------------------------------
+
+async fn wait_for_wheel_events(state: &mut DaemonState, expected: usize) -> Value {
+    for _ in 0..100 {
+        let resp = execute_command(
+            &json!({
+                "action": "evaluate",
+                "script": "({ last: window.__wheelProbe, events: window.__wheelEvents, buttons: window.__wheelButtons, scrollTop: document.getElementById('target').scrollTop })"
+            }),
+            state,
+        )
+        .await;
+        assert_success(&resp);
+        let result = get_data(&resp)["result"].clone();
+        if result["events"].as_array().map(Vec::len) == Some(expected)
+            && result["scrollTop"].as_f64().unwrap_or_default() > 0.0
+        {
+            return result;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("Expected {expected} wheel events and nested scrolling");
+}
+
+async fn launch_wheel_probe() -> DaemonState {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": native_test_fixture_url("wheel_probe")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "evaluate",
+            "script": "document.addEventListener('wheel', event => { window.__wheelButtons = event.buttons; }); 'armed'"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    state
+}
+
+async fn wheel_target_coordinates(state: &mut DaemonState) -> (i64, i64) {
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "evaluate",
+            "script": r#"(() => {
+                const rect = document.getElementById('target').getBoundingClientRect();
+                return {
+                    x: Math.round(rect.left + rect.width / 2),
+                    y: Math.round(rect.top + rect.height / 2)
+                };
+            })()"#
+        }),
+        state,
+    )
+    .await;
+    assert_success(&resp);
+    let target = &get_data(&resp)["result"];
+    let x = target["x"].as_i64().expect("target x should be numeric");
+    let y = target["y"].as_i64().expect("target y should be numeric");
+    (x, y)
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_mouse_wheel_uses_last_pointer_coordinates() {
+    let mut state = launch_wheel_probe().await;
+    let (x, y) = wheel_target_coordinates(&mut state).await;
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "mousemove", "x": x, "y": y }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "wheel", "deltaX": -12.5, "deltaY": 37.25 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["deltaX"], -12.5);
+    assert_eq!(get_data(&resp)["deltaY"], 37.25);
+
+    let probe = wait_for_wheel_events(&mut state, 1).await;
+    assert_eq!(probe["events"].as_array().map(Vec::len), Some(1), "{probe}");
+    let wheel = &probe["last"];
+    assert_eq!(wheel["target"], "target", "wheel probe: {wheel}");
+    assert_eq!(wheel["x"].as_i64(), Some(x));
+    assert_eq!(wheel["y"].as_i64(), Some(y));
+    assert_eq!(wheel["deltaX"].as_f64(), Some(-12.5));
+    assert_eq!(wheel["deltaY"].as_f64(), Some(37.25));
+    assert_eq!(probe["buttons"], 0);
+    assert!(probe["scrollTop"].as_f64().unwrap() > 0.0, "{probe}");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_mouse_wheel_honors_explicit_coordinates() {
+    let mut state = launch_wheel_probe().await;
+    let (x, y) = wheel_target_coordinates(&mut state).await;
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "mousemove", "x": x + 20, "y": y + 10 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let explicit_x = x - 10;
+    let explicit_y = y - 10;
+    let resp = execute_command(
+        &json!({
+            "id": "6",
+            "action": "wheel",
+            "x": explicit_x,
+            "y": explicit_y,
+            "deltaX": 2.5,
+            "deltaY": 31.5
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["deltaX"], 2.5);
+    assert_eq!(get_data(&resp)["deltaY"], 31.5);
+
+    let probe = wait_for_wheel_events(&mut state, 1).await;
+    let wheel = &probe["last"];
+    assert_eq!(wheel["target"], "target", "wheel probe: {wheel}");
+    assert_eq!(wheel["x"].as_i64(), Some(explicit_x));
+    assert_eq!(wheel["y"].as_i64(), Some(explicit_y));
+    assert_eq!(wheel["deltaX"].as_f64(), Some(2.5));
+    assert_eq!(wheel["deltaY"].as_f64(), Some(31.5));
+    assert!(probe["scrollTop"].as_f64().unwrap() > 0.0, "{probe}");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_raw_mouse_wheel_preserves_held_button_after_rejected_dispatch() {
+    let mut state = launch_wheel_probe().await;
+    let (x, y) = wheel_target_coordinates(&mut state).await;
+
+    let raw_x = x + 20;
+    let raw_y = y + 10;
+    let resp = Box::pin(execute_command(
+        &json!({
+            "id": "7",
+            "action": "mouse",
+            "eventType": "mouseMoved",
+            "x": raw_x,
+            "y": raw_y
+        }),
+        &mut state,
+    ))
+    .await;
+    assert_success(&resp);
+
+    let resp = Box::pin(execute_command(
+        &json!({
+            "id": "7a",
+            "action": "mouse",
+            "eventType": "mousePressed",
+            "x": raw_x,
+            "y": raw_y,
+            "button": "left"
+        }),
+        &mut state,
+    ))
+    .await;
+    assert_success(&resp);
+
+    let resp = Box::pin(execute_command(
+        &json!({
+            "id": "7b",
+            "action": "mouse",
+            "eventType": "mousePressed",
+            "x": raw_x + 30,
+            "y": raw_y + 20,
+            "button": "invalid"
+        }),
+        &mut state,
+    ))
+    .await;
+    assert_eq!(
+        resp.get("success").and_then(Value::as_bool),
+        Some(false),
+        "invalid button should fail: {resp}"
+    );
+
+    let resp = Box::pin(execute_command(
+        &json!({ "id": "8", "action": "wheel", "deltaX": 2, "deltaY": 29 }),
+        &mut state,
+    ))
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["deltaX"], 2.0);
+    assert_eq!(get_data(&resp)["deltaY"], 29.0);
+
+    let probe = wait_for_wheel_events(&mut state, 1).await;
+    let wheel = &probe["last"];
+    assert_eq!(wheel["target"], "target", "wheel probe: {wheel}");
+    assert_eq!(wheel["x"].as_i64(), Some(raw_x));
+    assert_eq!(wheel["y"].as_i64(), Some(raw_y));
+    assert_eq!(wheel["deltaX"].as_f64(), Some(2.0));
+    assert_eq!(wheel["deltaY"].as_f64(), Some(29.0));
+    assert_eq!(probe["buttons"], 1);
+    assert!(probe["scrollTop"].as_f64().unwrap() > 0.0, "{probe}");
+
+    let resp = Box::pin(execute_command(
+        &json!({
+            "id": "9",
+            "action": "mouse",
+            "eventType": "mouseReleased",
+            "x": raw_x,
+            "y": raw_y,
+            "button": "left"
+        }),
+        &mut state,
+    ))
+    .await;
+    assert_success(&resp);
+
+    let resp = Box::pin(execute_command(
+        &json!({ "id": "99", "action": "close" }),
+        &mut state,
+    ))
+    .await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_input_mouse_wheel_uses_input_mouse_coordinates() {
+    let mut state = launch_wheel_probe().await;
+    let (x, y) = wheel_target_coordinates(&mut state).await;
+    let input_x = x + 35;
+    let input_y = y + 15;
+
+    let resp = execute_command(
+        &json!({
+            "id": "10",
+            "action": "input_mouse",
+            "type": "mouseMoved",
+            "x": input_x,
+            "y": input_y,
+            "button": "none"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "11", "action": "wheel", "deltaX": -3.5, "deltaY": 8.25 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["deltaX"], -3.5);
+    assert_eq!(get_data(&resp)["deltaY"], 8.25);
+
+    let probe = wait_for_wheel_events(&mut state, 1).await;
+    let wheel = &probe["last"];
+    assert_eq!(wheel["target"], "target", "wheel probe: {wheel}");
+    assert_eq!(wheel["x"].as_i64(), Some(input_x));
+    assert_eq!(wheel["y"].as_i64(), Some(input_y));
+    assert_eq!(wheel["deltaX"].as_f64(), Some(-3.5));
+    assert_eq!(wheel["deltaY"].as_f64(), Some(8.25));
+    assert_eq!(probe["buttons"], 0);
+    assert!(probe["scrollTop"].as_f64().unwrap() > 0.0, "{probe}");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
 
 #[tokio::test]
 #[ignore]

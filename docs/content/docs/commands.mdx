@@ -5,6 +5,8 @@ navTitle: "Commands"
 
 ## Core
 
+When the top-level Chrome/CDP `eval` result is a value JSON cannot represent, plain output prints its exact JavaScript token, including `NaN`, `Infinity`, `-Infinity`, `-0`, BigInt literals, and `undefined`. With `--json`, `data.result` stays `null` and sibling `data.unserializable` contains the token. MCP text prints the token, and structured responses expose it at `structuredContent.response.data.unserializable`.
+
 ```bash
 agent-browser open                    # Launch browser (no nav); stays on about:blank
 agent-browser open <url>              # Launch + navigate (aliases: goto, navigate)
@@ -174,6 +176,15 @@ agent-browser mouse up [button]       # Release button
 agent-browser mouse wheel <dy> [dx]   # Scroll wheel
 ```
 
+The wheel scrolls at the current tracked pointer, which starts at `0,0`. Failed wheel dispatches leave the tracked pointer unchanged.
+
+To scroll elsewhere, move the pointer first:
+
+```bash
+agent-browser mouse move 600 400
+agent-browser mouse wheel 100
+```
+
 Use `--human` with `click`, `drag`, or `mouse move` for curved, eased movement from the current cursor position. For `mouse move`, `--duration` sets the target total milliseconds including browser response time, `--steps` sets the number of events, and `--seed` makes the path reproducible. A slow browser can still extend the requested duration.
 
 ## Clipboard
@@ -249,6 +260,8 @@ agent-browser network har start --content all  # Embed all response bodies (bina
 agent-browser network har start --content none # Metadata only, no bodies
 agent-browser network har stop [output.har]    # Stop and save HAR (temp path if omitted)
 ```
+
+If HAR export fails, recording and captured requests remain available. Fix the destination and retry `network har stop`.
 
 See [Network](/network) for pre-navigation routing, request filters, HAR export, and SSR/no-JavaScript debugging.
 
@@ -583,6 +596,8 @@ agent-browser react suspense [--only-dynamic] [--json]  # Suspense boundaries + 
                                                          # --only-dynamic hides the "static" list
 agent-browser vitals [url] [--json]                # LCP/CLS/TTFB/FCP/INP + hydration
 ```
+
+`react tree` prints the component tree when one is available. If the response contains only a header, no tree was collected. Confirm the page uses React and that a React root has mounted.
 
 Works on any React app (Next.js, Remix, Vite+React, CRA, TanStack Start, React Native Web, etc.). `vitals` and `pushstate` are framework-agnostic.
 

@@ -159,6 +159,8 @@ agent-browser chat "<instruction>"    # AI chat: natural language browser contro
 agent-browser chat                    # AI chat: interactive REPL mode
 ```
 
+When the top-level Chrome/CDP `eval` result is a value JSON cannot represent, plain output prints its exact JavaScript token, including `NaN`, `Infinity`, `-Infinity`, `-0`, BigInt literals, and `undefined`. With `--json`, `data.result` stays `null` and sibling `data.unserializable` contains the token. MCP text prints the token, and structured responses expose it at `structuredContent.response.data.unserializable`.
+
 ### WebMCP (experimental)
 
 WebMCP is enabled by default in agent-browser-managed Chrome. Use `--no-webmcp` to disable the launch features and proactive context.
@@ -328,7 +330,14 @@ agent-browser mouse move 600 400 --duration 250 --steps 24 # Smooth movement
 agent-browser mouse move 600 400 --human --seed 42 # Reproducible curved movement
 agent-browser mouse down [button]     # Press button (left/right/middle)
 agent-browser mouse up [button]       # Release button
-agent-browser mouse wheel <dy> [dx]   # Scroll wheel
+agent-browser mouse wheel <dy> [dx]   # Scroll at current tracked pointer (starts at 0,0)
+```
+
+Failed wheel dispatches leave the tracked pointer unchanged. To scroll elsewhere, move the pointer first:
+
+```bash
+agent-browser mouse move 600 400
+agent-browser mouse wheel 100
 ```
 
 Add `--human` to `click` or `drag` for curved, eased movement from the current cursor position. For timed mouse moves, `--duration` is the target total duration, including browser response time; a slow browser can still extend it.
@@ -391,6 +400,8 @@ agent-browser network har start --content all  # Embed all response bodies (bina
 agent-browser network har start --content none # Metadata only, no bodies
 agent-browser network har stop [output.har]    # Stop and save HAR (temp path if omitted)
 ```
+
+If HAR export fails, recording and captured requests remain available. Fix the destination and retry `network har stop`.
 
 ### Tabs & Windows
 
@@ -515,11 +526,11 @@ Without `batch` the same sequence is three commands that all reuse the same daem
 
 ### React / Web Vitals
 
-Agent-browser ships with first-class React introspection and universal Web Vitals metrics. The React commands need the React DevTools hook installed at launch; Web Vitals and pushstate are framework-agnostic.
+Agent-browser ships with first-class React introspection and universal Web Vitals metrics. React commands require the React DevTools hook, installed at launch with `--enable react-devtools`. The binary includes the hook's `installHook.js`; without the hook, React commands error with `React DevTools hook not installed` and tell you to relaunch with `--enable react-devtools`. Web Vitals and pushstate are framework-agnostic.
 
 ```bash
 agent-browser open --enable react-devtools <url>   # Launch with React hook installed
-agent-browser react tree                           # Full component tree
+agent-browser react tree                           # Print the component tree
 agent-browser react inspect <fiberId>              # props, hooks, state, source
 agent-browser react renders start                  # Begin fiber render recording
 agent-browser react renders stop [--json]          # Stop and print profile (--json for raw data)
@@ -528,8 +539,7 @@ agent-browser react suspense [--only-dynamic] [--json]  # Suspense boundaries + 
 agent-browser vitals [url] [--json]                # LCP/CLS/TTFB/FCP/INP + hydration summary
 ```
 
-Each `react ...` subcommand requires `--enable react-devtools` to have been passed at launch (the React DevTools `installHook.js` is embedded in the binary). Without it the commands error with `React DevTools hook not installed
-- relaunch with --enable react-devtools`.
+`react tree` prints the component tree when the output includes one. A header-only result means no component tree was collected; confirm the page uses React and that a React root has mounted.
 
 Works on any React app — Next.js, Remix, Vite+React, CRA, TanStack Start, React Native Web, etc. `vitals` and `pushstate` are framework-agnostic. `vitals` prints a summary by default; pass `--json` for the full structured payload.
 

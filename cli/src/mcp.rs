@@ -1036,7 +1036,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_EVAL,
             "Evaluate JavaScript",
-            "Run JavaScript in the page using stdin to avoid shell escaping.",
+            "Run JavaScript in the page using stdin to avoid shell escaping. When the top-level result is a value JSON cannot represent, the structured response includes `response.data.unserializable` and the text content prints the JavaScript token.",
             json!({
                 "script": { "type": "string", "description": "JavaScript expression or script to evaluate." }
             }),
@@ -1226,7 +1226,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_MOUSE_WHEEL,
             "Mouse wheel",
-            "Scroll with the mouse wheel.",
+            "Scroll with the mouse wheel at the current pointer, initially (0,0). Call agent_browser_mouse_move first to target another location.",
             json!({ "dy": number_schema(), "dx": number_schema() }),
             &["dy"],
         ),
@@ -1720,7 +1720,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_REACT_TREE,
             "React tree",
-            "Inspect React tree.",
+            "Inspect the React component tree and return its structured result.",
             json!({ "json": { "type": "boolean" } }),
             &[],
         ),
@@ -4347,6 +4347,9 @@ fn response_text(value: &Value) -> Option<String> {
         }
 
         if let Some(data) = obj.get("data") {
+            if let Some(token) = data.get("unserializable").and_then(Value::as_str) {
+                return Some(token.to_string());
+            }
             // Accessibility reports carry a URL alongside their findings. Use
             // the same report formatter as the CLI before the generic string
             // field fallback turns the MCP text content into only that URL.
@@ -5100,11 +5103,14 @@ mod tests {
     }
 
     #[test]
-    fn react_json_uses_command_local_raw_json_flag() {
+    fn react_json_uses_structured_cli_mode_and_command_local_raw_json_flag() {
         let mut args = vec!["react".to_string(), "tree".to_string()];
         append_react_raw_json_arg(&json!({ "json": true }), &mut args).unwrap();
 
         assert_eq!(args, vec!["react", "tree", RAW_JSON_ARG]);
+        let cli_args = cli_tool_args(&json!({}), args, None).unwrap();
+
+        assert_eq!(cli_args, vec!["--json", "react", "tree", RAW_JSON_ARG]);
     }
 
     #[test]

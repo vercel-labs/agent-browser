@@ -3917,7 +3917,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Run JavaScript in the page using stdin to avoid shell escaping.",
+      "description": "Run JavaScript in the page using stdin to avoid shell escaping. When the top-level result is a value JSON cannot represent, the structured response includes `response.data.unserializable` and the text content prints the JavaScript token.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -7049,7 +7049,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Scroll with the mouse wheel.",
+      "description": "Scroll with the mouse wheel at the current pointer, initially (0,0). Call agent_browser_mouse_move first to target another location.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -9296,7 +9296,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Inspect React tree.",
+      "description": "Inspect the React component tree and return its structured result.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

@@ -127,6 +127,23 @@ fn format_storage_text(data: &serde_json::Value) -> Option<String> {
     Some(format!("{}: {}", key, format_storage_value(value)))
 }
 
+/// Formats the daemon's preformatted React tree, including an empty-tree hint.
+fn format_react_tree_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
+    if action != Some("react_tree") {
+        return None;
+    }
+
+    let tree = data.get("tree")?.as_str()?;
+    if tree
+        .lines()
+        .any(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+    {
+        Some(tree.to_string())
+    } else {
+        Some("No React component tree found. Confirm that a React root has mounted.".to_string())
+    }
+}
+
 fn format_stream_status_text(action: Option<&str>, data: &serde_json::Value) -> Option<String> {
     match action {
         Some("stream_disable") => data
@@ -580,6 +597,10 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             println!("{}", output);
             return;
         }
+        if let Some(output) = format_react_tree_text(action, data) {
+            print_with_boundaries(&output, boundary_origin(data), opts);
+            return;
+        }
         if action == Some("webmcp_list") {
             let Some(tools) = data.get("tools").and_then(|tools| tools.as_array()) else {
                 return;
@@ -772,6 +793,10 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         }
         // Eval result
         if let Some(result) = data.get("result") {
+            if let Some(token) = data.get("unserializable").and_then(|v| v.as_str()) {
+                print_with_boundaries(token, origin, opts);
+                return;
+            }
             let formatted = serde_json::to_string_pretty(result).unwrap_or_default();
             print_with_boundaries(&formatted, origin, opts);
             return;
@@ -2295,6 +2320,7 @@ agent-browser eval - Execute JavaScript
 Usage: agent-browser eval [options] <script>
 
 Executes JavaScript code in the browser context and returns the result.
+For a top-level Chrome result JSON cannot represent, plain output prints its JavaScript token and JSON output includes data.unserializable.
 
 Options:
   -b, --base64         Decode script from base64 (avoids shell escaping issues)
@@ -2486,7 +2512,7 @@ Subcommands:
   move <x> <y>         Move mouse to coordinates
   down [button]        Press mouse button (left, right, middle)
   up [button]          Release mouse button
-  wheel <dy> [dx]      Scroll mouse wheel
+  wheel <dy> [dx]      Scroll at current tracked pointer (starts at 0,0)
 
 Movement Options:
   --duration <ms>       Target total duration, including browser response time
@@ -2495,6 +2521,7 @@ Movement Options:
   --seed <n>            Seed for the human movement path
 
 Steps share one schedule; a slow browser can extend the requested duration.
+Failed wheel dispatches leave the tracked pointer unchanged.
 
 Global Options:
   --json               Output as JSON
@@ -2502,12 +2529,12 @@ Global Options:
 
 Examples:
   agent-browser mouse move 100 200
+  agent-browser mouse wheel 100
   agent-browser mouse move 600 400 --duration 250 --steps 24
   agent-browser mouse move 600 400 --human --seed 42
   agent-browser mouse down
   agent-browser mouse up
   agent-browser mouse down right
-  agent-browser mouse wheel 100
   agent-browser mouse wheel -50 0
 "##
         }
@@ -2573,6 +2600,8 @@ Subcommands:
   request <requestId>        View full request/response detail (including body)
   har <start|stop> [path]    Record and export a HAR file
     --content <mode>         Response bodies to embed on start: text (default), all, none
+    If export fails, recording and captured requests remain available. Fix the
+    destination and retry stop.
 
 Global Options:
   --json               Output as JSON
@@ -3987,7 +4016,7 @@ WebMCP (experimental):
   Brief untrusted summaries appear only on discovery or change; no schemas
 
 React (requires `open --enable react-devtools`):
-  react tree                 Full React component tree (depth id parent name columns)
+  react tree                 Full React component tree (enable with open --enable react-devtools)
   react inspect <id>         Inspect one fiber (props, hooks, state, source)
   react renders start        Start recording re-renders via onCommitFiberRoot
   react renders stop [--json] Stop and print render profile
@@ -4428,11 +4457,57 @@ pub fn print_version() {
 #[cfg(test)]
 mod tests {
     use super::{
-        boundary_origin, format_a11y_text, format_snapshot_delta, format_storage_text,
-        format_vitals_text, format_webmcp_context, format_webmcp_text, format_webmcp_tool_text,
-        format_with_boundaries, OutputOptions,
+        boundary_origin, format_a11y_text, format_react_tree_text, format_snapshot_delta,
+        format_storage_text, format_vitals_text, format_webmcp_context, format_webmcp_text,
+        format_webmcp_tool_text, format_with_boundaries, OutputOptions,
     };
     use serde_json::json;
+
+    #[test]
+    fn test_format_react_tree_text_preserves_populated_tree() {
+        let tree =
+            "# React component tree\n# Columns: depth id parent name\n0 1 - App\n  1 2 1 Button\n";
+        let data = json!({ "tree": tree });
+
+        assert_eq!(
+            format_react_tree_text(Some("react_tree"), &data).as_deref(),
+            Some(tree)
+        );
+    }
+
+    #[test]
+    fn test_format_react_tree_text_reports_empty_tree() {
+        let header_only = json!({
+            "tree": "# React component tree\n# Columns: depth id parent name [key=...]\n# Use `react inspect <id>` for props/hooks/state. IDs valid until next navigation."
+        });
+        let whitespace_only = json!({ "tree": " \n\t\n" });
+        let expected = "No React component tree found. Confirm that a React root has mounted.";
+
+        assert_eq!(
+            format_react_tree_text(Some("react_tree"), &header_only).as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            format_react_tree_text(Some("react_tree"), &whitespace_only).as_deref(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn test_format_react_tree_text_ignores_other_actions() {
+        let data = json!({ "tree": "component tree" });
+
+        assert_eq!(format_react_tree_text(Some("snapshot"), &data), None);
+    }
+
+    #[test]
+    fn test_format_react_tree_text_ignores_missing_or_invalid_tree() {
+        assert_eq!(format_react_tree_text(Some("react_tree"), &json!({})), None);
+        assert_eq!(
+            format_react_tree_text(Some("react_tree"), &json!({ "tree": ["App"] })),
+            None
+        );
+    }
 
     #[test]
     fn test_format_stream_status_text_for_enabled_stream() {

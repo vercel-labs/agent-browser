@@ -1535,6 +1535,15 @@ impl BrowserManager {
     }
 
     pub async fn evaluate(&self, script: &str, _args: Option<Value>) -> Result<Value, String> {
+        let result = self.evaluate_remote_object(script).await?;
+        Ok(result.value.unwrap_or(Value::Null))
+    }
+
+    /// Returns the raw CDP result so direct eval can preserve special values.
+    pub(crate) async fn evaluate_remote_object(
+        &self,
+        script: &str,
+    ) -> Result<RemoteObject, String> {
         let session_id = self.active_session_id()?.to_string();
 
         let result: EvaluateResult = self
@@ -1559,7 +1568,7 @@ impl BrowserManager {
             return Err(format!("Evaluation error: {}", msg));
         }
 
-        Ok(result.result.value.unwrap_or(Value::Null))
+        Ok(result.result)
     }
 
     async fn evaluate_simple(&self, expression: &str) -> Result<Value, String> {
