@@ -349,6 +349,8 @@ agent-browser tab close t2             # close tab t2
 
 Stable `tabId`s mean `t2` points at the same tab across commands even when other tabs open or close. After switching, refs from a prior snapshot on a different tab no longer apply — re-snapshot. `tab list --json` also reports each tab's CDP `targetId`, accepted anywhere a tab ref is accepted; target ids stay stable across daemon restarts, unlike `t<N>` ids.
 
+A label starts with a letter and contains only letters, digits, `-`, or `_`. Labels must be unique within a session and cannot use the reserved `t<N>` or `T<N>` tab-id form. Rejected labels preserve the current tab's refs and selected frame.
+
 Tabs opened through `tab new` or `click --new-tab` inherit the session's user agent, headers, HTTP credentials, init scripts, routes, and emulation overrides before their first document loads.
 
 Runtime init-script identifiers are session-wide. Removing one clears it from every open tab where it was registered and from the setup replayed into future tabs.
@@ -577,6 +579,8 @@ agent-browser dashboard start --allowed-origins https://dashboard.example.com
 Use comma-separated origins only when each is a trusted dashboard URL. Every origin must be a valid exact HTTPS origin, and custom ports must be integers from 1 to 65535. Invalid dashboard options fail without starting the server. When external origins are configured, the command prints private tokenized access URLs only for them. Open the matching URL once to establish the browser session and do not share it; its unguessable token is carried in the initial fragment, then stored in a Secure, host-bound, same-site cookie for dashboard API and stream requests. Loopback URLs require no token and should be opened directly as `http://localhost:<port>`. Configure the reverse proxy to redact cookies from logs. The dashboard rejects requests with missing or cross-origin browser provenance. Repeated starts reuse a running dashboard only when the port and allowed origins match; run `agent-browser dashboard stop` before changing either setting.
 
 ## Full reference
+
+When no package root is found, the CLI reads manually installed skills from `~/.agent-browser/skills` and `~/.agent-browser/skill-data`. Package discovery looks for the bundled `skill-data/core/SKILL.md` file.
 
 Everything covered here plus the complete command/flag/env listing:
 
