@@ -27,6 +27,8 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{exit, Command};
+use std::thread;
+use std::time::Duration;
 
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::CloseHandle;
@@ -854,6 +856,80 @@ fn run_session(args: &[String], session: &str, json_mode: bool) {
                 println!("{}", session);
             }
         }
+    }
+}
+
+fn run_console_follow(flags: &flags::Flags, is_errors: bool) {
+    let action = if is_errors { "errors" } else { "console" };
+    let mut last_seen: usize = 0;
+    let mut reported_failure = false;
+
+    loop {
+        let cmd = json!({ "id": gen_id(), "action": action, "clear": false });
+        match send_command(cmd, &flags.session) {
+            Ok(resp) if resp.success => {
+                reported_failure = false;
+                if let Some(data) = &resp.data {
+                    if is_errors {
+                        if let Some(errors) = data.get("errors").and_then(|v| v.as_array()) {
+                            for entry in errors.iter().skip(last_seen) {
+                                if flags.json {
+                                    println!(
+                                        "{}",
+                                        serde_json::to_string(entry).unwrap_or_default()
+                                    );
+                                } else {
+                                    let text =
+                                        entry.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                                    let url =
+                                        entry.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                                    let line =
+                                        entry.get("line").and_then(|v| v.as_i64()).unwrap_or(0);
+                                    let col =
+                                        entry.get("column").and_then(|v| v.as_i64()).unwrap_or(0);
+                                    if url.is_empty() {
+                                        println!("{}", text);
+                                    } else {
+                                        println!("{} ({}:{}:{})", text, url, line, col);
+                                    }
+                                }
+                            }
+                            last_seen = errors.len();
+                        }
+                    } else if let Some(messages) = data.get("messages").and_then(|v| v.as_array()) {
+                        for entry in messages.iter().skip(last_seen) {
+                            if flags.json {
+                                println!("{}", serde_json::to_string(entry).unwrap_or_default());
+                            } else {
+                                let level =
+                                    entry.get("type").and_then(|v| v.as_str()).unwrap_or("log");
+                                let text = entry.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                                println!("{} {}", color::console_level_prefix(level), text);
+                            }
+                        }
+                        last_seen = messages.len();
+                    }
+                }
+            }
+            Ok(resp) => {
+                // Command failed (e.g., no browser running). Keep retrying, but
+                // say so once instead of staying silent.
+                if !reported_failure {
+                    reported_failure = true;
+                    eprintln!(
+                        "{} {}",
+                        color::error_indicator(),
+                        resp.error.as_deref().unwrap_or("Command failed, retrying")
+                    );
+                }
+            }
+            Err(e) => {
+                // Connection error - daemon may have stopped
+                eprintln!("{} {}", color::error_indicator(), e);
+                exit(1);
+            }
+        }
+        thread::sleep(Duration::from_millis(500));
     }
 }
 
@@ -2231,6 +2307,14 @@ fn main() {
                 // Launch succeeded
             }
         }
+    }
+
+    // Handle --follow for console/errors commands
+    if cmd.get("follow").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        let is_errors = action == "errors";
+        run_console_follow(&flags, is_errors);
+        return;
     }
 
     // Handle batch command: from args or stdin

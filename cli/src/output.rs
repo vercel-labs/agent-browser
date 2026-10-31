@@ -3070,12 +3070,13 @@ Examples:
             r##"
 agent-browser console - View console logs
 
-Usage: agent-browser console [--clear]
+Usage: agent-browser console [--clear] [--follow]
 
 View browser console output (log, warn, error, info).
 
 Options:
   --clear              Clear console log buffer
+  --follow, -f         Stream console logs in real-time (until Ctrl+C)
 
 Global Options:
   --json               Output as JSON
@@ -3084,18 +3085,21 @@ Global Options:
 Examples:
   agent-browser console
   agent-browser console --clear
+  agent-browser console -f
+  agent-browser console --follow --json
 "##
         }
         "errors" => {
             r##"
 agent-browser errors - View page errors
 
-Usage: agent-browser errors [--clear]
+Usage: agent-browser errors [--clear] [--follow]
 
 View JavaScript errors and uncaught exceptions.
 
 Options:
   --clear              Clear error buffer
+  --follow, -f         Stream page errors in real-time (until Ctrl+C)
 
 Global Options:
   --json               Output as JSON
@@ -3104,6 +3108,7 @@ Global Options:
 Examples:
   agent-browser errors
   agent-browser errors --clear
+  agent-browser errors --follow
 "##
         }
 
@@ -4017,8 +4022,8 @@ Debug:
   profiler start|stop [path] Record Chrome DevTools profile
   record start <path> [url]  Start video recording (.webm/.mp4; supports cursor and contact sheets)
   record stop                Stop and save video
-  console [--clear]          View console logs
-  errors [--clear]           View page errors
+  console [--clear] [-f]     View console logs (--follow to stream)
+  errors [--clear] [-f]      View page errors (--follow to stream)
   highlight <sel>            Highlight element
   inspect                    Open Chrome DevTools for the active page
   clipboard <op> [text]      Read/write clipboard (read, write, copy, paste)
