@@ -1,6 +1,6 @@
 {
   "name": "agent-browser",
-  "version": "0.41.0",
+  "version": "0.41.1",
   "description": "Browser automation CLI for AI agents",
   "type": "module",
   "packageManager": "pnpm@11.1.3",
@@ -32,7 +32,8 @@
     "release": "npm run version:sync && npm run build:all-platforms && npm publish",
     "postinstall": "node scripts/postinstall.js",
     "test:launcher": "node --test test/launcher.test.mjs",
-    "build:dashboard": "cd packages/dashboard && pnpm build"
+    "build:dashboard": "cd packages/dashboard && pnpm build",
+    "build:source": "pnpm install --frozen-lockfile --filter dashboard && pnpm run build:dashboard && pnpm run build:native"
   },
   "keywords": [
     "browser",

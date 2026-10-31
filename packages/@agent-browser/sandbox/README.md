@@ -57,10 +57,6 @@ await sandbox.stop();
 
 ## Version Pinning
 
-By default, this package installs the matching `agent-browser` version:
-
-```ts
-agent-browser@0.30.1
-```
+By default, this package installs the `agent-browser` version that matches its own, such as `agent-browser@0.41.0` for `@agent-browser/sandbox@0.41.0`.
 
 Pass `installSpec: "latest"` or another npm spec to override that default.

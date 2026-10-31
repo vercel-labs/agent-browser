@@ -66,6 +66,76 @@ fn assert_error_code(resp: &Value, code: &str) {
     assert_eq!(resp.get("code").and_then(Value::as_str), Some(code));
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_empty_table_cell_refs_resolve() {
+    let html = r#"<!doctype html><table role="table"><tbody><tr>
+<td role="cell" id="empty-cell"></td>
+<td role="cell" id="named-cell">Named cell</td>
+<td role="cell" id="nbsp-cell">&nbsp;</td>
+<th role="columnheader" id="empty-columnheader"></th>
+<th role="rowheader" id="empty-rowheader"></th>
+</tr></tbody></table><div role="grid"><div role="row"><div role="gridcell" id="empty-gridcell"></div></div></div>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let refs = get_data(&resp)["refs"]
+        .as_object()
+        .expect("snapshot refs should be an object");
+    let mut resolved = Vec::new();
+    for (reference, metadata) in refs {
+        let role = metadata["role"].as_str().unwrap_or_default();
+        if ["cell", "gridcell", "columnheader", "rowheader"].contains(&role) {
+            let resp = execute_command(
+                &json!({
+                    "id": format!("resolve-{reference}"),
+                    "action": "getattribute",
+                    "selector": format!("@{reference}"),
+                    "attribute": "id"
+                }),
+                &mut state,
+            )
+            .await;
+            assert_success(&resp);
+            resolved.push((
+                get_data(&resp)["value"].as_str().unwrap().to_string(),
+                role.to_string(),
+            ));
+        }
+    }
+    resolved.sort();
+    assert_eq!(
+        resolved,
+        [
+            ("empty-cell".to_string(), "cell".to_string()),
+            ("empty-columnheader".to_string(), "columnheader".to_string()),
+            ("empty-gridcell".to_string(), "gridcell".to_string()),
+            ("empty-rowheader".to_string(), "rowheader".to_string()),
+            ("named-cell".to_string(), "cell".to_string()),
+            ("nbsp-cell".to_string(), "cell".to_string()),
+        ]
+    );
+
+    let resp = execute_command(&json!({ "id": "close", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
@@ -1794,6 +1864,125 @@ async fn e2e_snapshot_refs_invalidate_iframe_navigation() {
     assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_stale_presentational_iframe_ref_recovers_for_read_and_hover() {
+    let mut state = DaemonState::new();
+    for command in [
+        json!({"action": "launch", "headless": true}),
+        json!({"action": "navigate", "url": "about:blank"}),
+        json!({"action": "setcontent", "html": "<iframe role='none' data-version='original'></iframe>"}),
+    ] {
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+    let snapshot = execute_command(&json!({"action": "snapshot"}), &mut state).await;
+    assert_success(&snapshot);
+    let refs = get_data(&snapshot)["refs"].as_object().unwrap();
+    let reference = refs
+        .iter()
+        .find(|(_, node)| node["role"] == "Iframe")
+        .unwrap()
+        .0
+        .clone();
+    let selector = format!("@{reference}");
+    for role in ["presentation", "none"] {
+        assert_success(
+            &execute_command(
+                &json!({"action": "evaluate", "script": format!("document.querySelector('iframe').outerHTML = \"<iframe role='{role}' data-version='{role}'></iframe>\"; true")}),
+                &mut state,
+            )
+            .await,
+        );
+        let attribute = execute_command(
+            &json!({"action": "getattribute", "selector": selector, "attribute": "data-version"}),
+            &mut state,
+        )
+        .await;
+        assert_success(&attribute);
+        assert_eq!(get_data(&attribute)["value"], role);
+        assert_success(
+            &execute_command(
+                &json!({"action": "hover", "selector": selector}),
+                &mut state,
+            )
+            .await,
+        );
+    }
+    assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_presentational_cross_origin_iframe_refs_support_fill_and_inputvalue() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{port}/");
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]);
+                let body = if request.starts_with("GET /child ") {
+                    "<!doctype html><input aria-label='Child field'>".to_string()
+                } else {
+                    format!(
+                        "<!doctype html><iframe role='none' src='http://localhost:{port}/child'></iframe><iframe role='presentation' src='http://localhost:{port}/child'></iframe>"
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    let mut state = DaemonState::new();
+    for (id, command) in [
+        ("1", json!({"action": "launch", "headless": true})),
+        ("2", json!({"action": "navigate", "url": url})),
+    ] {
+        let mut command = command;
+        command["id"] = json!(id);
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+    let snapshot = execute_command(&json!({"id": "3", "action": "snapshot"}), &mut state).await;
+    assert_success(&snapshot);
+    let refs = get_data(&snapshot)["refs"].as_object().unwrap();
+    assert_eq!(
+        refs.values()
+            .filter(|node| node["role"] == "Iframe")
+            .count(),
+        2
+    );
+    let child_refs = refs
+        .iter()
+        .filter(|(_, node)| node["role"] == "textbox" && node["name"] == "Child field")
+        .map(|(reference, _)| reference.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(child_refs.len(), 2);
+    for (index, reference) in child_refs.iter().enumerate() {
+        let selector = format!("@{reference}");
+        let fill = execute_command(
+            &json!({"id": format!("fill-{index}"), "action": "fill", "selector": selector, "value": format!("filled-{index}")}),
+            &mut state,
+        )
+        .await;
+        assert_success(&fill);
+        let value = execute_command(
+            &json!({"id": format!("value-{index}"), "action": "inputvalue", "selector": selector}),
+            &mut state,
+        )
+        .await;
+        assert_success(&value);
+        assert_eq!(get_data(&value)["value"], format!("filled-{index}"));
+    }
+    assert_success(&execute_command(&json!({"id": "close", "action": "close"}), &mut state).await);
+    server.abort();
+}
+
 // ---------------------------------------------------------------------------
 // Screenshot
 // ---------------------------------------------------------------------------
@@ -3196,6 +3385,72 @@ async fn e2e_wait_load_state_resolves_immediately_when_already_loaded() {
     assert_success(&resp);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_wait_network_idle_reports_timeout_on_busy_page() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let n = stream.read(&mut request).await.unwrap_or(0);
+            if String::from_utf8_lossy(&request[..n]).starts_with("GET /hang") {
+                held.push(stream);
+                continue;
+            }
+            let body = "<h1>Busy</h1><script>setInterval(() => fetch('/hang'), 200)</script>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let started = std::time::Instant::now();
+    let wait_resp = execute_command(
+        &json!({ "id": "3", "action": "waitforloadstate", "state": "networkidle", "timeout": 30000 }),
+        &mut state,
+    )
+    .await;
+    let waited = started.elapsed();
+    let close_resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    server.abort();
+    assert_success(&close_resp);
+    assert_eq!(wait_resp["success"], false, "{wait_resp}");
+    // The requested budget is the one that counts. The inner wait used to stop
+    // at the browser's hardcoded 25s default, so a 30s wait failed early.
+    assert!(
+        waited >= std::time::Duration::from_millis(28_000),
+        "network-idle wait returned after {waited:?}, expected to use the 30000ms budget"
+    );
+    assert!(
+        wait_resp["error"].as_str().is_some_and(|error| {
+            error.contains("Timed out after 30000ms") && error.contains("load state 'networkidle'")
+        }),
+        "expected the network-idle timeout error: {}",
+        serde_json::to_string_pretty(&wait_resp).unwrap_or_default()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Same-document navigation regression test
 // ---------------------------------------------------------------------------
@@ -3494,6 +3749,79 @@ async fn e2e_hover_scroll_press() {
     .await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["pressed"], "Enter");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+/// One `press` must produce exactly one keydown/keyup pair whose `code`
+/// matches the key. Sending the Windows VK code as `nativeVirtualKeyCode`
+/// made macOS Chrome resolve a different physical key and repeat keydown
+/// thousands of times per second until navigation.
+#[tokio::test]
+#[ignore]
+async fn e2e_press_dispatches_single_keystroke() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = concat!(
+        "data:text/html,<html><body><script>",
+        "window.__events=[];",
+        "addEventListener('keydown',e=>__events.push('down:'+e.key+'/'+e.code));",
+        "addEventListener('keyup',e=>__events.push('up:'+e.key+'/'+e.code));",
+        "</script></body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    for (i, (key, expected)) in [
+        ("a", "a/KeyA"),
+        ("Escape", "Escape/Escape"),
+        ("End", "End/End"),
+        ("Enter", "Enter/Enter"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let resp = execute_command(
+            &json!({ "id": format!("reset-{i}"), "action": "evaluate", "script": "window.__events=[]" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        let resp = execute_command(
+            &json!({ "id": format!("press-{i}"), "action": "press", "key": key }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+
+        // Give a stuck key time to auto-repeat before counting.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let resp = execute_command(
+            &json!({ "id": format!("read-{i}"), "action": "evaluate", "script": "window.__events" }),
+            &mut state,
+        )
+        .await;
+        assert_success(&resp);
+        assert_eq!(
+            get_data(&resp)["result"],
+            json!([format!("down:{expected}"), format!("up:{expected}")]),
+            "press {key}"
+        );
+    }
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);

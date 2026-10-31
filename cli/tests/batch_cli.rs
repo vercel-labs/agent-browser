@@ -196,6 +196,109 @@ fn e2e_batch_omits_fill_secret_from_cli_and_mcp_output() {
 }
 
 #[test]
+#[ignore = "requires Chrome"]
+fn e2e_eval_preserves_unserializable_values_across_cli_and_mcp() {
+    let fixture = Fixture::new();
+    let executable = std::env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok();
+    let browser_args = std::env::var("AGENT_BROWSER_ARGS").ok();
+    let mut open_args = vec![
+        "open",
+        "data:text/html,%3Ctitle%3EEval%20Test%3C/title%3E",
+        "--engine",
+        "chrome",
+        "--json",
+    ];
+    for (flag, value) in [
+        ("--executable-path", executable.as_deref()),
+        ("--args", browser_args.as_deref()),
+    ] {
+        if let Some(value) = value {
+            open_args.extend([flag, value]);
+        }
+    }
+    assert_eq!(fixture.run(&open_args, "", 0)["success"], true);
+
+    let mcp_eval = |script: &str| {
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "agent_browser_eval", "arguments": {
+                "script": script, "session": "batch-test"}}});
+        fixture.run(&["mcp", "--tools", "all"], &format!("{request}\n"), 0)
+    };
+
+    for token in ["NaN", "Infinity", "-Infinity", "-0", "1n", "undefined"] {
+        let cli = fixture.run(&["eval", "--stdin", "--json"], token, 0);
+        assert_eq!(cli["data"]["result"], Value::Null, "{cli}");
+        assert_eq!(cli["data"]["unserializable"], token, "{cli}");
+        let plain = fixture.run_raw(&["eval", "--stdin"], token, 0).stdout;
+        assert_eq!(String::from_utf8(plain).unwrap().trim(), token);
+
+        let mcp = mcp_eval(token);
+        let result = &mcp["result"];
+        assert_eq!(result["isError"], false, "{mcp}");
+        assert_eq!(result["structuredContent"]["response"], cli);
+        assert_eq!(result["content"][0]["text"], token);
+    }
+
+    let null = fixture.run(&["eval", "--stdin", "--json"], "null", 0);
+    assert_eq!(null["data"]["result"], Value::Null);
+    assert!(null["data"].get("unserializable").is_none());
+    let mcp_null = mcp_eval("null");
+    assert_eq!(mcp_null["result"]["structuredContent"]["response"], null);
+    assert_eq!(mcp_null["result"]["content"][0]["text"], "null");
+
+    let ordinary_script = r#"({unserializable: "NaN"})"#;
+    let ordinary = fixture.run(&["eval", "--stdin", "--json"], ordinary_script, 0);
+    assert_eq!(ordinary["data"]["result"], json!({"unserializable": "NaN"}));
+    assert!(ordinary["data"].get("unserializable").is_none());
+    let ordinary_text = String::from_utf8(
+        fixture
+            .run_raw(&["eval", "--stdin"], ordinary_script, 0)
+            .stdout,
+    )
+    .unwrap();
+    assert!(ordinary_text.contains("\"unserializable\": \"NaN\""));
+    let ordinary_mcp = mcp_eval(ordinary_script);
+    assert_eq!(
+        ordinary_mcp["result"]["structuredContent"]["response"],
+        ordinary
+    );
+    assert!(ordinary_mcp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("\"unserializable\": \"NaN\""));
+
+    let awaited = fixture.run(&["eval", "--stdin", "--json"], "Promise.resolve(1)", 0);
+    assert_eq!(awaited["data"]["result"], 1);
+    let awaited_mcp = mcp_eval("Promise.resolve(1)");
+    assert_eq!(
+        awaited_mcp["result"]["structuredContent"]["response"],
+        awaited
+    );
+    assert_eq!(awaited_mcp["result"]["content"][0]["text"], "1");
+
+    let exception = fixture.run(&["eval", "--stdin", "--json"], "throw new Error('boom')", 1);
+    assert_eq!(exception["success"], false);
+    assert!(exception["error"]
+        .as_str()
+        .unwrap()
+        .contains("Evaluation error"));
+    let exception_mcp = mcp_eval("throw new Error('boom')");
+    assert_eq!(exception_mcp["result"]["isError"], true);
+    assert_eq!(
+        exception_mcp["result"]["structuredContent"]["response"],
+        exception
+    );
+    assert!(exception_mcp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Evaluation error"));
+
+    let title = fixture.run(&["get", "title", "--json"], "", 0);
+    assert_eq!(title["data"]["title"], "Eval Test");
+    assert_eq!(fixture.run(&["close", "--json"], "", 0)["success"], true);
+}
+
+#[test]
 fn mcp_batch_typed_option_matches_cli_and_rejects_non_booleans() {
     let fixture = Fixture::new();
     let commands: Value = serde_json::from_str(COMMANDS).unwrap();
