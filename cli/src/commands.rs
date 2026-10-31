@@ -2158,6 +2158,20 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
             Ok(json!({ "id": id, "action": "removeinitscript", "identifier": identifier }))
         }
 
+        // === Media ===
+        "media" => {
+            const VALID: &[&str] = &["status", "pause", "play"];
+            match rest.first().copied() {
+                Some("status") | None => Ok(json!({ "id": id, "action": "media_status" })),
+                Some("pause") => Ok(json!({ "id": id, "action": "media_pause" })),
+                Some("play") => Ok(json!({ "id": id, "action": "media_play" })),
+                Some(sub) => Err(ParseError::UnknownSubcommand {
+                    subcommand: sub.to_string(),
+                    valid_options: VALID,
+                }),
+            }
+        }
+
         _ => Err(ParseError::UnknownCommand {
             command: cmd.to_string(),
         }),
@@ -7048,5 +7062,31 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, ParseError::MissingArguments { .. }));
+    }
+
+    // === Media ===
+
+    #[test]
+    fn test_media_status() {
+        let cmd = parse_command(&args("media status"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "media_status");
+    }
+
+    #[test]
+    fn test_media_default_is_status() {
+        let cmd = parse_command(&args("media"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "media_status");
+    }
+
+    #[test]
+    fn test_media_pause() {
+        let cmd = parse_command(&args("media pause"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "media_pause");
+    }
+
+    #[test]
+    fn test_media_play() {
+        let cmd = parse_command(&args("media play"), &default_flags()).unwrap();
+        assert_eq!(cmd["action"], "media_play");
     }
 }
