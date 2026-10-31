@@ -187,17 +187,31 @@ async fn capture_screenshot_base64(
             });
         }
     } else if let Some(ref selector) = options.selector {
-        if let Some(rect) =
-            get_document_rect_for_selector(client, session_id, ref_map, selector, iframe_sessions)
-                .await?
+        match get_document_rect_for_selector(client, session_id, ref_map, selector, iframe_sessions)
+            .await?
         {
-            params.clip = Some(Viewport {
-                x: rect.x,
-                y: rect.y,
-                width: rect.width,
-                height: rect.height,
-                scale: 1.0,
-            });
+            Some(rect) => {
+                if rect.width <= 0.0 || rect.height <= 0.0 {
+                    return Err(format!(
+                        "Element '{}' has zero dimensions ({}x{})",
+                        selector, rect.width, rect.height
+                    ));
+                }
+
+                params.clip = Some(Viewport {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.width,
+                    height: rect.height,
+                    scale: 1.0,
+                });
+            }
+            None => {
+                return Err(format!(
+                    "Element '{}' not found or not visible on the page",
+                    selector
+                ));
+            }
         }
     }
 
