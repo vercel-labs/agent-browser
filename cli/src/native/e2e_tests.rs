@@ -2141,6 +2141,100 @@ async fn e2e_screenshot() {
 // Form interaction: fill, type, select, check
 // ---------------------------------------------------------------------------
 
+/// `fill` replaces the whole value through real editing, so contenteditable
+/// hosts and React-style value trackers see it; `type` appends at the end.
+#[tokio::test]
+#[ignore]
+async fn e2e_fill_replaces_and_type_appends() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    // `#tracked` mimics React: an instance-level value setter records the
+    // value, and "onChange" only fires when the DOM value differs from it.
+    let html = concat!(
+        "data:text/html,<html><body>",
+        "<input id='field' value='old value'>",
+        "<div id='editor' contenteditable='true'>old text</div>",
+        "<input id='tracked' value='old value'>",
+        "<textarea id='area'>old</textarea>",
+        "<input id='date' type='date' value='2020-01-01'>",
+        "<input id='color' type='color' value='%23000000'>",
+        "<input id='email' type='email' value='a@b.c'>",
+        "<script>",
+        "const t=document.getElementById('tracked');",
+        "const d=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');",
+        "let last=t.value;window.state=t.value;",
+        "Object.defineProperty(t,'value',{get(){return d.get.call(this)},set(v){last=String(v);d.set.call(this,v)}});",
+        "t.addEventListener('input',()=>{if(t.value!==last){last=t.value;window.state=t.value}});",
+        "</script></body></html>"
+    );
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let steps = [
+        json!({ "action": "fill", "selector": "#editor", "value": "new text" }),
+        json!({ "action": "type", "selector": "#field", "text": " more" }),
+        json!({ "action": "fill", "selector": "#tracked", "value": "" }),
+        json!({ "action": "type", "selector": "#area", "text": "new", "clear": true }),
+        json!({ "action": "fill", "selector": "#date", "value": "2024-05-06" }),
+        json!({ "action": "fill", "selector": "#color", "value": "#ff0000" }),
+        json!({ "action": "type", "selector": "#email", "text": "om" }),
+    ];
+    for (i, mut step) in steps.into_iter().enumerate() {
+        step["id"] = json!(format!("step-{i}"));
+        let resp = execute_command(&step, &mut state).await;
+        assert_success(&resp);
+    }
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "fill", "selector": "#date", "value": "not-a-date" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false);
+    assert!(
+        resp["error"].as_str().unwrap().contains("Malformed value"),
+        "{resp}"
+    );
+
+    let resp = execute_command(
+        &json!({
+            "id": "4",
+            "action": "evaluate",
+            "script": "[editor.innerText, field.value, tracked.value, state, area.value, date.value, color.value, email.value]"
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        json!([
+            "new text",
+            "old value more",
+            "",
+            "",
+            "new",
+            "2024-05-06",
+            "#ff0000",
+            "a@b.com"
+        ])
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_form_interaction() {
