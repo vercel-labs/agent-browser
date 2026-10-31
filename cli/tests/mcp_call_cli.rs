@@ -426,7 +426,10 @@ fn automatic_config_errors_hide_values_and_trusted_errors_keep_details() {
         assert!(!stderr.contains("benign-preference-value"), "{stderr}");
         let result = &calls[0]["result"];
         assert_mcp_session(result, "default");
-        assert_eq!(result["structuredContent"]["stderr"], stderr.as_ref());
+        assert_eq!(
+            result["structuredContent"]["stderr"],
+            format!("{}\n", stderr.lines().next().unwrap())
+        );
         let text = result["content"][0]["text"].as_str().unwrap();
         assert!(text.len() < 1024, "tool text is {} bytes", text.len());
         assert!(!text.contains("benign-preference-value"), "{text}");
@@ -442,4 +445,115 @@ fn automatic_config_errors_hide_values_and_trusted_errors_keep_details() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("benign-preference-value"), "{stderr}");
     assert!(stderr.contains("expected a boolean"), "{stderr}");
+}
+
+#[test]
+fn mcp_survives_selected_config_removed_or_corrupted_after_startup() {
+    for corrupt in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("selected.json");
+        std::fs::write(&config, "{}").unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+
+                let mut child = command(&home)
+                    .env("AGENT_BROWSER_CONFIG", &config)
+                    .args(["mcp", "--tools", "state"])
+                    .kill_on_drop(true)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    let mut stdin = child.stdin.take().unwrap();
+                    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+                    let initialize = json!({
+                        "jsonrpc": "2.0", "id": 0, "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2025-11-25", "capabilities": {},
+                            "clientInfo": {"name": "config-tests", "version": "1"}
+                        }
+                    });
+                    stdin
+                        .write_all(format!("{initialize}\n").as_bytes())
+                        .await
+                        .unwrap();
+                    let response: Value = serde_json::from_str(
+                        &lines
+                            .next_line()
+                            .await
+                            .unwrap()
+                            .expect("initialize response"),
+                    )
+                    .unwrap();
+                    assert_eq!(response["result"]["serverInfo"]["name"], "agent-browser");
+                    stdin
+                        .write_all(
+                            b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+                        )
+                        .await
+                        .unwrap();
+                    if corrupt {
+                        std::fs::write(&config, "{invalid json").unwrap();
+                    } else {
+                        std::fs::remove_file(&config).unwrap();
+                    }
+                    let call = json!({
+                        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                        "params": {"name": "agent_browser_session", "arguments": {}}
+                    });
+                    stdin
+                        .write_all(format!("{call}\n").as_bytes())
+                        .await
+                        .unwrap();
+                    let response: Value = serde_json::from_str(
+                        &lines
+                            .next_line()
+                            .await
+                            .unwrap()
+                            .expect("tool error response"),
+                    )
+                    .unwrap();
+                    assert_eq!(response["id"], 1, "{response}");
+                    assert_eq!(response["error"]["code"], -32602, "{response}");
+                    let message = response["error"]["message"].as_str().unwrap();
+                    assert!(message.contains("selected.json"), "{message}");
+                    assert!(
+                        message.contains(if corrupt {
+                            "failed to load config from"
+                        } else {
+                            "config file not found"
+                        }),
+                        "{message}"
+                    );
+                    for (id, method) in [(2, "ping"), (3, "shutdown")] {
+                        let request = json!({"jsonrpc": "2.0", "id": id, "method": method});
+                        stdin
+                            .write_all(format!("{request}\n").as_bytes())
+                            .await
+                            .unwrap();
+                        let response: Value = serde_json::from_str(
+                            &lines
+                                .next_line()
+                                .await
+                                .unwrap()
+                                .expect("protocol response after config error"),
+                        )
+                        .unwrap();
+                        assert_eq!(response["id"], id, "{response}");
+                        assert_eq!(response["result"], json!({}), "{response}");
+                    }
+                    drop(stdin);
+                    let output = child.wait_with_output().await.unwrap();
+                    assert!(output.status.success(), "{output:?}");
+                })
+                .await
+                .expect("MCP config regression exceeded 10 seconds");
+            });
+    }
 }

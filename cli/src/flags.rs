@@ -567,10 +567,15 @@ pub struct Flags {
 }
 
 pub fn parse_flags(args: &[String]) -> Flags {
-    let config = load_config(args).unwrap_or_else(|e| {
+    try_parse_flags(args).unwrap_or_else(|e| {
         eprintln!("{} {}", color::warning_indicator(), e);
         std::process::exit(1);
-    });
+    })
+}
+
+/// Parse flags and return errors when the selected config cannot be loaded.
+pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
+    let config = load_config(args)?;
 
     let extensions_env = env::var("AGENT_BROWSER_EXTENSIONS")
         .ok()
@@ -1272,7 +1277,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
         }
         i += 1;
     }
-    flags
+    Ok(flags)
 }
 
 fn looks_like_command(value: &str) -> bool {

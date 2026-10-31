@@ -24,11 +24,9 @@ fn command(home: &TempDir, source: &str) -> Command {
             command.env("AGENT_BROWSER_SESSION", "bad name");
         }
         "config session" => {
-            std::fs::write(
-                home.path().join("agent-browser.json"),
-                r#"{"session":"bad name"}"#,
-            )
-            .unwrap();
+            let config = home.path().join("selected.json");
+            std::fs::write(&config, r#"{"session":"bad name"}"#).unwrap();
+            command.env("AGENT_BROWSER_CONFIG", config);
         }
         _ => unreachable!(),
     }

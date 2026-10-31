@@ -2593,7 +2593,8 @@ fn call_cli_tool(
     );
     let cli_args = cli_tool_args(arguments, command_args, session.as_deref())?;
     if uses_session {
-        let flags = crate::flags::parse_flags(&cli_args);
+        let flags =
+            crate::flags::try_parse_flags(&cli_args).map_err(ProtocolError::invalid_params)?;
         if !crate::validation::is_valid_session_name(&flags.session) {
             return Err(ProtocolError::invalid_params(
                 crate::validation::session_name_error(&flags.session),
