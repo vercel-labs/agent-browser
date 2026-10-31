@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Drag Probe</title>
+  <style>
+    body {
+      margin: 0;
+      font: 14px/1.4 sans-serif;
+      background: #f4f4f4;
+    }
+
+    #pad {
+      position: relative;
+      width: 800px;
+      height: 500px;
+      margin: 24px;
+      border: 1px solid #999;
+      background: white;
+      overflow: hidden;
+    }
+
+    #target {
+      position: absolute;
+      left: 320px;
+      top: 40px;
+      width: 100px;
+      height: 40px;
+      background: #e34c26;
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+      cursor: grab;
+    }
+
+    #target.dragging {
+      cursor: grabbing;
+      background: #0d9488;
+    }
+
+    #log {
+      margin: 24px;
+      white-space: pre-wrap;
+      font-family: ui-monospace, monospace;
+    }
+  </style>
+</head>
+<body>
+  <div id="pad">
+    <div id="target">drag me</div>
+  </div>
+  <pre id="log"></pre>
+  <script>
+    const target = document.getElementById("target");
+    const logEl = document.getElementById("log");
+
+    window.__dragProbe = {
+      dragging: false,
+      events: [],
+      finalLeft: 320,
+      finalTop: 40,
+    };
+
+    let offsetX = 0;
+    let offsetY = 0;
+
+    function pushEvent(event, extra = {}) {
+      window.__dragProbe.events.push({
+        type: event.type,
+        button: event.button,
+        buttons: event.buttons,
+        x: event.clientX,
+        y: event.clientY,
+        target: event.target.id || event.target.tagName,
+        ...extra,
+      });
+      logEl.textContent = JSON.stringify(window.__dragProbe, null, 2);
+    }
+
+    function onPointerLikeStart(event) {
+      if (event.type === "mousedown") {
+        const rect = target.getBoundingClientRect();
+        offsetX = event.clientX - rect.left;
+        offsetY = event.clientY - rect.top;
+        window.__dragProbe.dragging = true;
+        target.classList.add("dragging");
+        event.preventDefault();
+      }
+      pushEvent(event, { phase: "start" });
+    }
+
+    target.addEventListener("mousedown", (event) => {
+      const rect = target.getBoundingClientRect();
+      offsetX = event.clientX - rect.left;
+      offsetY = event.clientY - rect.top;
+      window.__dragProbe.dragging = true;
+      target.classList.add("dragging");
+      event.preventDefault();
+      pushEvent(event, { phase: "start" });
+    });
+    target.addEventListener("pointerdown", onPointerLikeStart);
+
+    document.addEventListener("mousemove", (event) => {
+      if (window.__dragProbe.dragging) {
+        const left = event.clientX - offsetX;
+        const top = event.clientY - offsetY;
+        target.style.left = `${left}px`;
+        target.style.top = `${top}px`;
+        window.__dragProbe.finalLeft = left;
+        window.__dragProbe.finalTop = top;
+      }
+      pushEvent(event);
+    });
+    document.addEventListener("pointermove", (event) => {
+      pushEvent(event);
+    });
+
+    document.addEventListener("mouseup", (event) => {
+      if (window.__dragProbe.dragging) {
+        window.__dragProbe.dragging = false;
+        target.classList.remove("dragging");
+      }
+      pushEvent(event, { phase: "end" });
+    });
+    document.addEventListener("pointerup", (event) => {
+      pushEvent(event, { phase: "end" });
+    });
+    target.addEventListener("dragstart", (event) => {
+      pushEvent(event, { phase: "dragstart" });
+    });
+  </script>
+</body>
+</html>

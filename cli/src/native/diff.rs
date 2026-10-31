@@ -101,6 +101,21 @@ pub fn diff_screenshot(
 
 /// Compute a snapshot diff using the Myers algorithm via the `similar` crate.
 pub fn diff_snapshots(before: &str, after: &str) -> SnapshotDiffResult {
+    // Fast path: identical inputs.
+    // This avoids constructing the `similar` TextDiff object and running the diff
+    // iteration when agents compare a snapshot to itself (common in retry/loop
+    // workloads).
+    if before == after {
+        let unchanged = before.lines().count();
+        return SnapshotDiffResult {
+            diff: String::new(),
+            additions: 0,
+            removals: 0,
+            unchanged,
+            changed: false,
+        };
+    }
+
     let text_diff = TextDiff::from_lines(before, after);
 
     let mut additions = 0usize;
@@ -191,5 +206,145 @@ mod tests {
         assert_eq!(result.removals, 1);
         assert_eq!(result.unchanged, 1);
         assert!(!result.diff.is_empty());
+    }
+
+    #[test]
+    fn test_diff_snapshots_identical_fast_path() {
+        let input = "hello\nworld\n";
+        let result = diff_snapshots(input, input);
+        assert!(!result.changed);
+        assert_eq!(result.additions, 0);
+        assert_eq!(result.removals, 0);
+        assert_eq!(result.unchanged, input.lines().count());
+        assert!(result.diff.is_empty());
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_diff_snapshots_identical_and_changed() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let identical_a = (0..200)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let identical_b = identical_a.clone();
+
+        let changed_a = identical_a.clone();
+        let changed_b = (0..200)
+            .map(|i| {
+                if i == 123 {
+                    format!("line {i} changed")
+                } else {
+                    format!("line {i}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Keep the iteration count high enough to measure, but low enough
+        // to avoid long CI times when someone runs `--ignored`.
+        let iters = 50_000usize;
+
+        let start = Instant::now();
+        let mut acc_changed = 0usize;
+        for _ in 0..iters {
+            let r = diff_snapshots(black_box(&identical_a), black_box(&identical_b));
+            acc_changed ^= r.unchanged;
+        }
+        let identical_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+        let start = Instant::now();
+        let mut acc_changed2 = 0usize;
+        for _ in 0..iters {
+            let r = diff_snapshots(black_box(&changed_a), black_box(&changed_b));
+            acc_changed2 ^= r.additions;
+        }
+        let changed_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+        // Prevent the compiler from optimizing everything away.
+        black_box(acc_changed);
+        black_box(acc_changed2);
+
+        println!(
+            "bench_diff_snapshots_identical_and_changed: iters={iters} identical_ms={identical_ms:.2} changed_ms={changed_ms:.2}"
+        );
+    }
+}
+
+/// Remove generated ref annotations for content comparisons across documents.
+/// Quoted names are preserved even when they contain text resembling a ref.
+pub fn snapshot_comparison_text(tree: &str) -> String {
+    let mut output = String::with_capacity(tree.len());
+    let mut chars = tree.chars().peekable();
+    let mut quoted = false;
+    while let Some(ch) = chars.next() {
+        if quoted && ch == '\\' {
+            output.push(ch);
+            if let Some(escaped) = chars.next() {
+                output.push(escaped);
+            }
+            continue;
+        }
+        if ch == '"' {
+            quoted = !quoted;
+        }
+        if !quoted && ch == '[' && output.ends_with(' ') {
+            let mut candidate = chars.clone();
+            let mut attributes = String::new();
+            while candidate.peek().is_some_and(|ch| !matches!(ch, ']' | '\n')) {
+                attributes.push(candidate.next().unwrap());
+            }
+            if candidate.next() == Some(']') {
+                let fields: Vec<&str> = attributes.split(", ").collect();
+                let retained: Vec<&str> = fields
+                    .iter()
+                    .copied()
+                    .filter(|field| {
+                        !field.strip_prefix("ref=e").is_some_and(|id| {
+                            !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())
+                        })
+                    })
+                    .collect();
+                if retained.len() != fields.len() {
+                    if retained.is_empty() {
+                        output.pop();
+                    } else {
+                        output.push('[');
+                        output.push_str(&retained.join(", "));
+                        output.push(']');
+                    }
+                    chars = candidate;
+                    continue;
+                }
+            }
+        }
+        output.push(ch);
+    }
+    output
+}
+
+#[cfg(test)]
+mod durable_ref_diff_tests {
+    use super::*;
+
+    #[test]
+    fn content_comparison_ignores_only_generated_ref_annotations() {
+        let before =
+            "- button \"Save [ref=e3]\" [ref=e1]\n- checkbox \"Agree\" [checked=false, ref=e2]";
+        let after =
+            "- button \"Save [ref=e3]\" [ref=e20]\n- checkbox \"Agree\" [checked=false, ref=e21]";
+        let normalized = snapshot_comparison_text(before);
+        assert!(normalized.contains("Save [ref=e3]"));
+        assert!(normalized.contains("[checked=false]"));
+        assert!(!diff_snapshots(&normalized, &snapshot_comparison_text(after)).changed);
+        assert!(
+            diff_snapshots(
+                &normalized,
+                &snapshot_comparison_text(&after.replace("Agree", "Agreed"))
+            )
+            .changed
+        );
     }
 }

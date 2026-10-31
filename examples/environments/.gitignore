@@ -2,5 +2,7 @@ node_modules/
 .next/
 .env
 .env.local
-.env*.local
+.env.*
+!.env.example
+!.env.*.example
 next-env.d.ts

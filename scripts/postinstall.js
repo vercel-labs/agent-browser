@@ -33,7 +33,10 @@ function isMusl() {
 
 // Platform detection
 const osKey = platform() === 'linux' && isMusl() ? 'linux-musl' : platform();
-const platformKey = `${osKey}-${arch()}`;
+// Windows ARM64 falls back to x64 binary (no native ARM64 build available).
+// x64 binaries run via Windows' built-in emulation on ARM64.
+const effectiveArch = platform() === 'win32' && arch() === 'arm64' ? 'x64' : arch();
+const platformKey = `${osKey}-${effectiveArch}`;
 const ext = platform() === 'win32' ? '.exe' : '';
 const binaryName = `agent-browser-${platformKey}${ext}`;
 const binaryPath = join(binDir, binaryName);
@@ -80,6 +83,31 @@ async function downloadFile(url, dest) {
   });
 }
 
+/**
+ * Detect which package manager ran this postinstall and write a marker file
+ * next to the binary so `agent-browser upgrade` can use the correct one
+ * without fragile path heuristics or slow subprocess probing.
+ *
+ * npm_config_user_agent is set by npm/pnpm/yarn/bun during lifecycle scripts,
+ * e.g. "pnpm/8.10.0 node/v20.10.0 linux x64"
+ */
+function writeInstallMethod() {
+  const ua = process.env.npm_config_user_agent || '';
+  let method = '';
+  if (ua.startsWith('pnpm/')) method = 'pnpm';
+  else if (ua.startsWith('yarn/')) method = 'yarn';
+  else if (ua.startsWith('bun/')) method = 'bun';
+  else if (ua.startsWith('npm/')) method = 'npm';
+
+  if (method) {
+    try {
+      writeFileSync(join(binDir, '.install-method'), method);
+    } catch {
+      // Non-critical — upgrade will fall back to heuristics
+    }
+  }
+}
+
 async function main() {
   // Check if binary already exists
   if (existsSync(binaryPath)) {
@@ -88,10 +116,12 @@ async function main() {
       chmodSync(binaryPath, 0o755);
     }
     console.log(`✓ Native binary ready: ${binaryName}`);
-    
+
+    writeInstallMethod();
+
     // On global installs, fix npm's bin entry to use native binary directly
     await fixGlobalInstallBin();
-    
+
     showInstallReminder();
     return;
   }
@@ -102,16 +132,19 @@ async function main() {
   }
 
   console.log(`Downloading native binary for ${platformKey}...`);
+  if (platform() === 'win32' && arch() === 'arm64') {
+    console.log(`  Note: Using x64 binary on ARM64 Windows (runs via emulation)`);
+  }
   console.log(`URL: ${DOWNLOAD_URL}`);
 
   try {
     await downloadFile(DOWNLOAD_URL, binaryPath);
-    
+
     // Make executable on Unix
     if (platform() !== 'win32') {
       chmodSync(binaryPath, 0o755);
     }
-    
+
     console.log(`✓ Downloaded native binary: ${binaryName}`);
   } catch (err) {
     console.log(`Could not download native binary: ${err.message}`);
@@ -120,6 +153,8 @@ async function main() {
     console.log('  1. Install Rust: https://rustup.rs');
     console.log('  2. Run: npm run build:native');
   }
+
+  writeInstallMethod();
 
   // On global installs, fix npm's bin entry to use native binary directly
   // This avoids the /bin/sh error on Windows and provides zero-overhead execution
@@ -259,7 +294,8 @@ async function fixWindowsShims() {
   }
 
   // Detect architecture so ARM64 Windows is handled correctly
-  const cpuArch = arch() === 'arm64' ? 'arm64' : 'x64';
+  // (falls back to x64 binary — see platform detection above)
+  const cpuArch = effectiveArch;
   const relativeBinaryPath = `node_modules\\agent-browser\\bin\\agent-browser-win32-${cpuArch}.exe`;
   const absoluteBinaryPath = join(npmBinDir, relativeBinaryPath);
 

@@ -2,6 +2,8 @@ use serde::Serialize;
 use serde_json::Value;
 use std::path::PathBuf;
 
+use std::collections::HashMap;
+
 use super::cdp::client::CdpClient;
 use super::cdp::types::*;
 use super::element::RefMap;
@@ -44,7 +46,6 @@ pub struct ScreenshotAnnotation {
 
 #[derive(Debug, Clone)]
 pub struct ScreenshotResult {
-    pub path: String,
     pub base64: String,
     pub annotations: Vec<ScreenshotAnnotation>,
 }
@@ -93,17 +94,20 @@ impl Serialize for ScreenshotAnnotation {
     }
 }
 
-/// Captures a screenshot via CDP and optionally overlays numbered annotations
-/// that mirror the Node.js screenshot `annotate` mode.
+/// Captures screenshot bytes and optional annotations without writing a file.
 pub async fn take_screenshot(
     client: &CdpClient,
     session_id: &str,
     ref_map: &RefMap,
     options: &ScreenshotOptions,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<ScreenshotResult, String> {
     let target_rect = if options.annotate {
         match options.selector.as_deref() {
-            Some(selector) => get_rect_for_selector(client, session_id, ref_map, selector).await?,
+            Some(selector) => {
+                get_rect_for_selector(client, session_id, ref_map, selector, iframe_sessions)
+                    .await?
+            }
             None => None,
         }
     } else {
@@ -124,7 +128,8 @@ pub async fn take_screenshot(
         false
     };
 
-    let base64 = capture_screenshot_base64(client, session_id, ref_map, options).await;
+    let base64 =
+        capture_screenshot_base64(client, session_id, ref_map, options, iframe_sessions).await;
 
     if overlay_injected {
         let _ = remove_annotation_overlay(client, session_id).await;
@@ -142,20 +147,7 @@ pub async fn take_screenshot(
         Vec::new()
     };
 
-    let ext = if options.format == "jpeg" {
-        "jpg"
-    } else {
-        "png"
-    };
-    let path = save_screenshot(
-        &base64,
-        options.path.as_deref(),
-        ext,
-        options.output_dir.as_deref(),
-    )?;
-
     Ok(ScreenshotResult {
-        path,
         base64,
         annotations,
     })
@@ -166,6 +158,7 @@ async fn capture_screenshot_base64(
     session_id: &str,
     ref_map: &RefMap,
     options: &ScreenshotOptions,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<String, String> {
     let mut params = CaptureScreenshotParams {
         format: Some(options.format.clone()),
@@ -176,7 +169,7 @@ async fn capture_screenshot_base64(
         },
         clip: None,
         from_surface: Some(true),
-        capture_beyond_viewport: if options.full_page { Some(true) } else { None },
+        capture_beyond_viewport: capture_beyond_viewport(options),
     };
 
     if options.full_page {
@@ -184,13 +177,7 @@ async fn capture_screenshot_base64(
             .send_command_no_params("Page.getLayoutMetrics", Some(session_id))
             .await?;
 
-        let content_size = metrics
-            .get("contentSize")
-            .or_else(|| metrics.get("cssContentSize"));
-        if let Some(size) = content_size {
-            let width = size.get("width").and_then(|v| v.as_f64()).unwrap_or(1280.0);
-            let height = size.get("height").and_then(|v| v.as_f64()).unwrap_or(720.0);
-
+        if let Some((width, height)) = full_page_clip_size(&metrics) {
             params.clip = Some(Viewport {
                 x: 0.0,
                 y: 0.0,
@@ -200,7 +187,10 @@ async fn capture_screenshot_base64(
             });
         }
     } else if let Some(ref selector) = options.selector {
-        if let Some(rect) = get_rect_for_selector(client, session_id, ref_map, selector).await? {
+        if let Some(rect) =
+            get_document_rect_for_selector(client, session_id, ref_map, selector, iframe_sessions)
+                .await?
+        {
             params.clip = Some(Viewport {
                 x: rect.x,
                 y: rect.y,
@@ -216,6 +206,22 @@ async fn capture_screenshot_base64(
         .await?;
 
     Ok(result.data)
+}
+
+fn capture_beyond_viewport(options: &ScreenshotOptions) -> Option<bool> {
+    (options.full_page || options.selector.is_some()).then_some(true)
+}
+
+/// Size of the full-page clip in CSS pixels, which is the unit
+/// `Page.captureScreenshot` expects. The deprecated `contentSize` is in
+/// physical pixels, so it is only a fallback.
+fn full_page_clip_size(metrics: &Value) -> Option<(f64, f64)> {
+    let size = metrics
+        .get("cssContentSize")
+        .or_else(|| metrics.get("contentSize"))?;
+    let width = size.get("width").and_then(|v| v.as_f64()).unwrap_or(1280.0);
+    let height = size.get("height").and_then(|v| v.as_f64()).unwrap_or(720.0);
+    Some((width, height))
 }
 
 async fn collect_annotations(
@@ -316,10 +322,86 @@ async fn get_rect_for_selector(
     session_id: &str,
     ref_map: &RefMap,
     selector: &str,
+    iframe_sessions: &HashMap<String, String>,
 ) -> Result<Option<Rect>, String> {
-    let object_id =
-        super::element::resolve_element_object_id(client, session_id, ref_map, selector).await?;
-    get_rect_for_object(client, session_id, &object_id).await
+    let (object_id, effective_session_id) = super::element::resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector,
+        iframe_sessions,
+    )
+    .await?;
+    get_rect_for_object(client, &effective_session_id, &object_id).await
+}
+
+async fn get_document_rect_for_selector(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    selector: &str,
+    iframe_sessions: &HashMap<String, String>,
+) -> Result<Option<Rect>, String> {
+    let (object_id, effective_session_id) = super::element::resolve_element_object_id(
+        client,
+        session_id,
+        ref_map,
+        selector,
+        iframe_sessions,
+    )
+    .await?;
+    let Some(rect) = get_rect_for_object(client, &effective_session_id, &object_id).await? else {
+        return Ok(None);
+    };
+    let offset = get_document_offset_for_object(client, &effective_session_id, &object_id).await?;
+    Ok(Some(offset_rect(rect, offset)))
+}
+
+/// Offset that turns the element's viewport rect into top document
+/// coordinates: the position of every same-process frame it sits in, plus the
+/// top window's scroll.
+async fn get_document_offset_for_object(
+    client: &CdpClient,
+    session_id: &str,
+    object_id: &str,
+) -> Result<(f64, f64), String> {
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: r#"function() {
+                    let x = 0;
+                    let y = 0;
+                    let win = this.ownerDocument.defaultView;
+                    while (win && win.frameElement) {
+                        const frame = win.frameElement;
+                        const rect = frame.getBoundingClientRect();
+                        x += rect.x + frame.clientLeft;
+                        y += rect.y + frame.clientTop;
+                        win = win.parent;
+                    }
+                    return { x: x + (win ? win.scrollX : 0), y: y + (win ? win.scrollY : 0) };
+                }"#
+                .to_string(),
+                object_id: Some(object_id.to_string()),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await?;
+
+    let value = result.result.value.unwrap_or(Value::Null);
+    let x = value.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let y = value.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    Ok((x, y))
+}
+
+fn offset_rect(mut rect: Rect, (scroll_x, scroll_y): (f64, f64)) -> Rect {
+    rect.x += scroll_x;
+    rect.y += scroll_y;
+    rect
 }
 
 async fn get_rect_for_object(
@@ -534,12 +616,15 @@ fn project_annotations(
         .collect()
 }
 
-fn save_screenshot(
-    base64_data: &str,
-    explicit_path: Option<&str>,
-    ext: &str,
-    output_dir: Option<&str>,
-) -> Result<String, String> {
+/// Writes a captured image only after the caller decides it is needed.
+pub fn save_screenshot(base64_data: &str, options: &ScreenshotOptions) -> Result<String, String> {
+    let ext = if options.format == "jpeg" {
+        "jpg"
+    } else {
+        "png"
+    };
+    let explicit_path = options.path.as_deref();
+    let output_dir = options.output_dir.as_deref();
     let save_path = match explicit_path {
         Some(path) => path.to_string(),
         None => {
@@ -583,6 +668,38 @@ fn get_screenshot_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selector_screenshots_capture_beyond_the_initial_viewport() {
+        let options = ScreenshotOptions {
+            selector: Some("#below-fold".to_string()),
+            ..ScreenshotOptions::default()
+        };
+
+        assert_eq!(capture_beyond_viewport(&options), Some(true));
+    }
+
+    #[test]
+    fn viewport_screenshots_keep_the_default_capture_extent() {
+        assert_eq!(capture_beyond_viewport(&ScreenshotOptions::default()), None);
+    }
+
+    #[test]
+    fn selector_clip_uses_document_coordinates_after_scroll() {
+        let rect = Rect {
+            x: 10.0,
+            y: 197.0,
+            width: 200.0,
+            height: 200.0,
+        };
+
+        let document_rect = offset_rect(rect, (0.0, 503.0));
+
+        assert_eq!(document_rect.x, 10.0);
+        assert_eq!(document_rect.y, 700.0);
+        assert_eq!(document_rect.width, 200.0);
+        assert_eq!(document_rect.height, 200.0);
+    }
 
     #[test]
     fn filters_annotations_to_target_overlap() {
@@ -670,5 +787,26 @@ mod tests {
         let projected = project_annotations(&annotations, None, Some((10.0, 1000.0)));
         assert_eq!(projected[0].box_.x, 15);
         assert_eq!(projected[0].box_.y, 1012);
+    }
+
+    #[test]
+    fn full_page_clip_uses_css_pixels_on_high_dpi_displays() {
+        // Page.getLayoutMetrics for a 1280x2500 CSS px page at device scale factor 2.
+        let metrics = serde_json::json!({
+            "contentSize": { "x": 0, "y": 0, "width": 2560, "height": 5000 },
+            "cssContentSize": { "x": 0, "y": 0, "width": 1280, "height": 2500 },
+        });
+
+        assert_eq!(full_page_clip_size(&metrics), Some((1280.0, 2500.0)));
+    }
+
+    #[test]
+    fn full_page_clip_falls_back_to_content_size() {
+        let metrics = serde_json::json!({
+            "contentSize": { "x": 0, "y": 0, "width": 1280, "height": 2500 },
+        });
+
+        assert_eq!(full_page_clip_size(&metrics), Some((1280.0, 2500.0)));
+        assert_eq!(full_page_clip_size(&serde_json::json!({})), None);
     }
 }

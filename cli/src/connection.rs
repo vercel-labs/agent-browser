@@ -1,16 +1,28 @@
+use crate::session_files::{remove_daemon_files, SessionFile};
+use crate::validation::sanitize_session_component;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::env;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
+
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::CloseHandle;
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{
+    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+
+pub(crate) const INTERNAL_DAEMON_SHUTDOWN_ACTION: &str = "__agent_browser_internal_shutdown";
 
 #[derive(Serialize)]
 #[allow(dead_code)]
@@ -26,6 +38,12 @@ pub struct Response {
     pub success: bool,
     pub data: Option<Value>,
     pub error: Option<String>,
+    /// Machine-readable error code for select failures (e.g. `tab_gone`
+    /// when a pinned session's bound tab no longer exists).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -85,64 +103,326 @@ impl Connection {
 /// Priority: AGENT_BROWSER_SOCKET_DIR > XDG_RUNTIME_DIR > ~/.agent-browser > tmpdir
 pub fn get_socket_dir() -> PathBuf {
     // 1. Explicit override (ignore empty string)
-    if let Ok(dir) = env::var("AGENT_BROWSER_SOCKET_DIR") {
+    let base = if let Ok(dir) = env::var("AGENT_BROWSER_SOCKET_DIR") {
         if !dir.is_empty() {
-            return PathBuf::from(dir);
+            PathBuf::from(dir)
+        } else if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
+            if !runtime_dir.is_empty() {
+                PathBuf::from(runtime_dir).join("agent-browser")
+            } else if let Some(home) = dirs::home_dir() {
+                home.join(".agent-browser")
+            } else {
+                env::temp_dir().join("agent-browser")
+            }
+        } else if let Some(home) = dirs::home_dir() {
+            home.join(".agent-browser")
+        } else {
+            env::temp_dir().join("agent-browser")
         }
-    }
-
-    // 2. XDG_RUNTIME_DIR (Linux standard, ignore empty string)
-    if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
+    } else if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
         if !runtime_dir.is_empty() {
-            return PathBuf::from(runtime_dir).join("agent-browser");
+            PathBuf::from(runtime_dir).join("agent-browser")
+        } else if let Some(home) = dirs::home_dir() {
+            home.join(".agent-browser")
+        } else {
+            env::temp_dir().join("agent-browser")
+        }
+    } else if let Some(home) = dirs::home_dir() {
+        home.join(".agent-browser")
+    } else {
+        env::temp_dir().join("agent-browser")
+    };
+
+    if let Ok(namespace) = env::var("AGENT_BROWSER_NAMESPACE") {
+        let namespace = sanitize_session_component(&namespace);
+        if !namespace.is_empty() {
+            return base.join("namespaces").join(namespace).join("run");
         }
     }
 
-    // 3. Home directory fallback (like Docker Desktop's ~/.docker/run/)
-    if let Some(home) = dirs::home_dir() {
-        return home.join(".agent-browser");
-    }
-
-    // 4. Last resort: temp dir
-    env::temp_dir().join("agent-browser")
+    base
 }
 
 #[cfg(unix)]
 fn get_socket_path(session: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.sock", session))
+    SessionFile::Socket.path(session)
 }
 
 fn get_pid_path(session: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.pid", session))
+    SessionFile::Pid.path(session)
 }
 
-/// Clean up stale socket and PID files for a session
-fn cleanup_stale_files(session: &str) {
-    let pid_path = get_pid_path(session);
-    let _ = fs::remove_file(&pid_path);
+fn get_version_path(session: &str) -> PathBuf {
+    SessionFile::Version.path(session)
+}
 
+fn get_config_path(session: &str) -> PathBuf {
+    SessionFile::Config.path(session)
+}
+
+/// Clean up the stale daemon files of a session
+pub fn cleanup_stale_files(session: &str) {
+    remove_daemon_files(&get_socket_dir(), session);
+}
+
+/// Returns whether a process with the given PID is currently alive.
+///
+/// On unix, EPERM (process exists but we can't signal it) counts as alive
+/// so we don't mis-clean a live daemon owned by a different uid. Only ESRCH
+/// ("no such process") is treated as dead.
+pub fn is_pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
-    {
-        let socket_path = get_socket_path(session);
-        let _ = fs::remove_file(&socket_path);
+    unsafe {
+        if libc::kill(pid as i32, 0) == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
     }
+    #[cfg(windows)]
+    unsafe {
+        // An exited process can still be opened while any handle to it is
+        // open, so check that it has not exited.
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle == 0 {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code) != 0;
+        CloseHandle(handle);
+        ok && code == windows_sys::Win32::Foundation::STILL_ACTIVE as u32
+    }
+}
 
+/// Returns true only when the process image name starts with "agent-browser" (case-insensitive), and false when it cannot be determined.
+/// Another agent-browser process that reuses the PID still passes.
+pub fn is_agent_browser_process(pid: u32) -> bool {
+    let path: Option<String>;
+    #[cfg(target_os = "linux")]
+    {
+        path = fs::read_link(format!("/proc/{}/exe", pid))
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut buf = vec![0u8; 4096];
+        let n =
+            unsafe { libc::proc_pidpath(pid as i32, buf.as_mut_ptr() as *mut libc::c_void, 4096) };
+        path = if n > 0 {
+            Some(String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+        } else {
+            None
+        };
+    }
     #[cfg(windows)]
     {
-        let port_path = get_port_path(session);
-        let _ = fs::remove_file(&port_path);
+        use windows_sys::Win32::System::Threading::QueryFullProcessImageNameW;
+        path = unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle == 0 {
+                None
+            } else {
+                let mut buf = [0u16; 1024];
+                let mut len = buf.len() as u32;
+                let ok = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut len);
+                CloseHandle(handle);
+                if ok != 0 {
+                    Some(String::from_utf16_lossy(&buf[..len as usize]))
+                } else {
+                    None
+                }
+            }
+        };
     }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = pid;
+        path = None;
+    }
+    path.and_then(|p| {
+        p.rsplit(['/', '\\'])
+            .next()
+            .map(|n| n.to_ascii_lowercase().starts_with("agent-browser"))
+    })
+    .unwrap_or(false)
+}
+
+/// A currently-running daemon session discovered by [`walk_daemons`].
+#[derive(Debug, Clone)]
+pub struct ActiveSession {
+    pub name: String,
+    pub pid: u32,
+    /// Contents of the session's `.version` file if present and non-empty.
+    pub version: Option<String>,
+}
+
+/// Why a session's sidecar files were cleaned up during a walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanReason {
+    /// The `.pid` file referenced a process that no longer exists.
+    ProcessGone,
+    /// The `.pid` file could not be parsed as a PID.
+    UnreadablePidFile,
+    /// A `.sock` file had no corresponding `.pid` file (unix only).
+    OrphanedSocket,
+    /// The `dashboard.pid` referenced a process that no longer exists.
+    DashboardGone,
+}
+
+/// A session whose sidecar files were removed as a side effect of a walk.
+#[derive(Debug, Clone)]
+pub struct CleanedSession {
+    pub name: String,
+    pub reason: CleanReason,
+}
+
+/// Information about the standalone dashboard process, if any.
+#[derive(Debug, Clone, Copy)]
+pub struct DashboardInfo {
+    pub pid: u32,
+    pub alive: bool,
+}
+
+/// Snapshot of daemon state under [`get_socket_dir()`] after a walk. Stale
+/// sidecar files are cleaned up as a side effect and recorded in `cleaned`.
+#[derive(Debug, Default)]
+pub struct DaemonInventory {
+    pub sessions: Vec<ActiveSession>,
+    pub cleaned: Vec<CleanedSession>,
+    pub dashboard: Option<DashboardInfo>,
+}
+
+/// Read the session's `.version` sidecar if present and non-empty.
+pub fn read_session_version(session: &str) -> Option<String> {
+    let path = SessionFile::Version.path(session);
+    fs::read_to_string(&path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Walk the socket directory and classify each `.pid` / `.sock` entry.
+///
+/// - Live daemons go into `sessions` with their `.version` file contents.
+/// - Stale entries (process gone, unreadable pid, orphaned `.sock`) are
+///   cleaned via [`cleanup_stale_files`] and recorded in `cleaned`.
+/// - `dashboard.pid` lands in `dashboard` with liveness info; if the
+///   process is gone, the pid file is removed and a `DashboardGone` entry
+///   is added to `cleaned`.
+///
+/// If the socket directory doesn't exist, returns an empty inventory with
+/// no side effects.
+pub fn walk_daemons() -> DaemonInventory {
+    let socket_dir = get_socket_dir();
+    let mut inventory = DaemonInventory::default();
+
+    let entries = match fs::read_dir(&socket_dir) {
+        Ok(e) => e,
+        Err(_) => return inventory,
+    };
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        if name == "dashboard.pid" {
+            if let Ok(s) = fs::read_to_string(entry.path()) {
+                if let Ok(pid) = s.trim().parse::<u32>() {
+                    let alive = is_pid_alive(pid);
+                    inventory.dashboard = Some(DashboardInfo { pid, alive });
+                    if !alive {
+                        let _ = fs::remove_file(entry.path());
+                        let _ = fs::remove_file(socket_dir.join("dashboard.config"));
+                        inventory.cleaned.push(CleanedSession {
+                            name: "dashboard".to_string(),
+                            reason: CleanReason::DashboardGone,
+                        });
+                    }
+                }
+            }
+            continue;
+        }
+
+        let session_name = match name.strip_suffix(".pid") {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => continue,
+        };
+
+        let pid = match fs::read_to_string(entry.path())
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+        {
+            Some(p) => p,
+            None => {
+                cleanup_stale_files(&session_name);
+                inventory.cleaned.push(CleanedSession {
+                    name: session_name,
+                    reason: CleanReason::UnreadablePidFile,
+                });
+                continue;
+            }
+        };
+
+        if !is_pid_alive(pid) {
+            cleanup_stale_files(&session_name);
+            inventory.cleaned.push(CleanedSession {
+                name: session_name,
+                reason: CleanReason::ProcessGone,
+            });
+            continue;
+        }
+
+        let version = read_session_version(&session_name);
+        inventory.sessions.push(ActiveSession {
+            name: session_name,
+            pid,
+            version,
+        });
+    }
+
+    // Orphaned .sock files without a corresponding .pid (unix only).
+    #[cfg(unix)]
+    if let Ok(entries) = fs::read_dir(&socket_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(session_name) = name.strip_suffix(".sock") {
+                if session_name.is_empty() {
+                    continue;
+                }
+                let pid_path = SessionFile::Pid.path_in(&socket_dir, session_name);
+                if !pid_path.exists() {
+                    cleanup_stale_files(session_name);
+                    inventory.cleaned.push(CleanedSession {
+                        name: session_name.to_string(),
+                        reason: CleanReason::OrphanedSocket,
+                    });
+                }
+            }
+        }
+    }
+
+    inventory
 }
 
 #[cfg(windows)]
 fn get_port_path(session: &str) -> PathBuf {
-    get_socket_dir().join(format!("{}.port", session))
+    SessionFile::Port.path(session)
 }
 
 #[cfg(windows)]
-fn get_port_for_session(session: &str) -> u16 {
+fn port_identity_for_session(session: &str) -> String {
+    if let Ok(namespace) = env::var("AGENT_BROWSER_NAMESPACE") {
+        let namespace = sanitize_session_component(&namespace);
+        if !namespace.is_empty() {
+            return format!("{}:{}", namespace, session);
+        }
+    }
+    session.to_string()
+}
+
+#[cfg(windows)]
+pub fn get_port_for_session(session: &str) -> u16 {
     let mut hash: i32 = 0;
-    for c in session.chars() {
+    for c in port_identity_for_session(session).chars() {
         hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
     }
     // Correct logic: first take absolute modulo, then cast to u16
@@ -150,43 +430,18 @@ fn get_port_for_session(session: &str) -> u16 {
     49152 + ((hash.unsigned_abs() as u32 % 16383) as u16)
 }
 
-#[cfg(unix)]
-fn is_daemon_running(session: &str) -> bool {
-    let pid_path = get_pid_path(session);
-    if !pid_path.exists() {
-        return false;
-    }
-    if let Ok(pid_str) = fs::read_to_string(&pid_path) {
-        if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            unsafe {
-                if libc::kill(pid, 0) == 0 {
-                    return true;
-                }
-                // EPERM means the process exists but we lack permission to
-                // signal it (e.g. inside a macOS sandbox). Only ESRCH means
-                // the process is genuinely gone.
-                return std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
-            }
-        }
-    }
-    false
-}
-
+/// Read the actual daemon port from the `.port` file written by the daemon.
+/// There is no hash-derived fallback: the hash ignores the socket directory,
+/// so before this session's daemon writes its file that port can belong to
+/// another daemon with the same session name.
 #[cfg(windows)]
-fn is_daemon_running(session: &str) -> bool {
-    let pid_path = get_pid_path(session);
-    if !pid_path.exists() {
-        return false;
-    }
-    let port = get_port_for_session(session);
-    TcpStream::connect_timeout(
-        &format!("127.0.0.1:{}", port).parse().unwrap(),
-        Duration::from_millis(100),
-    )
-    .is_ok()
+pub fn resolve_port(session: &str) -> Option<u16> {
+    fs::read_to_string(get_port_path(session))
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
 }
 
-fn daemon_ready(session: &str) -> bool {
+pub fn daemon_ready(session: &str) -> bool {
     #[cfg(unix)]
     {
         let socket_path = get_socket_path(session);
@@ -194,12 +449,13 @@ fn daemon_ready(session: &str) -> bool {
     }
     #[cfg(windows)]
     {
-        let port = get_port_for_session(session);
-        TcpStream::connect_timeout(
-            &format!("127.0.0.1:{}", port).parse().unwrap(),
-            Duration::from_millis(50),
-        )
-        .is_ok()
+        resolve_port(session).is_some_and(|port| {
+            TcpStream::connect_timeout(
+                &format!("127.0.0.1:{}", port).parse().unwrap(),
+                Duration::from_millis(50),
+            )
+            .is_ok()
+        })
     }
 }
 
@@ -207,6 +463,9 @@ fn daemon_ready(session: &str) -> bool {
 pub struct DaemonResult {
     /// True if we connected to an existing daemon, false if we started a new one
     pub already_running: bool,
+    /// True if an existing daemon was intentionally restarted to satisfy
+    /// current daemon-only configuration.
+    pub restarted: bool,
 }
 
 /// Options forwarded to the daemon process as environment variables.
@@ -218,25 +477,40 @@ pub struct DaemonOptions<'a> {
     pub debug: bool,
     pub executable_path: Option<&'a str>,
     pub extensions: &'a [String],
+    pub init_scripts: &'a [String],
+    pub enable: &'a [String],
     pub args: Option<&'a str>,
     pub user_agent: Option<&'a str>,
     pub proxy: Option<&'a str>,
     pub proxy_bypass: Option<&'a str>,
+    pub proxy_username: Option<&'a str>,
+    pub proxy_password: Option<&'a str>,
     pub ignore_https_errors: bool,
     pub allow_file_access: bool,
+    pub hide_scrollbars: bool,
+    pub webgpu: bool,
     pub profile: Option<&'a str>,
     pub state: Option<&'a str>,
     pub provider: Option<&'a str>,
     pub device: Option<&'a str>,
     pub session_name: Option<&'a str>,
+    pub restore_save: Option<&'a str>,
+    pub restore_check_url: Option<&'a str>,
+    pub restore_check_text: Option<&'a str>,
+    pub restore_check_fn: Option<&'a str>,
     pub download_path: Option<&'a str>,
     pub allowed_domains: Option<&'a [String]>,
     pub action_policy: Option<&'a str>,
     pub confirm_actions: Option<&'a str>,
     pub engine: Option<&'a str>,
     pub auto_connect: bool,
+    pub pin_tab: bool,
     pub idle_timeout: Option<&'a str>,
+    pub default_timeout: Option<u64>,
     pub cdp: Option<&'a str>,
+    pub cdp_headers: Option<&'a str>,
+    pub no_auto_dialog: bool,
+    pub plugins: Option<&'a str>,
 }
 
 fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
@@ -255,6 +529,12 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     if !opts.extensions.is_empty() {
         cmd.env("AGENT_BROWSER_EXTENSIONS", opts.extensions.join(","));
     }
+    if !opts.init_scripts.is_empty() {
+        cmd.env("AGENT_BROWSER_INIT_SCRIPTS", opts.init_scripts.join(","));
+    }
+    if !opts.enable.is_empty() {
+        cmd.env("AGENT_BROWSER_ENABLE", opts.enable.join(","));
+    }
     if let Some(a) = opts.args {
         cmd.env("AGENT_BROWSER_ARGS", a);
     }
@@ -267,11 +547,24 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     if let Some(pb) = opts.proxy_bypass {
         cmd.env("AGENT_BROWSER_PROXY_BYPASS", pb);
     }
+    if let Some(pu) = opts.proxy_username {
+        cmd.env("AGENT_BROWSER_PROXY_USERNAME", pu);
+    }
+    if let Some(pp) = opts.proxy_password {
+        cmd.env("AGENT_BROWSER_PROXY_PASSWORD", pp);
+    }
     if opts.ignore_https_errors {
         cmd.env("AGENT_BROWSER_IGNORE_HTTPS_ERRORS", "1");
     }
     if opts.allow_file_access {
         cmd.env("AGENT_BROWSER_ALLOW_FILE_ACCESS", "1");
+    }
+    cmd.env(
+        "AGENT_BROWSER_HIDE_SCROLLBARS",
+        if opts.hide_scrollbars { "1" } else { "0" },
+    );
+    if opts.webgpu {
+        cmd.env("AGENT_BROWSER_WEBGPU", "1");
     }
     if let Some(prof) = opts.profile {
         cmd.env("AGENT_BROWSER_PROFILE", prof);
@@ -287,6 +580,18 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     }
     if let Some(sn) = opts.session_name {
         cmd.env("AGENT_BROWSER_SESSION_NAME", sn);
+    }
+    if let Some(policy) = opts.restore_save {
+        cmd.env("AGENT_BROWSER_RESTORE_SAVE", policy);
+    }
+    if let Some(check) = opts.restore_check_url {
+        cmd.env("AGENT_BROWSER_RESTORE_CHECK_URL", check);
+    }
+    if let Some(check) = opts.restore_check_text {
+        cmd.env("AGENT_BROWSER_RESTORE_CHECK_TEXT", check);
+    }
+    if let Some(check) = opts.restore_check_fn {
+        cmd.env("AGENT_BROWSER_RESTORE_CHECK_FN", check);
     }
     if let Some(dp) = opts.download_path {
         cmd.env("AGENT_BROWSER_DOWNLOAD_PATH", dp);
@@ -306,25 +611,281 @@ fn apply_daemon_env(cmd: &mut Command, session: &str, opts: &DaemonOptions) {
     if opts.auto_connect {
         cmd.env("AGENT_BROWSER_AUTO_CONNECT", "1");
     }
+    if opts.pin_tab {
+        cmd.env("AGENT_BROWSER_PIN_TAB", "1");
+    }
     if let Some(idle) = opts.idle_timeout {
         cmd.env("AGENT_BROWSER_IDLE_TIMEOUT_MS", idle);
+    }
+    if let Some(timeout) = opts.default_timeout {
+        cmd.env("AGENT_BROWSER_DEFAULT_TIMEOUT", timeout.to_string());
     }
     if let Some(cdp) = opts.cdp {
         cmd.env("AGENT_BROWSER_CDP", cdp);
     }
+    if let Some(headers) = opts.cdp_headers {
+        cmd.env("AGENT_BROWSER_CDP_HEADERS", headers);
+    }
+    if opts.no_auto_dialog {
+        cmd.env("AGENT_BROWSER_NO_AUTO_DIALOG", "1");
+    }
+    if let Some(plugins) = opts.plugins {
+        cmd.env("AGENT_BROWSER_PLUGINS", plugins);
+    }
+}
+
+fn daemon_config_fingerprint(opts: &DaemonOptions) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    opts.debug.hash(&mut hasher);
+    opts.action_policy.hash(&mut hasher);
+    opts.confirm_actions.hash(&mut hasher);
+    opts.idle_timeout.hash(&mut hasher);
+    opts.default_timeout.hash(&mut hasher);
+    opts.no_auto_dialog.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonConfigStatus {
+    Matches,
+    Missing,
+    Different,
+}
+
+fn daemon_config_status(session: &str, opts: &DaemonOptions) -> DaemonConfigStatus {
+    let expected = daemon_config_fingerprint(opts);
+    match fs::read_to_string(get_config_path(session)) {
+        Ok(actual) if actual.trim() == expected => DaemonConfigStatus::Matches,
+        Ok(_) => DaemonConfigStatus::Different,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DaemonConfigStatus::Missing,
+        Err(_) => DaemonConfigStatus::Different,
+    }
+}
+
+fn daemon_config_matches(session: &str, opts: &DaemonOptions) -> bool {
+    daemon_config_status(session, opts) == DaemonConfigStatus::Matches
+}
+
+fn write_daemon_config(session: &str, opts: &DaemonOptions) {
+    let _ = fs::write(get_config_path(session), daemon_config_fingerprint(opts));
+}
+
+fn daemon_pid_matches(session: &str, expected_pid: u32) -> bool {
+    fs::read_to_string(get_pid_path(session))
+        .ok()
+        .and_then(|pid| pid.trim().parse::<u32>().ok())
+        == Some(expected_pid)
+}
+
+fn ready_spawned_daemon_result(
+    session: &str,
+    opts: &DaemonOptions,
+    spawned_pid: Option<u32>,
+    restarted: bool,
+) -> Option<DaemonResult> {
+    if spawned_pid.is_some_and(|pid| daemon_pid_matches(session, pid)) {
+        write_daemon_config(session, opts);
+        return Some(DaemonResult {
+            already_running: false,
+            restarted,
+        });
+    }
+
+    if daemon_config_matches(session, opts) {
+        return Some(DaemonResult {
+            already_running: true,
+            restarted,
+        });
+    }
+
+    None
+}
+
+fn ready_existing_daemon_result(
+    session: &str,
+    opts: &DaemonOptions,
+    timeout: Duration,
+) -> Option<DaemonResult> {
+    match daemon_config_status(session, opts) {
+        DaemonConfigStatus::Matches => Some(DaemonResult {
+            already_running: true,
+            restarted: false,
+        }),
+        DaemonConfigStatus::Missing => {
+            if wait_for_matching_ready_daemon(session, opts, timeout) {
+                Some(DaemonResult {
+                    already_running: true,
+                    restarted: false,
+                })
+            } else {
+                None
+            }
+        }
+        DaemonConfigStatus::Different => None,
+    }
+}
+
+fn wait_for_matching_ready_daemon(session: &str, opts: &DaemonOptions, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if daemon_config_matches(session, opts) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    daemon_config_matches(session, opts)
+}
+
+fn concurrent_daemon_config_error(session: &str) -> String {
+    format!(
+        "A daemon for session '{}' started concurrently with different daemon configuration. Retry the command so agent-browser can restart it with the requested configuration.",
+        session
+    )
+}
+
+/// Check if the running daemon's version matches this CLI binary.
+/// Returns false when the version file is missing — an unversioned daemon
+/// is most likely a stale leftover from before version tracking was added
+/// (or from the Node.js era), and silently reusing it is the exact bug
+/// this check exists to prevent. The one-time cost of an unnecessary
+/// restart on the first upgrade is preferable to silent failures.
+fn daemon_version_matches(session: &str) -> bool {
+    let version_path = get_version_path(session);
+    match fs::read_to_string(&version_path) {
+        Ok(v) => v.trim() == env!("CARGO_PKG_VERSION"),
+        Err(_) => false,
+    }
+}
+
+/// Kill a running daemon by reading its PID file and sending a kill signal.
+fn kill_stale_daemon(session: &str) {
+    // Remove the socket first so no new connections reach the old daemon
+    #[cfg(unix)]
+    {
+        let socket_path = get_socket_path(session);
+        let _ = fs::remove_file(&socket_path);
+    }
+
+    let pid_path = get_pid_path(session);
+    if let Ok(pid_str) = fs::read_to_string(&pid_path) {
+        if let Some(pid) = pid_str
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|p| is_agent_browser_process(*p))
+        {
+            #[cfg(unix)]
+            {
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGTERM);
+                }
+                // Wait up to 1s for graceful shutdown, then force-kill
+                for _ in 0..10 {
+                    thread::sleep(Duration::from_millis(100));
+                    if unsafe { libc::kill(pid as i32, 0) } != 0 {
+                        break;
+                    }
+                }
+                // Force-kill if still alive
+                if unsafe { libc::kill(pid as i32, 0) } == 0 {
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGKILL);
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+            #[cfg(windows)]
+            {
+                let _ = Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/F"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+
+    // Clean up leftover files regardless
+    cleanup_stale_files(session);
+}
+
+fn wait_for_daemon_exit(session: &str, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if !daemon_ready(session) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    !daemon_ready(session)
+}
+
+fn request_graceful_daemon_shutdown(session: &str) -> bool {
+    let close_cmd = json!({
+        "id": "restart-close",
+        "action": INTERNAL_DAEMON_SHUTDOWN_ACTION
+    });
+
+    match send_command(close_cmd, session) {
+        Ok(resp) if resp.success => wait_for_daemon_exit(session, Duration::from_secs(5)),
+        _ => false,
+    }
+}
+
+fn stop_existing_daemon_for_restart(session: &str) {
+    if !request_graceful_daemon_shutdown(session) {
+        kill_stale_daemon(session);
+    }
+}
+
+/// Marks this process's stdout and stderr non-inheritable so a detached child cannot hold a reader's pipes open.
+#[cfg(windows)]
+pub(crate) fn prevent_stdio_handle_inheritance() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+
+    for handle in [
+        std::io::stdout().as_raw_handle(),
+        std::io::stderr().as_raw_handle(),
+    ] {
+        if !handle.is_null() {
+            unsafe { SetHandleInformation(handle as HANDLE, HANDLE_FLAG_INHERIT, 0) };
+        }
+    }
 }
 
 pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult, String> {
-    // Check if daemon is running AND responsive
-    if is_daemon_running(session) && daemon_ready(session) {
-        // Double-check it's actually responsive by waiting and checking again
-        // This handles the race condition where daemon is shutting down
-        // (daemon has a 100ms shutdown delay, so we wait longer)
-        thread::sleep(Duration::from_millis(150));
-        if daemon_ready(session) {
-            return Ok(DaemonResult {
-                already_running: true,
-            });
+    let mut restarted = false;
+
+    // Socket connectivity is the sole liveness check — no PID check — so
+    // callers in a different PID namespace (e.g. unshare) can still reuse
+    // an existing daemon they can reach over the socket.
+    //
+    // No settle-sleep here: this runs on every CLI invocation, so a fixed
+    // delay would tax every command (a 150ms sleep used to dominate warm
+    // command latency). The rare race where the daemon exits right after
+    // this check is handled at request time: callers respawn via
+    // ensure_daemon when the request fails with daemon_unreachable().
+    if daemon_ready(session) {
+        // Check version: if the running daemon is from a different CLI
+        // version (e.g. after an upgrade), kill it and start a fresh one.
+        if !daemon_version_matches(session) {
+            eprintln!(
+                "{} Daemon version mismatch detected, restarting...",
+                crate::color::warning_indicator()
+            );
+            stop_existing_daemon_for_restart(session);
+            restarted = true;
+            // Fall through to spawn a new daemon below
+        } else {
+            match ready_existing_daemon_result(session, opts, Duration::from_secs(1)) {
+                Some(result) => return Ok(result),
+                None => {
+                    stop_existing_daemon_for_restart(session);
+                    restarted = true;
+                }
+            }
         }
     }
 
@@ -403,6 +964,8 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     {
         use std::os::windows::process::CommandExt;
 
+        prevent_stdio_handle_inheritance();
+
         let mut cmd = Command::new(&exe_path);
         cmd.env("AGENT_BROWSER_DAEMON", "1");
         apply_daemon_env(&mut cmd, session, opts);
@@ -420,11 +983,21 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
         );
     }
 
+    let spawned_pid = daemon_child.as_ref().map(|child| child.id());
+
     for _ in 0..50 {
         if daemon_ready(session) {
-            return Ok(DaemonResult {
-                already_running: false,
-            });
+            if let Some(result) = ready_spawned_daemon_result(session, opts, spawned_pid, restarted)
+            {
+                return Ok(result);
+            }
+            if wait_for_matching_ready_daemon(session, opts, Duration::from_secs(1)) {
+                return Ok(DaemonResult {
+                    already_running: true,
+                    restarted,
+                });
+            }
+            return Err(concurrent_daemon_config_error(session));
         }
 
         // Detect early daemon exit and surface the real error from stderr
@@ -435,6 +1008,25 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
                     let _ = stderr.read_to_string(&mut stderr_output);
                 }
                 let stderr_trimmed = stderr_output.trim();
+
+                // If the daemon failed because another instance won the bind
+                // race ("Address already in use"), check whether that winner is
+                // now accepting connections and piggyback on it.
+                if stderr_trimmed.contains("Address already in use")
+                    || stderr_trimmed.contains("Failed to bind")
+                {
+                    thread::sleep(Duration::from_millis(200));
+                    if daemon_ready(session) {
+                        if wait_for_matching_ready_daemon(session, opts, Duration::from_secs(1)) {
+                            return Ok(DaemonResult {
+                                already_running: true,
+                                restarted,
+                            });
+                        }
+                        return Err(concurrent_daemon_config_error(session));
+                    }
+                }
+
                 if !stderr_trimmed.is_empty() {
                     let msg = if stderr_trimmed.len() > 500 {
                         let mut end = 500;
@@ -459,12 +1051,12 @@ pub fn ensure_daemon(session: &str, opts: &DaemonOptions) -> Result<DaemonResult
     }
 
     #[cfg(unix)]
-    let endpoint_info = format!(
-        "socket: {}",
-        get_socket_dir().join(format!("{}.sock", session)).display()
-    );
+    let endpoint_info = format!("socket: {}", SessionFile::Socket.path(session).display());
     #[cfg(windows)]
-    let endpoint_info = format!("port: 127.0.0.1:{}", get_port_for_session(session));
+    let endpoint_info = match resolve_port(session) {
+        Some(port) => format!("port: 127.0.0.1:{}", port),
+        None => format!("no port file in {}", get_socket_dir().display()),
+    };
 
     Err(format!("Daemon failed to start ({})", endpoint_info))
 }
@@ -479,15 +1071,66 @@ fn connect(session: &str) -> Result<Connection, String> {
     }
     #[cfg(windows)]
     {
-        let port = get_port_for_session(session);
+        let port = resolve_port(session)
+            .ok_or_else(|| "Failed to connect: daemon has not written its port".to_string())?;
         TcpStream::connect(format!("127.0.0.1:{}", port))
             .map(Connection::Tcp)
             .map_err(|e| format!("Failed to connect: {}", e))
     }
 }
 
+/// Failure of a single request attempt, split by whether the daemon may have
+/// received the request.
+#[derive(Debug)]
+enum SendError {
+    /// Connecting failed, or the write failed before any byte was accepted.
+    NotSent(String),
+    /// At least part of the request was written, then the write, the read, or
+    /// response parsing failed. The daemon may already have executed it.
+    OutcomeUnknown(String),
+}
+
+/// Actions that only read state, so re-sending one after a lost response
+/// cannot change the page. Anything not listed is treated as mutating.
+const READ_ONLY_ACTIONS: &[&str] = &[
+    "url",
+    "title",
+    "snapshot",
+    "gettext",
+    "getattribute",
+    "isvisible",
+    "isenabled",
+    "ischecked",
+    "boundingbox",
+    "innerhtml",
+    "inputvalue",
+    "count",
+    "styles",
+    "cookies_get",
+    "storage_get",
+    "tab_list",
+    "cdp_url",
+    "stream_status",
+];
+
+fn is_read_only(cmd: &Value) -> bool {
+    cmd.get("action")
+        .and_then(Value::as_str)
+        .is_some_and(|action| READ_ONLY_ACTIONS.contains(&action))
+}
+
 pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
-    // Retry logic for transient errors (EAGAIN/EWOULDBLOCK/connection issues)
+    send_with_retry(is_read_only(&cmd), || send_command_once(&cmd, session))
+}
+
+/// Retry transient errors (EAGAIN/EWOULDBLOCK/connection issues). Once a
+/// request was written, only read-only actions are re-sent; a mutating one
+/// (click, fill, eval, navigation) could otherwise run twice, so it fails with
+/// code `outcome_unknown` instead.
+fn send_with_retry(
+    read_only: bool,
+    mut send_once: impl FnMut() -> Result<Response, SendError>,
+) -> Result<Response, String> {
     const MAX_RETRIES: u32 = 5;
     const RETRY_DELAY_MS: u64 = 200;
 
@@ -498,17 +1141,26 @@ pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
             thread::sleep(Duration::from_millis(RETRY_DELAY_MS * (attempt as u64)));
         }
 
-        match send_command_once(&cmd, session) {
+        let e = match send_once() {
             Ok(response) => return Ok(response),
-            Err(e) => {
-                if is_transient_error(&e) {
-                    last_error = e;
-                    continue;
-                }
-                // Non-transient error, fail immediately
-                return Err(e);
+            Err(SendError::OutcomeUnknown(e)) if !read_only => {
+                return Ok(Response {
+                    success: false,
+                    error: Some(format!(
+                        "{} (the command reached the daemon but no response came back; \
+                         it may or may not have run, so it was not retried)",
+                        e
+                    )),
+                    code: Some("outcome_unknown".to_string()),
+                    ..Default::default()
+                });
             }
+            Err(SendError::OutcomeUnknown(e)) | Err(SendError::NotSent(e)) => e,
+        };
+        if !is_transient_error(&e) {
+            return Err(e);
         }
+        last_error = e;
     }
 
     Err(format!(
@@ -517,56 +1169,330 @@ pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
     ))
 }
 
-/// Check if an error is transient and worth retrying.
+/// Check if an error is transient and worth retrying against the SAME daemon.
 /// Transient errors include:
 /// - EAGAIN/EWOULDBLOCK (os error 35 on macOS, 11 on Linux)
 /// - EOF errors (daemon closed connection before responding)
 /// - Connection reset/broken pipe (daemon crashed or restarting)
-/// - Connection refused/socket not found (daemon still starting)
+///
+/// Connection refused / missing socket are NOT transient: no daemon is
+/// listening, so backing off cannot help. Callers use daemon_unreachable()
+/// to respawn via ensure_daemon and retry once instead.
 fn is_transient_error(error: &str) -> bool {
-    error.contains("os error 35") // EAGAIN on macOS
-        || error.contains("os error 11") // EAGAIN on Linux
+    has_os_error(error, 35) // EAGAIN on macOS
+        || has_os_error(error, 11) // EAGAIN on Linux
         || error.contains("WouldBlock")
         || error.contains("Resource temporarily unavailable")
         || error.contains("EOF")
         || error.contains("line 1 column 0") // Empty JSON response
         || error.contains("Connection reset")
         || error.contains("Broken pipe")
-        || error.contains("os error 54") // Connection reset by peer (macOS)
-        || error.contains("os error 104") // Connection reset by peer (Linux)
-        || error.contains("os error 2") // No such file or directory (socket gone)
-        || error.contains("os error 61") // Connection refused (macOS)
-        || error.contains("os error 111") // Connection refused (Linux)
-        || error.contains("os error 10061") // Connection refused (Windows)
-        || error.contains("os error 10054") // Connection reset by peer (Windows)
+        || has_os_error(error, 54) // Connection reset by peer (macOS)
+        || has_os_error(error, 104) // Connection reset by peer (Linux)
+        || has_os_error(error, 10054) // Connection reset by peer (Windows)
 }
 
-fn send_command_once(cmd: &Value, session: &str) -> Result<Response, String> {
-    let mut stream = connect(session)?;
+/// True when the error means no daemon is listening on the session socket
+/// (exited or never started), as opposed to a live-but-busy daemon. The
+/// remedy is a respawn through ensure_daemon, not a retry.
+pub fn daemon_unreachable(error: &str) -> bool {
+    error.contains("Failed to connect")
+        || has_os_error(error, 2) // No such file or directory (socket gone)
+        || has_os_error(error, 61) // Connection refused (macOS)
+        || has_os_error(error, 111) // Connection refused (Linux)
+        || has_os_error(error, 10061) // Connection refused (Windows)
+}
 
-    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+/// Exact `(os error N)` match. Bare substring checks like "os error 11"
+/// also matched "os error 111" (connection refused on Linux), which made
+/// EAGAIN handling swallow refused connections.
+fn has_os_error(error: &str, code: u32) -> bool {
+    error.contains(&format!("(os error {})", code))
+}
 
-    let mut json_str = serde_json::to_string(cmd).map_err(|e| e.to_string())?;
+/// Socket read timeout for one request. Ordinary commands get a 30s floor.
+/// Commands carrying an operation timeout (the wait family, which
+/// parse_command stamps with AGENT_BROWSER_DEFAULT_TIMEOUT when no explicit
+/// --timeout is given) get that timeout plus margin, so the daemon can report
+/// a proper operation timeout instead of the client dying with EAGAIN at 30s
+/// and a mutating command failing with outcome_unknown while it still runs.
+///
+/// The env var is deliberately NOT consulted here. Reading it would apply a
+/// long wait budget to every command, so a genuinely hung daemon on a simple
+/// `url`/`title`/`snapshot` call would take the full budget to surface
+/// instead of 30s. Only commands that actually carry a `timeout` field get
+/// the extended budget, and that field is set client-side per invocation,
+/// avoiding the daemon's spawn-time env snapshot drifting from the client.
+pub(crate) fn read_timeout_for(cmd: &Value) -> Duration {
+    let mut op_ms = cmd.get("timeout").and_then(|v| v.as_u64()).unwrap_or(0);
+    if cmd.get("action").and_then(Value::as_str) == Some("mousemove") {
+        op_ms = op_ms.max(cmd.get("duration").and_then(Value::as_u64).unwrap_or(0));
+    }
+    Duration::from_millis(op_ms.saturating_add(10_000).max(30_000))
+}
+
+fn send_command_once(cmd: &Value, session: &str) -> Result<Response, SendError> {
+    let mut json_str = serde_json::to_string(cmd).map_err(|e| SendError::NotSent(e.to_string()))?;
     json_str.push('\n');
 
-    stream
-        .write_all(json_str.as_bytes())
-        .map_err(|e| format!("Failed to send: {}", e))?;
+    let stream = connect(session).map_err(SendError::NotSent)?;
+
+    stream.set_read_timeout(Some(read_timeout_for(cmd))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+
+    exchange(stream, json_str.as_bytes())
+}
+
+/// Write one request line and read one response line. Unlike write_all, the
+/// write loop tracks whether any byte was accepted, which decides whether a
+/// failure is safe to retry.
+fn exchange<S: Read + Write>(mut stream: S, request: &[u8]) -> Result<Response, SendError> {
+    let mut written = 0;
+    while written < request.len() {
+        let err = match stream.write(&request[written..]) {
+            Ok(0) => std::io::Error::from(std::io::ErrorKind::WriteZero),
+            Ok(n) => {
+                written += n;
+                continue;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => e,
+        };
+        let msg = format!("Failed to send: {}", err);
+        return Err(if written == 0 {
+            SendError::NotSent(msg)
+        } else {
+            SendError::OutcomeUnknown(msg)
+        });
+    }
 
     let mut reader = BufReader::new(stream);
     let mut response_line = String::new();
     reader
         .read_line(&mut response_line)
-        .map_err(|e| format!("Failed to read: {}", e))?;
+        .map_err(|e| SendError::OutcomeUnknown(format!("Failed to read: {}", e)))?;
 
-    serde_json::from_str(&response_line).map_err(|e| format!("Invalid response: {}", e))
+    serde_json::from_str(&response_line)
+        .map_err(|e| SendError::OutcomeUnknown(format!("Invalid response: {}", e)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
+
+    #[cfg(unix)]
+    #[test]
+    fn unrelated_process_is_not_agent_browser() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let unrelated = is_agent_browser_process(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(!unrelated);
+        assert!(!is_agent_browser_process(0));
+        assert!(!is_agent_browser_process(u32::MAX));
+    }
+
+    /// Repro for #2032: a daemon that reads the request and closes without
+    /// replying must see the request once.
+    #[test]
+    #[cfg(unix)]
+    fn send_command_does_not_resend_when_response_is_lost() {
+        use std::os::unix::net::UnixListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let dir = std::env::temp_dir().join(format!("ab-lost-resp-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.to_str().unwrap());
+
+        let session = "lost-resp";
+        let socket_path = get_socket_path(session);
+        let _ = fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+
+        let requests = Arc::new(AtomicUsize::new(0));
+        let seen = requests.clone();
+        let daemon = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(2500);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        let mut line = String::new();
+                        BufReader::new(&stream).read_line(&mut line).unwrap();
+                        seen.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Err(_) => thread::sleep(Duration::from_millis(10)),
+                }
+            }
+        });
+
+        let resp = send_command(json!({"id": "1", "action": "click"}), session)
+            .expect("outcome_unknown is a failed response, not a send error");
+        daemon.join().unwrap();
+        let _ = fs::remove_file(&socket_path);
+        let _ = fs::remove_dir(&dir);
+
+        assert_eq!(requests.load(Ordering::SeqCst), 1, "request was re-sent");
+        assert!(!resp.success);
+        assert_eq!(resp.code.as_deref(), Some("outcome_unknown"));
+    }
+
+    /// In-memory stream: accepts at most `accept` bytes, then fails writes
+    /// with `write_err`; reads return `response`.
+    struct MockStream {
+        accept: usize,
+        write_err: std::io::ErrorKind,
+        written: usize,
+        response: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl MockStream {
+        fn new(response: &str) -> Self {
+            Self {
+                accept: usize::MAX,
+                write_err: std::io::ErrorKind::BrokenPipe,
+                written: 0,
+                response: std::io::Cursor::new(response.as_bytes().to_vec()),
+            }
+        }
+    }
+
+    impl Read for MockStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.response.read(buf)
+        }
+    }
+
+    impl Write for MockStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let room = self.accept - self.written;
+            if room == 0 {
+                return Err(self.write_err.into());
+            }
+            let n = buf.len().min(room);
+            self.written += n;
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn exchange_classifies_failures_by_whether_bytes_were_written() {
+        let eof = exchange(MockStream::new(""), b"{}\n");
+        assert!(matches!(eof, Err(SendError::OutcomeUnknown(_))));
+
+        let garbage = exchange(MockStream::new("garbage\n"), b"{}\n");
+        assert!(matches!(garbage, Err(SendError::OutcomeUnknown(_))));
+
+        let mut partial = MockStream::new("");
+        partial.accept = 1;
+        let partial = exchange(partial, b"{}\n");
+        assert!(matches!(partial, Err(SendError::OutcomeUnknown(_))));
+
+        let mut blocked = MockStream::new("");
+        blocked.accept = 0;
+        blocked.write_err = std::io::ErrorKind::WouldBlock;
+        let blocked = exchange(blocked, b"{}\n");
+        assert!(matches!(blocked, Err(SendError::NotSent(_))));
+
+        let ok = exchange(MockStream::new("{\"success\":true}\n"), b"{}\n");
+        assert!(ok.unwrap().success);
+    }
+
+    fn ok_response() -> Response {
+        Response {
+            success: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn mutating_command_is_not_resent_after_write() {
+        for err in [
+            "Invalid response: EOF while parsing a value at line 1 column 0",
+            "Failed to read: Connection reset by peer (os error 104)",
+            "Failed to read: Resource temporarily unavailable (os error 11)",
+        ] {
+            assert!(is_transient_error(err));
+            let mut calls = 0;
+            let resp = send_with_retry(false, || {
+                calls += 1;
+                Err(SendError::OutcomeUnknown(err.to_string()))
+            })
+            .unwrap();
+            assert_eq!(calls, 1, "re-sent after: {}", err);
+            assert_eq!(resp.code.as_deref(), Some("outcome_unknown"));
+            assert!(!daemon_unreachable(resp.error.as_deref().unwrap()));
+        }
+    }
+
+    #[test]
+    fn read_only_command_is_resent_after_lost_response() {
+        let mut calls = 0;
+        let resp = send_with_retry(true, || {
+            calls += 1;
+            if calls < 3 {
+                Err(SendError::OutcomeUnknown(
+                    "Invalid response: EOF while parsing a value at line 1 column 0".to_string(),
+                ))
+            } else {
+                Ok(ok_response())
+            }
+        });
+        assert!(resp.unwrap().success);
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn unsent_request_is_retried_for_any_command() {
+        let mut calls = 0;
+        let resp = send_with_retry(false, || {
+            calls += 1;
+            if calls < 3 {
+                Err(SendError::NotSent(
+                    "Failed to send: Resource temporarily unavailable (os error 11)".to_string(),
+                ))
+            } else {
+                Ok(ok_response())
+            }
+        });
+        assert!(resp.unwrap().success);
+        assert_eq!(calls, 3);
+
+        let mut calls = 0;
+        let refused = send_with_retry(false, || {
+            calls += 1;
+            Err(SendError::NotSent(
+                "Failed to connect: Connection refused (os error 111)".to_string(),
+            ))
+        });
+        assert_eq!(calls, 1);
+        assert!(daemon_unreachable(&refused.err().unwrap()));
+    }
+
+    #[test]
+    fn only_listed_actions_count_as_read_only() {
+        assert!(is_read_only(&json!({"action": "snapshot"})));
+        assert!(is_read_only(&json!({"action": "url"})));
+        assert!(!is_read_only(&json!({"action": "click"})));
+        assert!(!is_read_only(&json!({"action": "evaluate"})));
+        assert!(!is_read_only(&json!({"action": "some_future_action"})));
+        assert!(!is_read_only(&json!({})));
+    }
+
+    #[test]
+    fn long_mouse_movement_gets_its_requested_time_budget() {
+        assert_eq!(
+            read_timeout_for(&json!({"action":"mousemove", "duration": 35_000})),
+            Duration::from_secs(45)
+        );
+    }
 
     #[test]
     fn test_get_socket_dir_explicit_override() {
@@ -627,6 +1553,219 @@ mod tests {
         assert!(
             result.to_string_lossy().contains("home") || result.to_string_lossy().contains("Users")
         );
+    }
+
+    #[test]
+    fn test_get_socket_dir_namespace_scopes_base_directory() {
+        let _guard = EnvGuard::new(&[
+            "AGENT_BROWSER_SOCKET_DIR",
+            "XDG_RUNTIME_DIR",
+            "AGENT_BROWSER_NAMESPACE",
+        ]);
+
+        _guard.set(
+            "AGENT_BROWSER_SOCKET_DIR",
+            "/tmp/agent-browser-test-sockets",
+        );
+        _guard.remove("XDG_RUNTIME_DIR");
+        _guard.set("AGENT_BROWSER_NAMESPACE", "Worktree: One");
+
+        assert_eq!(
+            get_socket_dir(),
+            PathBuf::from("/tmp/agent-browser-test-sockets")
+                .join("namespaces")
+                .join("worktree-one")
+                .join("run")
+        );
+    }
+
+    #[test]
+    fn test_walk_daemons_only_lists_current_namespace() {
+        let _guard = EnvGuard::new(&[
+            "AGENT_BROWSER_SOCKET_DIR",
+            "XDG_RUNTIME_DIR",
+            "AGENT_BROWSER_NAMESPACE",
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        _guard.remove("XDG_RUNTIME_DIR");
+
+        let ns_one = dir.path().join("namespaces").join("one").join("run");
+        let ns_two = dir.path().join("namespaces").join("two").join("run");
+        fs::create_dir_all(&ns_one).unwrap();
+        fs::create_dir_all(&ns_two).unwrap();
+        let pid = std::process::id().to_string();
+        fs::write(ns_one.join("current.pid"), &pid).unwrap();
+        fs::write(ns_two.join("other.pid"), &pid).unwrap();
+
+        _guard.set("AGENT_BROWSER_NAMESPACE", "one");
+        let inventory = walk_daemons();
+
+        assert_eq!(inventory.sessions.len(), 1);
+        assert_eq!(inventory.sessions[0].name, "current");
+    }
+
+    fn test_daemon_options<'a>(
+        idle_timeout: Option<&'a str>,
+        no_auto_dialog: bool,
+        allowed_domains: Option<&'a [String]>,
+    ) -> DaemonOptions<'a> {
+        DaemonOptions {
+            headed: false,
+            debug: false,
+            executable_path: None,
+            extensions: &[],
+            init_scripts: &[],
+            enable: &[],
+            args: None,
+            user_agent: None,
+            proxy: None,
+            proxy_bypass: None,
+            proxy_username: None,
+            proxy_password: None,
+            ignore_https_errors: false,
+            allow_file_access: false,
+            hide_scrollbars: true,
+            webgpu: false,
+            profile: None,
+            state: None,
+            provider: None,
+            device: None,
+            session_name: None,
+            restore_save: None,
+            restore_check_url: None,
+            restore_check_text: None,
+            restore_check_fn: None,
+            download_path: None,
+            allowed_domains,
+            action_policy: None,
+            confirm_actions: None,
+            engine: None,
+            auto_connect: false,
+            pin_tab: false,
+            idle_timeout,
+            default_timeout: None,
+            cdp: None,
+            cdp_headers: None,
+            no_auto_dialog,
+            plugins: None,
+        }
+    }
+
+    #[test]
+    fn test_daemon_config_fingerprint_tracks_daemon_owned_options() {
+        let domains = vec!["example.com".to_string()];
+        let base = test_daemon_options(None, false, None);
+        let idle_changed = test_daemon_options(Some("1000"), false, None);
+        let dialog_changed = test_daemon_options(None, true, None);
+        let domains_changed = test_daemon_options(None, false, Some(&domains));
+
+        assert_ne!(
+            daemon_config_fingerprint(&base),
+            daemon_config_fingerprint(&idle_changed)
+        );
+        assert_ne!(
+            daemon_config_fingerprint(&base),
+            daemon_config_fingerprint(&dialog_changed)
+        );
+        assert_eq!(
+            daemon_config_fingerprint(&base),
+            daemon_config_fingerprint(&domains_changed),
+            "allowed domains are browser launch state, not daemon identity"
+        );
+    }
+
+    #[test]
+    fn test_spawn_race_loser_does_not_overwrite_winner_config() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_NAMESPACE"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+
+        let session = "race-config";
+        let winner_opts = test_daemon_options(Some("1000"), false, None);
+        let loser_opts = test_daemon_options(Some("2000"), false, None);
+
+        fs::create_dir_all(get_socket_dir()).unwrap();
+        fs::write(get_pid_path(session), "12345").unwrap();
+        write_daemon_config(session, &winner_opts);
+
+        let result = ready_spawned_daemon_result(session, &loser_opts, Some(67890), false);
+
+        assert!(result.is_none());
+        assert!(daemon_config_matches(session, &winner_opts));
+        assert!(!daemon_config_matches(session, &loser_opts));
+    }
+
+    #[test]
+    fn test_spawn_race_loser_reuses_matching_winner_config() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_NAMESPACE"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+
+        let session = "race-config-match";
+        let opts = test_daemon_options(Some("1000"), false, None);
+
+        fs::create_dir_all(get_socket_dir()).unwrap();
+        fs::write(get_pid_path(session), "12345").unwrap();
+        write_daemon_config(session, &opts);
+
+        let result = ready_spawned_daemon_result(session, &opts, Some(67890), false)
+            .expect("matching winner config should be reused");
+
+        assert!(result.already_running);
+        assert!(!result.restarted);
+        assert!(daemon_config_matches(session, &opts));
+    }
+
+    #[test]
+    fn test_ready_existing_daemon_waits_for_startup_config() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_NAMESPACE"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+
+        let session = "startup-config";
+        let opts = test_daemon_options(Some("1000"), false, None);
+        fs::create_dir_all(get_socket_dir()).unwrap();
+
+        let config_path = get_config_path(session);
+        let expected = daemon_config_fingerprint(&opts);
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            fs::write(config_path, expected).unwrap();
+        });
+
+        let result = ready_existing_daemon_result(session, &opts, Duration::from_secs(1))
+            .expect("missing config should get a short startup settle window");
+        writer.join().unwrap();
+
+        assert!(result.already_running);
+        assert!(!result.restarted);
+        assert!(daemon_config_matches(session, &opts));
+    }
+
+    #[test]
+    fn test_spawn_owner_writes_config() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_NAMESPACE"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+
+        let session = "race-config-owner";
+        let opts = test_daemon_options(Some("1000"), false, None);
+        let spawned_pid = 67890;
+
+        fs::create_dir_all(get_socket_dir()).unwrap();
+        fs::write(get_pid_path(session), spawned_pid.to_string()).unwrap();
+
+        let result = ready_spawned_daemon_result(session, &opts, Some(spawned_pid), true)
+            .expect("spawn owner should be accepted");
+
+        assert!(!result.already_running);
+        assert!(result.restarted);
+        assert!(daemon_config_matches(session, &opts));
     }
 
     // === Transient Error Detection Tests ===
@@ -693,32 +1832,35 @@ mod tests {
         ));
     }
 
+    // Connection refused / missing socket mean no daemon is listening:
+    // not transient (retry can't help), handled by respawn via
+    // daemon_unreachable instead.
     #[test]
-    fn test_is_transient_error_socket_not_found() {
-        assert!(is_transient_error(
-            "Failed to connect: No such file or directory (os error 2)"
-        ));
+    fn test_socket_not_found_is_unreachable_not_transient() {
+        let error = "Failed to connect: No such file or directory (os error 2)";
+        assert!(!is_transient_error(error));
+        assert!(daemon_unreachable(error));
     }
 
     #[test]
-    fn test_is_transient_error_connection_refused_macos() {
-        assert!(is_transient_error(
-            "Failed to connect: Connection refused (os error 61)"
-        ));
+    fn test_connection_refused_macos_is_unreachable_not_transient() {
+        let error = "Failed to connect: Connection refused (os error 61)";
+        assert!(!is_transient_error(error));
+        assert!(daemon_unreachable(error));
     }
 
     #[test]
-    fn test_is_transient_error_connection_refused_linux() {
-        assert!(is_transient_error(
-            "Failed to connect: Connection refused (os error 111)"
-        ));
+    fn test_connection_refused_linux_is_unreachable_not_transient() {
+        let error = "Failed to connect: Connection refused (os error 111)";
+        assert!(!is_transient_error(error));
+        assert!(daemon_unreachable(error));
     }
 
     #[test]
-    fn test_is_transient_error_connection_refused_windows() {
-        assert!(is_transient_error(
-            "Failed to connect: No connection could be made because the target machine actively refused it. (os error 10061)"
-        ));
+    fn test_connection_refused_windows_is_unreachable_not_transient() {
+        let error = "Failed to connect: No connection could be made because the target machine actively refused it. (os error 10061)";
+        assert!(!is_transient_error(error));
+        assert!(daemon_unreachable(error));
     }
 
     #[test]
@@ -740,9 +1882,95 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn test_get_port_for_session() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_NAMESPACE"]);
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+
         assert_eq!(get_port_for_session("default"), 50838);
         assert_eq!(get_port_for_session("my-session"), 63105);
         assert_eq!(get_port_for_session("work"), 51184);
         assert_eq!(get_port_for_session(""), 49152);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_get_port_for_session_includes_namespace() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_NAMESPACE"]);
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        let unnamespaced = get_port_for_session("work");
+
+        guard.set("AGENT_BROWSER_NAMESPACE", "Worktree: One");
+        let namespaced_one = get_port_for_session("work");
+
+        guard.set("AGENT_BROWSER_NAMESPACE", "Worktree: Two");
+        let namespaced_two = get_port_for_session("work");
+
+        assert_ne!(namespaced_one, unnamespaced);
+        assert_ne!(namespaced_two, unnamespaced);
+        assert_ne!(namespaced_one, namespaced_two);
+    }
+
+    // === Daemon Version Mismatch Detection Tests ===
+
+    #[test]
+    fn test_daemon_version_matches_same_version() {
+        let dir = std::env::temp_dir().join("ab-test-version-match");
+        let _ = fs::create_dir_all(&dir);
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.to_str().unwrap());
+
+        let version_path = dir.join("test-session.version");
+        let _ = fs::write(&version_path, env!("CARGO_PKG_VERSION"));
+
+        assert!(daemon_version_matches("test-session"));
+
+        let _ = fs::remove_file(&version_path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_daemon_version_matches_different_version() {
+        let dir = std::env::temp_dir().join("ab-test-version-mismatch");
+        let _ = fs::create_dir_all(&dir);
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.to_str().unwrap());
+
+        let version_path = dir.join("test-session.version");
+        let _ = fs::write(&version_path, "0.0.0-old");
+
+        assert!(!daemon_version_matches("test-session"));
+
+        let _ = fs::remove_file(&version_path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_daemon_version_matches_no_file() {
+        let dir = std::env::temp_dir().join("ab-test-version-nofile");
+        let _ = fs::create_dir_all(&dir);
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.to_str().unwrap());
+
+        // No version file: treated as mismatch so stale pre-version-tracking
+        // daemons (including Node.js era) are always restarted.
+        assert!(!daemon_version_matches("test-session"));
+
+        let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_cleanup_stale_files_removes_version() {
+        let dir = std::env::temp_dir().join("ab-test-cleanup-version");
+        let _ = fs::create_dir_all(&dir);
+        let _guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "XDG_RUNTIME_DIR"]);
+        _guard.set("AGENT_BROWSER_SOCKET_DIR", dir.to_str().unwrap());
+
+        let version_path = dir.join("test-session.version");
+        let _ = fs::write(&version_path, "0.1.0");
+        assert!(version_path.exists());
+
+        cleanup_stale_files("test-session");
+        assert!(!version_path.exists());
+
+        let _ = fs::remove_dir(&dir);
     }
 }

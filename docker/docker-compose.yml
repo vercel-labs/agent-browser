@@ -7,6 +7,7 @@
 services:
   # Build for Linux platforms
   build-linux:
+    platform: linux/amd64
     build:
       context: ..
       dockerfile: docker/Dockerfile.build
@@ -15,19 +16,23 @@ services:
       - ../bin:/output
     command: |
       -c '
-        set -e
-        echo "Building for Linux platforms (parallel)..."
-        
-        # Build both targets in parallel
-        (echo "→ Linux x64" && cargo zigbuild --release --target x86_64-unknown-linux-gnu && cp /build/target/x86_64-unknown-linux-gnu/release/agent-browser /output/agent-browser-linux-x64 && chmod +x /output/agent-browser-linux-x64 && echo "✓ Linux x64 done") &
-        PID1=$!
-        
-        (echo "→ Linux ARM64" && cargo zigbuild --release --target aarch64-unknown-linux-gnu && cp /build/target/aarch64-unknown-linux-gnu/release/agent-browser /output/agent-browser-linux-arm64 && chmod +x /output/agent-browser-linux-arm64 && echo "✓ Linux ARM64 done") &
-        PID2=$!
-        
-        # Wait for both to complete
-        wait $PID1 $PID2
-        
+        set -euo pipefail
+        echo "Building for Linux platforms..."
+
+        rm -f /output/agent-browser-linux-x64 /output/agent-browser-linux-arm64
+
+        echo "→ Linux x64"
+        cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28
+        cp /build/target/x86_64-unknown-linux-gnu/release/agent-browser /output/agent-browser-linux-x64
+        chmod +x /output/agent-browser-linux-x64
+        echo "✓ Linux x64 done"
+
+        echo "→ Linux ARM64"
+        cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.28
+        cp /build/target/aarch64-unknown-linux-gnu/release/agent-browser /output/agent-browser-linux-arm64
+        chmod +x /output/agent-browser-linux-arm64
+        echo "✓ Linux ARM64 done"
+
         echo ""
         echo "✓ Linux platforms built successfully!"
         ls -la /output/agent-browser-linux-*
@@ -35,6 +40,7 @@ services:
 
   # Build for Windows
   build-windows:
+    platform: linux/amd64
     build:
       context: ..
       dockerfile: docker/Dockerfile.build
@@ -43,19 +49,22 @@ services:
       - ../bin:/output
     command: |
       -c '
-        set -e
+        set -euo pipefail
         echo "Building for Windows x64..."
-        
+
+        rm -f /output/agent-browser-win32-x64.exe
+
         cargo build --release --target x86_64-pc-windows-gnu
         cp /build/target/x86_64-pc-windows-gnu/release/agent-browser.exe /output/agent-browser-win32-x64.exe
-        
+
         echo ""
         echo "✓ Windows build completed!"
         ls -la /output/agent-browser-win32-*
       '
 
-  # Build for a single target (override with TARGET env var)
+  # Build for a single target
   build-single:
+    platform: linux/amd64
     build:
       context: ..
       dockerfile: docker/Dockerfile.build
@@ -63,12 +72,92 @@ services:
       - ../cli:/build
       - ../bin:/output
     environment:
-      - TARGET=${TARGET:-x86_64-unknown-linux-gnu}
+      - TARGET=${TARGET:-}
+      - RUST_TARGET=${RUST_TARGET:-}
+      - BUILD_TARGET=${BUILD_TARGET:-}
       - OUTPUT_NAME=${OUTPUT_NAME:-agent-browser-linux-x64}
     command: |
       -c '
-        cargo zigbuild --release --target $TARGET
-        cp /build/target/$TARGET/release/agent-browser* /output/$OUTPUT_NAME
-        chmod +x /output/$OUTPUT_NAME 2>/dev/null || true
-        echo "✓ Built $OUTPUT_NAME"
+        set -euo pipefail
+
+        rust_target="$${RUST_TARGET:-}"
+        build_target="$${BUILD_TARGET:-}"
+        legacy_target="$${TARGET:-}"
+
+        normalize_rust_target() {
+          case "$$1" in
+            x86_64-unknown-linux-gnu.*)
+              printf "%s\n" "x86_64-unknown-linux-gnu"
+              ;;
+            aarch64-unknown-linux-gnu.*)
+              printf "%s\n" "aarch64-unknown-linux-gnu"
+              ;;
+            *)
+              printf "%s\n" "$$1"
+              ;;
+          esac
+        }
+
+        derive_build_target() {
+          case "$$1" in
+            x86_64-unknown-linux-gnu.*|aarch64-unknown-linux-gnu.*)
+              printf "%s\n" "$$1"
+              ;;
+            x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu)
+              printf "%s.2.28\n" "$$1"
+              ;;
+            *)
+              printf "%s\n" "$$1"
+              ;;
+          esac
+        }
+
+        if [ -n "$$rust_target" ]; then
+          rust_target="$$(normalize_rust_target "$$rust_target")"
+        fi
+
+        if [ -n "$$legacy_target" ]; then
+          if [ -z "$$rust_target" ]; then
+            rust_target="$$(normalize_rust_target "$$legacy_target")"
+          fi
+
+          if [ -z "$$build_target" ]; then
+            build_target="$$(derive_build_target "$$legacy_target")"
+          fi
+        fi
+
+        if [ -z "$$rust_target" ] && [ -n "$$build_target" ]; then
+          rust_target="$$(normalize_rust_target "$$build_target")"
+        fi
+
+        if [ -z "$$build_target" ] && [ -n "$$rust_target" ]; then
+          build_target="$$(derive_build_target "$$rust_target")"
+        fi
+
+        if [ -z "$$rust_target" ]; then
+          rust_target="x86_64-unknown-linux-gnu"
+        fi
+
+        if [ -z "$$build_target" ]; then
+          build_target="$$(derive_build_target "$$rust_target")"
+        fi
+
+        expected_rust_target="$$(normalize_rust_target "$$build_target")"
+        if [ "$$expected_rust_target" != "$$rust_target" ]; then
+          echo "ERROR: BUILD_TARGET ($$build_target) maps to $$expected_rust_target, but RUST_TARGET is $$rust_target"
+          exit 1
+        fi
+
+        rm -f /output/$$OUTPUT_NAME
+
+        cargo zigbuild --release --target "$$build_target"
+
+        source_path=/build/target/$$rust_target/release/agent-browser
+        if [ -f "$$source_path.exe" ]; then
+          source_path="$$source_path.exe"
+        fi
+
+        cp "$$source_path" /output/$$OUTPUT_NAME
+        chmod +x /output/$$OUTPUT_NAME 2>/dev/null || true
+        echo "✓ Built $$OUTPUT_NAME"
       '

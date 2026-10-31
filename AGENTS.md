@@ -9,22 +9,95 @@ This project uses **pnpm**. Always use `pnpm` instead of `npm` or `yarn` for ins
 ## Code Style
 
 - Do not use emojis in code, output, or documentation. Unicode symbols (✓, ✗, →, ⚠) are acceptable.
+- In documentation and markdown, never use double hyphens (`--`) or em dashes as dashes. Rephrase the sentence instead.
 - CLI colored output uses `cli/src/color.rs`. This module respects the `NO_COLOR` environment variable. Never use hardcoded ANSI color codes.
 - CLI flags must always use kebab-case (e.g., `--auto-connect`, `--allow-file-access`). Never use camelCase for flags (e.g., `--autoConnect` is wrong).
 
 ## Documentation
 
+Do not hard-wrap prose in documentation files such as Markdown, MDX, and READMEs; let the editor or renderer wrap text naturally.
+
+Use the `technical-writer` skill (`.agents/skills/technical-writer/SKILL.md`) when you write or edit prose for this repo, including docs pages, READMEs, changelog entries, commit messages, PR descriptions, and issues.
+
 When adding or changing user-facing features (new flags, commands, behaviors, environment variables, etc.), update **all** of the following:
 
-1. `cli/src/output.rs` -- `--help` output (flags list, examples, environment variables)
-2. `README.md` -- Options table, relevant feature sections, examples
-3. `skills/agent-browser/SKILL.md` -- so AI agents know about the feature
-4. `docs/src/app/` -- the Next.js docs site (MDX pages)
+1. `cli/src/output.rs` — `--help` output (flags list, examples, environment variables)
+2. `README.md` — Options table, relevant feature sections, examples
+3. `skill-data/core/SKILL.md` (and its `references/`) — so AI agents know about the feature when they load the core skill. Edit `skill-data/core/SKILL.md` for overview/workflow changes; edit `skill-data/core/references/*.md` for detailed reference content. Do **not** put feature content in `skills/agent-browser/SKILL.md` — that file is an intentionally thin discovery stub for `npx skills add` and exists only to redirect agents to `agent-browser skills get core`.
+4. `docs/content/docs/` — the Geistdocs site (MDX pages); routing and API handlers live in `docs/src/app/`
 5. Inline doc comments in the relevant source files
 
 This applies to changes that either human users or AI agents would need to know about. Do not skip any of these locations.
 
-In the `docs/src/app/` MDX files, always use HTML `<table>` syntax for tables (not markdown pipe tables). This matches the existing convention across the docs site.
+## CLI/MCP Parity
+
+When adding or changing any CLI command, flag, behavior, output, environment variable, or parser semantics, update the MCP server in `cli/src/mcp.rs` in the same change. MCP tools should stay in sync with canonical CLI behavior by delegating through the normal CLI parser where possible. If a CLI command has no dedicated MCP tool, add one or document why it is intentionally omitted. Add or update tests that prove the CLI and MCP surfaces remain aligned.
+
+In the `docs/content/docs/` MDX files, always use HTML `<table>` syntax for tables (not markdown pipe tables). This matches the existing convention across the docs site. Page titles and descriptions live in frontmatter; do not duplicate the title as an H1 in the body.
+
+For documentation changes, run `pnpm --filter docs test`, `pnpm --filter docs type-check`, `pnpm --filter docs build`, and `pnpm --filter docs test:routes`. The route suite starts its own production server. Its frozen migration fixtures cover the original public routes, metadata, content, anchors, and API contracts; only update affected fixtures when deliberately changing that contract.
+
+The Vercel docs project uses `docs` as its Root Directory and must enable **Include source files outside of the Root Directory in the Build Step** (`sourceFilesOutsideRootDirectory`). Installation requires the repository's `pnpm-workspace.yaml`, root `pnpm-lock.yaml`, and `patches/`. Keep the docs `packageManager` pin aligned with the root and use the Corepack commands in `docs/vercel.json`; do not create a separate docs lockfile or disable frozen installs.
+
+## Dashboard (packages/dashboard)
+
+- Never use native browser dialogs (`alert`, `confirm`, `prompt`). Use shadcn/ui components (`Dialog`, `AlertDialog`, etc.) instead.
+- Use param-case (kebab-case) for all file and folder names (e.g., `session-tree.tsx`, not `SessionTree.tsx`). The `ui/` directory follows shadcn conventions which already uses param-case.
+
+## Releasing
+
+Releases are manual, single-PR affairs. There is no changesets automation. The maintainer controls the changelog voice and format.
+
+To prepare a release:
+
+1. Create a branch (e.g. `prepare-v0.24.0`)
+2. Bump `version` in `package.json`
+3. Run `pnpm version:sync` to update `cli/Cargo.toml`, `cli/Cargo.lock`, and `packages/dashboard/package.json`
+4. Write the changelog entry in `CHANGELOG.md` at the top, under a new `## <version>` heading, wrapped in `<!-- release:start -->` and `<!-- release:end -->` markers. Remove the `<!-- release:start -->` and `<!-- release:end -->` markers from the previous release entry so only the new release has markers.
+5. Add a matching entry to `docs/content/docs/changelog.mdx` at the top (below the frontmatter)
+6. Open a PR and merge to `main`
+
+When the PR merges, CI compares `package.json` version to what's on npm. If it differs, it builds all 7 platform binaries, publishes to npm, and creates the GitHub release automatically. The GitHub release body is extracted from the content between the `<!-- release:start -->` and `<!-- release:end -->` markers in `CHANGELOG.md`.
+
+### Writing the changelog
+
+Review the git log since the last release and write the entry in `CHANGELOG.md`. Follow the existing format and voice. Group changes under `### New Features`, `### Bug Fixes`, `### Improvements`, etc. Bold the feature/fix name, then describe it concisely. Reference PR numbers in parentheses.
+
+Wrap the release notes (everything between the `## <version>` heading and the previous version) in markers so CI can extract them for the GitHub release. Only the current release should have markers; remove the `<!-- release:start -->` and `<!-- release:end -->` markers from any previous release entry:
+
+```markdown
+## 0.24.1
+
+<!-- release:start -->
+### Bug Fixes
+
+- Fixed **baz** not working when qux is enabled (#1235)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.24.0
+
+### New Features
+
+- **Foo command** - Added `foo` command for bar (#1234)
+```
+
+Include a `### Contributors` section listing the GitHub usernames (with `@` prefix) of everyone who contributed to the release. Check the git log between the previous tag and HEAD to find them.
+
+Do not prefix entries with commit hashes. Do not use the changesets `### Patch Changes` / `### Minor Changes` headings. Use descriptive section names instead.
+
+### Docs changelog
+
+The docs changelog at `docs/content/docs/changelog.mdx` mirrors `CHANGELOG.md` but uses a slightly different format. Each entry uses:
+
+- A `v` prefix on the version (e.g. `## v0.24.0`)
+- A date line with the full date: `<p className="text-[#888] text-sm">March 30, 2026</p>`
+- A `---` separator between entries
+
+Match the existing style in that file.
 
 ## Architecture
 
@@ -53,6 +126,18 @@ Runs 18 e2e tests that launch real headless Chrome instances and exercise the fu
 - Tests are `#[ignore]`'d so they don't run during normal `cargo test`
 
 The e2e tests live in `cli/src/native/e2e_tests.rs` and cover: launch/close, navigation, snapshots, screenshots, form interaction, cookies, storage, tabs, element queries, viewport/emulation, domain filtering, diff, state management, error handling, and Phase 8 commands.
+
+### Obscura adapter
+
+From a source checkout:
+
+```bash
+cd cli
+cargo test --locked -j 2 obscura -- --test-threads=1
+OBSCURA_BIN=/absolute/path/to/obscura cargo test --locked -j 2 e2e_obscura -- --ignored --test-threads=1
+```
+
+The first command runs engine-independent regression tests and skips the two ignored E2E tests. The second explicitly verifies the binary: missing, empty, invalid, or unlaunchable `OBSCURA_BIN` fails rather than silently passing. The E2E tests use a loopback fixture, enable private-network access, isolate proxy settings, clear `AGENT_BROWSER_CDP`, `AGENT_BROWSER_AUTO_CONNECT`, and `AGENT_BROWSER_PROVIDER`, and require an owned Obscura process rather than an attached browser. Coverage includes explicit/automatic launch, navigation, JavaScript, a basic snapshot, and close, not full browser fidelity. A normal `cargo test` skips these ignored tests and is not evidence of real Obscura verification.
 
 ### Linting and Formatting
 
