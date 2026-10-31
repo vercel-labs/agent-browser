@@ -1036,7 +1036,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_EVAL,
             "Evaluate JavaScript",
-            "Run JavaScript in the page using stdin to avoid shell escaping.",
+            "Run JavaScript in the page using stdin to avoid shell escaping. When the top-level result is a value JSON cannot represent, the structured response includes `response.data.unserializable` and the text content prints the JavaScript token.",
             json!({
                 "script": { "type": "string", "description": "JavaScript expression or script to evaluate." }
             }),
@@ -1226,7 +1226,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_MOUSE_WHEEL,
             "Mouse wheel",
-            "Scroll with the mouse wheel.",
+            "Scroll with the mouse wheel at the current pointer, initially (0,0). Call agent_browser_mouse_move first to target another location.",
             json!({ "dy": number_schema(), "dx": number_schema() }),
             &["dy"],
         ),
@@ -1373,8 +1373,15 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_TAB_NEW,
             "Tab new",
-            "Open a new tab after applying session setup before its first navigation.",
-            json!({ "url": { "type": "string" }, "label": { "type": "string" } }),
+            "Open a new tab after applying session setup before its first navigation. Rejected labels preserve the current tab's refs and selected frame.",
+            json!({
+                "url": { "type": "string" },
+                "label": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                    "description": "Starts with an ASCII letter, then ASCII letters, digits, `-`, or `_`; `t<N>` and `T<N>` forms are reserved for tab IDs."
+                }
+            }),
             &[],
         ),
         tool(TOOL_TAB_LIST, "Tab list", "List tabs.", json!({}), &[]),
@@ -1871,14 +1878,14 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SKILLS_LIST,
             "Skills list",
-            "List bundled skills.",
+            "List available skills.",
             json!({}),
             &[],
         ),
         tool(
             TOOL_SKILLS_GET,
             "Skills get",
-            "Get bundled skill content.",
+            "Get skill content, including home-directory skills when no package root is found. Package discovery looks for the bundled skill-data/core/SKILL.md file.",
             json!({ "names": string_array_schema("Skill names."), "all": { "type": "boolean" }, "full": { "type": "boolean" } }),
             &[],
         ),
@@ -4368,6 +4375,9 @@ fn response_text(value: &Value) -> Option<String> {
         }
 
         if let Some(data) = obj.get("data") {
+            if let Some(token) = data.get("unserializable").and_then(Value::as_str) {
+                return Some(token.to_string());
+            }
             // Accessibility reports carry a URL alongside their findings. Use
             // the same report formatter as the CLI before the generic string
             // field fallback turns the MCP text content into only that URL.

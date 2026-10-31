@@ -793,6 +793,10 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         }
         // Eval result
         if let Some(result) = data.get("result") {
+            if let Some(token) = data.get("unserializable").and_then(|v| v.as_str()) {
+                print_with_boundaries(token, origin, opts);
+                return;
+            }
             let formatted = serde_json::to_string_pretty(result).unwrap_or_default();
             print_with_boundaries(&formatted, origin, opts);
             return;
@@ -2316,6 +2320,7 @@ agent-browser eval - Execute JavaScript
 Usage: agent-browser eval [options] <script>
 
 Executes JavaScript code in the browser context and returns the result.
+For a top-level Chrome result JSON cannot represent, plain output prints its JavaScript token and JSON output includes data.unserializable.
 
 Options:
   -b, --base64         Decode script from base64 (avoids shell escaping issues)
@@ -2507,7 +2512,7 @@ Subcommands:
   move <x> <y>         Move mouse to coordinates
   down [button]        Press mouse button (left, right, middle)
   up [button]          Release mouse button
-  wheel <dy> [dx]      Scroll mouse wheel
+  wheel <dy> [dx]      Scroll at current tracked pointer (starts at 0,0)
 
 Movement Options:
   --duration <ms>       Target total duration, including browser response time
@@ -2516,6 +2521,7 @@ Movement Options:
   --seed <n>            Seed for the human movement path
 
 Steps share one schedule; a slow browser can extend the requested duration.
+Failed wheel dispatches leave the tracked pointer unchanged.
 
 Global Options:
   --json               Output as JSON
@@ -2523,12 +2529,12 @@ Global Options:
 
 Examples:
   agent-browser mouse move 100 200
+  agent-browser mouse wheel 100
   agent-browser mouse move 600 400 --duration 250 --steps 24
   agent-browser mouse move 600 400 --human --seed 42
   agent-browser mouse down
   agent-browser mouse up
   agent-browser mouse down right
-  agent-browser mouse wheel 100
   agent-browser mouse wheel -50 0
 "##
         }
@@ -2594,6 +2600,8 @@ Subcommands:
   request <requestId>        View full request/response detail (including body)
   har <start|stop> [path]    Record and export a HAR file
     --content <mode>         Response bodies to embed on start: text (default), all, none
+    If export fails, recording and captured requests remain available. Fix the
+    destination and retry stop.
 
 Global Options:
   --json               Output as JSON
@@ -2714,8 +2722,11 @@ Manage browser tabs in the current window. Stable tab ids look like `t1`,
 `t2`, `t3`. An id is never reused within a session, so scripts can keep
 referring to the same tab across commands. Optional user-assigned labels
 (e.g. `docs`, `app`) are interchangeable with ids everywhere a tab ref is
-accepted. CDP target ids (from `tab list --json`) are also accepted as tab
-refs; unlike `t<N>` ids they stay stable across daemon restarts.
+accepted. A label starts with a letter and contains only letters, digits, `-`, or
+`_`. Labels must be unique within a session and cannot use the reserved `t<N>`
+or `T<N>` tab-id form. CDP target ids (from `tab list --json`) are also accepted
+as tab refs; unlike `t<N>` ids they stay stable across daemon restarts.
+Rejected labels preserve the current tab's refs and selected frame.
 
 Tabs opened with `tab new` or `click --new-tab` inherit the session's user
 agent, headers, HTTP credentials, init scripts, routes, and emulation
@@ -3799,6 +3810,8 @@ Options:
 The skills command serves bundled skill content that always matches the
 installed CLI version. Agents should use this to get current instructions
 rather than relying on cached copies.
+When no package root is found, the CLI reads manually installed skills from ~/.agent-browser/skills and ~/.agent-browser/skill-data.
+Package discovery looks for the bundled skill-data/core/SKILL.md file.
 
 Examples:
   agent-browser skills

@@ -1535,6 +1535,15 @@ impl BrowserManager {
     }
 
     pub async fn evaluate(&self, script: &str, _args: Option<Value>) -> Result<Value, String> {
+        let result = self.evaluate_remote_object(script).await?;
+        Ok(result.value.unwrap_or(Value::Null))
+    }
+
+    /// Returns the raw CDP result so direct eval can preserve special values.
+    pub(crate) async fn evaluate_remote_object(
+        &self,
+        script: &str,
+    ) -> Result<RemoteObject, String> {
         let session_id = self.active_session_id()?.to_string();
 
         let result: EvaluateResult = self
@@ -1559,7 +1568,7 @@ impl BrowserManager {
             return Err(format!("Evaluation error: {}", msg));
         }
 
-        Ok(result.result.value.unwrap_or(Value::Null))
+        Ok(result.result)
     }
 
     async fn evaluate_simple(&self, expression: &str) -> Result<Value, String> {
@@ -1895,6 +1904,8 @@ impl BrowserManager {
         self.pages.iter().any(|p| p.label.as_deref() == Some(label))
     }
 
+    /// Creates a tab with an optional unique label; `t<N>` forms are reserved for tab IDs.
+    /// Rejected labels preserve the current tab and its selection.
     pub async fn tab_new(
         &mut self,
         url: Option<&str>,
@@ -1905,6 +1916,12 @@ impl BrowserManager {
                 return Err(format!(
                     "Invalid tab label `{}`; labels must start with a letter and contain only \
                      letters, digits, `-`, and `_`",
+                    label
+                ));
+            }
+            if !matches!(TabRef::parse(label), Ok(TabRef::Label(_))) {
+                return Err(format!(
+                    "Tab label `{}` uses syntax reserved for tab IDs",
                     label
                 ));
             }

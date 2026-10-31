@@ -56,6 +56,8 @@ All commands support `--json` for structured output.
 
 Set the `AGENT_BROWSER_SKILLS_DIR` environment variable to override the skills directory path.
 
+When no package root is found, the CLI reads manually installed skills from `~/.agent-browser/skills` and `~/.agent-browser/skill-data`. Package discovery looks for the bundled `skill-data/core/SKILL.md` file.
+
 ## How It Works
 
 The discovery skill installed via `npx skills add` is intentionally thin and stable. It makes agents aware of agent-browser, provides trigger words for activation, and points to the `agent-browser skills` command. Actual usage instructions, command references, workflows, and specialized knowledge all live in the CLI-served skills.
