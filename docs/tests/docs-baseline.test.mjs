@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { navigation } from "../src/lib/docs-navigation.ts";
+import { getPageTitle } from "../src/lib/page-titles.ts";
 import {
   baseline,
   pages,
@@ -136,6 +137,28 @@ test("WebMCP appears once in Features after CDP Mode in both navigation sources"
     ),
     featurePaths.map((href) => href.slice(1)),
   );
+});
+
+test("Baizhi Cloud Browser is registered in provider navigation and page metadata", async () => {
+  const slug = "providers/baizhi-cloud-browser";
+  const providers = navigation.find((section) => section.title === "Providers");
+  assert.deepEqual(
+    providers.items.filter((item) => item.href === `/${slug}`),
+    [{ name: "Baizhi Cloud Browser", href: `/${slug}` }],
+  );
+  assert.equal(getPageTitle(slug), "Baizhi Cloud Browser");
+  const meta = JSON.parse(
+    await readFile(
+      new URL("../content/docs/providers/meta.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.equal(meta.pages.filter((page) => page === "baizhi-cloud-browser").length, 1);
+  const source = await readFile(
+    new URL(`../content/docs/${slug}.mdx`, import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /^title: "Baizhi Cloud Browser"$/m);
 });
 
 test("heading oracle excludes fenced shell comments and preserves original duplicate IDs", () => {
