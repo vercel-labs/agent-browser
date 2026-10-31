@@ -1,6 +1,6 @@
 {
   "name": "agent-browser",
-  "version": "0.39.1",
+  "version": "0.41.1",
   "description": "Browser automation CLI for AI agents",
   "type": "module",
   "packageManager": "pnpm@11.1.3",
@@ -20,6 +20,7 @@
     "agent-browser": "./bin/agent-browser.js"
   },
   "scripts": {
+    "mcp-tools:sync": "cd cli && AGENT_BROWSER_UPDATE_MCP_TOOLS=1 cargo test --bin agent-browser mcp_tool_catalog_snapshot",
     "version:sync": "node scripts/sync-version.js",
     "version": "npm run version:sync && git add cli/Cargo.toml",
     "build:native": "npm run version:sync && cargo build --release --manifest-path cli/Cargo.toml && node scripts/copy-native.js",
@@ -31,7 +32,8 @@
     "release": "npm run version:sync && npm run build:all-platforms && npm publish",
     "postinstall": "node scripts/postinstall.js",
     "test:launcher": "node --test test/launcher.test.mjs",
-    "build:dashboard": "cd packages/dashboard && pnpm build"
+    "build:dashboard": "cd packages/dashboard && pnpm build",
+    "build:source": "pnpm install --frozen-lockfile --filter dashboard && pnpm run build:dashboard && pnpm run build:native"
   },
   "keywords": [
     "browser",

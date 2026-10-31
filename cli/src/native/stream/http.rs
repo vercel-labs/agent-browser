@@ -5,9 +5,10 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
 
-use crate::connection::get_socket_dir;
 #[cfg(windows)]
 use crate::connection::resolve_port;
+#[cfg(unix)]
+use crate::session_files::SessionFile;
 
 use super::chat::{chat_status_json, handle_chat_request, handle_models_request};
 use super::dashboard::spawn_session;
@@ -410,7 +411,7 @@ pub(super) async fn relay_command_to_daemon(
 
     #[cfg(unix)]
     let stream = {
-        let socket_path = get_socket_dir().join(format!("{}.sock", session_name));
+        let socket_path = SessionFile::Socket.path(session_name);
         tokio::net::UnixStream::connect(&socket_path)
             .await
             .map_err(|e| format!("Failed to connect to daemon: {}", e))?
@@ -418,7 +419,8 @@ pub(super) async fn relay_command_to_daemon(
 
     #[cfg(windows)]
     let stream = {
-        let port = resolve_port(session_name);
+        let port = resolve_port(session_name)
+            .ok_or_else(|| "Failed to connect to daemon: no port file".to_string())?;
         tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
             .await
             .map_err(|e| format!("Failed to connect to daemon: {}", e))?
@@ -441,17 +443,23 @@ pub(super) async fn relay_command_to_daemon(
 }
 
 pub(super) fn serve_embedded_file(url_path: &str) -> (&'static str, &'static str, Vec<u8>) {
-    let clean = url_path.trim_start_matches('/');
+    let clean = url_path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('/');
     let key = if clean.is_empty() {
         "index.html"
     } else {
         clean
     };
 
-    let file = DashboardAssets::get(key).or_else(|| DashboardAssets::get("index.html"));
+    let file = DashboardAssets::get(key)
+        .map(|file| (key, file))
+        .or_else(|| DashboardAssets::get("index.html").map(|file| ("index.html", file)));
 
     match file {
-        Some(content) => {
+        Some((key, content)) => {
             let ext = key.rsplit('.').next().unwrap_or("");
             let ct = match ext {
                 "html" => "text/html; charset=utf-8",
@@ -484,6 +492,28 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
+
+    #[test]
+    fn test_serve_embedded_file_query_string() {
+        let (_, expected_content_type, expected_body) = serve_embedded_file("/");
+        let (status, content_type, body) = serve_embedded_file("/?port=35511");
+
+        assert_eq!(status, "200 OK");
+        assert_eq!(content_type, "text/html; charset=utf-8");
+        assert_eq!(content_type, expected_content_type);
+        assert_eq!(body, expected_body);
+    }
+
+    #[test]
+    fn test_serve_embedded_file_missing_route_falls_back_to_index() {
+        let (_, expected_content_type, expected_body) = serve_embedded_file("/");
+        let (status, content_type, body) = serve_embedded_file("/missing-route.js");
+
+        assert_eq!(status, "200 OK");
+        assert_eq!(content_type, "text/html; charset=utf-8");
+        assert_eq!(content_type, expected_content_type);
+        assert_eq!(body, expected_body);
+    }
 
     async fn send_request_to_handler(request: &str, session_name: &str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

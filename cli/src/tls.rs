@@ -263,15 +263,19 @@ mod tests {
 
     #[test]
     fn cli_selection_is_saved_and_reused() {
+        let ca = std::env::temp_dir()
+            .join("ca.pem")
+            .to_string_lossy()
+            .into_owned();
         let mut first = flags();
-        first.ca_cert = Some("/tmp/ca.pem".to_string());
+        first.ca_cert = Some(ca.clone());
         first.cli_ca_cert = true;
         let (opts, saved) = resolve(&first, &SessionTrust::default());
-        assert_eq!(opts.ca_cert.as_deref(), Some("/tmp/ca.pem"));
+        assert_eq!(opts.ca_cert.as_deref(), Some(ca.as_str()));
         assert!(!opts.ca_cert_is_implicit);
 
         let (reused, unchanged) = resolve(&flags(), &saved);
-        assert_eq!(reused.ca_cert.as_deref(), Some("/tmp/ca.pem"));
+        assert_eq!(reused.ca_cert.as_deref(), Some(ca.as_str()));
         assert_eq!(unchanged, saved);
     }
 

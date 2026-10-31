@@ -45,11 +45,12 @@ agent-browser stream disable          # Stop runtime WebSocket streaming
 agent-browser close                   # Close browser (aliases: quit, exit)
 agent-browser close --all             # Close all active sessions
 agent-browser mcp                     # Start an MCP stdio server
+agent-browser mcp call <tool> <json>  # Run one MCP tool and print its result
 ```
 
 Browser responses automatically announce WebMCP tools on first discovery and when the catalog changes. Summaries contain only names, brief descriptions, origins, and frame IDs. Choose a relevant tool, then fetch its full schema with `agent-browser webmcp list <tool> --frame <frame-id> --json` before invoking it. Schemas and annotations are never included proactively. Unchanged catalogs and pages without tools add no context. JSON exposes updates as `data.webmcp`; CLI and MCP text include the same bounded summary. See [WebMCP](/webmcp) for update semantics and security.
 
-Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, take a fresh snapshot, then retry the original action.
+Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, take a fresh snapshot, then retry the original action. Click and dblclick fail, instead of reporting success, when the element is hidden, disabled, or outside the viewport. `click --new-tab` opens the link's URL directly, so these checks do not apply to it.
 
 Headless Chromium screenshots hide native scrollbars for consistent image output. Pass `--hide-scrollbars false` when launching to keep native scrollbars visible.
 
@@ -67,6 +68,8 @@ agent-browser get count <sel>         # Count matching elements
 agent-browser get box <sel>           # Get bounding box
 agent-browser get styles <sel>        # Get computed styles
 ```
+
+`get cdp-url` reports the CDP WebSocket URL of a browser that is already running. It requires a running browser and never launches one. A batch containing only `get cdp-url` commands also skips browser launch. A mixed batch can launch a browser for its other commands.
 
 ## Read agent-friendly text
 
@@ -145,12 +148,16 @@ agent-browser wait "#spinner" --state hidden           # Wait for element to dis
 
 After a page change, prefer a selector, text, URL, or JavaScript condition that represents the state you need. Use `networkidle` only when the page is known to become quiet, because SSE, WebSockets, polling, and long-polling can keep it from resolving.
 
+A load-state wait runs for its whole timeout budget, taken from `--timeout` or `AGENT_BROWSER_DEFAULT_TIMEOUT`, and returns an error when it expires.
+
 ## Downloads
 
 ```bash
 agent-browser download <sel> <path>   # Click element to trigger download
 agent-browser wait --download [path]  # Wait for any download to complete
 ```
+
+`wait --download` returns the oldest download not yet claimed by an earlier wait, including one that finished before the command ran, so it can follow the command that triggered it. With `[path]`, the file is moved there; without it, the output is where the browser saved it. The move only applies to a browser agent-browser launched: over `--cdp`, `--auto-connect`, or a provider, the saved path comes from the remote endpoint, so `[path]` is rejected.
 
 Use `--download-path <dir>` (or `AGENT_BROWSER_DOWNLOAD_PATH` env) to set a default download directory. Without it, downloads go to a temporary directory that is deleted when the browser closes.
 
@@ -192,6 +199,8 @@ agent-browser set credentials <u> <p> # HTTP basic auth for current and future t
 agent-browser set media [dark|light]  # Emulate color scheme (persists for session)
 ```
 
+Viewport scales and geolocation coordinates must be finite numbers.
+
 Use `--color-scheme` for persistent dark/light mode across all commands:
 
 ```bash
@@ -213,12 +222,19 @@ agent-browser storage local clear     # Clear all
 agent-browser storage session         # Same for sessionStorage
 ```
 
+Cookie attributes use kebab-case flags such as `--http-only` and `--same-site`. The legacy `--httpOnly` and `--sameSite` spellings remain accepted. When setting one cookie, unknown flags and extra arguments return an error.
+
+```bash
+agent-browser cookies set session_id abc123 --http-only --same-site Strict
+```
+
 ## Network
 
 ```bash
 agent-browser network route <url>              # Intercept requests
 agent-browser network route <url> --abort      # Block requests
 agent-browser network route <url> --body <json>  # Mock response
+agent-browser network route <url> --body <json> --allow-origin <origin>  # Mock readable cross-origin
 agent-browser network route '*' --abort --resource-type script  # Block scripts only
 agent-browser network unroute [url]            # Remove routes
 agent-browser network requests                 # View tracked requests
@@ -568,6 +584,8 @@ agent-browser react suspense [--only-dynamic] [--json]  # Suspense boundaries + 
 agent-browser vitals [url] [--json]                # LCP/CLS/TTFB/FCP/INP + hydration
 ```
 
+`react tree` prints the component tree when one is available. If the response contains only a header, no tree was collected. Confirm the page uses React and that a React root has mounted.
+
 Works on any React app (Next.js, Remix, Vite+React, CRA, TanStack Start, React Native Web, etc.). `vitals` and `pushstate` are framework-agnostic.
 
 See [React & Web Vitals](/react) for full command details and examples.
@@ -610,7 +628,7 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime 
 --extension <path>       # Load browser extension (repeatable)
 --init-script <path>     # Register a page init script before first navigation (repeatable)
 --enable <feature>       # Built-in init scripts: react-devtools (repeatable or comma-list)
---args <args>            # Browser launch args (comma separated)
+--args <args>            # Browser launch args (commas inside a value are kept)
 --user-agent <ua>        # Custom User-Agent string
 --proxy <url>            # Proxy server URL
 --proxy-bypass <hosts>   # Hosts to bypass proxy
@@ -631,6 +649,7 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime 
 --webgpu                 # Enable WebGPU (software Vulkan on Linux, no GPU needed)
 --no-webmcp              # Disable default experimental WebMCP Chrome features (or AGENT_BROWSER_NO_WEBMCP env)
 --cdp <port|url>         # Connect via CDP; root WebSocket query slash is optional
+--cdp-headers <json>     # Headers for --cdp discovery and WebSocket handshake (or AGENT_BROWSER_CDP_HEADERS env)
 --auto-connect           # Auto-discover and connect to running Chrome
 --color-scheme <scheme>  # Color scheme: dark, light, no-preference
 --download-path <path>   # Default download directory
@@ -671,6 +690,8 @@ echo '[
   ["click", "@e1"],
   ["screenshot", "result.png"]
 ]' | agent-browser batch --json
+
+echo '[["fill", "#password", "secret"]]' | agent-browser batch --json --omit-command
 ```
 
 <table>
@@ -680,8 +701,11 @@ echo '[
   <tbody>
     <tr><td><code>--bail</code></td><td>Stop on first error (default: continue all commands)</td></tr>
     <tr><td><code>--json</code></td><td>Output results as a JSON array</td></tr>
+    <tr><td><code>--omit-command</code></td><td>With <code>--json</code>, replace each <code>command</code> array with a stable zero-based <code>index</code> field</td></tr>
   </tbody>
 </table>
+
+With `--json --omit-command`, rows use a stable zero-based `index` field on success, failure, or `--bail`; default JSON output keeps the `command` field. This only removes command arrays and does not make output safe for secrets. Errors and response data are unchanged: `type` echoes typed text, and `get value`/`eval` may return input values. The MCP `agent_browser_batch` tool accepts `omitCommand: true`.
 
 ## MCP server
 
@@ -689,9 +713,17 @@ echo '[
 agent-browser mcp
 agent-browser mcp --tools all
 agent-browser mcp --tools core,network,react
+agent-browser mcp call agent_browser_open '{"url":"https://example.com"}'
+agent-browser mcp --config /path/to/trusted-config.json
+agent-browser mcp call agent_browser_open '{"url":"https://example.com"}' --config /path/to/trusted-config.json
+echo '{"selector":"@e2"}' | agent-browser mcp call agent_browser_click -
 ```
 
-Starts a Model Context Protocol server over stdio. MCP clients launch this command as a subprocess and exchange newline-delimited JSON-RPC on stdin and stdout. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization.
+Starts a Model Context Protocol server over stdio. MCP clients launch this command as a subprocess and exchange newline-delimited JSON-RPC on stdin and stdout. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization. A tool call with an argument its schema does not declare fails with an invalid-params error that names the unknown keys and lists the tool's own arguments.
+
+`mcp call` runs one MCP tool without a stdio session and prints its `tools/call` result as JSON, with the agent-browser version in `_meta.agentBrowserVersion`. Pass the tool arguments as a JSON object, or `-` to read them from stdin. Every tool is available unless `--tools` limits the call to profiles. The exit code is 0 on success, 1 when the tool reports an error, and 2 for an unknown tool or invalid arguments. Use it from runtimes that cannot keep a stdio session open between tool calls, such as serverless agents. Access settings such as `AGENT_BROWSER_ALLOWED_DOMAINS` come from the environment, as with the server.
+
+In a Vercel Sandbox, `startAgentBrowserMcp` runs the server over the sandbox command's stdin. See [Next.js + Vercel](/next#mcp-server-over-stdin).
 
 The default tools profile is `core`, which keeps MCP context small for everyday browser automation. Use `--tools all` for the full typed CLI parity surface, or combine profiles with commas, such as `--tools core,network,react`.
 
@@ -736,9 +768,11 @@ Common tools include:
 - `agent_browser_eval`
 - `agent_browser_close`
 
-Each tool has typed fields such as `url`, `selector`, `text`, `key`, `session`, `allowedDomains`, and `idleTimeout`, so MCP clients show meaningful approval prompts instead of raw command arrays. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. The common `idleTimeout` string maps to `--idle-timeout`, accepts values such as `30s`, `5m`, `1h`, or raw milliseconds, and accepts `0` to disable idle shutdown. Each tool also accepts `extraArgs` for advanced CLI flags and exact CLI parity. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.
+Each tool has typed fields such as `url`, `selector`, `text`, `key`, `session`, `allowedDomains`, and `idleTimeout`, so MCP clients show meaningful approval prompts instead of raw command arrays. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. The common `idleTimeout` string maps to `--idle-timeout`, accepts values such as `30s`, `5m`, `1h`, or raw milliseconds, and accepts `0` to disable idle shutdown. Each tool also accepts `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. Structured `allowedDomains` is rejected when the server already sets allowed domains. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.
 
-Tool invocations use the same config files and environment variables as the CLI. Use `session` in the tool arguments, or set `AGENT_BROWSER_SESSION`, to isolate browser state.
+By default, tool invocations use the same config discovery and environment variables as the CLI. Use `session` in the tool arguments, or set `AGENT_BROWSER_SESSION`, to isolate browser state.
+
+Pass `--config <trusted-path>` to `agent-browser mcp` or `agent-browser mcp call` to select one trusted config file. MCP tool child processes load only that file, replacing default user/project discovery. Put any required safety policy in it. Environment variables and accepted per-tool CLI arguments keep their normal precedence.
 
 ## Command chaining
 

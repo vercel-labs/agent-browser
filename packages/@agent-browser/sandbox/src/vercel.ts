@@ -9,6 +9,11 @@ import {
   type AgentBrowserInstallOptions,
   type BuildAgentBrowserArgvOptions,
 } from "./shared.js";
+import {
+  connectAgentBrowserMcp,
+  type AgentBrowserMcpClient,
+  type ConnectAgentBrowserMcpOptions,
+} from "./mcp.js";
 
 export {
   AgentBrowserCommandError,
@@ -17,6 +22,9 @@ export {
   resolveAgentBrowserInstallSpec,
   type AgentBrowserCommandResult,
   type AgentBrowserInstallOptions,
+  AgentBrowserMcpError,
+  type AgentBrowserMcpClient,
+  type AgentBrowserMcpToolResult,
 } from "./index.js";
 
 export const CHROMIUM_SYSTEM_DEPS = [
@@ -64,6 +72,29 @@ export interface VercelSandboxSession {
 
 export interface VercelSandboxConstructor {
   create(options: Record<string, unknown>): Promise<VercelSandboxSession>;
+}
+
+/** The detached-command surface of `@vercel/sandbox` 3.7+ that stdin needs. */
+export interface VercelSandboxStdinCommand {
+  closeStdin(): Promise<void>;
+  kill(): Promise<void>;
+  logs(): AsyncIterable<{ readonly data: string; readonly stream: "stderr" | "stdout" }>;
+  wait(): Promise<{ readonly exitCode: number }>;
+  writeStdin(data: string | Uint8Array): Promise<void>;
+}
+
+export interface VercelSandboxStdinHost {
+  runCommand(options: {
+    readonly args: readonly string[];
+    readonly cmd: string;
+    readonly detached: true;
+    readonly stdin: true;
+  }): Promise<VercelSandboxStdinCommand>;
+}
+
+export interface StartAgentBrowserMcpOptions extends ConnectAgentBrowserMcpOptions {
+  /** Extra `agent-browser mcp` flags, such as `["--tools", "core"]`. */
+  readonly args?: readonly string[];
 }
 
 export interface SandboxStepEvent {
@@ -220,6 +251,53 @@ export async function runAgentBrowserCommand<TJson = unknown>(
     options.onStep,
     options.stepLabel,
   );
+}
+
+/**
+ * Starts one long-lived `agent-browser mcp` in the sandbox over stdin, so
+ * every tool call reuses the same process instead of spawning a command.
+ * Requires `@vercel/sandbox` 3.7 or later.
+ */
+export async function startAgentBrowserMcp(
+  sandbox: VercelSandboxSession | VercelSandboxStdinHost,
+  options: StartAgentBrowserMcpOptions = {},
+): Promise<AgentBrowserMcpClient> {
+  // A real `Sandbox` takes both `runCommand` forms; `VercelSandboxSession` declares only the positional one.
+  const command = await (sandbox as VercelSandboxStdinHost).runCommand({
+    args: ["mcp", ...(options.args ?? [])],
+    cmd: "agent-browser",
+    detached: true,
+    stdin: true,
+  });
+  const encoder = new TextEncoder();
+  const stdout = new ReadableStream<Uint8Array>({
+    start(controller) {
+      void (async () => {
+        try {
+          for await (const log of command.logs()) {
+            if (log.stream === "stdout") controller.enqueue(encoder.encode(log.data));
+          }
+          controller.close();
+        } catch (error) {
+          controller.error(error);
+        }
+      })();
+    },
+  });
+  const stdin = new WritableStream<Uint8Array>({
+    write: (chunk) => command.writeStdin(chunk),
+    close: () => command.closeStdin(),
+    abort: () => command.closeStdin(),
+  });
+  try {
+    return await connectAgentBrowserMcp(
+      { stdin, stdout, wait: () => command.wait() },
+      options,
+    );
+  } catch (error) {
+    await command.kill().catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function withAgentBrowserSandbox<T>(

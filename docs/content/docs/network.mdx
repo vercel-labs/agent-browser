@@ -24,12 +24,15 @@ agent-browser navigate https://app.example.com
     <tr><td><code>network route &lt;url&gt;</code></td><td>Intercept matching requests</td></tr>
     <tr><td><code>network route &lt;url&gt; --abort</code></td><td>Block matching requests</td></tr>
     <tr><td><code>network route &lt;url&gt; --body &lt;json&gt;</code></td><td>Fulfill matching requests with a mock body</td></tr>
+    <tr><td><code>network route &lt;url&gt; --body &lt;json&gt; --allow-origin &lt;origin&gt;</code></td><td>Let a page on that origin read the mock cross-origin</td></tr>
     <tr><td><code>network route "*" --resource-type script --abort</code></td><td>Block only a specific resource type</td></tr>
     <tr><td><code>network unroute [url]</code></td><td>Remove one route or all routes</td></tr>
   </tbody>
 </table>
 
 `--resource-type` accepts comma-separated resource types such as `script`, `image`, `font`, `xhr`, and `fetch`.
+
+A mock for a URL on another origin than the page (a page on `www.example.com` calling `api.example.com`) fails with a network error unless you pass `--allow-origin` with the page's origin. The mock then answers CORS checks and preflights for that origin only. JSON bodies are sent as `application/json`.
 
 ## Request log
 

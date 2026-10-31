@@ -70,6 +70,8 @@ agent-browser install --with-deps
 
 This exits nonzero if the package manager cannot install every required browser library.
 
+When run as root, this command calls the detected package manager directly. For non-root users, it uses `sudo`. If you are not root and `sudo` is unavailable, it reports that root privileges or `sudo` are required.
+
 ### Updating
 
 Upgrade to the latest version:
@@ -98,7 +100,7 @@ agent-browser screenshot page.png
 agent-browser close
 ```
 
-Clicks fail early when another element covers the target's click point, for example a consent banner or modal. Dismiss or interact with the reported covering element, then take a fresh snapshot before retrying the original ref.
+Clicks fail early when another element covers the target's click point, for example a consent banner or modal. Dismiss or interact with the reported covering element, then take a fresh snapshot before retrying the original ref. Click and dblclick fail, instead of reporting success, when the element is hidden, disabled, or outside the viewport. `click --new-tab` opens the link's URL directly, so these checks do not apply to it.
 
 Headless Chromium screenshots hide native scrollbars for consistent image output. Pass `--hide-scrollbars false` when launching to keep native scrollbars visible.
 
@@ -197,11 +199,13 @@ agent-browser get value <sel>         # Get input value
 agent-browser get attr <sel> <attr>   # Get attribute
 agent-browser get title               # Get page title
 agent-browser get url                 # Get current URL
-agent-browser get cdp-url             # Get CDP WebSocket URL (for DevTools, debugging)
+agent-browser get cdp-url             # CDP WebSocket URL of a running browser (never launches)
 agent-browser get count <sel>         # Count matching elements
 agent-browser get box <sel>           # Get bounding box
 agent-browser get styles <sel>        # Get computed styles
 ```
+
+A batch containing only `get cdp-url` commands also skips browser launch. A mixed batch can launch a browser for its other commands.
 
 ### Read Agent-Friendly Text
 
@@ -279,6 +283,8 @@ agent-browser wait "#spinner" --state hidden
 
 **Load states:** `load`, `domcontentloaded`, `networkidle`
 
+A load-state wait runs for its whole timeout budget, taken from `--timeout` or `AGENT_BROWSER_DEFAULT_TIMEOUT`, and returns an error when it expires.
+
 After a page change, prefer a selector, text, URL, or JavaScript condition that represents the state you need. Use `load` or `domcontentloaded` when the lifecycle event is the milestone. `networkidle` is supported for pages known to become quiet, but SSE, WebSockets, polling, and long-polling can keep it from resolving.
 
 ### Batch Execution
@@ -299,7 +305,11 @@ echo '[
   ["click", "@e1"],
   ["screenshot", "result.png"]
 ]' | agent-browser batch --json
+
+echo '[["fill", "#password", "secret"]]' | agent-browser batch --json --omit-command
 ```
+
+With `--json`, `--omit-command` replaces each `command` array with a stable zero-based `index` field on success, failure, or `--bail`; default output is unchanged. This only removes command arrays and does not make output safe for secrets. Errors and response data are unchanged: `type` echoes typed text, and `get value`/`eval` may return input values. The MCP `agent_browser_batch` tool accepts `omitCommand: true`.
 
 ### Clipboard
 
@@ -335,6 +345,8 @@ agent-browser set credentials <u> <p> # HTTP basic auth for current and future t
 agent-browser set media [dark|light]  # Emulate color scheme
 ```
 
+Viewport scales and geolocation coordinates must be finite numbers.
+
 `set credentials` applies HTTP Basic Authentication to the current tab and tabs opened later. `set offline off` and `set headers '{}'` restore the default setup for future tabs.
 
 ### Cookies & Storage
@@ -352,6 +364,12 @@ agent-browser storage local set <k> <v>  # Set value
 agent-browser storage local clear     # Clear all
 
 agent-browser storage session         # Same for sessionStorage
+```
+
+Cookie attributes use kebab-case flags such as `--http-only` and `--same-site`. The legacy `--httpOnly` and `--sameSite` spellings remain accepted. When setting one cookie, unknown flags and extra arguments return an error.
+
+```bash
+agent-browser cookies set session_id abc123 --http-only --same-site Strict
 ```
 
 ### Network
@@ -467,6 +485,8 @@ agent-browser state clear --all       # Clear all saved states
 agent-browser state clean --older-than <days>  # Delete old states
 ```
 
+Saved localStorage and sessionStorage are written through Chrome DevTools, not page JavaScript, and only while the page is on the saved origin. If an origin redirects elsewhere or fails to load, its storage is skipped, the rest still loads, and `state load` lists it under `skippedOrigins`. For `--state` and `--restore` at launch, `session info` lists it under `restoreSkippedOrigins`.
+
 With recording `--cursor`, the pointer and click ripple render with the page, keeping drags synchronized in every captured frame. The temporary overlay is inert, hidden from accessibility snapshots, and removed when recording stops. Screenshots taken during the recording include it.
 
 ### Navigation
@@ -495,11 +515,11 @@ Without `batch` the same sequence is three commands that all reuse the same daem
 
 ### React / Web Vitals
 
-Agent-browser ships with first-class React introspection and universal Web Vitals metrics. The React commands need the React DevTools hook installed at launch; Web Vitals and pushstate are framework-agnostic.
+Agent-browser ships with first-class React introspection and universal Web Vitals metrics. React commands require the React DevTools hook, installed at launch with `--enable react-devtools`. The binary includes the hook's `installHook.js`; without the hook, React commands error with `React DevTools hook not installed` and tell you to relaunch with `--enable react-devtools`. Web Vitals and pushstate are framework-agnostic.
 
 ```bash
 agent-browser open --enable react-devtools <url>   # Launch with React hook installed
-agent-browser react tree                           # Full component tree
+agent-browser react tree                           # Print the component tree
 agent-browser react inspect <fiberId>              # props, hooks, state, source
 agent-browser react renders start                  # Begin fiber render recording
 agent-browser react renders stop [--json]          # Stop and print profile (--json for raw data)
@@ -508,8 +528,7 @@ agent-browser react suspense [--only-dynamic] [--json]  # Suspense boundaries + 
 agent-browser vitals [url] [--json]                # LCP/CLS/TTFB/FCP/INP + hydration summary
 ```
 
-Each `react ...` subcommand requires `--enable react-devtools` to have been passed at launch (the React DevTools `installHook.js` is embedded in the binary). Without it the commands error with `React DevTools hook not installed
-- relaunch with --enable react-devtools`.
+`react tree` prints the component tree when the output includes one. A header-only result means no component tree was collected; confirm the page uses React and that a React root has mounted.
 
 Works on any React app — Next.js, Remix, Vite+React, CRA, TanStack Start, React Native Web, etc. `vitals` and `pushstate` are framework-agnostic. `vitals` prints a summary by default; pass `--json` for the full structured payload.
 
@@ -564,6 +583,9 @@ agent-browser doctor                  # Diagnose the install and auto-clean stal
 agent-browser doctor --fix            # Also run destructive repairs (reinstall Chrome, purge old state, ...)
 agent-browser doctor --offline --quick  # Skip network probes and the live launch test
 agent-browser mcp                     # Start an MCP stdio server
+agent-browser mcp call <tool> <json>  # Run one MCP tool and print its result
+agent-browser mcp --config /path/to/trusted-config.json
+agent-browser mcp call agent_browser_open '{"url":"https://example.com"}' --config /path/to/trusted-config.json
 ```
 
 `doctor` checks your environment, Chrome install, daemon state, config files, encryption key, providers, network reachability, and runs a live headless browser launch test. Stale socket/pid sidecar files are auto-cleaned. Output is also available as `--json` for agents.
@@ -588,9 +610,15 @@ Serves bundled skill content that always matches the installed CLI version. AI a
 agent-browser mcp
 agent-browser mcp --tools all
 agent-browser mcp --tools core,network,react
+agent-browser mcp call agent_browser_open '{"url":"https://example.com"}'
+echo '{"selector":"@e2"}' | agent-browser mcp call agent_browser_click -
 ```
 
-Starts a Model Context Protocol server over stdio. MCP clients launch this command as a subprocess and exchange newline-delimited JSON-RPC on stdin and stdout. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization.
+Starts a Model Context Protocol server over stdio. MCP clients launch this command as a subprocess and exchange newline-delimited JSON-RPC on stdin and stdout. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization. A tool call with an argument its schema does not declare fails with an invalid-params error that names the unknown keys and lists the tool's own arguments.
+
+`mcp call` runs one MCP tool without a stdio session and prints its `tools/call` result as JSON, with the agent-browser version in `_meta.agentBrowserVersion`. Pass the tool arguments as a JSON object, or `-` to read them from stdin. Every tool is available unless `--tools` limits the call to profiles. The exit code is 0 on success, 1 when the tool reports an error, and 2 for an unknown tool or invalid arguments. Use it from runtimes that cannot keep a stdio session open between tool calls, such as serverless agents. Access settings such as `AGENT_BROWSER_ALLOWED_DOMAINS` come from the environment, as with the server.
+
+In a Vercel Sandbox, `startAgentBrowserMcp` runs the server over the sandbox command's stdin. See [Serverless (Vercel)](#serverless-vercel).
 
 The default tools profile is `core`, which keeps MCP context small for everyday browser automation. Use `--tools all` for the full typed CLI parity surface, or combine profiles with commas, such as `--tools core,network,react`.
 
@@ -620,7 +648,7 @@ Common tools include:
 - `agent_browser_eval`
 - `agent_browser_close`
 
-Each tool has typed fields such as `url`, `selector`, `text`, `key`, `session`, and `allowedDomains`, so MCP clients show meaningful approval prompts instead of raw command arrays. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. Each tool also accepts `extraArgs` for advanced CLI flags and exact CLI parity. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.
+Each tool has typed fields such as `url`, `selector`, `text`, `key`, `session`, and `allowedDomains`, so MCP clients show meaningful approval prompts instead of raw command arrays. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. Each tool also accepts `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. Structured `allowedDomains` is rejected when the server already sets allowed domains. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.
 
 Example MCP client config:
 
@@ -648,7 +676,7 @@ Full parity MCP client config:
 }
 ```
 
-Tool invocations use the same config files and environment variables as the CLI. Use `session` in the tool arguments, or set `AGENT_BROWSER_SESSION`, to isolate browser state.
+By default, tool invocations use the same config discovery and environment variables as the CLI. Pass `--config <trusted-path>` to `agent-browser mcp` or `agent-browser mcp call` to select one trusted config file; MCP tool child processes load only that file, replacing default user/project discovery. Put any required safety policy in the selected file. Environment variables and accepted per-tool CLI arguments keep their normal precedence. Use `session` in the tool arguments, or set `AGENT_BROWSER_SESSION`, to isolate browser state.
 
 ## Authentication
 
@@ -773,8 +801,9 @@ With `--pin-tab`:
 - If the bound tab is closed, commands fail with a `tab_gone` error (exit code 1) instead of silently acting on another tab. JSON responses carry `"code": "tab_gone"` and recovery metadata in `data.targetId` plus optional `data.lastUrl`
 - `tab list`, `tab new`, and `tab <ref>` still work in that state, so an agent can recover by binding a new tab
 - Tabs opened by other sessions or the user never steal the pinned session's active tab
+- Another session cannot take a pinned tab with `tab <ref>` while the pinning session is running; the switch fails with `tab_locked` naming the owner
 
-The flag is sticky per session: pass it once and later commands and daemon restarts keep the strict semantics. Pass `--no-pin-tab` to explicitly turn the pin off again.
+The flag is sticky per session: pass it once and later commands keep the strict semantics. Daemon restarts keep the pin; an explicit `close` releases it so other sessions can take the tab, and the next `--pin-tab` command pins again. Pass `--no-pin-tab` to explicitly turn the pin off again.
 
 `data.lastUrl` is emitted only for sanitized HTTP(S) URLs and `about:blank`. HTTP(S) credentials, query strings, and fragments are removed, and opaque URLs such as `data:` are omitted. Batch output exposes the same object as `result`.
 
@@ -869,15 +898,15 @@ agent-browser --session secure --restore open example.com
 
 ## Security
 
-agent-browser includes security features for safe AI agent deployments. All features are opt-in, and existing workflows are unaffected until you explicitly enable a feature:
+agent-browser includes security features for AI agent deployments. Navigation, action, and output controls are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Auto-discovered project config filtering applies by default:
 
 - **Authentication Vault**: Store credentials locally (always encrypted), reference by name. The LLM never sees passwords. `auth login` navigates with `load` and then waits for login form selectors to appear (SPA-friendly, timeout follows the default action timeout). Use `auth login <name> --no-navigate` to preserve an already prepared active page after its origin is checked against the credential URL. A key is auto-generated at `~/.agent-browser/.encryption-key` if `AGENT_BROWSER_ENCRYPTION_KEY` is not set: `echo "pass" | agent-browser auth save github --url https://github.com/login --username user --password-stdin` then `agent-browser auth login github`
 - **Plugin System**: Extend agent-browser with external executable plugins. Plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol and declare capabilities such as `credential.read`, `browser.provider`, `launch.mutate`, or `command.run`.
 - **Content Boundary Markers**: Wrap page output in delimiters so LLMs can distinguish tool output from untrusted content: `--content-boundaries`
 - **Domain Allowlist**: Restrict navigation to trusted domains (wildcards like `*.example.com` also match the bare domain): `--allowed-domains "example.com,*.example.com"`. Sub-resource requests (scripts, images, fetch), WebSocket/EventSource connections, and `sendBeacon` calls to non-allowed domains are blocked. WebRTC peer connections are disabled in supported Chromium sessions while the allowlist is active to prevent STUN, TURN, and DNS traffic from bypassing HTTP interception. Dedicated and shared workers are guarded with a bootstrap wrapper; if a page CSP forbids that wrapper, the worker fails closed rather than running without the allowlist guard. Pre-existing CDP sessions, auto-connect, Chrome profiles, direct-page provider plugins, agent-browser restore or state-file replay, raw Chrome args that select profiles, restore sessions, or open startup pages, iOS, and Safari reject this option because agent-browser cannot install equivalent containment before page scripts run. Include any CDN domains your target pages depend on (e.g., `*.cdn.example.com`).
-- **Action Policy**: Gate destructive actions with a static policy file: `--action-policy ./policy.json`
+- **Action Policy**: Gate destructive actions with a static policy file: `--action-policy ./policy.json`; a missing or invalid file blocks every command except `close`
 - **Action Confirmation**: Require explicit approval for sensitive action categories: `--confirm-actions eval,download`
-- **Output Length Limits**: Prevent context flooding: `--max-output 50000`
+- **Output Length Limits**: Prevent context flooding: `--max-output 50000`. Invalid `--max-output` and `AGENT_BROWSER_MAX_OUTPUT` values warn and keep the existing limit.
 
 | Variable                            | Description                              |
 | ----------------------------------- | ---------------------------------------- |
@@ -901,11 +930,11 @@ agent-browser plugin add @company/agent-browser-plugin-vault --name vault
 agent-browser plugin add org/agent-browser-plugin-cloud-browser
 ```
 
-References are resolved by shape: `name` uses npm, `@scope/name` uses npm, and `owner/repo` uses GitHub. `plugin add` writes `./agent-browser.json` by default; use `--global` for `~/.agent-browser/config.json`.
+References are resolved by shape: `name` uses npm, `@scope/name` uses npm, and `owner/repo` uses GitHub. `plugin add` writes `~/.agent-browser/config.json` by default; use `--project` for `./agent-browser.json` (only used with `--config`).
 
 Plugin packages should support `plugin.manifest` so `plugin add` can discover their name and capabilities automatically. If a plugin does not support manifests, pass `--capability <name>` during add.
 
-Plugins can also be configured manually in `agent-browser.json`:
+Plugins can also be configured manually in `~/.agent-browser/config.json` (or a file loaded with `--config`):
 
 ```json
 {
@@ -940,6 +969,8 @@ Inspect configured plugins:
 agent-browser plugin list
 agent-browser plugin show vault
 ```
+
+Credential resolution, browser launch and cleanup, and launch mutation errors omit plugin response error text and unsupported protocol values from diagnostics. Manifest discovery and `plugin run` retain detailed errors. Plugins remain trusted local executables; this redaction does not sandbox them.
 
 Use a credential provider plugin for one login:
 
@@ -981,9 +1012,11 @@ Do not put vault tokens or passwords in plugin command args. Use the vault vendo
 
 ## Snapshot Options
 
-Surviving DOM elements keep their refs across snapshots. Take a fresh snapshot after page or iframe navigation.
+Surviving DOM elements keep their refs across snapshots. Take a fresh snapshot after page or iframe navigation. Presentational iframes use the same `Iframe` role for snapshots and stale-ref recovery.
 
 Use filters to reduce snapshot output:
+
+Compact snapshots (`-c`) keep visible text, status text, and their direct ancestors. Empty sibling branches are removed. Interactive snapshots (`-i`) filter out noninteractive content. For MCP snapshots, `interactive` defaults to `true`; set `interactive: false` to retain visible text and status text.
 
 ```bash
 agent-browser snapshot                    # Full accessibility tree
@@ -1051,7 +1084,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--extension <path>` | Load browser extension (repeatable; or `AGENT_BROWSER_EXTENSIONS` env) |
 | `--init-script <path>` | Register a page init script before the first navigation (repeatable; or `AGENT_BROWSER_INIT_SCRIPTS` env) |
 | `--enable <feature>` | Built-in init scripts: `react-devtools` (repeatable or comma-list; or `AGENT_BROWSER_ENABLE` env) |
-| `--args <args>` | Browser launch args, comma or newline separated (or `AGENT_BROWSER_ARGS` env) |
+| `--args <args>` | Browser launch args, newline separated, or comma separated before another flag. Commas inside a value such as `--disable-features=A,B` are kept (or `AGENT_BROWSER_ARGS` env) |
 | `--user-agent <ua>` | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env) |
 | `--proxy <url>` | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env) |
 | `--proxy-bypass <hosts>` | Hosts to bypass proxy (or `AGENT_BROWSER_PROXY_BYPASS` env) |
@@ -1074,6 +1107,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--webgpu` | Enable WebGPU; SwiftShader software Vulkan on Linux, no GPU required (or `AGENT_BROWSER_WEBGPU` env) |
 | `--no-webmcp` | Disable experimental WebMCP support, which is enabled by default for locally launched Chrome (or `AGENT_BROWSER_NO_WEBMCP` env) |
 | `--cdp <port\|url>` | Connect via Chrome DevTools Protocol (port or WebSocket URL) |
+| `--cdp-headers <json>` | Headers sent on CDP discovery and the WebSocket handshake, such as `Authorization` (or `AGENT_BROWSER_CDP_HEADERS` env) |
 | `--auto-connect` | Auto-discover and connect to running Chrome (or `AGENT_BROWSER_AUTO_CONNECT` env) |
 | `--pin-tab` | Pin the session to its bound tab; fail with `tab_gone` instead of falling back to another tab (or `AGENT_BROWSER_PIN_TAB` env) |
 | `--no-pin-tab` | Disable a sticky pin previously enabled with `--pin-tab` |
@@ -1159,7 +1193,7 @@ agent-browser --model openai/gpt-4o chat "take a screenshot" # Override model
 
 The `chat` command translates natural language instructions into agent-browser commands, executes them, and streams the AI response. In interactive mode, type `quit` to exit. Use `--json` for structured output suitable for agent consumption.
 
-Chat runs one agent-browser command per tool call. A `;` or `&&` inside a quoted argument is kept as text, so JSON parameters can contain them. Chat can load bundled skills with `skills get <name>` and use page WebMCP tools: it fetches a tool's input schema with `webmcp list <tool> --frame <frame-id> --json`, then calls `webmcp invoke` with the same `--frame`.
+Chat runs one agent-browser command per tool call. A `;` or `&&` inside a quoted argument is kept as text, so JSON parameters can contain them. Chat can load bundled skills with `skills get <name>` and use page WebMCP tools: it fetches a tool's input schema with `webmcp list <tool> --frame <frame-id> --json`, then calls `webmcp invoke` with the same `--frame`. Chat runs in the selected session and cannot create or switch sessions; use New Session in the dashboard for a new one. Chat commands cannot set global flags other than `--json` and `--annotate`.
 
 **Dashboard usage:**
 
@@ -1167,36 +1201,35 @@ The Chat tab is always visible in the dashboard. When `AI_GATEWAY_API_KEY` is se
 
 ## Configuration
 
-Create an `agent-browser.json` file to set persistent defaults instead of repeating flags on every command.
+Create `./agent-browser.json` to set persistent project defaults instead of repeating flags on every command.
 
-**Locations (lowest to highest priority):**
+**Default discovery (lowest to highest priority):**
 
 1. `~/.agent-browser/config.json`: user-level defaults
-2. `./agent-browser.json`: project-level overrides (in working directory)
+2. `./agent-browser.json`: project defaults for an allowlist of settings
 3. `AGENT_BROWSER_*` environment variables override config file values
 4. CLI flags override everything
 
-**Example `agent-browser.json`:**
+The auto-discovered `./agent-browser.json` accepts only `headed`, `json`, `debug`, `userAgent`, `hideScrollbars`, `annotate`, `colorScheme`, `maxOutput`, `screenshotQuality`, `screenshotFormat`, and `idleTimeout`. Other runtime keys, including `extensions`, `initScripts`, state, trust, policy, session, connection, and path settings, are ignored with a warning. The `$schema` metadata key is ignored silently. Put advanced settings in `~/.agent-browser/config.json` or load a trusted file with `--config` or `AGENT_BROWSER_CONFIG`. An explicit config replaces default discovery and loads only that file; environment variables and CLI flags still override its values.
+
+**Example config file:**
 
 ```json
 {
   "headed": true,
-  "proxy": "http://localhost:8080",
-  "profile": "./browser-data",
   "userAgent": "my-agent/1.0",
   "hideScrollbars": false,
-  "ignoreHttpsErrors": true,
-  "plugins": [
-    {
-      "name": "vault",
-      "command": "agent-browser-plugin-vault",
-      "capabilities": ["credential.read"]
-    }
-  ]
+  "colorScheme": "dark",
+  "maxOutput": 50000,
+  "screenshotQuality": 80,
+  "screenshotFormat": "png",
+  "idleTimeout": "30m"
 }
 ```
 
 **Example proxy CA configuration:**
+
+These proxy and CA settings require a user config or a file loaded explicitly with `--config`.
 
 ```json
 {
@@ -1216,7 +1249,7 @@ agent-browser --config ./ci-config.json open example.com
 AGENT_BROWSER_CONFIG=./ci-config.json agent-browser open example.com
 ```
 
-All options from the table above can be set in the config file using camelCase keys (e.g., `--executable-path` becomes `"executablePath"`, `--proxy-bypass` becomes `"proxyBypass"`). Plugins are configured with the `"plugins"` array shown above. Unknown keys are ignored for forward compatibility.
+Supported options can be set in a trusted config file using camelCase keys (for example, `--executable-path` becomes `"executablePath"` and `--proxy-bypass` becomes `"proxyBypass"`). Plugins use the `"plugins"` array shown above. Unknown keys are ignored for forward compatibility.
 
 A [JSON Schema](agent-browser.schema.json) is available for IDE autocomplete and validation. Add a `$schema` key to your config file to enable it:
 
@@ -1229,9 +1262,9 @@ A [JSON Schema](agent-browser.schema.json) is available for IDE autocomplete and
 
 Boolean flags accept an optional `true`/`false` value to override config settings. For example, `--headed false` disables `"headed": true` from config. A bare `--headed` is equivalent to `--headed true`.
 
-Auto-discovered config files that are missing are silently ignored. If `--config <path>` points to a missing or invalid file, agent-browser exits with an error. Extensions from user and project configs are merged (concatenated), not replaced.
+Auto-discovered config files that are missing are silently ignored. If `--config <path>` points to a missing or invalid file, agent-browser exits with an error. The auto-discovered project config ignores `extensions` with a warning. Put extension paths in user config or an explicitly loaded config, or use `AGENT_BROWSER_EXTENSIONS` or `--extension`.
 
-> **Tip:** If your project-level `agent-browser.json` contains environment-specific values (paths, proxies), consider adding it to `.gitignore`.
+Existing project configs that use advanced keys must move those settings to user config or be loaded explicitly with `--config`.
 
 ## Default Timeout
 
@@ -1245,6 +1278,8 @@ export AGENT_BROWSER_DEFAULT_TIMEOUT=45000
 ```
 
 > **Note:** Setting this above 30000 (30s) may cause EAGAIN errors on slow operations because the CLI's read timeout will expire before the daemon responds. Read-only commands (`snapshot`, `url`, `get text`, ...) are retried automatically. A command that changes the page or launches the browser is not re-sent once the daemon received it, since it may already have run; it fails with code `outcome_unknown` instead.
+
+> **Note:** If a command times out because the page stopped responding (for example a script stuck in `while(true){}`), the command fails with code `page_wedged`. When agent-browser launched the browser and the next command also times out, it replaces the stuck tab with a blank one, so later commands work again after you navigate. A page that recovers in between keeps its tab. With `--cdp` or `--auto-connect`, the tab belongs to your browser and is left as is. The tab is also left as is when an action policy denies `tab_new` or `tab_close` or requires confirmation for them.
 
 | Variable                        | Description                              |
 | ------------------------------- | ---------------------------------------- |
@@ -1273,6 +1308,8 @@ agent-browser hover @e4                   # Hover the link
 ```
 
 When a ref click is blocked by an overlay, the error includes the covering element, such as `covered by <div#consent-banner>`. Click the banner or dialog control first, then run `snapshot` again before reusing refs.
+
+If a ref's element was replaced, agent-browser uses the one element with the same role and name. When duplicates make that ambiguous, the action fails without acting. Run `snapshot` again and use a fresh ref.
 
 **Why use refs?**
 
@@ -1461,6 +1498,24 @@ const result = await withAgentBrowserSandbox(async (sandbox) => {
 });
 ```
 
+When an agent makes many MCP tool calls in the same Vercel Sandbox, use `startAgentBrowserMcp` from `@agent-browser/sandbox/vercel`. It starts one `agent-browser mcp` process and sends every request over that command's stdin, so tool calls reuse the process instead of starting a CLI command each time as `runAgentBrowserCommand` does:
+
+```typescript
+import { startAgentBrowserMcp, withAgentBrowserSandbox } from "@agent-browser/sandbox/vercel";
+
+const snapshot = await withAgentBrowserSandbox(async (sandbox) => {
+  const mcp = await startAgentBrowserMcp(sandbox, { timeout: 60_000 });
+  try {
+    await mcp.callTool("agent_browser_open", { url: "https://example.com" });
+    return await mcp.callTool("agent_browser_snapshot", { interactive: true });
+  } finally {
+    await mcp.close();
+  }
+});
+```
+
+`startAgentBrowserMcp` requires `@vercel/sandbox` 3.7 or later. `timeout` is in milliseconds and applies to each request and to `close()`; without it, requests wait indefinitely. In another runtime, pass a process with `stdin` and `stdout` streams to `connectAgentBrowserMcp` from `@agent-browser/sandbox`.
+
 Install `@agent-browser/sandbox` and `@vercel/sandbox` in the consuming app. See the [sandbox helper example](examples/sandbox/) for minimal Vercel Sandbox usage, or the [environments example](examples/environments/) for a full UI demo with a deploy-to-Vercel button.
 
 Fresh Vercel and eve sandboxes install Chromium system dependencies by default. Pass `installSystemDependencies: false` only when your sandbox image already includes those libraries.
@@ -1476,7 +1531,7 @@ import browser from "@agent-browser/eve";
 export default browser({});
 ```
 
-This composes ~20 namespaced tools into the agent — `browser__navigate`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, `browser__screenshot`, and more — all running agent-browser inside the agent's sandbox. agent-browser installs automatically on first use; pre-install it in `agent/sandbox.ts` with the `@agent-browser/eve/sandbox` helpers to bake the cost into the sandbox template instead. Configuration (domain allowlists, output limits, session naming) and per-tool overrides are covered in the [package README](packages/@agent-browser/eve/README.md), and the [eve example](examples/eve/) is a complete app with the extension mounted.
+This composes 42 namespaced tools into the agent — `browser__open`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, `browser__screenshot`, and more — all running agent-browser inside the agent's sandbox. agent-browser installs automatically on first use; pre-install it in `agent/sandbox.ts` with the `@agent-browser/eve/sandbox` helpers to bake the cost into the sandbox template instead. Configuration (domain allowlists, output limits, session naming) and per-tool overrides are covered in the [package README](packages/@agent-browser/eve/README.md), and the [eve example](examples/eve/) is a complete app with the extension mounted.
 
 ### Serverless (AWS Lambda)
 
@@ -1535,6 +1590,10 @@ agent-browser --cdp 9222 snapshot
 # Connect to remote browser via WebSocket URL
 agent-browser --cdp "wss://your-browser-service.com/cdp?token=..." snapshot
 ```
+
+The session stays attached until `agent-browser close`. Later commands without a connection flag run against the same browser, as if you passed `--cdp` again. If that browser goes away, commands fail instead of launching a local one.
+
+If the debugging port is not open yet, `connect` and `--cdp` wait up to 2 seconds for it before failing.
 
 The `--cdp` flag accepts either:
 
@@ -1709,7 +1768,7 @@ agent-browser uses a client-daemon architecture:
 1. **Rust CLI** - Parses commands, communicates with daemon
 2. **Rust Daemon** - Pure Rust daemon using direct CDP, no Node.js required
 
-The daemon starts automatically on first command and persists between commands for fast subsequent operations. After **1 hour** with no commands or dashboard input it saves configured restore state, closes the browser, and exits, so an integration that dies without calling `close` cannot leak the daemon and its browser indefinitely; the next command starts a fresh daemon and configured state restore works as usual. A session without `--restore` or another restore key does not save browser state, so its transient state and open tabs are discarded at shutdown. Set `--idle-timeout` to a duration such as `30s`, `5m`, or `1h`, or set `AGENT_BROWSER_IDLE_TIMEOUT_MS` to a value in milliseconds. Use `0` to disable idle shutdown entirely. The default never closes a headed browser, including Safari and iOS WebDriver sessions, or a user-attached browser because those may be in direct human use. Provider-owned cloud browsers remain eligible for cleanup. An explicitly set timeout applies to every browser.
+The daemon starts automatically on first command and persists between commands for fast subsequent operations. After **1 hour** with no commands or dashboard input it saves configured restore state, closes the browser, and exits, so an integration that dies without calling `close` cannot leak the daemon and its browser indefinitely; the next command starts a fresh daemon and configured state restore works as usual. A session without `--restore` or another restore key does not save browser state, so its transient state and open tabs are discarded at shutdown. Set `--idle-timeout` to a duration such as `30s`, `5m`, or `1h`, or set `AGENT_BROWSER_IDLE_TIMEOUT_MS` to a value in milliseconds. Use `0` to disable idle shutdown entirely. Values too large to convert to milliseconds produce a warning and are ignored. The default never closes a headed browser, including Safari and iOS WebDriver sessions, or a user-attached browser because those may be in direct human use. Provider-owned cloud browsers remain eligible for cleanup. An explicitly set timeout applies to every browser.
 
 **Browser Engine:** Uses Chrome (from Chrome for Testing) by default. The `--engine` flag selects between `chrome`, `lightpanda`, and `obscura`. Supported browsers: Chromium/Chrome (via CDP), Lightpanda and Obscura (via CDP), and Safari (via WebDriver for iOS).
 
