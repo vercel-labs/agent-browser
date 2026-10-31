@@ -9,8 +9,8 @@
  * - Mac/Linux: Replaces symlink to point to native binary
  */
 
-import { existsSync, mkdirSync, chmodSync, createWriteStream, unlinkSync, writeFileSync, symlinkSync, lstatSync } from 'fs';
-import { dirname, join } from 'path';
+import { existsSync, mkdirSync, chmodSync, createWriteStream, unlinkSync, writeFileSync, symlinkSync, lstatSync, realpathSync } from 'fs';
+import { dirname, join, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch } from 'os';
 import { get } from 'https';
@@ -221,6 +221,20 @@ function showInstallReminder() {
 }
 
 /**
+ * Whether `path` resolves to this package or a file inside it. A local
+ * install must not repoint the bin entry of a separate global install.
+ */
+function isInThisPackage(path) {
+  try {
+    const root = realpathSync(projectRoot);
+    const target = realpathSync(path);
+    return target === root || target.startsWith(root + sep);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Fix npm's bin entry on global installs to use the native binary directly.
  * This provides zero-overhead CLI execution for global installs.
  */
@@ -258,6 +272,11 @@ async function fixUnixSymlink() {
     return; // Symlink doesn't exist, not a global install
   }
 
+  // The global command belongs to another copy, so this is a local install
+  if (!isInThisPackage(symlinkPath)) {
+    return;
+  }
+
   // Replace symlink to point directly to native binary
   try {
     unlinkSync(symlinkPath);
@@ -280,6 +299,11 @@ async function fixWindowsShims() {
   try {
     npmBinDir = execSync('npm prefix -g', { encoding: 'utf8' }).trim();
   } catch {
+    return;
+  }
+
+  // Only the global copy itself may rewrite the global shims
+  if (!isInThisPackage(join(npmBinDir, 'node_modules', 'agent-browser'))) {
     return;
   }
 
