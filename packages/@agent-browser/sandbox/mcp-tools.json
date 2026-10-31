@@ -306,7 +306,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Log in with a saved auth profile. Control selection checks layout size, computed visibility and opacity, and disabled/readonly state. Replaced or focus-redirected credential fields fail without submitting.",
+      "description": "Log in with a saved auth profile. Control selection checks layout size, computed visibility and opacity, and disabled/readonly state. Replaced or focus-redirected credential fields fail without submitting. Credential-provider errors omit response error text and unsupported protocol values.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -728,7 +728,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Run multiple commands sequentially.",
+      "description": "Run multiple commands sequentially. A batch containing only get cdp-url commands never launches a browser.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -4850,7 +4850,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Get the current browser CDP URL.",
+      "description": "Get the CDP WebSocket URL of a running browser. Never launches a browser.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -6002,6 +6002,7 @@
             "type": "boolean"
           },
           "withDeps": {
+            "description": "Install Linux system dependencies. The package manager runs directly as root; non-root uses sudo.",
             "type": "boolean"
           }
         },
@@ -7770,7 +7771,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Launch the browser and optionally navigate to a URL. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools.",
+      "description": "Launch the browser and optionally navigate to a URL. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -11111,7 +11112,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Set geolocation.",
+      "description": "Set geolocation with finite latitude and longitude.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -11527,7 +11528,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Set viewport size.",
+      "description": "Set viewport size. The optional scale must be finite.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -11933,7 +11934,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Return an accessibility-tree snapshot with reusable element refs. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref.",
+      "description": "Return an accessibility-tree snapshot with reusable element refs. Presentational iframes use the Iframe role for snapshots and stale-ref recovery. If an action reports that a stale ref cannot be recovered, take a new snapshot and use a fresh ref.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -11954,7 +11955,7 @@
           },
           "compact": {
             "default": false,
-            "description": "Remove empty structural elements.",
+            "description": "Remove empty structural elements, retaining only matching content and its direct ancestors. With interactive:false, retain visible text.",
             "type": "boolean"
           },
           "delta": {
@@ -14987,7 +14988,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Wait for a page load state.",
+      "description": "Wait for a page load state. Uses the full wait timeout and returns an error when it expires.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -15097,7 +15098,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Wait for an element to appear.",
+      "description": "Wait for an element with a CSS selector or @ref. Bare integers are rejected because they are treated as millisecond waits; use CSS selector syntax for numeric IDs.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

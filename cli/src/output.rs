@@ -1720,6 +1720,8 @@ Global Options:
   --allowed-domains <list>  Restrict read fetches and redirects to allowed domains
   --content-boundaries Wrap read output in boundary markers
   --max-output <chars> Truncate read output to N chars
+  Invalid --max-output and AGENT_BROWSER_MAX_OUTPUT values warn and leave the
+  existing output limit unchanged.
 
 Examples:
   agent-browser read
@@ -2149,6 +2151,8 @@ Modes:
   --text <text>        Wait for text to appear on page (substring match)
   --download [path]    Wait for a download to complete (optionally save to path)
 
+A load-state wait uses --timeout (or AGENT_BROWSER_DEFAULT_TIMEOUT) and fails when it expires.
+
 Download Options (with --download):
   --timeout <ms>       Timeout in milliseconds for download to start
 
@@ -2252,6 +2256,7 @@ references (like @e1, @e2) that can be used in subsequent commands.
 Refs can be reused across snapshots. Take a fresh snapshot after navigation.
 If a ref's element was replaced, the action uses the one element with the same
 role and name. If that is ambiguous, it fails: run snapshot again.
+Presentational iframes use the Iframe role for snapshots and stale-ref recovery.
 
 Options:
   -i, --interactive    Only include interactive elements
@@ -2262,6 +2267,10 @@ Options:
       --delta          Return full state once, then unchanged or structural deltas
                        Deltas include ref changes and an exact treeChange line splice
       --full           Force full state and update the delta baseline
+
+Compact snapshots keep visible text, status text, and their direct ancestors.
+Empty sibling branches are removed. Interactive snapshots filter out noninteractive content. MCP snapshots default to interactive; set
+interactive to false to retain visible text and status text.
 
 Global Options:
   --json               Output as JSON
@@ -2372,7 +2381,8 @@ Subcommands:
   count <selector>           Count matching elements
   box <selector>             Get bounding box (x, y, width, height)
   styles <selector>          Get computed styles of elements
-  cdp-url                    Get Chrome DevTools Protocol WebSocket URL
+  cdp-url                    Get CDP WebSocket URL of a running browser
+                             Never launches a browser, including metadata-only batches
 
 Global Options:
   --json               Output as JSON
@@ -2512,9 +2522,10 @@ Usage: agent-browser set <setting> [args]
 Configures various browser settings and emulation options.
 
 Settings:
-  viewport <w> <h> [scale]   Set viewport size (scale = deviceScaleFactor, e.g. 2 for retina)
+  viewport <w> <h> [scale]   Set viewport size (scale = deviceScaleFactor, e.g. 2 for retina;
+                             scale must be finite)
   device <name>              Emulate device (e.g., "iPhone 12")
-  geo <lat> <lng>            Set geolocation
+  geo <lat> <lng>            Set geolocation (coordinates must be finite)
   offline [on|off]           Toggle offline mode; off restores the new-tab default
   headers <json>             Set extra HTTP headers; use {} to clear them for new tabs
   credentials <user> <pass>  Set HTTP authentication for current and future tabs
@@ -2632,10 +2643,13 @@ Cookie Set Options:
   --url <url>                        URL for the cookie (allows setting before page load)
   --domain <domain>                  Cookie domain (e.g., ".example.com")
   --path <path>                      Cookie path (e.g., "/api")
-  --httpOnly                         Set HttpOnly flag (prevents JavaScript access)
+  --http-only                        Set HttpOnly flag (prevents JavaScript access)
   --secure                           Set Secure flag (HTTPS only)
-  --sameSite <Strict|Lax|None>       SameSite policy
+  --same-site <Strict|Lax|None>      SameSite policy
   --expires <timestamp>              Expiration time (Unix timestamp in seconds)
+
+The legacy camelCase spellings --httpOnly and --sameSite are still accepted.
+When setting one cookie, unknown flags and extra arguments return an error.
 
 Note: If --url, --domain, and --path are all omitted, the cookie will be set
 for the current page URL.
@@ -2651,11 +2665,11 @@ Examples:
   # Set cookie for a URL before loading it (useful for authentication)
   agent-browser cookies set session_id "abc123" --url https://app.example.com
 
-  # Set secure, httpOnly cookie with domain and path
-  agent-browser cookies set auth_token "xyz789" --domain example.com --path /api --httpOnly --secure
+  # Set secure, HttpOnly cookie with domain and path
+  agent-browser cookies set auth_token "xyz789" --domain example.com --path /api --http-only --secure
 
   # Set cookie with SameSite policy
-  agent-browser cookies set tracking_consent "yes" --sameSite Strict
+  agent-browser cookies set tracking_consent "yes" --same-site Strict
 
   # Set cookie with expiration (Unix timestamp)
   agent-browser cookies set temp_token "temp123" --expires 1735689600
@@ -3184,7 +3198,8 @@ Usage: agent-browser install [--with-deps]
 Downloads and installs browser binaries required for automation.
 
 Options:
-  -d, --with-deps      Also install system dependencies (Linux only; fails if deps fail)
+  -d, --with-deps      Also install Linux system dependencies. The package manager runs
+                       directly as root; non-root uses sudo.
 
 Examples:
   agent-browser install
@@ -3323,6 +3338,9 @@ Supported URL formats:
   - Remote service: wss://remote-browser.example.com/cdp?token=...
   - Root endpoint: wss://remote-browser.example.com?token=... (slash optional)
 
+Options:
+  --cdp-headers <json>  Headers for CDP discovery and handshake, e.g. Authorization
+
 Global Options:
   --json               Output as JSON
   --session <name>     Use specific session
@@ -3337,6 +3355,10 @@ Examples:
 
   # Connect to remote browser service
   agent-browser connect "wss://browser-service.example.com/cdp?token=xyz"
+
+  # Connect to a service that authenticates the WebSocket handshake
+  agent-browser connect "wss://browser-service.example.com/cdp" \
+    --cdp-headers '{"Authorization":"Bearer <token>"}'
 
   # After connecting, run commands normally
   agent-browser snapshot
@@ -3651,8 +3673,9 @@ Examples:
             r##"
 agent-browser mcp - Start an MCP stdio server
 
-Usage: agent-browser mcp [--tools <profiles>]
-       agent-browser mcp call <tool> [<arguments-json> | -] [--tools <profiles>]
+Usage: agent-browser mcp [--tools <profiles>] [--config <trusted-path>]
+       agent-browser mcp call <tool> [<arguments-json> | -]
+         [--tools <profiles>] [--config <trusted-path>]
 
 Starts a Model Context Protocol server over stdio. MCP clients launch this
 command as a subprocess and communicate with newline-delimited JSON-RPC.
@@ -3665,6 +3688,12 @@ result as JSON, with the agent-browser version in _meta.agentBrowserVersion.
 Pass the arguments as a JSON object, or - to read them from stdin. Every tool
 is available unless --tools limits the call. Exit code: 0 on success, 1 when
 the tool reports an error, 2 for an unknown tool or invalid arguments.
+
+Pass --config <trusted-path> to agent-browser mcp or agent-browser mcp call to
+select one trusted config file. MCP tool child processes load only that file,
+replacing default user/project discovery. Put required safety policy in it.
+Environment variables and accepted per-tool CLI arguments still override its
+values.
 
 The default tools profile is core, which keeps MCP context small for everyday
 browser automation. Use --tools all for the full typed CLI parity surface, or
@@ -3695,11 +3724,10 @@ Common tools include:
 
 Each tool has typed fields such as url, selector, text, key, and session.
 Each tool also accepts extraArgs for per-command options and display or emulation
-flags such as --engine. Global flags that change network, file, policy, or host
-access (such as --allowed-domains, --action-policy, --executable-path, --args,
-and --config) are rejected in extraArgs and must be set in the MCP server's
-environment or config, and structured allowedDomains is rejected when the server
-already sets allowed domains.
+flags such as --engine. extraArgs cannot set --config or global flags that change
+network, file, policy, or host access. Set host-wide options in the MCP server's
+environment or selected config. Structured allowedDomains is rejected when the
+server already sets allowed domains.
 Tool discovery is paginated and includes read-only/open-world annotations so
 modern MCP clients can load the large typed surface incrementally.
 Use agent_browser_snapshot after navigation to get fresh refs before clicking.
@@ -3809,6 +3837,9 @@ Capabilities:
 Core capabilities and protocol request types use dedicated command paths.
 Use auth login for credential.read, --provider for browser.provider, and
 a local launch for launch.mutate.
+Credential, browser-provider, and launch-mutation errors omit response error
+text and unsupported protocol values. Manifest discovery and plugin run retain
+detailed errors.
 
 Example config:
   {{
@@ -3918,7 +3949,7 @@ Network:  agent-browser network <action>
   har <start|stop> [path]
 
 Storage:
-  cookies [get|set|clear]    Manage cookies (set supports --url, --domain, --path, --httpOnly, --secure, --sameSite, --expires)
+  cookies [get|set|clear]    Manage cookies (set supports --url, --domain, --path, --http-only, --secure, --same-site, --expires)
                              Or:  cookies set --curl <file> [--domain <host>] (auto-detects JSON/cURL/Cookie-header files)
   storage <local|session>    Manage web storage
 
@@ -4104,6 +4135,8 @@ Options:
   --no-webmcp                Disable default experimental WebMCP support for locally launched Chrome
                              (or AGENT_BROWSER_NO_WEBMCP env)
   --cdp <port|url>           Connect via CDP; root WebSocket query slash is optional
+  --cdp-headers <json>       Headers for --cdp discovery and handshake, e.g. Authorization
+                             (or AGENT_BROWSER_CDP_HEADERS env)
   --pin-tab                  Pin the session to its bound tab (or AGENT_BROWSER_PIN_TAB env)
                              Commands fail with a tab_gone error instead of falling back
                              to another tab when the bound tab is closed. JSON includes
@@ -4113,6 +4146,7 @@ Options:
   --download-path <path>     Default download directory (or AGENT_BROWSER_DOWNLOAD_PATH)
   --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
   --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
+                             Invalid values warn and leave the existing output limit unchanged.
   --allowed-domains <list>   Restrict network domains; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
   --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
@@ -4139,31 +4173,40 @@ Options:
   --version, -V              Show version
 
 Configuration:
-  agent-browser looks for agent-browser.json in these locations (lowest to highest priority):
+  Default discovery loads config from these locations (lowest to highest priority):
     1. ~/.agent-browser/config.json      User-level defaults
-    2. ./agent-browser.json              Project-level overrides
+    2. ./agent-browser.json              Allowlisted project defaults
     3. Environment variables             Override config file values
     4. CLI flags                         Override everything
 
-  Use --config <path> to load a specific config file instead of the defaults.
+  Use --config <path> to load only that config file instead of default discovery.
+  AGENT_BROWSER_CONFIG has the same effect. Environment variables and CLI flags
+  still override values from the selected config file.
   If --config points to a missing or invalid file, agent-browser exits with an error.
-  The auto-discovered ./agent-browser.json cannot set executablePath, args or plugins (they are ignored with a warning); set them in ~/.agent-browser/config.json, env vars or flags, or load the file explicitly with --config ./agent-browser.json.
+  The auto-discovered ./agent-browser.json accepts only:
+    {project_config_keys}.
+  Other runtime keys, including extensions, initScripts, state, trust, policy,
+  session, connection, and path settings, are ignored with a warning.
+  The $schema metadata key is ignored silently.
+  Put advanced settings in ~/.agent-browser/config.json or load a trusted file
+  with --config or AGENT_BROWSER_CONFIG.
 
   Boolean flags accept an optional true/false value to override config:
     --headed           (same as --headed true)
     --headed false     (disables "headed": true from config)
     --hide-scrollbars false (keeps native scrollbars visible in headless Chromium screenshots)
 
-  Extensions from user and project configs are merged (not replaced).
+  The auto-discovered project config ignores extensions. Use the user config, an
+  explicitly loaded config file, AGENT_BROWSER_EXTENSIONS, or --extension.
 
   On Windows, headless Chrome runs on a private desktop to prevent stray desktop
   rectangles. Owned Chrome processes close with their daemon, even if it is killed.
   Headed browsers use the interactive desktop; externally connected browsers are not owned.
 
-  Example agent-browser.json:
-    {{"headed": true, "hideScrollbars": false, "proxy": "http://localhost:8080"}}
+  Example auto-discovered agent-browser.json:
+    {{"headed": true, "hideScrollbars": false, "userAgent": "my-agent/1.0", "colorScheme": "dark"}}
 
-  Plugin example:
+  Trusted config example (user config or a file loaded with --config):
     {{"plugins":[{{"name":"vault","command":"agent-browser-plugin-vault","capabilities":["credential.read"]}},{{"name":"stealth","command":"agent-browser-plugin-stealth","capabilities":["launch.mutate"]}}]}}
 
 Environment:
@@ -4293,7 +4336,12 @@ iOS Simulator (requires Xcode and Appium):
   agent-browser -p ios device list                         # List simulators
   agent-browser -p ios swipe up                            # Swipe gesture
   agent-browser -p ios tap @e1                             # Touch element
-"#
+"#,
+        project_config_keys = crate::flags::PROJECT_CONFIG_ALLOWED_KEYS
+            .chunks(4)
+            .map(|keys| keys.join(", "))
+            .collect::<Vec<_>>()
+            .join(",\n    ")
     );
 }
 
