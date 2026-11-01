@@ -122,6 +122,7 @@ const INTERACTIVE_ROLES: &[&str] = &[
     "switch",
     "tab",
     "treeitem",
+    "DisclosureTriangle",
     "Iframe",
 ];
 
@@ -791,7 +792,8 @@ async fn find_cursor_interactive_elements(
     var interactiveRoles = {
         'button':1, 'link':1, 'textbox':1, 'checkbox':1, 'radio':1, 'combobox':1, 'listbox':1,
         'menuitem':1, 'menuitemcheckbox':1, 'menuitemradio':1, 'option':1, 'searchbox':1,
-        'slider':1, 'spinbutton':1, 'switch':1, 'tab':1, 'treeitem':1
+        'slider':1, 'spinbutton':1, 'switch':1, 'tab':1, 'treeitem':1,
+        'disclosuretriangle':1
     };
     var interactiveTags = {
         'a':1, 'button':1, 'input':1, 'select':1, 'textarea':1, 'details':1, 'summary':1
@@ -1530,6 +1532,7 @@ mod tests {
     fn test_interactive_roles() {
         assert!(INTERACTIVE_ROLES.contains(&"button"));
         assert!(INTERACTIVE_ROLES.contains(&"textbox"));
+        assert!(INTERACTIVE_ROLES.contains(&"DisclosureTriangle"));
         assert!(!INTERACTIVE_ROLES.contains(&"heading"));
     }
 
@@ -1589,6 +1592,13 @@ mod tests {
             result.contains("button \"Submit\""),
             "button should be kept"
         );
+    }
+
+    #[test]
+    fn test_compact_tree_keeps_disclosure_triangle_with_ref() {
+        let tree = "- group\n  - DisclosureTriangle \"Advanced\" [expanded=false, ref=e1]\n";
+        assert!(compact_tree(tree, true).contains("ref=e1"));
+        assert!(compact_tree(tree, false).contains("ref=e1"));
     }
 
     #[test]
