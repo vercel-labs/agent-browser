@@ -214,6 +214,8 @@ agent-browser set media [dark|light]  # Emulate color scheme (persists for sessi
 
 Viewport scales and geolocation coordinates must be finite numbers.
 
+`set viewport` also emulates a screen of the same size, so `screen.width`, `screen.height`, and `device-width` media queries match the viewport.
+
 Use `--color-scheme` for persistent dark/light mode across all commands:
 
 ```bash

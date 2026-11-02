@@ -3675,6 +3675,20 @@ async fn e2e_viewport_scale_factor() {
     let css_width = get_data(&resp)["result"].as_i64().unwrap();
     assert_eq!(css_width, 1920, "CSS width should remain 1920 at 2x scale");
 
+    // The screen should match the viewport, not headless Chrome's 800x600
+    // default screen
+    let resp = execute_command(
+        &json!({ "id": "7", "action": "evaluate", "script": "[screen.width, screen.height]" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        json!([1920, 1080]),
+        "screen size should match the viewport"
+    );
+
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
 }
