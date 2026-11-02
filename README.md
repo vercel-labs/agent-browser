@@ -53,10 +53,9 @@ Requires Node.js 24+, pnpm 11+, and Rust.
 ```bash
 git clone https://github.com/vercel-labs/agent-browser
 cd agent-browser
-pnpm install
-pnpm build
+pnpm install --ignore-scripts
 pnpm build:native   # Requires Rust (https://rustup.rs)
-pnpm link --global  # Makes agent-browser available globally
+pnpm add --global . # Makes agent-browser available globally
 agent-browser install
 ```
 
