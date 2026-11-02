@@ -879,7 +879,7 @@ impl DaemonState {
             effective_ca_cert: None,
             network_auto_attach_installed: false,
             engine: env::var("AGENT_BROWSER_ENGINE").unwrap_or_else(|_| "chrome".to_string()),
-            // README documents 25s, intentionally below the CLI's 30s IPC
+            // Defaults to 25s, intentionally below the CLI's 30s IPC
             // read timeout so the daemon reports a proper timeout error
             // instead of the client dying with EAGAIN and retrying.
             default_timeout_ms: env::var("AGENT_BROWSER_DEFAULT_TIMEOUT")

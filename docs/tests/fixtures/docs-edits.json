@@ -257,6 +257,12 @@
         "from": "Or in your agent-browser.json config:",
         "to": "Or in ~/.agent-browser/config.json or a file loaded with --config:"
       }
+    ],
+    "/installation": [
+      {
+        "from": "pnpm install\npnpm build\npnpm build:native\n./bin/agent-browser install\npnpm link --global",
+        "to": "pnpm install\npnpm build:source\npnpm link --global\nagent-browser install"
+      }
     ]
   },
   "resources": {
