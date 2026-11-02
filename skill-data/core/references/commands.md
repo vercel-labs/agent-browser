@@ -184,6 +184,8 @@ agent-browser mouse wheel 100         # Scroll at the current tracked pointer
 
 Use `--human` with `click` or `drag` when pointer-path events matter. Movement starts at the current cursor position and ends at the target; `mouse move --seed` makes the path reproducible. `--duration` is the target total duration, including browser response time; a slow browser can still extend it.
 
+Mouse coordinates and wheel deltas accept finite numbers, including decimals such as `100.5` or `37.5`. Invalid values return an error. With no wheel arguments, the defaults are `100` vertically and `0` horizontally; explicit zero deltas remain zero.
+
 The wheel starts at `0,0`; move the pointer first to scroll elsewhere. Failed wheel dispatches leave the tracked pointer unchanged.
 
 ## Semantic Locators (alternative to refs)

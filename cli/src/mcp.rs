@@ -1199,7 +1199,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_MOUSE_MOVE,
             "Mouse move",
-            "Move the mouse. Interpolation starts at the last pointer or element interaction.",
+            "Move the mouse using finite coordinates, including fractional CSS pixels. Interpolation starts at the last pointer or element interaction.",
             json!({
                 "x": number_schema(),
                 "y": number_schema(),
@@ -1227,7 +1227,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_MOUSE_WHEEL,
             "Mouse wheel",
-            "Scroll with the mouse wheel at the current pointer, initially (0,0). Call agent_browser_mouse_move first to target another location.",
+            "Scroll with finite wheel deltas, including fractional CSS pixels, at the current pointer, initially (0,0). Call agent_browser_mouse_move first to target another location.",
             json!({ "dy": number_schema(), "dx": number_schema() }),
             &["dy"],
         ),
@@ -3214,14 +3214,18 @@ fn call_mouse_button(arguments: &Value, action: &str) -> Result<Value, ProtocolE
     call_cli_tool(arguments, args, None)
 }
 
-fn call_mouse_wheel(arguments: &Value) -> Result<Value, ProtocolError> {
+fn mouse_wheel_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let dy = required_number_string(arguments, "dy")?;
     let dx = optional_number_string(arguments, "dx")?;
     let mut args = vec!["mouse".to_string(), "wheel".to_string(), dy];
     if let Some(dx) = dx {
         args.push(dx);
     }
-    call_cli_tool(arguments, args, None)
+    Ok(args)
+}
+
+fn call_mouse_wheel(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, mouse_wheel_command_args(arguments)?, None)
 }
 
 fn call_set_viewport(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4562,6 +4566,30 @@ mod tests {
             assert_eq!(command["cursor"], true);
             assert_eq!(command["fps"], 60);
             assert_eq!(command["action"], format!("recording_{operation}"));
+        }
+    }
+
+    #[test]
+    fn fractional_mouse_move_uses_cli_parser() {
+        let args = mouse_move_command_args(&json!({ "x": 100.5, "y": -200.25 })).unwrap();
+        let flags = crate::flags::parse_flags(&args);
+        let command = crate::commands::parse_command(&args, &flags).unwrap();
+        assert_eq!(command["x"], 100.5);
+        assert_eq!(command["y"], -200.25);
+    }
+
+    #[test]
+    fn fractional_mouse_wheel_uses_cli_parser() {
+        for (arguments, dy, dx) in [
+            (json!({ "dy": 37.5, "dx": -2.25 }), 37.5, -2.25),
+            (json!({ "dy": -0.5 }), -0.5, 0.0),
+            (json!({ "dy": 0 }), 0.0, 0.0),
+        ] {
+            let args = mouse_wheel_command_args(&arguments).unwrap();
+            let flags = crate::flags::parse_flags(&args);
+            let command = crate::commands::parse_command(&args, &flags).unwrap();
+            assert_eq!(command["deltaY"].as_f64(), Some(dy));
+            assert_eq!(command["deltaX"].as_f64(), Some(dx));
         }
     }
 

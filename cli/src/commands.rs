@@ -3265,18 +3265,8 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 context: "mouse move".to_string(),
                 usage: "mouse move <x> <y>",
             })?;
-            let x = x_str
-                .parse::<i32>()
-                .map_err(|_| ParseError::MissingArguments {
-                    context: "mouse move".to_string(),
-                    usage: "mouse move <x> <y>",
-                })?;
-            let y = y_str
-                .parse::<i32>()
-                .map_err(|_| ParseError::MissingArguments {
-                    context: "mouse move".to_string(),
-                    usage: "mouse move <x> <y>",
-                })?;
+            let x = parse_mouse_number(x_str, "mouse move x", "mouse move <x> <y>")?;
+            let y = parse_mouse_number(y_str, "mouse move y", "mouse move <x> <y>")?;
             let mut cmd = json!({ "id": id, "action": "mousemove", "x": x, "y": y });
             let mut i = 3;
             while i < rest.len() {
@@ -3313,9 +3303,14 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
         Some("wheel") => {
             let dy = rest
                 .get(1)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(100);
-            let dx = rest.get(2).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+                .map(|s| parse_mouse_number(s, "mouse wheel dy", "mouse wheel [dy] [dx]"))
+                .transpose()?
+                .unwrap_or(json!(100));
+            let dx = rest
+                .get(2)
+                .map(|s| parse_mouse_number(s, "mouse wheel dx", "mouse wheel [dy] [dx]"))
+                .transpose()?
+                .unwrap_or(json!(0));
             Ok(json!({ "id": id, "action": "wheel", "deltaX": dx, "deltaY": dy }))
         }
         Some(sub) => Err(ParseError::UnknownSubcommand {
@@ -3327,6 +3322,15 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             usage: "mouse <move|down|up|wheel> [args...]",
         }),
     }
+}
+
+/// Preserve existing integer payloads while accepting finite fractional mouse inputs.
+fn parse_mouse_number(raw: &str, what: &str, usage: &'static str) -> Result<Value, ParseError> {
+    let number = parse_finite_f64(raw, what, usage)?;
+    Ok(match raw.parse::<i32>() {
+        Ok(integer) => json!(integer),
+        Err(_) => json!(number),
+    })
 }
 
 /// Parse a finite floating-point argument for JSON serialization.
@@ -4680,6 +4684,86 @@ mod tests {
         let cmd = parse_command(&args("click @e1 --human"), &default_flags()).unwrap();
         assert_eq!(cmd["selector"], "@e1");
         assert_eq!(cmd["inputMode"], "human");
+    }
+
+    #[test]
+    fn test_mouse_fractional_arguments() {
+        let cmd = parse_command(
+            &args("mouse move 100.5 -200.25 --duration 250 --steps 24 --seed 42 --human"),
+            &default_flags(),
+        )
+        .unwrap();
+        assert_eq!(cmd["x"], 100.5);
+        assert_eq!(cmd["y"], -200.25);
+        assert_eq!(cmd["duration"], 250);
+        assert_eq!(cmd["steps"], 24);
+        assert_eq!(cmd["seed"], 42);
+        assert_eq!(cmd["inputMode"], "human");
+
+        let cmd = parse_command(&args("mouse wheel 37.5 -2.25"), &default_flags()).unwrap();
+        assert_eq!(cmd["deltaY"], 37.5);
+        assert_eq!(cmd["deltaX"], -2.25);
+    }
+
+    #[test]
+    fn test_mouse_integer_arguments_and_defaults() {
+        let cmd = parse_command(&args("mouse move 0 -200"), &default_flags()).unwrap();
+        assert_eq!(cmd["x"], json!(0));
+        assert_eq!(cmd["y"], json!(-200));
+        let cmd =
+            parse_command(&args("mouse move 2147483647 -2147483648"), &default_flags()).unwrap();
+        assert_eq!(cmd["x"], json!(i32::MAX));
+        assert_eq!(cmd["y"], json!(i32::MIN));
+        for (input, dy, dx) in [
+            ("mouse wheel", 100, 0),
+            ("mouse wheel 0", 0, 0),
+            ("mouse wheel -37 -2", -37, -2),
+        ] {
+            let cmd = parse_command(&args(input), &default_flags()).unwrap();
+            assert_eq!(cmd["deltaY"], json!(dy));
+            assert_eq!(cmd["deltaX"], json!(dx));
+        }
+        for input in ["mouse move", "mouse move 100"] {
+            assert!(matches!(
+                parse_command(&args(input), &default_flags()),
+                Err(ParseError::MissingArguments { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn test_mouse_finite_number_forms() {
+        for (x, y, expected_x, expected_y) in [
+            (".5", "-2.5e1", 0.5, -25.0),
+            ("2147483648", "-2147483649", 2147483648.0, -2147483649.0),
+        ] {
+            let input = vec!["mouse", "move", x, y]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let cmd = parse_command(&input, &default_flags()).unwrap();
+            assert_eq!(cmd["x"].as_f64(), Some(expected_x));
+            assert_eq!(cmd["y"].as_f64(), Some(expected_y));
+        }
+    }
+
+    #[test]
+    fn test_mouse_invalid_numbers_are_not_missing_or_defaults() {
+        for raw in ["bad", "NaN", "inf", "-inf", "Infinity", "1e309", ""] {
+            for input in [
+                vec!["mouse", "move", raw, "200"],
+                vec!["mouse", "move", "100", raw],
+                vec!["mouse", "wheel", raw],
+                vec!["mouse", "wheel", "10", raw],
+            ] {
+                let input: Vec<String> = input.into_iter().map(str::to_owned).collect();
+                let result = parse_command(&input, &default_flags());
+                assert!(
+                    matches!(result, Err(ParseError::InvalidValue { .. })),
+                    "invalid mouse number must fail: {input:?}: {result:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -345,6 +345,8 @@ agent-browser mouse wheel 100
 
 Add `--human` to `click` or `drag` for curved, eased movement from the current cursor position. For timed mouse moves, `--duration` is the target total duration, including browser response time; a slow browser can still extend it.
 
+Mouse coordinates and wheel deltas accept finite numbers, including decimals such as `100.5` or `37.5`. Invalid values return an error. With no wheel arguments, the defaults are `100` vertically and `0` horizontally; explicit zero deltas remain zero.
+
 ### Browser Settings
 
 ```bash
