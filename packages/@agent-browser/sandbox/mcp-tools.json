@@ -7254,7 +7254,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Stop HAR capture.",
+      "description": "Stop an active HAR capture and export it, including captures with no requests. Fails if no recording is active. A failed export can be retried.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

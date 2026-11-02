@@ -11853,8 +11853,11 @@ async fn handle_har_start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     Ok(json!({ "started": true }))
 }
 
-/// Stop HAR recording and write the captured requests to disk.
+/// Stop an active HAR recording and write the captured requests to disk.
 async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    if !state.har_recording {
+        return Err("No HAR recording is active. Start one with 'network har start'.".to_string());
+    }
     let path = har_output_path(cmd.get("path").and_then(|v| v.as_str()));
 
     let entries: Vec<Value> = state.har_entries.iter().map(har_entry_to_json).collect();
@@ -18856,6 +18859,52 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[tokio::test]
+    async fn test_handle_har_stop_requires_active_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inactive.har");
+        let mut state = DaemonState::new();
+
+        for existing_file in [false, true] {
+            if existing_file {
+                fs::write(&path, "existing export").unwrap();
+            }
+            let result = handle_har_stop(&json!({ "path": path }), &mut state).await;
+
+            assert!(
+                result.is_err(),
+                "inactive recording must not export: {result:?}"
+            );
+            assert!(result.unwrap_err().contains("No HAR recording is active"));
+            if existing_file {
+                assert_eq!(fs::read_to_string(&path).unwrap(), "existing export");
+            } else {
+                assert!(!path.exists());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_har_stop_empty_recording_and_repeated_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.har");
+        let mut state = DaemonState::new();
+        state.har_recording = true;
+
+        let result = handle_har_stop(&json!({ "path": path }), &mut state)
+            .await
+            .unwrap();
+        assert_eq!(result["requestCount"], 0);
+        assert!(!state.har_recording);
+        let exported = fs::read_to_string(&path).unwrap();
+        let har: Value = serde_json::from_str(&exported).unwrap();
+        assert_eq!(har["log"]["entries"], json!([]));
+
+        let result = handle_har_stop(&json!({ "path": path }), &mut state).await;
+        assert!(result.is_err(), "a second stop must fail: {result:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), exported);
+    }
+
+    #[tokio::test]
     async fn test_handle_har_stop_without_path_uses_default_location() {
         let mut state = DaemonState::new();
         state.har_recording = true;
@@ -18981,6 +19030,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             unix_timestamp_millis()
         ));
         let mut state = DaemonState::new();
+        state.har_recording = true;
         state.har_entries.push(HarEntry {
             request_id: "req-3".to_string(),
             wall_time: 1773576000.0,

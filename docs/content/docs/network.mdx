@@ -74,6 +74,8 @@ agent-browser network har stop ./trace.har
 
 If HAR export fails, recording and captured requests remain available. Fix the destination and retry `network har stop`.
 
+Stopping requires an active HAR recording. After a daemon restart or a successful export, start a new recording before stopping again. Stopping an active recording with no requests saves an empty HAR.
+
 Text response bodies (JSON, HTML, JavaScript, form data) are embedded in the HAR as `content.text` by default, captured while the browser still has them buffered so they survive navigation. The `--content` flag on `har start` controls this:
 
 <table>
