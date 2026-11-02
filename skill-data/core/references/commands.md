@@ -219,6 +219,8 @@ agent-browser set media light reduced-motion  # Light mode + reduced motion
 
 Viewport scales and geolocation coordinates must be finite numbers.
 
+`set viewport` also emulates a screen of the same size, so `screen.width`, `screen.height`, and `device-width` media queries match the viewport.
+
 ## Cookies and Storage
 
 ```bash

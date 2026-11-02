@@ -359,6 +359,8 @@ agent-browser set media [dark|light]  # Emulate color scheme
 
 Viewport scales and geolocation coordinates must be finite numbers.
 
+`set viewport` also emulates a screen of the same size, so `screen.width`, `screen.height`, and `device-width` media queries match the viewport.
+
 `set credentials` applies HTTP Basic Authentication to the current tab and tabs opened later. `set offline off` and `set headers '{}'` restore the default setup for future tabs.
 
 ### Cookies & Storage

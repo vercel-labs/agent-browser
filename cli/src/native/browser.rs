@@ -2147,6 +2147,11 @@ impl BrowserManager {
         mobile: bool,
     ) -> Result<(), String> {
         let session_id = self.active_session_id()?;
+        // Emulate a screen the size of the viewport. Without screenWidth and
+        // screenHeight, desktop emulation keeps the real screen, which headless
+        // Chrome fixes at 800x600 regardless of the window size, so
+        // screen.width, screen.height, and device-width media queries would
+        // disagree with the viewport. Mobile emulation already does this.
         self.client
             .send_command(
                 "Emulation.setDeviceMetricsOverride",
@@ -2155,6 +2160,8 @@ impl BrowserManager {
                     "height": height,
                     "deviceScaleFactor": device_scale_factor,
                     "mobile": mobile,
+                    "screenWidth": width,
+                    "screenHeight": height,
                 })),
                 Some(session_id),
             )
