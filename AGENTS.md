@@ -23,7 +23,7 @@ When adding or changing user-facing features (new flags, commands, behaviors, en
 
 1. `cli/src/output.rs` — `--help` output (flags list, examples, environment variables)
 2. `README.md` — Options table, relevant feature sections, examples
-3. `skill-data/core/SKILL.md` (and its `references/`) — so AI agents know about the feature when they load the core skill. Edit `skill-data/core/SKILL.md` for overview/workflow changes; edit `skill-data/core/references/*.md` for detailed reference content. Do **not** put feature content in `skills/agent-browser/SKILL.md` — that file is an intentionally thin discovery stub for `npx skills add` and exists only to redirect agents to `agent-browser skills get core`.
+3. `skill-data/core/references/*.md`, plus `skill-data/core/SKILL.md` when the core workflow changes, so AI agents can find the feature. `skills get core` loads `SKILL.md` on every use, so keep it to the loop, refs, waits, common tasks, troubleshooting, safety, and its routing table; put flags, options, and edge cases in the matching reference, and add a routing row when you add a reference. Do **not** put feature content in `skills/agent-browser/SKILL.md`. That file is an intentionally thin discovery stub for `npx skills add` and exists only to redirect agents to `agent-browser skills get core`.
 4. `docs/content/docs/` — the Geistdocs site (MDX pages); routing and API handlers live in `docs/src/app/`
 5. Inline doc comments in the relevant source files
 
@@ -111,7 +111,7 @@ This is a Rust codebase. The browser automation daemon lives in `cli/src/native/
 cd cli && cargo test
 ```
 
-Runs all unit tests (~320 tests). These are fast and don't require Chrome.
+Runs all unit tests. These are fast and don't require Chrome.
 
 ### End-to-End Tests
 
@@ -119,7 +119,7 @@ Runs all unit tests (~320 tests). These are fast and don't require Chrome.
 cd cli && cargo test e2e -- --ignored --test-threads=1
 ```
 
-Runs 18 e2e tests that launch real headless Chrome instances and exercise the full native daemon command pipeline. Requirements:
+Runs the e2e tests that launch real headless Chrome instances and exercise the full native daemon command pipeline. Requirements:
 
 - Chrome must be installed
 - Must run serially (`--test-threads=1`) to avoid Chrome instance contention
