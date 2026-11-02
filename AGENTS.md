@@ -22,7 +22,7 @@ Use the `technical-writer` skill (`.agents/skills/technical-writer/SKILL.md`) wh
 When adding or changing user-facing features (new flags, commands, behaviors, environment variables, etc.), update **all** of the following:
 
 1. `cli/src/output.rs` — `--help` output (flags list, examples, environment variables)
-2. `README.md` — Options table, relevant feature sections, examples
+2. `README.md` — only when install, the quick start, or the command groups table changes. The README links to the docs site for details instead of repeating them
 3. `skill-data/core/references/*.md`, plus `skill-data/core/SKILL.md` when the core workflow changes, so AI agents can find the feature. `skills get core` loads `SKILL.md` on every use, so keep it to the loop, refs, waits, common tasks, troubleshooting, safety, and its routing table; put flags, options, and edge cases in the matching reference, and add a routing row when you add a reference. Do **not** put feature content in `skills/agent-browser/SKILL.md`. That file is an intentionally thin discovery stub for `npx skills add` and exists only to redirect agents to `agent-browser skills get core`.
 4. `docs/content/docs/` — the Geistdocs site (MDX pages); routing and API handlers live in `docs/src/app/`
 5. Inline doc comments in the relevant source files

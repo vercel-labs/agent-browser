@@ -238,6 +238,20 @@
         "to": "Session and restore names accept Unicode letters and numbers, hyphens, and underscores only. For example, café-東京_7 is valid, while my session is rejected because it contains a space.\n\nUse agent-browser session id to generate a valid key:"
       }
     ],
+    "/skills": [
+      {
+        "from": " — ",
+        "to": ": "
+      },
+      {
+        "from": "`agent-browser skills get core --full` is the recommended starting point for most browser tasks.",
+        "to": "Start with `agent-browser skills get core`. It routes to its references when a task needs more detail, and `--full` prints all of them at once."
+      },
+      {
+        "from": "agent-browser skills get core --full is the recommended starting point for most browser tasks.",
+        "to": "Start with agent-browser skills get core. It routes to its references when a task needs more detail, and --full prints all of them at once."
+      }
+    ],
     "/webgpu": [
       {
         "from": "Also available as the `AGENT_BROWSER_WEBGPU` environment variable or `\"webgpu\": true` in `agent-browser.json`.",
@@ -256,20 +270,6 @@
       {
         "from": "Or in your agent-browser.json config:",
         "to": "Or in ~/.agent-browser/config.json or a file loaded with --config:"
-      }
-    ],
-    "/skills": [
-      {
-        "from": " — ",
-        "to": ": "
-      },
-      {
-        "from": "`agent-browser skills get core --full` is the recommended starting point for most browser tasks.",
-        "to": "Start with `agent-browser skills get core`. It routes to its references when a task needs more detail, and `--full` prints all of them at once."
-      },
-      {
-        "from": "agent-browser skills get core --full is the recommended starting point for most browser tasks.",
-        "to": "Start with agent-browser skills get core. It routes to its references when a task needs more detail, and --full prints all of them at once."
       }
     ]
   },
