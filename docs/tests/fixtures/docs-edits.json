@@ -257,6 +257,20 @@
         "from": "Or in your agent-browser.json config:",
         "to": "Or in ~/.agent-browser/config.json or a file loaded with --config:"
       }
+    ],
+    "/skills": [
+      {
+        "from": " — ",
+        "to": ": "
+      },
+      {
+        "from": "`agent-browser skills get core --full` is the recommended starting point for most browser tasks.",
+        "to": "Start with `agent-browser skills get core`. It routes to its references when a task needs more detail, and `--full` prints all of them at once."
+      },
+      {
+        "from": "agent-browser skills get core --full is the recommended starting point for most browser tasks.",
+        "to": "Start with agent-browser skills get core. It routes to its references when a task needs more detail, and --full prints all of them at once."
+      }
     ]
   },
   "resources": {
