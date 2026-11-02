@@ -43,7 +43,7 @@ fn validate_profile_name(name: &str) -> Result<(), String> {
 }
 
 fn get_auth_dir() -> PathBuf {
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = std::env::home_dir() {
         home.join(".agent-browser").join("auth")
     } else {
         std::env::temp_dir().join("agent-browser").join("auth")
@@ -58,7 +58,7 @@ const ENCRYPTION_KEY_ENV: &str = "AGENT_BROWSER_ENCRYPTION_KEY";
 const KEY_FILE_NAME: &str = ".encryption-key";
 
 fn get_agent_browser_dir() -> PathBuf {
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = std::env::home_dir() {
         home.join(".agent-browser")
     } else {
         std::env::temp_dir().join("agent-browser")
