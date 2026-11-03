@@ -3158,15 +3158,15 @@ mod tests {
     }
 
     #[test]
-    fn test_readme_proxy_ca_config_uses_compatible_options() {
-        let readme = include_str!("../../README.md");
-        let marker = "**Example proxy CA configuration:**";
-        let example = readme
+    fn test_docs_proxy_ca_config_uses_compatible_options() {
+        let docs = include_str!("../../docs/content/docs/configuration.mdx");
+        let marker = "### Behind a Proxy";
+        let example = docs
             .split_once(marker)
             .and_then(|(_, rest)| rest.split_once("```json"))
             .and_then(|(_, rest)| rest.split_once("```"))
             .map(|(json, _)| json.trim())
-            .expect("README proxy CA configuration example");
+            .expect("docs proxy CA configuration example");
         let config: flags::Config = serde_json::from_str(example).unwrap();
         let mut flags = neutral_launch_config_flags();
         flags.profile = config.profile;
@@ -3181,7 +3181,7 @@ mod tests {
         let error = incompatible_launch_mode_error(&flags);
         assert!(
             error.is_none() || error == Some("--ca-cert browser trust is currently supported only on Linux (read, install, upgrade, and doctor accept it on every platform)"),
-            "README proxy CA configuration is incompatible: {error:?}"
+            "docs proxy CA configuration is incompatible: {error:?}"
         );
     }
 

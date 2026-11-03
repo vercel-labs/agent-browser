@@ -629,7 +629,7 @@ fn validate_plugin_name(name: &str) -> Result<(), String> {
 fn config_path_for_scope(scope: &PluginConfigScope) -> Result<PathBuf, String> {
     match scope {
         PluginConfigScope::Project => Ok(PathBuf::from("agent-browser.json")),
-        PluginConfigScope::Global => dirs::home_dir()
+        PluginConfigScope::Global => std::env::home_dir()
             .map(|d| d.join(".agent-browser").join("config.json"))
             .ok_or_else(|| "Could not determine home directory".to_string()),
     }

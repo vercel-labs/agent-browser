@@ -73,8 +73,8 @@ fn find_skills_dirs() -> Vec<PathBuf> {
         }
     }
 
-    let Some(root) =
-        find_package_root().or_else(|| dirs::home_dir().map(|home| home.join(".agent-browser")))
+    let Some(root) = find_package_root()
+        .or_else(|| std::env::home_dir().map(|home| home.join(".agent-browser")))
     else {
         return vec![];
     };
@@ -620,5 +620,29 @@ mod tests {
         assert_eq!(files[0].0, "references/auth.md");
         assert_eq!(files[1].0, "references/commands.md");
         assert_eq!(files[2].0, "templates/example.sh");
+    }
+
+    #[test]
+    fn test_bundled_core_skill_routes_every_reference_and_skill() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../skill-data");
+        let core = fs::read_to_string(root.join("core/SKILL.md")).unwrap();
+        for (path, _) in collect_supplementary_files(&root.join("core")) {
+            if path.starts_with("references/") {
+                assert!(
+                    core.contains(&format!("`{}`", path)),
+                    "core SKILL.md does not route to {}",
+                    path
+                );
+            }
+        }
+        for skill in discover_skills(&[root]) {
+            if skill.name != "core" && !skill.hidden {
+                assert!(
+                    core.contains(&format!("| `{}` |", skill.name)),
+                    "core SKILL.md does not route to the {} skill",
+                    skill.name
+                );
+            }
+        }
     }
 }

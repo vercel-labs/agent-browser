@@ -1290,7 +1290,7 @@ pub fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = std::env::home_dir() {
             let base = home.join("Library/Application Support");
             for name in [
                 "Google/Chrome",
@@ -1305,7 +1305,7 @@ pub fn get_chrome_user_data_dirs() -> Vec<PathBuf> {
 
     #[cfg(target_os = "linux")]
     {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = std::env::home_dir() {
             let config = home.join(".config");
             for name in [
                 "google-chrome",
@@ -1711,7 +1711,7 @@ fn find_puppeteer_chrome() -> Option<PathBuf> {
         search_dirs.push(PathBuf::from(custom).join("chrome"));
     }
 
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = std::env::home_dir() {
         search_dirs.push(home.join(".cache/puppeteer/chrome"));
     }
 
@@ -1781,7 +1781,7 @@ fn find_playwright_chromium() -> Option<PathBuf> {
         search_dirs.push(PathBuf::from(custom));
     }
 
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = std::env::home_dir() {
         search_dirs.push(home.join(".cache/ms-playwright"));
     }
 
@@ -1842,7 +1842,7 @@ fn build_playwright_binary_path(chromium_dir: &Path) -> PathBuf {
 
 fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix('~') {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = std::env::home_dir() {
             return home
                 .join(rest.strip_prefix('/').unwrap_or(rest))
                 .to_string_lossy()

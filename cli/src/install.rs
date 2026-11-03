@@ -8,7 +8,7 @@ const LAST_KNOWN_GOOD_URL: &str =
     "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
 
 pub fn get_browsers_dir() -> PathBuf {
-    dirs::home_dir()
+    std::env::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".agent-browser")
         .join("browsers")
@@ -22,7 +22,7 @@ pub fn find_installed_chrome() -> Option<PathBuf> {
         let _ = writeln!(
             io::stderr(),
             "[chrome-search] home_dir={:?} browsers_dir={}",
-            dirs::home_dir(),
+            std::env::home_dir(),
             browsers_dir.display()
         );
     }
