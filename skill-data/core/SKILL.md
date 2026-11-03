@@ -72,8 +72,6 @@ agent-browser get url                                # also: title, value, html,
 
 Use `read` for documentation and other text pages. A read with a URL fetches over HTTP without launching Chrome.
 
-Before browser work, the daemon checks supported browser versions in both headed and headless sessions. Load `references/trust-boundaries.md` for the products covered, advisory warnings, fallback behavior, and override scope.
-
 ## Interacting
 
 ```bash

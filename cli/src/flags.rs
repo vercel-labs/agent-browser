@@ -151,7 +151,6 @@ pub struct Config {
     pub clear_ca_cert: Option<bool>,
     pub use_system_ca: Option<bool>,
     pub allow_file_access: Option<bool>,
-    pub allow_outdated_browser: Option<bool>,
     pub cdp: Option<String>,
     pub cdp_headers: Option<String>,
     pub auto_connect: Option<bool>,
@@ -237,7 +236,6 @@ impl Config {
             clear_ca_cert,
             use_system_ca: other.use_system_ca.or(self.use_system_ca),
             allow_file_access: other.allow_file_access.or(self.allow_file_access),
-            allow_outdated_browser: other.allow_outdated_browser.or(self.allow_outdated_browser),
             cdp: other.cdp.or(self.cdp),
             cdp_headers: other.cdp_headers.or(self.cdp_headers),
             auto_connect: other.auto_connect.or(self.auto_connect),
@@ -505,8 +503,6 @@ pub struct Flags {
     pub clear_ca_cert: bool,
     pub use_system_ca: bool,
     pub allow_file_access: bool,
-    /// Launch an outdated browser that is missing documented security fixes.
-    pub allow_outdated_browser: bool,
     pub hide_scrollbars: bool,
     pub webgpu: bool,
     pub no_webmcp: bool,
@@ -555,7 +551,6 @@ pub struct Flags {
     pub cli_ca_cert: bool,
     pub cli_use_system_ca: bool,
     pub cli_allow_file_access: bool,
-    pub cli_allow_outdated_browser: bool,
     pub cli_hide_scrollbars: bool,
     pub cli_annotate: bool,
     pub cli_download_path: bool,
@@ -728,8 +723,6 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
             .unwrap_or(false),
         allow_file_access: env_var_is_truthy("AGENT_BROWSER_ALLOW_FILE_ACCESS")
             || config.allow_file_access.unwrap_or(false),
-        allow_outdated_browser: env_var_is_truthy(crate::browser_security::ALLOW_ENV)
-            || config.allow_outdated_browser.unwrap_or(false),
         hide_scrollbars: env_var_bool("AGENT_BROWSER_HIDE_SCROLLBARS")
             .or(config.hide_scrollbars)
             .unwrap_or(true),
@@ -814,7 +807,6 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
         cli_ca_cert: false,
         cli_use_system_ca: false,
         cli_allow_file_access: false,
-        cli_allow_outdated_browser: false,
         cli_hide_scrollbars: false,
         cli_annotate: false,
         cli_download_path: false,
@@ -1098,14 +1090,6 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
                     i += 1;
                 }
             }
-            "--allow-outdated-browser" => {
-                let (val, consumed) = parse_bool_arg(args, i);
-                flags.allow_outdated_browser = val;
-                flags.cli_allow_outdated_browser = true;
-                if consumed {
-                    i += 1;
-                }
-            }
             "--hide-scrollbars" => {
                 let (val, consumed) = parse_bool_arg(args, i);
                 flags.hide_scrollbars = val;
@@ -1319,7 +1303,6 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--debug",
         "--ignore-https-errors",
         "--allow-file-access",
-        "--allow-outdated-browser",
         "--hide-scrollbars",
         "--auto-connect",
         "--pin-tab",

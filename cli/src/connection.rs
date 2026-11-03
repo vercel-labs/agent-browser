@@ -1119,29 +1119,7 @@ fn is_read_only(cmd: &Value) -> bool {
         .is_some_and(|action| READ_ONLY_ACTIONS.contains(&action))
 }
 
-static REQUEST_TLS: std::sync::OnceLock<crate::tls::TrustOptions> = std::sync::OnceLock::new();
-
-/// Set the TLS options resolved for this CLI invocation.
-pub fn set_request_tls(options: crate::tls::TrustOptions) {
-    let _ = REQUEST_TLS.set(options);
-}
-
-fn with_request_tls(mut cmd: Value, options: Option<&crate::tls::TrustOptions>) -> Value {
-    if let (Some(options), Some(object)) = (options, cmd.as_object_mut()) {
-        let value = json!(options);
-        if object.get("action").and_then(Value::as_str) == Some("read") {
-            object.insert("tls".to_string(), value.clone());
-        }
-        object.insert("securityTls".to_string(), value);
-    }
-    cmd
-}
-
 pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
-    // Single place a command leaves the CLI, so the caller's security opt-out
-    // rides on every envelope without each builder remembering it.
-    let cmd = crate::commands::with_browser_security_override(cmd);
-    let cmd = with_request_tls(cmd, REQUEST_TLS.get());
     send_with_retry(is_read_only(&cmd), || send_command_once(&cmd, session))
 }
 
@@ -1302,26 +1280,6 @@ fn exchange<S: Read + Write>(mut stream: S, request: &[u8]) -> Result<Response, 
 mod tests {
     use super::*;
     use crate::test_utils::EnvGuard;
-
-    #[test]
-    fn request_tls_reaches_launches_and_reads_without_changing_unconfigured_requests() {
-        let trust = crate::tls::TrustOptions {
-            use_system_ca: true,
-            ca_cert: Some("/tmp/custom-ca.pem".to_string()),
-            ca_cert_is_implicit: false,
-        };
-        for action in ["launch", "navigate", "read", "confirm"] {
-            let command = with_request_tls(json!({"action": action}), Some(&trust));
-            assert_eq!(command["securityTls"], json!(trust));
-            if action == "read" {
-                assert_eq!(command["tls"], command["securityTls"]);
-            } else {
-                assert!(command.get("tls").is_none());
-            }
-        }
-        let command = json!({"action": "navigate"});
-        assert_eq!(with_request_tls(command.clone(), None), command);
-    }
 
     #[cfg(unix)]
     #[test]

@@ -98,8 +98,6 @@ Run `agent-browser --help` for the full list, or `agent-browser <command> --help
 
 Flags, environment variables, and `agent-browser.json` are documented in [Configuration](https://agent-browser.dev/configuration).
 
-Supported browser builds below the stable-release threshold are blocked by default. Update the browser, or use `--allow-outdated-browser` for an invocation when you accept the risk. See [Security](https://agent-browser.dev/security#browser-version-check) for coverage and limitations.
-
 ## Platforms
 
 Native binaries ship for macOS (ARM64, x64), Linux (ARM64, x64, glibc and musl), and Windows (x64). The npm package picks the right binary for the host.
@@ -130,7 +128,7 @@ cargo test e2e -- --ignored --test-threads=1   # launches real headless Chrome
 
 - [agent-browser.dev](https://agent-browser.dev): introduction, guides, and reference
 - [Commands](https://agent-browser.dev/commands) and [Configuration](https://agent-browser.dev/configuration)
-- [Security](https://agent-browser.dev/security): browser version checks, the auth vault, domain allowlists, action policies, and content boundaries
+- [Security](https://agent-browser.dev/security): the auth vault, domain allowlists, action policies, and content boundaries
 - [Next.js and Vercel](https://agent-browser.dev/next) and [eve](https://agent-browser.dev/eve): running agent-browser in Vercel Sandbox and eve agents
 - [Changelog](CHANGELOG.md)
 

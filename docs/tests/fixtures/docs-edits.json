@@ -32,10 +32,6 @@
       {
         "from": "agent-browser network route <url> --body <json>  # Mock response",
         "to": "agent-browser network route <url> --body <json>  # Mock response\nagent-browser network route <url> --body <json> --allow-origin <origin>  # Mock readable cross-origin"
-      },
-      {
-        "from": "--allow-file-access      # Allow file:// URLs to access local files (Chromium only)\n--hide-scrollbars <bool> # Hide native scrollbars in headless Chromium screenshots",
-        "to": "--allow-file-access      # Allow file:// URLs to access local files (Chromium only)\n--allow-outdated-browser # Drive a browser that is behind the current stable release\n--hide-scrollbars <bool> # Hide native scrollbars in headless Chromium screenshots"
       }
     ],
     "/configuration": [
@@ -162,10 +158,6 @@
       {
         "from": "All security features are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Enable these features as needed for your deployment -- existing workflows are unaffected until you explicitly activate a feature.",
         "to": "Navigation, action, and output controls are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Auto-discovered project config filtering applies by default; see Project config trust."
-      },
-      {
-        "from": "Navigation, action, and output controls are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Auto-discovered project config filtering applies by default; see Project config trust.",
-        "to": "Navigation, action, and output controls are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. A browser version check also runs for supported products in headed and headless sessions. See Browser version check for its scope, fallbacks, and exceptions. Auto-discovered project config filtering applies by default; see Project config trust."
       }
     ],
     "/init-scripts": [
@@ -239,16 +231,16 @@
     "/sessions": [
       {
         "from": "Session and restore names must contain only alphanumeric characters, hyphens, and underscores. Use `agent-browser session id` to generate a valid key:",
-        "to": "Session and restore names accept Unicode letters and numbers, hyphens, and underscores only. For example, `caf\u00e9-\u6771\u4eac_7` is valid, while `my session` is rejected because it contains a space.\n\nUse `agent-browser session id` to generate a valid key:"
+        "to": "Session and restore names accept Unicode letters and numbers, hyphens, and underscores only. For example, `café-東京_7` is valid, while `my session` is rejected because it contains a space.\n\nUse `agent-browser session id` to generate a valid key:"
       },
       {
         "from": "Session and restore names must contain only alphanumeric characters, hyphens, and underscores. Use agent-browser session id to generate a valid key:",
-        "to": "Session and restore names accept Unicode letters and numbers, hyphens, and underscores only. For example, caf\u00e9-\u6771\u4eac_7 is valid, while my session is rejected because it contains a space.\n\nUse agent-browser session id to generate a valid key:"
+        "to": "Session and restore names accept Unicode letters and numbers, hyphens, and underscores only. For example, café-東京_7 is valid, while my session is rejected because it contains a space.\n\nUse agent-browser session id to generate a valid key:"
       }
     ],
     "/skills": [
       {
-        "from": " \u2014 ",
+        "from": " — ",
         "to": ": "
       },
       {
@@ -289,8 +281,8 @@
   },
   "resources": {
     "/schema.json": {
-      "size": 9980,
-      "sha256": "9e132b951d52a7e91d113d116819bb47a6a90c90ce7970e0962ae1011e331ff4"
+      "size": 9813,
+      "sha256": "2b250f5cd22c2e91efc2d924be140efe6c4197c3e0e5b2bab3f439134b6dbe12"
     }
   }
 }
