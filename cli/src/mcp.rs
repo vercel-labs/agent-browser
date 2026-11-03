@@ -5995,7 +5995,7 @@ mod tests {
                 assert_eq!(structured["stdout"], stdout);
             }
             assert_eq!(structured["response"], response);
-            assert_eq!(structured["exitCode"], exit_code);
+            assert_eq!(structured["exitCode"], json!(exit_code));
             assert_eq!(structured["stderr"], stderr);
             assert_eq!(result["isError"], is_error);
             assert!(result["content"][0]["text"]
