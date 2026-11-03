@@ -4,29 +4,29 @@
 //! The module does no IO. `seed` is the one place that reads the environment,
 //! kept as a temporary shim until the patch rides on every command.
 
-// The patch and wire halves have no caller until the CLI sends them.
-#![allow(dead_code)]
-
+// The patch and the option table have no caller until the CLI sends the
+// patch. The running views and the seed are used by the daemon and stay
+// compiler-checked.
+#[allow(dead_code)]
 mod patch;
 mod proxy;
 mod running;
 mod seed;
+#[allow(dead_code)]
 mod spec;
 
 #[allow(unused_imports)]
 pub use patch::{Patch, Requested};
-#[allow(unused_imports)]
-pub use proxy::{parse_proxy, ParsedProxy};
-#[allow(unused_imports)]
-pub use running::{
-    resolve_idle_timeout, Connection, IdleTimeout, Running, SecurityView, DEFAULT_IDLE_TIMEOUT_MS,
-    DEFAULT_TIMEOUT_MS,
-};
+pub use proxy::parse_proxy;
+#[cfg(test)]
+pub use running::resolve_idle_timeout;
+pub use running::{Connection, IdleTimeout, Running, DEFAULT_IDLE_TIMEOUT_MS};
 #[allow(unused_imports)]
 pub use spec::{spec, spec_by_name, Effect, Key, Persist, Shape, Spec, SPECS};
 
 use std::fmt;
 
+#[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub enum SettingsError {
     NotAnObject,
