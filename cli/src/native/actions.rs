@@ -5297,6 +5297,25 @@ async fn handle_launch_for_target(
     result
 }
 
+/// A local launch without an explicit profile or storage state keeps the
+/// daemon's spawn-time profile, so the launch hash stays stable.
+fn launch_profile_from_command_or_env(cmd: &Value) -> Option<String> {
+    if let Some(profile) = cmd.get("profile").and_then(|v| v.as_str()) {
+        return Some(profile.to_string());
+    }
+    let external_or_stateful = ["cdpUrl", "cdpPort", "provider", "storageState"]
+        .iter()
+        .any(|key| cmd.get(*key).is_some_and(|v| !v.is_null()))
+        || cmd
+            .get("autoConnect")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    if external_or_stateful {
+        return None;
+    }
+    env::var("AGENT_BROWSER_PROFILE").ok()
+}
+
 async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let effective_ca_cert = resolve_effective_ca_cert(cmd, state)?;
     // Absent field falls back to the daemon's spawn-time env (mirrors
@@ -5331,10 +5350,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         .and_then(|v| v.as_str())
         .map(String::from)
         .or_else(|| env::var("AGENT_BROWSER_ENGINE").ok());
-    let profile = cmd
-        .get("profile")
-        .and_then(|v| v.as_str())
-        .map(String::from);
+    let profile = launch_profile_from_command_or_env(cmd);
 
     let requested_allowed_domains = allowed_domains_from_launch_command(cmd);
     let previous_domain_filter = state.domain_filter.read().await.clone();
@@ -15765,6 +15781,33 @@ mod tests {
         assert!(state.restore_loaded_path.is_none());
         assert!(!state.restore_load_failed);
         assert_eq!(state.restore_save_status, "not_attempted");
+    }
+
+    #[test]
+    fn test_launch_profile_falls_back_to_env_only_for_plain_local_launch() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_PROFILE"]);
+        guard.set("AGENT_BROWSER_PROFILE", "/tmp/env-profile");
+
+        assert_eq!(
+            launch_profile_from_command_or_env(&json!({ "action": "launch" })).as_deref(),
+            Some("/tmp/env-profile")
+        );
+        assert_eq!(
+            launch_profile_from_command_or_env(
+                &json!({ "action": "launch", "profile": "/tmp/cli" })
+            )
+            .as_deref(),
+            Some("/tmp/cli")
+        );
+        for cmd in [
+            json!({ "action": "launch", "cdpUrl": "ws://127.0.0.1:9222" }),
+            json!({ "action": "launch", "cdpPort": 9222 }),
+            json!({ "action": "launch", "autoConnect": true }),
+            json!({ "action": "launch", "provider": "browserbase" }),
+            json!({ "action": "launch", "storageState": "/tmp/state.json" }),
+        ] {
+            assert_eq!(launch_profile_from_command_or_env(&cmd), None, "{cmd}");
+        }
     }
 
     #[test]
