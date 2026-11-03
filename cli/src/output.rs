@@ -564,6 +564,18 @@ pub fn settings_notices(data: &serde_json::Value) -> Vec<String> {
     lines
 }
 
+/// True when the lifecycle report names a setting change or `--relaunch` as the
+/// reason for a relaunch, and the notices therefore printed it.
+fn settings_notices_explain_relaunch(lifecycle: &serde_json::Value) -> bool {
+    let settings = &lifecycle["settings"];
+    settings["forcedRelaunch"] == true
+        || settings["changes"].as_array().is_some_and(|changes| {
+            changes
+                .iter()
+                .any(|c| c["effect"] == "relaunch" && c["applied"] == true)
+        })
+}
+
 fn print_settings_notices(resp: &Response) {
     if let Some(data) = resp.data.as_ref() {
         for line in settings_notices(data) {
@@ -1654,7 +1666,10 @@ fn print_lifecycle_note(data: &serde_json::Value) {
         .unwrap_or(false);
 
     if relaunched {
-        parts.push("relaunched browser".to_string());
+        // A settings notice already said why the browser was relaunched.
+        if !settings_notices_explain_relaunch(lifecycle) {
+            parts.push("relaunched browser".to_string());
+        }
     } else if launched && !reused {
         parts.push("launched browser".to_string());
     }
@@ -4976,7 +4991,7 @@ hydration: -  phases: 0  hydratedComponents: 0"
         assert!(!unavailable.contains(": 0"));
     }
     // === Settings notices ===
-    use super::settings_notices;
+    use super::{settings_notices, settings_notices_explain_relaunch};
 
     fn notice_data(
         changes: serde_json::Value,
@@ -5057,6 +5072,41 @@ hydration: -  phases: 0  hydratedComponents: 0"
             lines[0]
         );
         assert!(settings_notices(&notice_data(serde_json::json!([]), true, false)).is_empty());
+    }
+
+    #[test]
+    fn test_a_settings_notice_replaces_the_generic_relaunch_note() {
+        let explained = notice_data(
+            serde_json::json!([{
+                "option": "profile", "requested": "/b", "running": "/a",
+                "effect": "relaunch", "applied": true,
+            }]),
+            false,
+            true,
+        );
+        assert!(settings_notices_explain_relaunch(&explained["lifecycle"]));
+        assert!(settings_notices_explain_relaunch(
+            &notice_data(serde_json::json!([]), true, true)["lifecycle"]
+        ));
+        let unexplained = notice_data(serde_json::json!([]), false, true);
+        assert!(!settings_notices_explain_relaunch(
+            &unexplained["lifecycle"]
+        ));
+    }
+
+    #[test]
+    fn test_settings_notice_never_prints_url_secrets() {
+        let data = notice_data(
+            serde_json::json!([{
+                "option": "cdp",
+                "requested": "wss://host.example/cdp?<redacted>",
+                "running": null, "effect": "relaunch", "applied": true,
+            }]),
+            false,
+            true,
+        );
+        let lines = settings_notices(&data).join("\n");
+        assert!(lines.contains("cdp?<redacted>") && !lines.contains("SECRET"));
     }
 
     #[test]

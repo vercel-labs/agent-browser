@@ -2136,6 +2136,13 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         }),
     );
     props.insert(
+        "relaunch".to_string(),
+        json!({
+            "type": "boolean",
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch)."
+        }),
+    );
+    props.insert(
         "extraArgs".to_string(),
         json!({
             "type": "array",
@@ -4140,6 +4147,10 @@ fn append_common_global_args(
         args.push(idle_timeout);
     }
 
+    if optional_bool(arguments, "relaunch")?.unwrap_or(false) {
+        args.push("--relaunch".to_string());
+    }
+
     if let Some(restore) = arguments.get("restore") {
         if let Some(enabled) = restore.as_bool() {
             if enabled {
@@ -5622,6 +5633,22 @@ mod tests {
             open["inputSchema"]["properties"]["idleTimeout"]["type"],
             "string"
         );
+        assert_eq!(
+            open["inputSchema"]["properties"]["relaunch"]["type"],
+            "boolean"
+        );
+    }
+
+    #[test]
+    fn common_global_args_include_relaunch() {
+        let mut args = Vec::new();
+        append_common_global_args(&mut args, &json!({ "relaunch": true }), None).unwrap();
+        assert_eq!(args, vec!["--relaunch"]);
+        assert!(crate::flags::parse_flags(&args).relaunch);
+
+        let mut none = Vec::new();
+        append_common_global_args(&mut none, &json!({ "relaunch": false }), None).unwrap();
+        assert!(none.is_empty());
     }
 
     #[test]

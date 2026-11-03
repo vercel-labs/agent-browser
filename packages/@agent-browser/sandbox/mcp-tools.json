@@ -43,6 +43,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -149,6 +153,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -245,6 +253,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -346,6 +358,10 @@
           "noNavigate": {
             "default": false,
             "description": "Use the active top-level page without performing the initial login navigation. The credential URL must match the page origin.",
+            "type": "boolean"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
             "type": "boolean"
           },
           "restore": {
@@ -454,6 +470,10 @@
           },
           "passwordSelector": {
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -570,6 +590,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -666,6 +690,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -780,6 +808,10 @@
             "description": "Replace only command arrays with a stable zero-based input index. Does not make output safe for secrets: errors and response data are unchanged; type echoes typed text, and get value/eval may return input values.",
             "type": "boolean"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -886,6 +918,10 @@
           "quiet": {
             "type": "boolean"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -985,6 +1021,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -1097,6 +1137,10 @@
             "description": "Open link targets in a new tab after applying session setup.",
             "type": "boolean"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -1198,6 +1242,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -1291,6 +1339,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -1386,6 +1438,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -1479,6 +1535,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -1585,6 +1645,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -1681,6 +1745,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -1781,6 +1849,10 @@
           },
           "pinTab": {
             "description": "Strict session-to-tab binding (sticky for the session). Explicit false disables a sticky pin; omitted leaves it unchanged.",
+            "type": "boolean"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
             "type": "boolean"
           },
           "restore": {
@@ -1887,6 +1959,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -1981,6 +2057,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -2074,6 +2154,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -2183,6 +2267,10 @@
           },
           "path": {
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -2305,6 +2393,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -2415,6 +2507,10 @@
             "minimum": 1,
             "type": "integer"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -2509,6 +2605,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -2602,6 +2702,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -2704,6 +2808,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -2809,6 +2917,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -2902,6 +3014,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -3000,6 +3116,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -3093,6 +3213,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -3196,6 +3320,10 @@
           },
           "output": {
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -3306,6 +3434,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -3411,6 +3543,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -3542,6 +3678,10 @@
           "quick": {
             "type": "boolean"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -3642,6 +3782,10 @@
           },
           "path": {
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -3750,6 +3894,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -3857,6 +4005,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -3950,6 +4102,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -4051,6 +4207,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -4190,6 +4350,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -4294,6 +4458,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -4393,6 +4561,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -4487,6 +4659,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -4584,6 +4760,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -4685,6 +4865,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -4785,6 +4969,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -4884,6 +5072,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -4975,6 +5167,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -5075,6 +5271,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -5174,6 +5374,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -5272,6 +5476,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -5374,6 +5582,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -5468,6 +5680,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -5561,6 +5777,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -5660,6 +5880,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -5762,6 +5986,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -5861,6 +6089,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -5954,6 +6186,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -6052,6 +6288,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -6152,6 +6392,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -6250,6 +6494,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -6350,6 +6598,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -6449,6 +6701,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -6554,6 +6810,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -6654,6 +6914,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -6761,6 +7025,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -6864,6 +7132,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -6989,6 +7261,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -7088,6 +7364,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -7194,6 +7474,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -7291,6 +7575,10 @@
           "path": {
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -7384,6 +7672,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "requestId": {
             "type": "string"
@@ -7493,6 +7785,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -7604,6 +7900,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "resourceType": {
             "description": "Comma-separated resource types.",
             "type": "string"
@@ -7708,6 +8008,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -7808,6 +8112,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -7917,6 +8225,10 @@
           },
           "path": {
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -8041,6 +8353,10 @@
             "description": "npm package, scoped package, or owner/repo GitHub reference.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -8137,6 +8453,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -8240,6 +8560,10 @@
             "additionalProperties": true,
             "description": "JSON object payload to send as the plugin request.",
             "type": "object"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "requestType": {
             "description": "Namespaced request type to send to the plugin.",
@@ -8346,6 +8670,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -8447,6 +8775,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -8547,6 +8879,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -8644,6 +8980,10 @@
           "path": {
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -8738,6 +9078,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -8831,6 +9175,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -8939,6 +9287,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -9039,6 +9391,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -9135,6 +9491,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -9236,6 +9596,10 @@
           "onlyDynamic": {
             "type": "boolean"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -9332,6 +9696,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -9450,6 +9818,10 @@
           "readTimeoutMs": {
             "description": "Request timeout in milliseconds.",
             "type": "integer"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "requireMd": {
             "description": "Fail unless the response is Content-Type: text/markdown.",
@@ -9577,6 +9949,10 @@
             "description": "Output file; .webm (VP8) and .mp4 (H.264) are the supported formats, other extensions are handed to ffmpeg as-is with H.264 video. Must have an extension. Needs ffmpeg on PATH.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -9701,6 +10077,10 @@
             "description": "Output file; .webm (VP8) and .mp4 (H.264) are the supported formats, other extensions are handed to ffmpeg as-is with H.264 video. Must have an extension. Needs ffmpeg on PATH.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -9802,6 +10182,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -9895,6 +10279,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -9993,6 +10381,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -10123,6 +10515,10 @@
             "minimum": 0,
             "type": "integer"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -10246,6 +10642,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -10343,6 +10743,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -10442,6 +10846,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -10553,6 +10961,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -10650,6 +11062,10 @@
           "prefix": {
             "description": "Optional readable prefix for the generated id.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -10754,6 +11170,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -10847,6 +11267,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -10944,6 +11368,10 @@
           },
           "password": {
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -11049,6 +11477,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -11151,6 +11583,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -11255,6 +11691,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -11368,6 +11808,10 @@
             ],
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -11464,6 +11908,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -11564,6 +12012,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -11691,6 +12143,10 @@
             "minItems": 1,
             "type": "array"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -11784,6 +12240,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -11881,6 +12341,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -12006,6 +12470,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -12107,6 +12575,10 @@
           "olderThanDays": {
             "minimum": 0,
             "type": "integer"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -12211,6 +12683,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -12304,6 +12780,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -12401,6 +12881,10 @@
           },
           "path": {
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -12505,6 +12989,10 @@
           "oldName": {
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -12606,6 +13094,10 @@
           "path": {
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -12706,6 +13198,10 @@
           "path": {
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -12802,6 +13298,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -12910,6 +13410,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -13016,6 +13520,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -13126,6 +13634,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -13223,6 +13735,10 @@
           "port": {
             "type": "integer"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -13316,6 +13832,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -13423,6 +13943,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -13519,6 +14043,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -13618,6 +14146,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -13719,6 +14251,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -13816,6 +14352,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -13919,6 +14459,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -14020,6 +14564,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -14113,6 +14661,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -14210,6 +14762,10 @@
           },
           "path": {
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -14314,6 +14870,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -14421,6 +14981,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -14521,6 +15085,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -14623,6 +15191,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -14729,6 +15301,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -14829,6 +15405,10 @@
           "path": {
             "description": "Optional output path.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -14932,6 +15512,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -15031,6 +15615,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -15141,6 +15729,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -15258,6 +15850,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -15362,6 +15958,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -15471,6 +16071,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -15570,6 +16174,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -15676,6 +16284,10 @@
           },
           "params": {
             "type": "object"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -15784,6 +16396,10 @@
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
           },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
+          },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
             "oneOf": [
@@ -15883,6 +16499,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",
@@ -15984,6 +16604,10 @@
           "namespace": {
             "description": "Optional namespace that isolates daemon sockets and restore-state directories.",
             "type": "string"
+          },
+          "relaunch": {
+            "description": "Relaunch the session's browser even when no setting changed (--relaunch).",
+            "type": "boolean"
           },
           "restore": {
             "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key.",

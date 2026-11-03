@@ -91,10 +91,43 @@ fn attach_plugins_to_command(cmd: &mut serde_json::Value, plugins: &[plugins::Pl
     cmd["plugins"] = json!(plugins);
 }
 
+/// Identifies CDP metadata requests, including batches containing only those requests.
+fn command_is_cdp_url_metadata(cmd: &serde_json::Value) -> bool {
+    match cmd.get("action").and_then(|value| value.as_str()) {
+        Some("cdp_url") => true,
+        Some("batch") => {
+            if let Some(commands) = cmd.get("commands").and_then(|value| value.as_array()) {
+                !commands.is_empty()
+                    && commands.iter().all(|command| {
+                        command.as_str().is_some_and(|command| {
+                            commands::shell_words_split(command)
+                                .starts_with(&["get".into(), "cdp-url".into()])
+                        })
+                    })
+            } else if let Some(argv) = cmd.get("argv").and_then(|value| value.as_array()) {
+                !argv.is_empty()
+                    && argv.iter().all(|args| {
+                        args.as_array()
+                            .is_some_and(|args| args.starts_with(&[json!("get"), json!("cdp-url")]))
+                    })
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
 /// The settings patch one command carries. A browserless command never
 /// launches a browser, so CA trust does not apply to it.
 fn command_settings(flags: &Flags, cmd: &serde_json::Value) -> session_settings::Patch {
-    let mut patch = session_settings::Patch::from_flags(flags);
+    let patch = session_settings::Patch::from_flags(flags);
+    // Asking for a running browser's CDP URL never launches or relaunches one,
+    // so launch settings do not apply to it.
+    if command_is_cdp_url_metadata(cmd) {
+        return patch.without_launch_settings();
+    }
+    let mut patch = patch;
     if command_is_browserless(cmd) {
         patch.remove(session_settings::Key::CaCert);
         patch.remove(session_settings::Key::ClearCaCert);
@@ -2189,6 +2222,50 @@ mod tests {
         ]))
         .unwrap_err();
         assert!(error.contains("JSON object"), "{error}");
+    }
+
+    #[test]
+    fn test_cdp_url_metadata_carries_no_launch_settings() {
+        let (command, wire) = settings_of(&[
+            "--profile",
+            "/tmp/p",
+            "--args",
+            "--disable-gpu",
+            "--no-auto-dialog",
+            "get",
+            "cdp-url",
+        ]);
+        assert!(command_is_cdp_url_metadata(&command));
+        assert_eq!(wire["no-auto-dialog"], true);
+        assert!(
+            wire.get("profile").is_none() && wire.get("args").is_none(),
+            "{wire}"
+        );
+
+        let (command, wire) = settings_of(&["--profile", "/tmp/p", "snapshot"]);
+        assert!(!command_is_cdp_url_metadata(&command));
+        assert_eq!(wire["profile"], "/tmp/p");
+    }
+
+    #[test]
+    fn test_cdp_url_metadata_batches_carry_no_launch_settings() {
+        for command in [
+            json!({ "action": "batch", "commands": ["get cdp-url", "get 'cdp-url' ignored"] }),
+            json!({ "action": "batch", "argv": [["get", "cdp-url"]] }),
+        ] {
+            assert!(command_is_cdp_url_metadata(&command), "{command}");
+        }
+        for command in [
+            json!({ "action": "batch", "commands": ["get cdp-url", "open about:blank"] }),
+            json!({ "action": "batch", "argv": [["get", "cdp-url"], ["snapshot"]] }),
+            json!({ "action": "batch", "commands": ["batch 'get cdp-url'"] }),
+            json!({ "action": "batch", "argv": [["batch", "get cdp-url"]] }),
+            json!({ "action": "batch", "commands": [] }),
+            json!({ "action": "batch", "argv": [[]] }),
+            json!({ "action": "batch" }),
+        ] {
+            assert!(!command_is_cdp_url_metadata(&command), "{command}");
+        }
     }
 
     #[test]
