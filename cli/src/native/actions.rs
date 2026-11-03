@@ -2790,6 +2790,7 @@ fn policy_actions_for_command(
     action: &str,
     needs_implicit_launch: bool,
     attached: Option<&AttachedTarget>,
+    settings: &Running,
 ) -> Vec<String> {
     let mut actions = vec![action.to_string()];
     // `a11y <url>` performs a real browser navigation before the audit. Keep
@@ -2814,8 +2815,8 @@ fn policy_actions_for_command(
             append_launch_policy_actions(&mut actions, &launch, &plugins);
             return actions;
         }
-        let provider_launch = env::var("AGENT_BROWSER_PROVIDER")
-            .ok()
+        let provider_launch = settings
+            .provider()
             .map(|provider| provider.to_lowercase())
             .filter(|provider| !provider.is_empty() && provider != "ios" && provider != "safari");
         if let Some(provider) = provider_launch {
@@ -3050,8 +3051,13 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     let mut lifecycle_reused = false;
     let mut lifecycle_launched = false;
     let mut lifecycle_relaunched_browser = false;
-    let policy_actions =
-        policy_actions_for_command(cmd, action, needs_launch, state.attached_target.as_ref());
+    let policy_actions = policy_actions_for_command(
+        cmd,
+        action,
+        needs_launch,
+        state.attached_target.as_ref(),
+        &state.settings,
+    );
 
     // Hot-reload and check action policy
     if let Some(ref mut policy) = state.policy {
@@ -4563,7 +4569,8 @@ async fn auto_launch_inner(
         })?;
         // ios/safari are device providers handled via explicit launch command
         if !p.is_empty() && p != "ios" && p != "safari" {
-            let conn = providers::connect_provider_with_plugins(&p, &plugins).await?;
+            let conn =
+                providers::connect_provider_with_plugins(&p, &plugins, &state.settings).await?;
             if conn.direct_page && !allowed_domains.is_empty() {
                 if let Some(ref ps) = conn.session {
                     let _ = providers::close_provider_session_with_plugins(ps, &plugins).await;
@@ -5552,6 +5559,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
                 let conn = providers::connect_provider_with_plugins_and_options(
                     provider,
                     &command_plugins,
+                    &state.settings,
                     Some(provider_plugin_launch_options_from_command(cmd)),
                 )
                 .await?;
@@ -15697,7 +15705,8 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "navigate", true, None);
+        let actions =
+            policy_actions_for_command(&cmd, "navigate", true, None, &Running::from_env());
 
         assert_eq!(actions[0], "navigate");
         assert!(actions.contains(&"plugin:stealth:launch.mutate".to_string()));
@@ -15720,7 +15729,8 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "navigate", false, None);
+        let actions =
+            policy_actions_for_command(&cmd, "navigate", false, None, &Running::from_env());
 
         assert_eq!(actions, vec!["navigate".to_string()]);
     }
@@ -15738,11 +15748,11 @@ mod tests {
         });
 
         assert_eq!(
-            policy_actions_for_command(&with_url, "a11y", false, None),
+            policy_actions_for_command(&with_url, "a11y", false, None, &Running::from_env()),
             vec!["a11y".to_string(), "navigate".to_string()]
         );
         assert_eq!(
-            policy_actions_for_command(&current_page, "a11y", false, None),
+            policy_actions_for_command(&current_page, "a11y", false, None, &Running::from_env()),
             vec!["a11y".to_string()]
         );
     }
@@ -15769,7 +15779,8 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "navigate", true, None);
+        let actions =
+            policy_actions_for_command(&cmd, "navigate", true, None, &Running::from_env());
 
         assert!(actions.contains(&"plugin:browserbox:browser.provider".to_string()));
         assert!(!actions.contains(&"plugin:stealth:launch.mutate".to_string()));
@@ -15797,8 +15808,20 @@ mod tests {
             json!({ "action": "navigate", "url": "https://example.com", "plugins": plugins });
 
         for actions in [
-            policy_actions_for_command(&launch, "launch", false, Some(&attached)),
-            policy_actions_for_command(&navigate, "navigate", true, Some(&attached)),
+            policy_actions_for_command(
+                &launch,
+                "launch",
+                false,
+                Some(&attached),
+                &Running::from_env(),
+            ),
+            policy_actions_for_command(
+                &navigate,
+                "navigate",
+                true,
+                Some(&attached),
+                &Running::from_env(),
+            ),
         ] {
             assert!(actions.contains(&"plugin:browserbox:browser.provider".to_string()));
             assert!(!actions.contains(&"plugin:stealth:launch.mutate".to_string()));
@@ -15827,7 +15850,8 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "navigate", true, None);
+        let actions =
+            policy_actions_for_command(&cmd, "navigate", true, None, &Running::from_env());
 
         assert_eq!(actions, vec!["navigate".to_string()]);
     }
@@ -15853,7 +15877,8 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "auth_login", false, None);
+        let actions =
+            policy_actions_for_command(&cmd, "auth_login", false, None, &Running::from_env());
 
         assert_eq!(actions, vec!["auth_login".to_string()]);
     }

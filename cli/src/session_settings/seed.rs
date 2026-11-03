@@ -76,6 +76,11 @@ impl Running {
             r.set(Key::ActionPolicy, Value::from(path));
         }
 
+        if let Some(v) = lookup("AGENT_BROWSER_HEADED") {
+            r.provider_headed =
+                !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "");
+        }
+
         // `1` or `true`.
         let flags = [
             (Key::Headed, "AGENT_BROWSER_HEADED"),

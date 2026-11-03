@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use serde_json::{json, Value};
 
+use super::running::SecurityView;
 use super::*;
 use crate::flags::{split_launch_args, try_parse_flags, Flags};
 use crate::test_utils::EnvGuard;
@@ -580,7 +581,6 @@ fn timeout_views() {
             is_default: true
         })
     );
-    assert_eq!(seeded(&[]).idle_duration().unwrap().as_millis(), 3_600_000);
     assert_eq!(
         seeded(&[("AGENT_BROWSER_IDLE_TIMEOUT_MS", " 5000 ")]).idle_timeout(),
         Some(IdleTimeout {

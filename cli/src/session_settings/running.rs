@@ -1,7 +1,6 @@
 //! The daemon's view of its session's settings.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use serde_json::Value;
 
@@ -89,6 +88,9 @@ pub struct Running {
     /// Verbatim extensions value for the session's extensions file.
     /// Temporary with the env seed.
     pub(super) extensions_file: Option<String>,
+    /// Headed as the plugin provider path reads it: any value except `0`,
+    /// `false`, `no` or empty counts. Temporary with the env seed.
+    pub(super) provider_headed: bool,
 }
 
 impl Running {
@@ -175,11 +177,6 @@ impl Running {
         resolve_idle_timeout(self.str(Key::IdleTimeout))
     }
 
-    /// The idle timeout as a duration; `None` when idle shutdown is disabled.
-    pub fn idle_duration(&self) -> Option<Duration> {
-        self.idle_timeout().map(|t| Duration::from_millis(t.ms))
-    }
-
     pub fn security(&self) -> SecurityView {
         SecurityView {
             allowed_domains: self.list(Key::AllowedDomains),
@@ -222,6 +219,25 @@ impl Running {
 
     pub fn no_xvfb(&self) -> bool {
         self.bool(Key::NoXvfb).unwrap_or(false)
+    }
+
+    /// The raw provider name, whatever else is set.
+    pub fn provider(&self) -> Option<String> {
+        self.str(Key::Provider)
+    }
+
+    pub fn user_agent(&self) -> Option<String> {
+        self.str(Key::UserAgent)
+    }
+
+    pub fn color_scheme(&self) -> Option<String> {
+        self.str(Key::ColorScheme)
+    }
+
+    /// Headed as handed to plugin providers. Looser than `headed()`, which
+    /// accepts only `1` and `true`: `yes` or `on` count here.
+    pub fn plugin_provider_headed(&self) -> bool {
+        self.provider_headed
     }
 
     pub fn pin_tab(&self) -> bool {

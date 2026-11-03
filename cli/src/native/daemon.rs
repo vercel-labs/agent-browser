@@ -20,7 +20,7 @@ use super::state;
 use super::stream::{IdleActivity, StreamServer};
 use crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION;
 use crate::session_files::{owns_session, remove_daemon_files, SessionFile};
-use crate::session_settings::{resolve_idle_timeout, IdleTimeout, DEFAULT_IDLE_TIMEOUT_MS};
+use crate::session_settings::{IdleTimeout, Running, DEFAULT_IDLE_TIMEOUT_MS};
 use crate::validation::{is_valid_session_name, session_name_error};
 
 pub async fn run_daemon(session: &str) {
@@ -136,7 +136,7 @@ pub async fn run_daemon(session: &str) {
     // or dashboard input received). Applies a default when
     // AGENT_BROWSER_IDLE_TIMEOUT_MS is unset; an explicit 0 disables idle
     // shutdown entirely.
-    let idle_timeout = resolve_idle_timeout(env::var("AGENT_BROWSER_IDLE_TIMEOUT_MS").ok());
+    let idle_timeout = Running::from_env().idle_timeout();
 
     let autosave_interval_ms = autosave_interval_ms_from_env();
 
@@ -687,6 +687,7 @@ fn get_port_for_session(session: &str) -> u16 {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+    use crate::session_settings::resolve_idle_timeout;
 
     #[test]
     fn test_resolve_idle_timeout_unset_applies_default() {
