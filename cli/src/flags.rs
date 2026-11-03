@@ -56,6 +56,13 @@ fn push_launch_arg(args: &mut Vec<String>, current: &mut String) {
     current.clear();
 }
 
+fn split_list(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|d| d.trim().to_lowercase())
+        .filter(|d| !d.is_empty())
+        .collect()
+}
+
 /// Parse idle timeout from user-friendly format, returning an error on conversion overflow.
 /// Supports "10s" (seconds), "3m" (minutes), "1h" (hours), or raw milliseconds.
 fn parse_idle_timeout(s: &str) -> Result<String, String> {
@@ -162,6 +169,7 @@ pub struct Config {
     pub content_boundaries: Option<bool>,
     pub max_output: Option<usize>,
     pub allowed_domains: Option<Vec<String>>,
+    pub capture: Option<Vec<String>>,
     pub action_policy: Option<String>,
     pub confirm_actions: Option<String>,
     pub confirm_interactive: Option<bool>,
@@ -247,6 +255,7 @@ impl Config {
             content_boundaries: other.content_boundaries.or(self.content_boundaries),
             max_output: other.max_output.or(self.max_output),
             allowed_domains: other.allowed_domains.or(self.allowed_domains),
+            capture: other.capture.or(self.capture),
             action_policy: other.action_policy.or(self.action_policy),
             confirm_actions: other.confirm_actions.or(self.confirm_actions),
             confirm_interactive: other.confirm_interactive.or(self.confirm_interactive),
@@ -412,6 +421,7 @@ pub(crate) fn extract_config_path(args: &[String]) -> Option<Option<String>> {
         "--download-path",
         "--max-output",
         "--allowed-domains",
+        "--capture",
         "--action-policy",
         "--confirm-actions",
         "--engine",
@@ -519,6 +529,7 @@ pub struct Flags {
     pub content_boundaries: bool,
     pub max_output: Option<usize>,
     pub allowed_domains: Option<Vec<String>>,
+    pub capture: Option<Vec<String>>,
     pub action_policy: Option<String>,
     pub confirm_actions: Option<String>,
     pub confirm_interactive: bool,
@@ -759,6 +770,10 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
                     .collect()
             })
             .or(config.allowed_domains),
+        capture: env::var("AGENT_BROWSER_CAPTURE")
+            .ok()
+            .map(|s| split_list(&s))
+            .or(config.capture),
         action_policy: env::var("AGENT_BROWSER_ACTION_POLICY")
             .ok()
             .or(config.action_policy),
@@ -1180,6 +1195,12 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
                     i += 1;
                 }
             }
+            "--capture" => {
+                if let Some(s) = args.get(i + 1) {
+                    flags.capture = Some(split_list(s));
+                    i += 1;
+                }
+            }
             "--action-policy" => {
                 if let Some(s) = args.get(i + 1) {
                     flags.action_policy = Some(s.clone());
@@ -1351,6 +1372,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
         "--download-path",
         "--max-output",
         "--allowed-domains",
+        "--capture",
         "--action-policy",
         "--confirm-actions",
         "--config",

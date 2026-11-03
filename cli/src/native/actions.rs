@@ -2758,6 +2758,7 @@ fn skip_launch_action(action: &str) -> bool {
             | "read"
             | "har_stop"
             | "flow_save"
+            | "flow_steps"
             | "flow_run"
             | "flow_list"
             | "credentials_set"
@@ -2854,6 +2855,22 @@ fn append_launch_policy_actions(
 }
 
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
+    let outer = state.flow.begun.take();
+    let mut resp = execute_command_inner(cmd, state).await;
+    let mine = std::mem::replace(&mut state.flow.begun, outer);
+    if let Some(seq) = mine {
+        let ok = resp.get("success") == Some(&json!(true));
+        let url = match state.browser.as_ref() {
+            Some(mgr) => mgr.get_url().await.ok(),
+            None => None,
+        };
+        state.flow.finish_command(seq, ok, url);
+        resp["recorded"] = json!({ "seq": seq });
+    }
+    resp
+}
+
+async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     // Unlike normal auth login, no-navigation mode must never launch a
     // browser or manufacture an about:blank page to satisfy the command.
@@ -2942,9 +2959,13 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     }
 
     // After the drain, so late requests from the previous command keep its tag.
-    if state.flow.active() {
+    if state.flow.records(action) {
         let stable = flow_stable_command(action, cmd, &state.ref_map);
-        state.flow.begin_command(action, &stable);
+        let from_url = match state.browser.as_ref() {
+            Some(mgr) => mgr.get_url().await.ok(),
+            None => None,
+        };
+        state.flow.begin_command(action, &stable, from_url);
     }
 
     // Keep element resolution in sync with the `frame` selection (see
@@ -3351,7 +3372,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "diff_screenshot" => handle_diff_screenshot(cmd, state).await,
         "video_start" => handle_video_start(cmd, state).await,
         "video_stop" => handle_video_stop(state).await,
-        "flow_start" => handle_flow_start(cmd, state).await,
+        "flow_steps" => handle_flow_steps(cmd, state),
         "flow_save" => handle_flow_save(cmd, state).await,
         "flow_run" => handle_flow_run(cmd, state).await,
         "flow_list" => handle_flow_list(cmd),
@@ -5236,11 +5257,36 @@ async fn handle_launch_with_deadline(
         attach_saved_cdp_headers(launch, state);
     }
     let cmd = resolved.as_ref().unwrap_or(cmd);
+    let capture = launch_capture_requested(cmd)?;
+    if capture
+        && !state.flow.active()
+        && (state.browser.is_some() || state.active_provider_session.is_some())
+    {
+        return Err(
+            "this session is already running without --capture flow; close it and reopen with `--capture flow`"
+                .to_string(),
+        );
+    }
     let result = handle_launch_for_target(cmd, state, deadline).await;
     if result.is_ok() {
         state.attached_target = AttachedTarget::from_launch_command(cmd);
+        if capture && !state.flow.active() {
+            handle_har_start(&json!({}), state).await?;
+            let page_url = match state.browser.as_ref() {
+                Some(mgr) => mgr.get_url().await.ok(),
+                None => None,
+            };
+            state.flow.begin_capture(page_url);
+        }
     }
     result
+}
+
+/// Whether the launch asks for `--capture flow`; unsupported values are an error.
+fn launch_capture_requested(cmd: &Value) -> Result<bool, String> {
+    let values = string_array_from_command(cmd, "capture").unwrap_or_default();
+    super::flow::parse_capture(&values)?;
+    Ok(!values.is_empty())
 }
 
 async fn handle_launch_for_target(
@@ -6149,6 +6195,14 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
         Ok(None) => None,
         Err(e) => Some(e),
     };
+    let unsaved = if state.flow.active() {
+        state.har_recording = false;
+        state.har_entries.clear();
+        state.har_body_total_bytes = 0;
+        state.flow.end_capture()
+    } else {
+        0
+    };
     let mut reply = match save_result {
         Ok(Some(path)) => json!({
             "closed": true,
@@ -6168,6 +6222,9 @@ async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
             "saveError": err
         }),
     };
+    if unsaved > 0 {
+        reply["unsaved"] = json!({ "steps": unsaved });
+    }
     if let Some(err) = pin_release_error {
         reply["pinReleaseError"] = json!(err);
     }
@@ -11849,6 +11906,11 @@ async fn handle_video_stop(state: &mut DaemonState) -> Result<Value, String> {
 
 /// Begin capturing network traffic for a later HAR export.
 async fn handle_har_start(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    if state.flow.active() && state.har_recording {
+        return Err(
+            "capture is owned by --capture flow; HAR recording is already running".to_string(),
+        );
+    }
     let content_mode = match cmd.get("content").and_then(|v| v.as_str()) {
         Some(s) => HarContentMode::parse(s)?,
         None => HarContentMode::default(),
@@ -11890,6 +11952,9 @@ async fn handle_har_start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 
 /// Stop HAR recording and write the captured requests to disk.
 async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    if state.flow.active() {
+        return Err("capture is owned by --capture flow; use flow save".to_string());
+    }
     let path = har_output_path(cmd.get("path").and_then(|v| v.as_str()));
 
     let entries: Vec<Value> = state.har_entries.iter().map(har_entry_to_json).collect();
@@ -11924,37 +11989,57 @@ async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 // Saved flows
 // ---------------------------------------------------------------------------
 
-async fn handle_flow_start(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+fn handle_flow_steps(_cmd: &Value, state: &DaemonState) -> Result<Value, String> {
+    let rec = &state.flow;
+    if !rec.active() {
+        return Err(NOT_CAPTURING.to_string());
+    }
+    let steps: Vec<Value> = rec
+        .commands
+        .iter()
+        .map(|(seq, c)| {
+            let tagged = rec.request_tags.values().filter(|s| *s == seq).count();
+            json!({
+                "seq": seq,
+                "command": super::flow::describe_command(c),
+                "url": rec.meta.get(seq).and_then(|m| m.url.clone()),
+                "requests": tagged,
+                "ok": rec.is_ok(*seq),
+                "saved": *seq <= rec.last_save_seq,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "steps": steps,
+        "lastSave": rec.last_save_seq,
+        "unsaved": rec.unsaved_steps(),
+    }))
+}
+
+const NOT_CAPTURING: &str =
+    "this session is not capturing flows; close it and reopen with `--capture flow`";
+
+async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    if !state.flow.active() {
+        return Err(NOT_CAPTURING.to_string());
+    }
     let name = cmd
         .get("name")
         .and_then(|v| v.as_str())
-        .ok_or("flow start requires a name")?;
-    super::flow::validate_name(name)?;
-    if let Some(active) = state.flow.name.as_deref() {
-        return Err(format!(
-            "flow '{}' is already recording; run `flow save` first",
-            active
-        ));
-    }
-    let started_har = !state.har_recording;
-    if started_har {
-        handle_har_start(&json!({}), state).await?;
-    }
-    state.flow.start(name, started_har);
-    state.flow.page_url = match state.browser.as_ref() {
-        Some(mgr) => mgr.get_url().await.ok(),
-        None => None,
-    };
-    Ok(json!({ "name": name, "recording": true }))
-}
-
-async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    let name = state
-        .flow
-        .name
-        .clone()
-        .ok_or("no flow is recording; run `flow start <name>` first")?;
+        .ok_or("flow save requires a name")?
+        .to_string();
+    super::flow::validate_name(&name)?;
     let params = super::flow::parse_params(cmd)?;
+    let from = cmd.get("from").and_then(|v| v.as_str());
+    let to = cmd.get("to").and_then(|v| v.as_u64());
+    let (first, last) = state.flow.resolve_range(from, to)?;
+    let commands: Vec<(u64, Value)> = state
+        .flow
+        .commands
+        .iter()
+        .filter(|(seq, _)| *seq >= first && *seq <= last)
+        .cloned()
+        .collect();
     let login_wall = match state.browser.as_ref() {
         Some(mgr) => mgr
             .evaluate(
@@ -11967,28 +12052,38 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             .unwrap_or(false),
         None => false,
     };
-    let built = super::flow::build_flow(super::flow::SaveInput {
+    let (flow, mut report) = super::flow::build_flow(super::flow::SaveInput {
         name: &name,
         recorder: &state.flow,
+        commands: &commands,
+        description: cmd.get("description").and_then(|v| v.as_str()),
         entries: &state.har_entries,
         params: &params,
         output: cmd.get("output").and_then(|v| v.as_str()),
         created_at: chrono::Utc::now().to_rfc3339(),
         login_wall,
-    });
-    if state.flow.started_har {
-        state.har_recording = false;
-        state.har_entries.clear();
-        state.har_body_total_bytes = 0;
-    }
-    state.flow = Default::default();
-    let (flow, mut report) = built?;
+    })?;
     let path = super::flow::write_flow(&flow)?;
+    state.flow.last_save_seq = last;
+    state.flow.saved.push((
+        flow["origin"].as_str().unwrap_or_default().to_string(),
+        name,
+    ));
     report["path"] = json!(path.to_string_lossy());
+    report["from"] = json!(first);
+    report["to"] = json!(last);
     Ok(report)
 }
 
 async fn handle_flow_run(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    // Commands a run sends to the browser are not part of the recording.
+    state.flow.set_suspended(true);
+    let result = handle_flow_run_inner(cmd, state).await;
+    state.flow.set_suspended(false);
+    result
+}
+
+async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let started = std::time::Instant::now();
     let name = cmd
         .get("name")
@@ -12370,8 +12465,7 @@ async fn attach_flow_availability(resp: &mut Value, action: &str, state: &mut Da
     if !matches!(
         action,
         "navigate" | "back" | "forward" | "reload" | "tab_switch"
-    ) || state.flow.active()
-        || resp.get("success") != Some(&json!(true))
+    ) || resp.get("success") != Some(&json!(true))
     {
         return;
     }
@@ -12391,7 +12485,14 @@ async fn attach_flow_availability(resp: &mut Value, action: &str, state: &mut Da
         return;
     }
     state.flow_hinted = Some(site);
-    let flows = super::flow::list_flows(Some(&host));
+    let mut flows = super::flow::list_flows(Some(&host));
+    flows.retain(|f| {
+        !state
+            .flow
+            .saved
+            .iter()
+            .any(|(o, n)| f["origin"] == o.as_str() && f["name"] == n.as_str())
+    });
     if flows.is_empty() {
         return;
     }
@@ -19423,6 +19524,61 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert_eq!(har["log"]["entries"][0]["response"]["content"]["size"], 128);
 
         let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn har_commands_are_refused_while_capture_owns_the_recorder() {
+        let mut state = DaemonState::new();
+        state.har_recording = true;
+        state.flow.begin_capture(None);
+        let stop = handle_har_stop(&json!({}), &mut state).await.unwrap_err();
+        assert_eq!(stop, "capture is owned by --capture flow; use flow save");
+        assert!(state.har_recording);
+        let start = handle_har_start(&json!({}), &mut state).await.unwrap_err();
+        assert!(start.contains("--capture flow"), "{start}");
+    }
+
+    #[tokio::test]
+    async fn flow_save_and_steps_need_a_capturing_session() {
+        let mut state = DaemonState::new();
+        let err = handle_flow_save(&json!({ "name": "x" }), &mut state)
+            .await
+            .unwrap_err();
+        assert!(err.contains("--capture flow"), "{err}");
+        assert!(handle_flow_steps(&json!({}), &state).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_launch_cannot_turn_capture_on_for_a_running_session() {
+        assert!(launch_capture_requested(&json!({ "capture": ["flow"] })).unwrap());
+        assert!(!launch_capture_requested(&json!({})).unwrap());
+        let err = launch_capture_requested(&json!({ "capture": ["har"] })).unwrap_err();
+        assert!(err.contains("Supported: flow"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn steps_list_failed_commands_and_close_reports_unsaved() {
+        let mut state = DaemonState::new();
+        state.flow.begin_capture(None);
+        let seq = state
+            .flow
+            .begin_command(
+                "click",
+                &json!({ "action": "click", "selector": "#a" }),
+                None,
+            )
+            .unwrap();
+        state.flow.tag_request("r1");
+        state
+            .flow
+            .finish_command(seq, false, Some("https://a.test/".to_string()));
+        let steps = handle_flow_steps(&json!({}), &state).unwrap();
+        assert_eq!(steps["steps"][0]["ok"], false);
+        assert_eq!(steps["steps"][0]["requests"], 1);
+        assert_eq!(steps["unsaved"], 1);
+        let close = handle_close(&mut state).await.unwrap();
+        assert_eq!(close["unsaved"]["steps"], 1);
+        assert!(!state.flow.active());
     }
 
     #[tokio::test]

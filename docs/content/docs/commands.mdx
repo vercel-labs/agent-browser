@@ -677,6 +677,7 @@ See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime 
 --content-boundaries     # Wrap page output in boundary markers for LLM safety
 --max-output <chars>     # Truncate page output to N characters
 --allowed-domains <list> # Allowed domains; rejects restore/state replay, profile/session startup args, and direct-page providers
+--capture flow           # Record the session so flow save can turn it into a replayable flow (or AGENT_BROWSER_CAPTURE)
 --action-policy <path>   # Path to action policy JSON file
 --confirm-actions <list> # Action categories requiring confirmation
 --confirm-interactive    # Interactive confirmation prompts (auto-denies if stdin is not a TTY)
@@ -789,7 +790,7 @@ Common tools include:
 - `agent_browser_eval`
 - `agent_browser_close`
 
-Each tool has typed fields such as `url`, `selector`, `text`, `key`, `session`, `allowedDomains`, and `idleTimeout`, so MCP clients show meaningful approval prompts instead of raw command arrays. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. The common `idleTimeout` string maps to `--idle-timeout`, accepts values such as `30s`, `5m`, `1h`, or raw milliseconds, and accepts `0` to disable idle shutdown. Each tool also accepts `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. Structured `allowedDomains` is rejected when the server already sets allowed domains. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.
+Each tool has typed fields such as `url`, `selector`, `text`, `key`, `session`, `allowedDomains`, and `idleTimeout`, so MCP clients show meaningful approval prompts instead of raw command arrays. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. The common `idleTimeout` string maps to `--idle-timeout`, accepts values such as `30s`, `5m`, `1h`, or raw milliseconds, and accepts `0` to disable idle shutdown. Each tool also accepts `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. Structured `allowedDomains` is rejected when the server already sets allowed domains. The common `capture` array maps to `--capture` and applies when the session opens. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally.
 
 By default, tool invocations use the same config discovery and environment variables as the CLI. Use `session` in the tool arguments, or set `AGENT_BROWSER_SESSION`, to isolate browser state.
 

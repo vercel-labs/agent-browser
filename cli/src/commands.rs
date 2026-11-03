@@ -2166,10 +2166,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
     }
 }
 
-/// Parse `flow <start|save|run|list>`: record a task once, replay it over HTTP.
+/// Parse `flow <steps|save|run|list>`: save a task captured with `--capture flow`, replay it over HTTP.
 fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
-    const VALID: &[&str] = &["start", "save", "run", "list"];
-    const USAGE: &str = "flow <start <name>|save [--param k=v]... [--output <id>]|run <name> [--param k=v]... [--origin <host>] [--allow-write]|list [--origin <host>]>";
+    const VALID: &[&str] = &["steps", "save", "run", "list"];
+    const USAGE: &str = "flow <steps [--json]|save <name> [--from <seq|open|last-save>] [--to <seq>] [--param k=v]... [--output <id>] [--description <text>]|run <name> [--param k=v]... [--origin <host>] [--allow-write]|list [--origin <host>]>";
 
     fn params(args: &[&str], usage: &'static str) -> Result<Value, ParseError> {
         let mut out = serde_json::Map::new();
@@ -2204,21 +2204,37 @@ fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     }
 
     match rest.first().copied() {
-        Some("start") => {
-            let name = rest.get(1).ok_or_else(|| ParseError::MissingArguments {
-                context: "flow start".to_string(),
-                usage: "flow start <name>",
-            })?;
-            Ok(json!({ "id": id, "action": "flow_start", "name": name }))
-        }
+        Some("steps") => Ok(json!({ "id": id, "action": "flow_steps" })),
         Some("save") => {
+            const SAVE_USAGE: &str = "flow save <name> [--from <seq|open|last-save>] [--to <seq>] [--param name=value]... [--output <request-id>] [--description <text>]";
+            let name = rest
+                .get(1)
+                .filter(|n| !n.starts_with("--"))
+                .ok_or_else(|| ParseError::MissingArguments {
+                    context: "flow save".to_string(),
+                    usage: SAVE_USAGE,
+                })?;
             let mut cmd = json!({
                 "id": id,
                 "action": "flow_save",
-                "params": params(&rest[1..], "flow save [--param name=value]... [--output <request-id>]")?,
+                "name": name,
+                "params": params(&rest[2..], SAVE_USAGE)?,
             });
             if let Some(output) = flag_value(rest, "--output") {
                 cmd["output"] = json!(output);
+            }
+            if let Some(from) = flag_value(rest, "--from") {
+                cmd["from"] = json!(from);
+            }
+            if let Some(to) = flag_value(rest, "--to") {
+                let n: u64 = to.parse().map_err(|_| ParseError::InvalidValue {
+                    message: format!("Invalid --to '{}': expected a step number", to),
+                    usage: SAVE_USAGE,
+                })?;
+                cmd["to"] = json!(n);
+            }
+            if let Some(description) = flag_value(rest, "--description") {
+                cmd["description"] = json!(description);
             }
             Ok(cmd)
         }
@@ -3893,6 +3909,7 @@ mod tests {
             content_boundaries: false,
             max_output: None,
             allowed_domains: None,
+            capture: None,
             action_policy: None,
             confirm_actions: None,
             confirm_interactive: false,
@@ -4575,6 +4592,41 @@ mod tests {
         assert_eq!(cmd["raw"], true);
         assert_eq!(cmd["requireMd"], true);
         assert_eq!(cmd["timeout"], 2500);
+    }
+
+    #[test]
+    fn flow_save_takes_a_name_and_a_range() {
+        let cmd = parse_flow(
+            &[
+                "save",
+                "cart",
+                "--from",
+                "open",
+                "--to",
+                "7",
+                "--param",
+                "q=x",
+                "--description",
+                "Adds",
+            ],
+            "1",
+        )
+        .unwrap();
+        assert_eq!(cmd["action"], "flow_save");
+        assert_eq!(cmd["name"], "cart");
+        assert_eq!(cmd["from"], "open");
+        assert_eq!(cmd["to"], 7);
+        assert_eq!(cmd["params"]["q"], "x");
+        assert_eq!(cmd["description"], "Adds");
+        assert!(parse_flow(&["save"], "1").is_err());
+        assert!(parse_flow(&["save", "--from", "1"], "1").is_err());
+        assert!(parse_flow(&["save", "a", "--to", "x"], "1").is_err());
+    }
+
+    #[test]
+    fn flow_start_is_gone_and_steps_parses() {
+        assert!(parse_flow(&["start", "x"], "1").is_err());
+        assert_eq!(parse_flow(&["steps"], "1").unwrap()["action"], "flow_steps");
     }
 
     #[test]

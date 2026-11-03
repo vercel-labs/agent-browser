@@ -123,6 +123,12 @@ fn attach_allowed_domains_to_launch_command(launch_cmd: &mut serde_json::Value, 
     }
 }
 
+fn attach_capture_to_launch_command(launch_cmd: &mut serde_json::Value, flags: &Flags) {
+    if let Some(ref modes) = flags.capture {
+        launch_cmd["capture"] = json!(modes);
+    }
+}
+
 fn attach_pin_tab_to_command(cmd: &mut serde_json::Value, flags: &Flags) {
     if flags.pin_tab {
         cmd["pinTab"] = json!(true);
@@ -218,6 +224,7 @@ fn build_provider_launch_command(provider: &str, flags: &Flags) -> serde_json::V
     attach_script_launch_options(&mut launch_cmd, flags);
     attach_webmcp_launch_option(&mut launch_cmd, flags);
     attach_allowed_domains_to_launch_command(&mut launch_cmd, flags);
+    attach_capture_to_launch_command(&mut launch_cmd, flags);
     attach_restore_config_to_command(&mut launch_cmd, flags);
     attach_ca_cert_to_launch_command(&mut launch_cmd, flags);
 
@@ -343,6 +350,7 @@ fn should_send_local_launch_config(flags: &Flags, command: &serde_json::Value) -
         || flags.download_path.is_some()
         || flags.engine.is_some()
         || flags.allowed_domains.is_some()
+        || flags.capture.is_some()
         || !flags.init_scripts.is_empty()
         || !flags.enable.is_empty()
         || !flags.extensions.is_empty())
@@ -1780,6 +1788,7 @@ fn main() {
                 error: None,
                 code: None,
                 warning: None,
+                recorded: None,
             },
             Err(e) => connection::Response {
                 success: false,
@@ -1787,6 +1796,7 @@ fn main() {
                 error: Some(e),
                 code: None,
                 warning: None,
+                recorded: None,
             },
         };
         let output_opts = OutputOptions::from_flags(&flags);
@@ -1908,6 +1918,7 @@ fn main() {
         attach_script_launch_options(&mut launch_cmd, &flags);
         attach_webmcp_launch_option(&mut launch_cmd, &flags);
         attach_allowed_domains_to_launch_command(&mut launch_cmd, &flags);
+        attach_capture_to_launch_command(&mut launch_cmd, &flags);
         attach_pin_tab_to_command(&mut launch_cmd, &flags);
         attach_restore_config_to_command(&mut launch_cmd, &flags);
 
@@ -2010,6 +2021,7 @@ fn main() {
         attach_script_launch_options(&mut launch_cmd, &flags);
         attach_webmcp_launch_option(&mut launch_cmd, &flags);
         attach_allowed_domains_to_launch_command(&mut launch_cmd, &flags);
+        attach_capture_to_launch_command(&mut launch_cmd, &flags);
         attach_pin_tab_to_command(&mut launch_cmd, &flags);
         attach_restore_config_to_command(&mut launch_cmd, &flags);
 
@@ -2196,6 +2208,7 @@ fn main() {
         }
 
         attach_allowed_domains_to_launch_command(&mut launch_cmd, &flags);
+        attach_capture_to_launch_command(&mut launch_cmd, &flags);
 
         if let Some(ref engine) = flags.engine {
             launch_cmd["engine"] = json!(engine);
@@ -2692,6 +2705,7 @@ mod tests {
         flags.download_path = None;
         flags.engine = None;
         flags.allowed_domains = None;
+        flags.capture = None;
         flags.init_scripts.clear();
         flags.enable.clear();
         flags.extensions.clear();
@@ -2872,6 +2886,18 @@ mod tests {
 
         flags.cdp = Some("9222".to_string());
         assert!(!should_send_local_launch_config(&flags, &command));
+    }
+
+    #[test]
+    fn test_capture_requests_local_launch_configuration() {
+        let mut flags = neutral_launch_config_flags();
+        let command = json!({ "action": "snapshot" });
+        assert!(!should_send_local_launch_config(&flags, &command));
+        flags.capture = Some(vec!["flow".to_string()]);
+        assert!(should_send_local_launch_config(&flags, &command));
+        let mut launch = json!({ "action": "launch" });
+        attach_capture_to_launch_command(&mut launch, &flags);
+        assert_eq!(launch["capture"], json!(["flow"]));
     }
 
     #[test]
@@ -3214,6 +3240,7 @@ mod tests {
             })),
             error: None,
             warning: None,
+            recorded: None,
         };
 
         let prompt = confirmation_prompt_from_response(&resp).unwrap();

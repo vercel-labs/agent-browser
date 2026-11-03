@@ -155,7 +155,7 @@ const TOOL_STREAM_ENABLE: &str = "agent_browser_stream_enable";
 const TOOL_STREAM_DISABLE: &str = "agent_browser_stream_disable";
 const TOOL_STREAM_STATUS: &str = "agent_browser_stream_status";
 const TOOL_WEBMCP_LIST: &str = "agent_browser_webmcp_list";
-const TOOL_FLOW_START: &str = "agent_browser_flow_start";
+const TOOL_FLOW_STEPS: &str = "agent_browser_flow_steps";
 const TOOL_FLOW_SAVE: &str = "agent_browser_flow_save";
 const TOOL_FLOW_RUN: &str = "agent_browser_flow_run";
 const TOOL_FLOW_LIST: &str = "agent_browser_flow_list";
@@ -346,7 +346,7 @@ const CORE_PROFILE_TOOLS: &[&str] = &[
     TOOL_OPEN,
     TOOL_FLOW_LIST,
     TOOL_FLOW_RUN,
-    TOOL_FLOW_START,
+    TOOL_FLOW_STEPS,
     TOOL_FLOW_SAVE,
     TOOL_READ,
     TOOL_SNAPSHOT,
@@ -861,7 +861,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_FLOW_LIST,
             "List saved flows",
-            "List tasks saved with flow start and flow save, with their params and whether their last run verified.",
+            "List tasks saved with flow save, with their params and whether their last run verified.",
             json!({ "origin": { "type": "string", "description": "Only flows for this host's site." } }),
             &[],
         ),
@@ -881,21 +881,25 @@ fn tools() -> Vec<Value> {
             &["name"],
         ),
         tool(
-            TOOL_FLOW_START,
-            "Start recording flow",
-            "Start recording a task so later runs can skip the browser. Do the task with the usual tools, then call flow save.",
-            json!({ "name": { "type": "string" } }),
-            &["name"],
+            TOOL_FLOW_STEPS,
+            "List captured steps",
+            "List the steps a session opened with capture flow has recorded: number, command, URL, tagged request count, and whether it succeeded. Use the numbers with flow save from and to.",
+            json!({}),
+            &[],
         ),
         tool(
             TOOL_FLOW_SAVE,
             "Save flow",
-            "Save the recorded task. params maps a param name to the value you typed, so later runs can change it.",
+            "Save recorded steps as a flow so later runs can skip the browser. The session must be opened with capture flow. By default the flow starts at the last navigation after the previous save. params maps a param name to the value you typed, so later runs can change it.",
             json!({
+                "name": { "type": "string" },
+                "from": { "type": "string", "description": "First step: a step number, open (the last navigation), or last-save." },
+                "to": { "type": "integer", "minimum": 1, "description": "Last step; defaults to the latest." },
+                "description": { "type": "string", "description": "One line saying what the flow does." },
                 "params": { "type": "object", "additionalProperties": { "type": "string" } },
                 "output": { "type": "string", "description": "Request id whose response the flow returns." }
             }),
-            &[],
+            &["name"],
         ),
         tool(
             TOOL_WEBMCP_LIST,
@@ -2155,6 +2159,14 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         }),
     );
     props.insert(
+        "capture".to_string(),
+        json!({
+            "type": "array",
+            "items": { "type": "string", "enum": ["flow"] },
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it."
+        }),
+    );
+    props.insert(
         "caCert".to_string(),
         json!({
             "type": "string",
@@ -2267,6 +2279,7 @@ fn is_read_only_tool(name: &str) -> bool {
             | TOOL_STREAM_STATUS
             | TOOL_WEBMCP_LIST
             | TOOL_FLOW_LIST
+            | TOOL_FLOW_STEPS
             | TOOL_WEBMCP_RESULT
             | TOOL_SESSION
             | TOOL_SESSION_LIST
@@ -2559,7 +2572,7 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_WEBMCP_LIST => call_cli_tool(arguments, webmcp_list_args(arguments)?, None),
         TOOL_FLOW_LIST => call_cli_tool(arguments, flow_args(arguments, "list")?, None),
         TOOL_FLOW_RUN => call_cli_tool(arguments, flow_args(arguments, "run")?, None),
-        TOOL_FLOW_START => call_cli_tool(arguments, flow_args(arguments, "start")?, None),
+        TOOL_FLOW_STEPS => call_cli_tool(arguments, flow_args(arguments, "steps")?, None),
         TOOL_FLOW_SAVE => call_cli_tool(arguments, flow_args(arguments, "save")?, None),
         TOOL_WEBMCP_INVOKE => call_webmcp_invoke(arguments),
         TOOL_WEBMCP_RESULT => call_webmcp_result(arguments),
@@ -2858,7 +2871,7 @@ fn call_open(arguments: &Value) -> Result<Value, ProtocolError> {
 
 fn flow_args(arguments: &Value, sub: &str) -> Result<Vec<String>, ProtocolError> {
     let mut args = vec!["flow".to_string(), sub.to_string()];
-    if matches!(sub, "run" | "start") {
+    if matches!(sub, "run" | "save") {
         args.push(required_string(arguments, "name")?);
     }
     let pairs = |key: &str, flag: &str, args: &mut Vec<String>| -> Result<(), ProtocolError> {
@@ -2882,6 +2895,8 @@ fn flow_args(arguments: &Value, sub: &str) -> Result<Vec<String>, ProtocolError>
         ("fields", "--fields"),
         ("origin", "--origin"),
         ("output", "--output"),
+        ("from", "--from"),
+        ("description", "--description"),
     ] {
         if let Some(v) = optional_string(arguments, key)? {
             args.push(flag.to_string());
@@ -2891,6 +2906,10 @@ fn flow_args(arguments: &Value, sub: &str) -> Result<Vec<String>, ProtocolError>
     if let Some(limit) = arguments.get("limit").and_then(Value::as_u64) {
         args.push("--limit".to_string());
         args.push(limit.to_string());
+    }
+    if let Some(to) = arguments.get("to").and_then(Value::as_u64) {
+        args.push("--to".to_string());
+        args.push(to.to_string());
     }
     if optional_bool(arguments, "allowWrite")? == Some(true) {
         args.push("--allow-write".to_string());
@@ -4272,6 +4291,12 @@ fn append_common_global_args(
             args.push(domains.join(","));
         }
     }
+    if let Some(modes) = optional_string_array(arguments, "capture")? {
+        if !modes.is_empty() {
+            args.push("--capture".to_string());
+            args.push(modes.join(","));
+        }
+    }
     let ca_cert = optional_string(arguments, "caCert")?;
     let clear_ca_cert = optional_bool(arguments, "clearCaCert")?.unwrap_or(false);
     if ca_cert.is_some() && clear_ca_cert {
@@ -4549,6 +4574,9 @@ fn response_text(value: &Value) -> Option<String> {
             }
             if data.get("verified").is_some() && data.get("steps").is_some() {
                 return crate::output::format_flow_text(Some("flow_run"), data);
+            }
+            if data.get("lastSave").is_some() && data.get("steps").is_some() {
+                return crate::output::format_flow_text(Some("flow_steps"), data);
             }
             if data.get("gaps").is_some() && data.get("requests").is_some() {
                 return crate::output::format_flow_text(Some("flow_save"), data);
@@ -5626,6 +5654,41 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["--allowed-domains", "example.com,*.example.org"]);
+    }
+
+    #[test]
+    fn common_global_args_include_capture() {
+        let mut args = Vec::new();
+        append_common_global_args(&mut args, &json!({ "capture": ["flow"] }), None).unwrap();
+        assert_eq!(args, vec!["--capture", "flow"]);
+        let mut args = Vec::new();
+        assert!(append_common_global_args(&mut args, &json!({ "capture": [] }), None).is_err());
+    }
+
+    #[test]
+    fn flow_tools_map_to_the_cli_flow_commands() {
+        assert_eq!(
+            flow_args(&json!({}), "steps").unwrap(),
+            vec!["flow", "steps"]
+        );
+        assert_eq!(
+            flow_args(
+                &json!({ "name": "cart", "from": "open", "to": 7, "description": "Adds", "params": { "q": "x" } }),
+                "save"
+            )
+            .unwrap(),
+            vec![
+                "flow", "save", "cart", "--param", "q=x", "--from", "open", "--description",
+                "Adds", "--to", "7"
+            ]
+        );
+        assert!(flow_args(&json!({}), "save").is_err());
+        let names: Vec<String> = tools()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(String::from))
+            .collect();
+        assert!(names.contains(&TOOL_FLOW_STEPS.to_string()));
+        assert!(!names.iter().any(|n| n == "agent_browser_flow_start"));
     }
 
     #[test]

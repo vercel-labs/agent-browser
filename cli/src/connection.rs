@@ -44,6 +44,9 @@ pub struct Response {
     pub code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// Step number under which a `--capture flow` session recorded the command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded: Option<Value>,
 }
 
 #[allow(dead_code)]

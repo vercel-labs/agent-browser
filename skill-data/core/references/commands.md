@@ -261,16 +261,20 @@ If HAR export fails, recording and captured requests remain available. Fix the d
 ## Saved flows
 
 ```bash
-agent-browser flow start <name>                       # Record a task (starts HAR capture)
-agent-browser flow save [--param k=v]... [--output <id>]  # Keep first-party JSON requests, turn values into params
+agent-browser --capture flow open <url>               # Open a session that records its commands and requests
+agent-browser flow steps [--json]                     # Recorded steps: seq, command, URL, request count, ok or failed
+agent-browser flow save <name> [--param k=v]... [--output <id>] [--description <text>]  # Keep first-party JSON requests, turn values into params
+agent-browser flow save <name> --from <seq|open|last-save> --to <seq>  # Save a range of steps
 agent-browser flow run <name> [--param k=v]...        # Replay over HTTP, falling back to the page
 agent-browser flow run <name> --where field=value --fields a,b.c --limit 5  # Return only matching items and fields
 agent-browser flow list [--origin <host>]             # Saved flows, with params and verified state
 ```
 
+`--capture flow` applies when the session opens; close and reopen to change it. Every recorded command returns `recorded: {seq}` in JSON. Failed commands stay in the recording with `ok: false`. Saving does not stop the capture, so one session can save several flows; by default `flow save` starts at the last navigation after the previous save. `close` reports `unsaved: {steps: N}` when steps after the last save exist. `har stop` is unavailable while capture is on; use `flow save`.
+
 `flow save` keeps first-party JSON responses and, for pages rendered on the server, JSON the HTML embeds (`__NEXT_DATA__`, JSON-LD, `window.x = {...}` state); a run fetches the page and reads the same block back. `flow save` also finds params on its own: a value the task sent that came from an item of an earlier response (an id picked from a list) becomes a param, and a value copied from a single field (a session key) is filled from that response on every run. The save report lists them, plus the steps it could not turn into requests and why, such as a login the recording stopped at.
 
-Flows live in `~/.agent-browser/flows/<origin>/<name>.json` (override with `AGENT_BROWSER_FLOWS_DIR`). Cookies, `authorization` and token or CSRF headers are never saved. A run tries direct HTTP, then the request from the page, then a replay of the recorded commands, and starts the next run at the tier that worked. Every tier checks the response shape against the recording; a mismatch marks the flow unverified. Non-GET requests need `--allow-write`.
+Flows live in `~/.agent-browser/flows/<origin>/<name>.json` (override with `AGENT_BROWSER_FLOWS_DIR`) and are version 2; an older file must be saved again. Cookies, `authorization` and token or CSRF headers are never saved. A run tries direct HTTP, then the request from the page, then a replay of the recorded commands, and starts the next run at the tier that worked. Every tier checks the response shape against the recording; a mismatch marks the flow unverified. Non-GET requests need `--allow-write`.
 
 ## Tabs and Windows
 

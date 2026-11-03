@@ -21,6 +21,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -127,6 +137,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -227,6 +247,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -320,6 +350,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -425,6 +465,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -548,6 +598,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -648,6 +708,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -745,6 +815,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -858,6 +938,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -967,6 +1057,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -1067,6 +1167,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -1179,6 +1289,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -1272,6 +1392,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -1367,6 +1497,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -1460,6 +1600,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -1566,6 +1716,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -1659,6 +1819,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -1759,6 +1929,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -1865,6 +2045,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clear": {
             "type": "boolean"
           },
@@ -1962,6 +2152,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -2056,6 +2256,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -2149,6 +2359,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -2280,6 +2500,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -2391,6 +2621,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -2490,6 +2730,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -2583,6 +2833,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -2682,6 +2942,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -2790,6 +3060,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -2883,6 +3163,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -2981,6 +3271,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -3074,6 +3374,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -3171,6 +3481,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -3281,6 +3601,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -3383,6 +3713,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -3506,6 +3846,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -3621,6 +3971,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -3725,6 +4085,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -3835,6 +4205,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clear": {
             "type": "boolean"
           },
@@ -3931,6 +4311,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -4032,6 +4422,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -4142,6 +4542,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -4260,7 +4670,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "List tasks saved with flow start and flow save, with their params and whether their last run verified.",
+      "description": "List tasks saved with flow save, with their params and whether their last run verified.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -4274,6 +4684,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -4376,6 +4796,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -4486,7 +4916,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Save the recorded task. params maps a param name to the value you typed, so later runs can change it.",
+      "description": "Save recorded steps as a flow so later runs can skip the browser. The session must be opened with capture flow. By default the flow starts at the last navigation after the previous save. params maps a param name to the value you typed, so later runs can change it.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -4501,9 +4931,23 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
+          },
+          "description": {
+            "description": "One line saying what the flow does.",
+            "type": "string"
           },
           "extraArgs": {
             "description": "Advanced: extra CLI arguments, including --engine chrome|lightpanda|obscura. Global flags that change network, file, policy, or host access (such as --allowed-domains, --executable-path, --args, --config) are rejected; set them in the MCP server environment or config. Obscura is experimental and rejects --proxy-bypass (including resolved config/environment settings). Explicit Obscura launches send this invocation's resolved bypass setting even to an existing daemon.",
@@ -4512,8 +4956,15 @@
             },
             "type": "array"
           },
+          "from": {
+            "description": "First step: a step number, open (the last navigation), or last-save.",
+            "type": "string"
+          },
           "idleTimeout": {
             "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Values too large to convert to milliseconds produce a warning and are ignored. Defaults to 1h; 0 disables idle shutdown.",
+            "type": "string"
+          },
+          "name": {
             "type": "string"
           },
           "namespace": {
@@ -4572,11 +5023,19 @@
             "minimum": 1,
             "type": "integer"
           },
+          "to": {
+            "description": "Last step; defaults to the latest.",
+            "minimum": 1,
+            "type": "integer"
+          },
           "useSystemCa": {
             "description": "Use the operating system trust store instead of the built-in roots for the CLI's own HTTPS requests. Does not affect the browser.",
             "type": "boolean"
           }
         },
+        "required": [
+          "name"
+        ],
         "type": "object"
       },
       "name": "agent_browser_flow_save",
@@ -4588,9 +5047,9 @@
     {
       "annotations": {
         "openWorldHint": true,
-        "readOnlyHint": false
+        "readOnlyHint": true
       },
-      "description": "Start recording a task so later runs can skip the browser. Do the task with the usual tools, then call flow save.",
+      "description": "List the steps a session opened with capture flow has recorded: number, command, URL, tagged request count, and whether it succeeded. Use the numbers with flow save from and to.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -4605,6 +5064,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -4618,9 +5087,6 @@
           },
           "idleTimeout": {
             "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Values too large to convert to milliseconds produce a warning and are ignored. Defaults to 1h; 0 disables idle shutdown.",
-            "type": "string"
-          },
-          "name": {
             "type": "string"
           },
           "namespace": {
@@ -4674,16 +5140,13 @@
             "type": "boolean"
           }
         },
-        "required": [
-          "name"
-        ],
         "type": "object"
       },
-      "name": "agent_browser_flow_start",
+      "name": "agent_browser_flow_steps",
       "profiles": [
         "core"
       ],
-      "title": "Start recording flow"
+      "title": "List captured steps"
     },
     {
       "annotations": {
@@ -4704,6 +5167,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -4804,6 +5277,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -4899,6 +5382,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -4992,6 +5485,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -5092,6 +5595,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -5196,6 +5709,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -5295,6 +5818,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -5386,6 +5919,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -5486,6 +6029,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -5585,6 +6138,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -5683,6 +6246,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -5785,6 +6358,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -5879,6 +6462,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -5972,6 +6565,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -6071,6 +6674,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -6173,6 +6786,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -6272,6 +6895,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -6365,6 +6998,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -6463,6 +7106,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -6563,6 +7216,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -6662,6 +7325,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -6760,6 +7433,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -6861,6 +7544,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -6960,6 +7653,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -7061,6 +7764,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -7172,6 +7885,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -7265,6 +7988,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -7400,6 +8133,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -7493,6 +8236,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -7597,6 +8350,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -7699,6 +8462,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -7795,6 +8568,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -7895,6 +8678,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clear": {
             "type": "boolean"
@@ -8015,6 +8808,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -8119,6 +8922,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -8215,6 +9028,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -8326,6 +9149,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -8432,6 +9265,16 @@
               "type": "string"
             },
             "minItems": 1,
+            "type": "array"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
             "type": "array"
           },
           "clearCaCert": {
@@ -8549,6 +9392,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -8642,6 +9495,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -8754,6 +9617,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -8853,6 +9726,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -8955,6 +9838,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "categories": {
             "type": "string"
           },
@@ -9051,6 +9944,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -9149,6 +10052,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -9242,6 +10155,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -9342,6 +10265,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -9447,6 +10380,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -9544,6 +10487,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -9640,6 +10593,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -9741,6 +10704,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -9837,6 +10810,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -9964,6 +10947,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -10087,6 +11080,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -10213,6 +11216,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -10306,6 +11319,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -10401,6 +11424,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -10506,6 +11539,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -10647,6 +11690,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -10755,6 +11808,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -10853,6 +11916,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -10964,6 +12037,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -11057,6 +12140,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -11165,6 +12258,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -11259,6 +12362,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -11352,6 +12465,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -11457,6 +12580,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -11556,6 +12689,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -11661,6 +12804,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -11763,6 +12916,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -11873,6 +13036,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -11972,6 +13145,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -12083,6 +13266,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -12188,6 +13381,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -12281,6 +13484,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -12378,6 +13591,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -12507,6 +13730,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -12611,6 +13844,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -12708,6 +13951,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -12801,6 +14054,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -12901,6 +14164,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -13006,6 +14279,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -13106,6 +14389,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -13205,6 +14498,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -13309,6 +14612,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -13416,6 +14729,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -13529,6 +14852,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -13622,6 +14955,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -13720,6 +15063,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -13816,6 +15169,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -13923,6 +15286,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -14022,6 +15395,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -14116,6 +15499,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -14220,6 +15613,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -14322,6 +15725,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -14423,6 +15836,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -14517,6 +15940,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -14610,6 +16043,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -14707,6 +16150,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clear": {
             "default": false,
@@ -14824,6 +16277,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -14925,6 +16388,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -15018,6 +16491,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -15129,6 +16612,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -15228,6 +16721,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -15332,6 +16835,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -15434,6 +16947,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -15544,6 +17067,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -15661,6 +17194,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -15766,6 +17309,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -15870,6 +17423,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -15971,6 +17534,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -16070,6 +17643,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -16184,6 +17767,16 @@
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
           },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
             "type": "boolean"
@@ -16283,6 +17876,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",
@@ -16387,6 +17990,16 @@
           "caCert": {
             "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux.",
             "type": "string"
+          },
+          "capture": {
+            "description": "Record the session so flow steps and flow save can turn it into a replayable flow. Applies when the session opens; close and reopen to change it.",
+            "items": {
+              "enum": [
+                "flow"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           },
           "clearCaCert": {
             "description": "Explicitly clear CA trust retained by the running browser session.",

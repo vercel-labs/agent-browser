@@ -103,20 +103,62 @@ Launching with `open` and no URL leaves the browser on `about:blank`, which give
 
 ## Saved flows
 
-Saved flows are experimental. Record a browser task once, and agent-browser keeps the requests behind it. Later runs replay those requests and return only the data the task needs, without driving the page.
+Saved flows are experimental. Open a session with `--capture flow`, do a browser task once, and agent-browser keeps the requests behind it. Later runs replay those requests and return only the data the task needs, without driving the page.
 
 ```bash
-agent-browser flow start search
-agent-browser open "https://shop.example.com/search?q=kettle"
-agent-browser flow save
+agent-browser --capture flow open "https://shop.example.com/search?q=kettle"
+agent-browser flow steps
+agent-browser flow save search
 agent-browser close
 
 agent-browser flow run search --param q="toaster" --fields title,price --limit 3
 ```
 
-### Recording
+### Capturing
 
-`flow start <name>` tags every request with the command that caused it. Run the task with ordinary commands, then `flow save`. A flow can also start on a page that is already open, such as one where you are signed in.
+`--capture flow` is a launch option, like `--allowed-domains`. It applies when the session opens and records every command with the requests it caused until `close`. Passing it to a session that is already running without it fails with a message to close and reopen. `flow` is the only supported value; any other value fails and lists the supported ones.
+
+Every recorded command returns `recorded: {seq}` in its JSON response. Failed commands stay in the recording with `ok: false`, because a failed click may still have sent requests. `close` reports `unsaved: {steps: N}` when steps after the last save exist.
+
+`har start` and `har stop` are not available while capture owns the recorder. `har stop` fails with a message to use `flow save`.
+
+### Steps and saving
+
+`flow steps` lists the recorded steps.
+
+<table>
+  <thead>
+    <tr><th>Column</th><th>Meaning</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>seq</code></td><td>Step number, the same one returned as <code>recorded.seq</code></td></tr>
+    <tr><td><code>command</code></td><td>The command and its main argument</td></tr>
+    <tr><td><code>url</code></td><td>The page URL after the command</td></tr>
+    <tr><td><code>requests</code></td><td>Requests the command caused</td></tr>
+    <tr><td><code>ok</code></td><td>Whether the command succeeded</td></tr>
+  </tbody>
+</table>
+
+`flow steps --json` returns the same data.
+
+```bash
+agent-browser flow save <name> [--from <seq|open|last-save>] [--to <seq>] [--param k=v]... [--output <id>] [--description <text>]
+```
+
+<table>
+  <thead>
+    <tr><th>Option</th><th>Meaning</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>--from</code></td><td>First step. A step number, <code>open</code> for the last navigation, or <code>last-save</code> for the step after the previous save. Defaults to the last navigation after the previous save</td></tr>
+    <tr><td><code>--to</code></td><td>Last step. Defaults to the latest</td></tr>
+    <tr><td><code>--param</code></td><td>A value you typed during the task, so later runs can change it</td></tr>
+    <tr><td><code>--output</code></td><td>Request id whose response the flow returns</td></tr>
+    <tr><td><code>--description</code></td><td>One line saying what the flow does, shown in flow lists</td></tr>
+  </tbody>
+</table>
+
+Saving does not stop or reset the capture, so one session can save several flows. A flow can also start on a page that is already open, such as one where you are signed in.
 
 `flow save` keeps:
 
@@ -126,6 +168,8 @@ agent-browser flow run search --param q="toaster" --fields title,price --limit 3
 It never saves cookies, `authorization`, or token and CSRF headers. Each run reads cookies from the live session.
 
 The save report lists the requests it kept, the params, and any step it could not turn into a request, with the reason. When the recording stops at a sign-in form, the report says so.
+
+Flow files are version 2. A flow saved by an earlier version fails to run with a message to save it again.
 
 ### Params
 
@@ -159,11 +203,11 @@ Requests other than GET and GraphQL queries are writes and need `--allow-write`.
 
 ### Discovery
 
-After `open`, `back`, `forward`, `reload` or a tab switch, the response lists the saved flows for that site once per session, with their params, the recorded values and the item fields. When the page also declares WebMCP tools, those come first and the hint suggests them when one covers the task.
+After `open`, `back`, `forward`, `reload` or a tab switch, the response lists the saved flows for that site once per session, with their params, the recorded values and the item fields. A capturing session hides only the flows it saved itself. When the page also declares WebMCP tools, those come first and the hint suggests them when one covers the task.
 
 Saved flows use the shape of a WebMCP tool: a name, a description and an `inputSchema` built from the params. `flow list --json` returns that shape, and `webmcp list` shows saved flows in it, after the tools the page declares. Run them with `flow run`; `webmcp invoke` only calls the page's own tools.
 
-The MCP server exposes `agent_browser_flow_list`, `agent_browser_flow_run`, `agent_browser_flow_start` and `agent_browser_flow_save` in the core profile.
+The MCP server exposes `agent_browser_flow_list`, `agent_browser_flow_run`, `agent_browser_flow_steps` and `agent_browser_flow_save` in the core profile. The common `capture` argument opens a session with `--capture flow`.
 
 ### Storage
 

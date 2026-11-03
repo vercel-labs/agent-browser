@@ -305,10 +305,30 @@ pub(crate) fn format_flow_text(action: Option<&str>, data: &serde_json::Value) -
             .unwrap_or_default()
     };
     match action {
-        Some("flow_start") => Some(format!(
-            "Recording flow '{}'. Do the task, then run `flow save`.",
-            data.get("name")?.as_str()?
-        )),
+        Some("flow_steps") => {
+            let steps = data.get("steps")?.as_array()?;
+            if steps.is_empty() {
+                return Some("No steps recorded yet.".to_string());
+            }
+            let mut out = String::new();
+            for s in steps {
+                out.push_str(&format!(
+                    "{:>3} {} {}  {}  requests: {}{}\n",
+                    s["seq"].as_u64().unwrap_or(0),
+                    if s["ok"] == true { "ok    " } else { "FAILED" },
+                    s["command"].as_str().unwrap_or(""),
+                    s["url"].as_str().unwrap_or("-"),
+                    s["requests"].as_u64().unwrap_or(0),
+                    if s["saved"] == true { "  (saved)" } else { "" }
+                ));
+            }
+            out.push_str(&format!(
+                "Last save covered step {}; {} step(s) not saved.",
+                data["lastSave"].as_u64().unwrap_or(0),
+                data["unsaved"].as_u64().unwrap_or(0)
+            ));
+            Some(out)
+        }
         Some("flow_save") => {
             let mut out = format!(
                 "Saved flow '{}' for {} to {}\n",
@@ -420,7 +440,7 @@ pub(crate) fn format_flow_text(action: Option<&str>, data: &serde_json::Value) -
         Some("flow_list") => {
             let flows = data.get("flows")?.as_array()?;
             if flows.is_empty() {
-                return Some("No saved flows. Record one with `flow start <name>`.".to_string());
+                return Some("No saved flows. Open a session with `--capture flow`, do the task, then run `flow save <name>`.".to_string());
             }
             Some(
                 flows
@@ -1412,6 +1432,9 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                 _ => "Browser closed",
             };
             println!("{} {}", color::success_indicator(), label);
+            if let Some(steps) = data["unsaved"]["steps"].as_u64() {
+                println!("  {} recorded step(s) were not saved to a flow", steps);
+            }
             return;
         }
         // Started actions (profiling, HAR, recording)
@@ -4339,6 +4362,14 @@ WebMCP (experimental):
   webmcp cancel <id>         Cancel an active invocation
   Brief untrusted summaries appear only on discovery or change; no schemas
 
+Saved flows (experimental, open the session with --capture flow):
+  flow steps [--json]        Steps recorded so far: number, command, URL, requests, ok or failed
+  flow save <name>           Save the steps since the last open as a flow; accepts --from <seq|open|last-save>,
+                             --to <seq>, --param k=v, --output <id>, and --description <text>
+  flow run <name>            Replay over HTTP; accepts --param k=v, --where f=v, --fields a,b, --limit n,
+                             --origin <host>, and --allow-write
+  flow list [--origin <host>] Saved flows with params and verified state
+
 React (requires `open --enable react-devtools`):
   react tree                 Full React component tree (enable with open --enable react-devtools)
   react inspect <id>         Inspect one fiber (props, hooks, state, source)
@@ -4503,6 +4534,8 @@ Options:
   --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
                              Invalid values warn and leave the existing output limit unchanged.
   --allowed-domains <list>   Restrict network domains; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
+  --capture <list>           Record the session as it runs; only flow is supported (or AGENT_BROWSER_CAPTURE)
+                             Set when the session opens; close and reopen to change it
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
   --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
