@@ -3595,6 +3595,10 @@ Runs multiple commands in sequence. Commands can be passed as quoted
 arguments or piped as JSON via stdin. Results are printed in order,
 separated by blank lines (or as a JSON array with --json).
 
+Put global flags such as `--init-script` and `--enable` on the outer batch
+invocation. Items reject global flags; command-specific options such as
+`snapshot -i` stay in each item.
+
 Options:
   --bail               Stop on first error (default: continue all commands)
   --json               Output results as a JSON array
@@ -3616,6 +3620,7 @@ Stdin Mode (JSON):
 
 Examples:
   agent-browser batch "open https://example.com" "screenshot"
+  agent-browser --enable react-devtools batch "open" "navigate data:text/html,<h1>hi</h1>"
   agent-browser batch --bail "open https://example.com" "click @e1" "screenshot"
   echo '[["open", "https://example.com"], ["snapshot"]]' | agent-browser batch
   echo '[["fill", "#password", "secret"]]' | agent-browser batch --json --omit-command

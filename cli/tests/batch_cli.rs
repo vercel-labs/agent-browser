@@ -136,6 +136,63 @@ fn batch_preserves_results_and_parse_errors_with_optional_command_omission() {
 }
 
 #[test]
+fn batch_rejects_item_global_flags_across_cli_and_mcp() {
+    let commands = json!([
+        ["stream", "status"],
+        ["stream", "enable", "--port", "0"],
+        ["stream", "status", "--init-script", "/tmp/probe.js"],
+        ["stream", "disable"]
+    ]);
+    let mut expected_error: Option<String> = None;
+    for mode in ["quoted", "stdin", "mcp"] {
+        for bail in [false, true] {
+            let fixture = Fixture::new();
+            let rows = if mode == "mcp" {
+                let request = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "agent_browser_batch", "arguments": {
+                        "commands": commands, "session": "batch-test", "bail": bail}}});
+                let response = fixture.run(&["mcp", "--tools", "all"], &format!("{request}\n"), 0);
+                let result = &response["result"];
+                assert_eq!(result["isError"], true, "{response}");
+                assert_eq!(result["structuredContent"]["exitCode"], 1);
+                result["structuredContent"]["response"].clone()
+            } else {
+                let mut args = vec!["batch", "--json"];
+                if bail {
+                    args.push("--bail");
+                }
+                if mode == "quoted" {
+                    args.extend([
+                        "stream status",
+                        "stream enable --port 0",
+                        "stream status --init-script /tmp/probe.js",
+                        "stream disable",
+                    ]);
+                }
+                fixture.run(&args, &commands.to_string(), 1)
+            };
+            let rows = rows.as_array().unwrap();
+            assert_eq!(rows.len(), if bail { 3 } else { 4 }, "{mode}: {rows:?}");
+            for (index, row) in rows.iter().enumerate() {
+                assert_identity(row, &commands[index], index, false);
+                assert_eq!(row["success"], index != 2, "{mode}: {row}");
+            }
+            let error = rows[2]["error"].as_str().unwrap();
+            let lower = error.to_lowercase();
+            assert!(
+                lower.contains("global flags") || lower.contains("batch command"),
+                "{mode}: {error}"
+            );
+            if let Some(expected) = &expected_error {
+                assert_eq!(error, expected, "{mode}");
+            } else {
+                expected_error = Some(error.to_string());
+            }
+        }
+    }
+}
+
+#[test]
 #[ignore = "requires Chrome"]
 fn e2e_batch_omits_fill_secret_from_cli_and_mcp_output() {
     const SECRET_VALUE: &str = "SECRET_VALUE";
