@@ -766,8 +766,9 @@ fn initialize_result(params: Option<&Value>, config: &McpConfig) -> Value {
             "version": env!("CARGO_PKG_VERSION")
         },
         "instructions": format!(
-            "Use the typed agent_browser_* tools to control a browser. Active MCP tools profile(s): {}. Prefer agent_browser_snapshot after navigation to obtain stable element refs before clicking or typing. Use agent_browser_tools_profiles to see available startup profiles.",
-            config.profile_names().join(", ")
+            "Use the typed agent_browser_* tools to control a browser. Active MCP tools profile(s): {}. Prefer agent_browser_snapshot after navigation to obtain stable element refs before clicking or typing. Use agent_browser_tools_profiles to see available startup profiles. {}",
+            config.profile_names().join(", "),
+            SHARED_ARGUMENTS_INSTRUCTIONS
         )
     })
 }
@@ -2041,117 +2042,62 @@ fn wait_timeout_schema() -> Value {
     })
 }
 
+/// Per-call arguments every tool advertises in its input schema.
+fn shared_properties() -> serde_json::Map<String, Value> {
+    let Value::Object(map) = json!({
+        "session": {
+            "type": "string",
+            "description": "Isolated browser session name: Unicode letters, numbers, hyphens, and underscores."
+        },
+        "restore": {
+            "oneOf": [{ "type": "boolean" }, { "type": "string" }],
+            "description": "Restore and auto-save browser state. true keys it by session; a string is an explicit key."
+        },
+        "allowedDomains": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Restrict browser and read traffic to these domain patterns."
+        },
+        "extraArgs": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Extra CLI arguments for this command, such as --engine. Flags that change network, file, policy, or host access are rejected."
+        },
+        "timeoutMs": {
+            "type": "integer",
+            "minimum": 1,
+            "default": DEFAULT_TIMEOUT_MS,
+            "description": "Maximum time to wait for this tool call."
+        }
+    }) else {
+        unreachable!()
+    };
+    map
+}
+
+/// Arguments every tool accepts but does not advertise. They configure the daemon,
+/// restore checks, or CA trust, which a client normally sets once; the server's
+/// initialize instructions describe them.
+const UNADVERTISED_SHARED_ARGUMENTS: &[&str] = &[
+    "namespace",
+    "restoreSave",
+    "restoreCheckUrl",
+    "restoreCheckText",
+    "restoreCheckFn",
+    "caCert",
+    "useSystemCa",
+    "clearCaCert",
+    "idleTimeout",
+];
+
+const SHARED_ARGUMENTS_INSTRUCTIONS: &str = "Every tool also accepts these optional arguments, which are not listed in each tool's schema: namespace (string, isolates daemon sockets and restore-state directories), restoreSave (auto, always, or never), restoreCheckUrl, restoreCheckText, and restoreCheckFn (strings that restored state must satisfy), caCert (path to a CA certificate or PEM bundle for the CLI's HTTPS requests and locally launched Chromium on Linux), useSystemCa (boolean, use the OS trust store for the CLI's HTTPS requests), clearCaCert (boolean, clear CA trust retained by the session; cannot be combined with caCert), and idleTimeout (string such as 30s, 5m, 1h, or milliseconds; defaults to 1h, 0 disables idle shutdown). allowedDomains also disables RTCPeerConnection in Chromium sessions and is rejected when the server environment or config already sets allowed domains. extraArgs rejects global flags that change network, file, policy, or host access, such as --allowed-domains, --executable-path, --args, and --config; set those in the MCP server environment or config.";
+
 fn tool(name: &str, title: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     let mut props = match properties {
         Value::Object(map) => map,
         _ => serde_json::Map::new(),
     };
-    props.insert(
-        "session".to_string(),
-        json!({
-            "type": "string",
-            "description": "Optional isolated browser session name. Accepts Unicode letters and numbers, hyphens, and underscores only; spaces are rejected."
-        }),
-    );
-    props.insert(
-        "namespace".to_string(),
-        json!({
-            "type": "string",
-            "description": "Optional namespace that isolates daemon sockets and restore-state directories."
-        }),
-    );
-    props.insert(
-        "restore".to_string(),
-        json!({
-            "oneOf": [
-                { "type": "boolean" },
-                { "type": "string" }
-            ],
-            "description": "Restore and auto-save browser state. true uses the current session as the key; a string uses that explicit key."
-        }),
-    );
-    props.insert(
-        "restoreSave".to_string(),
-        json!({
-            "type": "string",
-            "enum": ["auto", "always", "never"],
-            "description": "Auto-save policy for restored state."
-        }),
-    );
-    props.insert(
-        "restoreCheckUrl".to_string(),
-        json!({
-            "type": "string",
-            "description": "Optional URL pattern that restored state must match."
-        }),
-    );
-    props.insert(
-        "restoreCheckText".to_string(),
-        json!({
-            "type": "string",
-            "description": "Optional page text that restored state must expose."
-        }),
-    );
-    props.insert(
-        "restoreCheckFn".to_string(),
-        json!({
-            "type": "string",
-            "description": "Optional JavaScript expression that must evaluate truthy after restore."
-        }),
-    );
-    props.insert(
-        "allowedDomains".to_string(),
-        json!({
-            "type": "array",
-            "items": { "type": "string" },
-            "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active."
-        }),
-    );
-    props.insert(
-        "caCert".to_string(),
-        json!({
-            "type": "string",
-            "description": "Path to a CA certificate or PEM bundle. Trusted by the CLI's own HTTPS requests (read, install, upgrade, doctor), and by a locally launched Chromium browser on Linux."
-        }),
-    );
-    props.insert(
-        "useSystemCa".to_string(),
-        json!({
-            "type": "boolean",
-            "description": "Use the operating system trust store instead of the built-in roots for the CLI's own HTTPS requests. Does not affect the browser."
-        }),
-    );
-    props.insert(
-        "clearCaCert".to_string(),
-        json!({
-            "type": "boolean",
-            "description": "Explicitly clear CA trust retained by the running browser session."
-        }),
-    );
-    props.insert(
-        "idleTimeout".to_string(),
-        json!({
-            "type": "string",
-            "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Values too large to convert to milliseconds produce a warning and are ignored. Defaults to 1h; 0 disables idle shutdown."
-        }),
-    );
-    props.insert(
-        "extraArgs".to_string(),
-        json!({
-            "type": "array",
-            "items": { "type": "string" },
-            "description": "Advanced: extra CLI arguments, including --engine chrome|lightpanda|obscura. Global flags that change network, file, policy, or host access (such as --allowed-domains, --executable-path, --args, --config) are rejected; set them in the MCP server environment or config. Obscura is experimental and rejects --proxy-bypass (including resolved config/environment settings). Explicit Obscura launches send this invocation's resolved bypass setting even to an existing daemon."
-        }),
-    );
-    props.insert(
-        "timeoutMs".to_string(),
-        json!({
-            "type": "integer",
-            "minimum": 1,
-            "default": DEFAULT_TIMEOUT_MS,
-            "description": "Maximum time to wait for this tool call."
-        }),
-    );
+    props.extend(shared_properties());
 
     let mut schema = serde_json::Map::new();
     schema.insert("type".to_string(), json!("object"));
@@ -2276,18 +2222,16 @@ fn reject_unknown_arguments(
         .unwrap_or(&empty);
     let mut unknown: Vec<&str> = args
         .keys()
-        .filter(|key| !declared.contains_key(*key))
+        .filter(|key| {
+            !declared.contains_key(*key) && !UNADVERTISED_SHARED_ARGUMENTS.contains(&key.as_str())
+        })
         .map(|key| key.as_str())
         .collect();
     if unknown.is_empty() {
         return Ok(());
     }
     unknown.sort();
-    let shared = tool("", "", "", json!({}), &[]);
-    let shared_keys = shared
-        .pointer("/inputSchema/properties")
-        .and_then(|v| v.as_object())
-        .unwrap_or(&empty);
+    let shared_keys = shared_properties();
     let mut own: Vec<&str> = declared
         .keys()
         .filter(|key| !shared_keys.contains_key(*key))
@@ -5598,21 +5542,39 @@ mod tests {
             "array"
         );
         assert_eq!(
-            open["inputSchema"]["properties"]["restoreSave"]["enum"][0],
-            "auto"
-        );
-        assert_eq!(
-            open["inputSchema"]["properties"]["namespace"]["type"],
-            "string"
-        );
-        assert_eq!(
             open["inputSchema"]["properties"]["allowedDomains"]["type"],
             "array"
         );
-        assert_eq!(
-            open["inputSchema"]["properties"]["idleTimeout"]["type"],
-            "string"
-        );
+        for key in UNADVERTISED_SHARED_ARGUMENTS {
+            assert!(
+                open["inputSchema"]["properties"].get(*key).is_none(),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn unadvertised_shared_arguments_are_accepted_and_documented() {
+        let open = find_tool(TOOL_OPEN).unwrap();
+        let arguments = json!({
+            "url": "https://example.com",
+            "namespace": "ns",
+            "restoreSave": "never",
+            "restoreCheckUrl": "example.com",
+            "restoreCheckText": "Welcome",
+            "restoreCheckFn": "true",
+            "caCert": "/tmp/ca.pem",
+            "useSystemCa": true,
+            "idleTimeout": "5m"
+        });
+        reject_unknown_arguments(TOOL_OPEN, &open, &arguments).unwrap();
+        let err =
+            reject_unknown_arguments(TOOL_OPEN, &open, &json!({ "namespaec": "ns" })).unwrap_err();
+        assert!(err.message.contains("namespaec"));
+        for key in UNADVERTISED_SHARED_ARGUMENTS {
+            assert!(SHARED_ARGUMENTS_INSTRUCTIONS.contains(key), "{key}");
+            assert!(shared_properties().get(*key).is_none(), "{key}");
+        }
     }
 
     #[test]

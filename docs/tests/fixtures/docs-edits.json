@@ -32,6 +32,14 @@
       {
         "from": "agent-browser network route <url> --body <json>  # Mock response",
         "to": "agent-browser network route <url> --body <json>  # Mock response\nagent-browser network route <url> --body <json> --allow-origin <origin>  # Mock readable cross-origin"
+      },
+      {
+        "from": "`key`, `session`, `allowedDomains`, and `idleTimeout`, so MCP clients",
+        "to": "`key`, `session`, and `allowedDomains`, so MCP clients"
+      },
+      {
+        "from": "key, session, allowedDomains, and idleTimeout, so MCP clients",
+        "to": "key, session, and allowedDomains, so MCP clients"
       }
     ],
     "/configuration": [
