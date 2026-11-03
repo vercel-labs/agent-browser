@@ -95,13 +95,6 @@ pub struct SendCtx<'a> {
     pub wanted: &'a [&'a PreparedRequest],
 }
 
-/// One way of sending a request.
-#[allow(clippy::double_must_use)]
-#[async_trait]
-pub trait Sender: Send {
-    async fn send(&mut self, req: &PreparedRequest, ctx: &SendCtx<'_>) -> TierResult;
-}
-
 /// The senders of a run, one per tier, sharing whatever they borrow.
 #[allow(clippy::double_must_use)]
 #[async_trait]
@@ -111,20 +104,15 @@ pub trait Senders: Send {
     fn replay_ran(&self) -> bool;
 }
 
-/// What the HTTP and in-page tiers need from the browser session.
+/// What the tiers need from the browser session: its cookies and routes,
+/// the active tab, and the commands a replay runs.
 #[allow(clippy::double_must_use)]
 #[async_trait]
-pub trait Host: Send {
+pub trait Browser: Send {
     async fn cookie_header(&mut self, url: &str) -> Option<String>;
     async fn routed_response(&mut self, url: &str) -> Option<RoutedResponse>;
     async fn tab_url(&mut self) -> Option<String>;
     async fn eval(&mut self, script: &str) -> Result<Value, String>;
-}
-
-/// What the replay needs: run commands and read back the requests they sent.
-#[allow(clippy::double_must_use)]
-#[async_trait]
-pub trait CommandRunner: Host {
     async fn ensure_browser(&mut self) -> Result<(), String>;
     /// Start collecting requests; the mark says where this replay's begin.
     async fn begin_capture(&mut self) -> Result<usize, String>;

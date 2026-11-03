@@ -12462,7 +12462,7 @@ impl<'a> FlowWiring<'a> {
 }
 
 #[async_trait::async_trait]
-impl super::flow::Host for FlowWiring<'_> {
+impl super::flow::Browser for FlowWiring<'_> {
     async fn cookie_header(&mut self, url: &str) -> Option<String> {
         let mgr = self.state.browser.as_ref()?;
         let sid = mgr.active_session_id().ok()?;
@@ -12489,10 +12489,7 @@ impl super::flow::Host for FlowWiring<'_> {
             None => Err("Browser not launched".to_string()),
         }
     }
-}
 
-#[async_trait::async_trait]
-impl super::flow::CommandRunner for FlowWiring<'_> {
     async fn ensure_browser(&mut self) -> Result<(), String> {
         flow_ensure_browser(self.state).await
     }
@@ -12544,32 +12541,19 @@ impl super::flow::Senders for DaemonSenders<'_> {
         req: &super::flow::PreparedRequest,
         ctx: &super::flow::SendCtx<'_>,
     ) -> super::flow::TierResult {
-        use super::flow::{HttpSender, PageSender, ReplaySender, Sender, Tier};
+        use super::flow::{http, page, replay, Tier};
         match tier {
-            Tier::Http => {
-                HttpSender {
-                    client: &self.client,
-                    host: &mut self.wiring,
-                }
-                .send(req, ctx)
-                .await
-            }
-            Tier::Page => {
-                PageSender {
-                    flow: self.flow,
-                    host: &mut self.wiring,
-                }
-                .send(req, ctx)
-                .await
-            }
+            Tier::Http => http::send(&self.client, &mut self.wiring, req).await,
+            Tier::Page => page::send(self.flow, &mut self.wiring, req).await,
             Tier::Replay => {
-                ReplaySender {
-                    flow: self.flow,
-                    params: self.params,
-                    runner: &mut self.wiring,
-                    run: &mut self.replay_run,
-                }
-                .send(req, ctx)
+                replay::send(
+                    self.flow,
+                    self.params,
+                    &mut self.wiring,
+                    &mut self.replay_run,
+                    req,
+                    ctx,
+                )
                 .await
             }
         }

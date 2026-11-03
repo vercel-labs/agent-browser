@@ -1,7 +1,5 @@
 //! The in-page tier: the same request sent by the active tab's own fetch.
 
-use async_trait::async_trait;
-
 use super::*;
 
 /// Tier 2: the page sends the request itself, so the browser adds its own
@@ -95,21 +93,12 @@ pub fn tab_on_site(flow: &Flow, current: Option<&str>) -> Result<(), String> {
 }
 
 /// The in-page tier over the active tab.
-pub struct PageSender<'a> {
-    pub flow: &'a Flow,
-    pub host: &'a mut dyn Host,
-}
-
-#[allow(clippy::double_must_use)]
-#[async_trait]
-impl Sender for PageSender<'_> {
-    async fn send(&mut self, req: &PreparedRequest, _ctx: &SendCtx<'_>) -> TierResult {
-        let started = Instant::now();
-        let tab = self.host.tab_url().await;
-        if let Err(reason) = tab_on_site(self.flow, tab.as_deref()) {
-            return TierResult::fail(req, Tier::Page, started, Failure::drift(reason));
-        }
-        let value = self.host.eval(&page_fetch_script(req)).await;
-        page_result(req, started, value)
+pub async fn send(flow: &Flow, browser: &mut dyn Browser, req: &PreparedRequest) -> TierResult {
+    let started = Instant::now();
+    let tab = browser.tab_url().await;
+    if let Err(reason) = tab_on_site(flow, tab.as_deref()) {
+        return TierResult::fail(req, Tier::Page, started, Failure::drift(reason));
     }
+    let value = browser.eval(&page_fetch_script(req)).await;
+    page_result(req, started, value)
 }

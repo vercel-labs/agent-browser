@@ -11,14 +11,14 @@ use super::actions::HarEntry;
 
 mod hint;
 mod hosts;
-mod http;
+pub mod http;
 #[cfg(test)]
 mod memory;
 mod model;
 mod outcome;
-mod page;
+pub mod page;
 mod recorder;
-mod replay;
+pub mod replay;
 mod send;
 
 pub use hint::*;
@@ -26,7 +26,6 @@ pub use hosts::*;
 pub use http::*;
 pub use model::*;
 pub use outcome::*;
-pub use page::*;
 pub use recorder::*;
 pub use replay::*;
 pub use send::*;
@@ -1876,6 +1875,7 @@ pub(crate) fn flow_of(mut v: Value) -> Flow {
 
 #[cfg(test)]
 mod tests {
+    use super::page::*;
     use super::*;
 
     fn build_flow_value(input: SaveInput<'_>) -> Result<(Value, Value), String> {

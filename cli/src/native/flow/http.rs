@@ -1,7 +1,5 @@
 //! The direct-HTTP tier: the saved request sent with the session's cookies.
 
-use async_trait::async_trait;
-
 use super::*;
 
 /// A session route (`network route`) that matches the request answers it on
@@ -154,17 +152,12 @@ pub fn cookie_header(cookies: &[crate::native::cookies::Cookie]) -> String {
 }
 
 /// The HTTP tier over a browser session's cookies and routes.
-pub struct HttpSender<'a> {
-    pub client: &'a reqwest::Client,
-    pub host: &'a mut dyn Host,
-}
-
-#[allow(clippy::double_must_use)]
-#[async_trait]
-impl Sender for HttpSender<'_> {
-    async fn send(&mut self, req: &PreparedRequest, _ctx: &SendCtx<'_>) -> TierResult {
-        let cookie = self.host.cookie_header(&req.url).await;
-        let routed = self.host.routed_response(&req.url).await;
-        run_http(self.client, req, cookie.as_deref(), routed).await
-    }
+pub async fn send(
+    client: &reqwest::Client,
+    browser: &mut dyn Browser,
+    req: &PreparedRequest,
+) -> TierResult {
+    let cookie = browser.cookie_header(&req.url).await;
+    let routed = browser.routed_response(&req.url).await;
+    run_http(client, req, cookie.as_deref(), routed).await
 }

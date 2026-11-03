@@ -1,7 +1,5 @@
 //! The replay tier: the recorded commands run once, requests read from what they sent.
 
-use async_trait::async_trait;
-
 use super::*;
 
 /// Tier 3: the recorded commands with the run's params swapped in. A param
@@ -334,155 +332,147 @@ pub struct ReplayRun {
     failure: Option<String>,
 }
 
-/// The replay tier over a command runner. The recording runs at most once
-/// per run; every request that falls back to it reads from that capture.
-pub struct ReplaySender<'a> {
-    pub flow: &'a Flow,
-    pub params: &'a [(String, String)],
-    pub runner: &'a mut dyn CommandRunner,
-    pub run: &'a mut Option<ReplayRun>,
-}
-
-#[allow(clippy::double_must_use)]
-#[async_trait]
-impl Sender for ReplaySender<'_> {
-    async fn send(&mut self, req: &PreparedRequest, ctx: &SendCtx<'_>) -> TierResult {
-        let started = Instant::now();
-        let fail = |f: Failure| TierResult::fail(req, Tier::Replay, started, f);
-        // A write that was already sent is only read back, never sent again.
-        if req.write && ctx.ledger.already_sent(&req.id) {
-            return match self.run.as_ref().map(|r| replay_lookup(&r.entries, req)) {
-                Some(Ok(entry)) => replay_result(req, started, Some(entry)),
-                Some(Err(reason)) => fail(Failure::unknown_outcome(format!(
-                    "the write was already sent in this run and its answer cannot be read back: {}",
-                    reason
-                ))),
-                None => fail(Failure::unknown_outcome(
-                    "the write was already sent in this run".to_string(),
-                )),
-            };
-        }
-        if self.run.is_none() {
-            // A replay repeats every recorded command, so it also sends the
-            // writes no kept request covers; each must be approved.
-            for w in self.flow.replay_only_writes() {
-                if let Err(reason) = self.runner.write_approved(w) {
-                    return fail(Failure::unavailable(format!(
-                        "replaying the recorded commands would also send {} {} ({}): {}",
-                        w.method, w.url, w.id, reason
-                    )));
-                }
-            }
-            // A write another tier already sent would go out a second time.
-            if let Some(id) = ctx.ledger.first_repeated_by_replay(self.flow) {
+/// The replay tier over a browser. The recording runs at most once per run;
+/// every request that falls back to it reads from that capture.
+pub async fn send(
+    flow: &Flow,
+    params: &[(String, String)],
+    browser: &mut dyn Browser,
+    run: &mut Option<ReplayRun>,
+    req: &PreparedRequest,
+    ctx: &SendCtx<'_>,
+) -> TierResult {
+    let started = Instant::now();
+    let fail = |f: Failure| TierResult::fail(req, Tier::Replay, started, f);
+    // A write that was already sent is only read back, never sent again.
+    if req.write && ctx.ledger.already_sent(&req.id) {
+        return match run.as_ref().map(|r| replay_lookup(&r.entries, req)) {
+            Some(Ok(entry)) => replay_result(req, started, Some(entry)),
+            Some(Err(reason)) => fail(Failure::unknown_outcome(format!(
+                "the write was already sent in this run and its answer cannot be read back: {}",
+                reason
+            ))),
+            None => fail(Failure::unknown_outcome(
+                "the write was already sent in this run".to_string(),
+            )),
+        };
+    }
+    if run.is_none() {
+        // A replay repeats every recorded command, so it also sends the
+        // writes no kept request covers; each must be approved.
+        for w in flow.replay_only_writes() {
+            if let Err(reason) = browser.write_approved(w) {
                 return fail(Failure::unavailable(format!(
-                    "replaying the recorded commands would send write {} again; it was already sent in this run",
-                    id
+                    "replaying the recorded commands would also send {} {} ({}): {}",
+                    w.method, w.url, w.id, reason
                 )));
             }
-            match self.capture(ctx.wanted, started).await {
-                Ok(captured) => *self.run = Some(captured),
-                Err(Ok(reason)) => return fail(Failure::unavailable(reason)),
-                Err(Err(reason)) => return fail(Failure::drift(reason)),
-            }
         }
-        let Some(captured) = self.run.as_ref() else {
-            return fail(Failure::drift("the replay did not run".to_string()));
-        };
-        if let Some(reason) = captured.failure.clone() {
-            return fail(Failure::drift(reason));
+        // A write another tier already sent would go out a second time.
+        if let Some(id) = ctx.ledger.first_repeated_by_replay(flow) {
+            return fail(Failure::unavailable(format!(
+                "replaying the recorded commands would send write {} again; it was already sent in this run",
+                id
+            )));
         }
-        match replay_lookup(&captured.entries, req) {
-            Ok(entry) => replay_result(req, started, Some(entry)),
-            Err(reason) => fail(Failure::drift(reason)),
+        match capture(flow, params, browser, ctx.wanted, started).await {
+            Ok(captured) => *run = Some(captured),
+            Err(Ok(reason)) => return fail(Failure::unavailable(reason)),
+            Err(Err(reason)) => return fail(Failure::drift(reason)),
         }
+    }
+    let Some(captured) = run.as_ref() else {
+        return fail(Failure::drift("the replay did not run".to_string()));
+    };
+    if let Some(reason) = captured.failure.clone() {
+        return fail(Failure::drift(reason));
+    }
+    match replay_lookup(&captured.entries, req) {
+        Ok(entry) => replay_result(req, started, Some(entry)),
+        Err(reason) => fail(Failure::drift(reason)),
     }
 }
 
-impl ReplaySender<'_> {
-    /// Run the recorded commands once and capture the requests they send.
-    /// `Err(Ok(reason))` means the replay cannot run at all, `Err(Err(reason))`
-    /// that it could not start.
-    async fn capture(
-        &mut self,
-        wanted: &[&PreparedRequest],
-        started: Instant,
-    ) -> Result<ReplayRun, Result<String, String>> {
-        self.runner.ensure_browser().await.map_err(Err)?;
-        let mark = self.runner.begin_capture().await.map_err(Err)?;
-        let commands = match replay_commands(self.flow, self.params) {
-            Ok(c) => c,
-            Err(e) => {
-                self.runner.end_capture().await;
-                return Err(Ok(e));
-            }
-        };
-        if let Err(reason) = check_replay_commands(self.flow, &commands) {
-            self.runner.end_capture().await;
-            return Err(Ok(reason));
+/// Run the recorded commands once and capture the requests they send.
+/// `Err(Ok(reason))` means the replay cannot run at all, `Err(Err(reason))`
+/// that it could not start.
+async fn capture(
+    flow: &Flow,
+    params: &[(String, String)],
+    browser: &mut dyn Browser,
+    wanted: &[&PreparedRequest],
+    started: Instant,
+) -> Result<ReplayRun, Result<String, String>> {
+    browser.ensure_browser().await.map_err(Err)?;
+    let mark = browser.begin_capture().await.map_err(Err)?;
+    let commands = match replay_commands(flow, params) {
+        Ok(c) => c,
+        Err(e) => {
+            browser.end_capture().await;
+            return Err(Ok(e));
         }
-        let mut failed = None;
-        for (i, c) in commands.into_iter().enumerate() {
-            let mut c = c;
-            c["id"] = json!(format!("flow-replay-{}", i + 1));
-            // A page opened by the replay may still be rendering the element.
-            let resp = loop {
-                let resp = self.runner.run(&c).await;
-                let missing = resp.get("error").and_then(|e| e.as_str()).is_some_and(|e| {
-                    e.contains("No element found") || e.contains("Element not found")
-                });
-                if !missing || Instant::now() >= started + Duration::from_secs(20) {
-                    break resp;
-                }
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            };
-            // The replay stops as soon as the tab leaves the flow's site.
-            if let Some(url) = self
-                .runner
-                .tab_url()
-                .await
-                .filter(|u| u.starts_with("http"))
-            {
-                if let Err(reason) = HostPolicy::of(self.flow).check(&url) {
-                    failed = Some(format!(
-                        "replay stopped after command {}: {}",
-                        i + 1,
-                        reason
-                    ));
-                    break;
-                }
+    };
+    if let Err(reason) = check_replay_commands(flow, &commands) {
+        browser.end_capture().await;
+        return Err(Ok(reason));
+    }
+    let mut failed = None;
+    for (i, c) in commands.into_iter().enumerate() {
+        let mut c = c;
+        c["id"] = json!(format!("flow-replay-{}", i + 1));
+        // A page opened by the replay may still be rendering the element.
+        let resp = loop {
+            let resp = browser.run(&c).await;
+            let missing = resp
+                .get("error")
+                .and_then(|e| e.as_str())
+                .is_some_and(|e| e.contains("No element found") || e.contains("Element not found"));
+            if !missing || Instant::now() >= started + Duration::from_secs(20) {
+                break resp;
             }
-            if resp.get("success") != Some(&json!(true)) {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        };
+        // The replay stops as soon as the tab leaves the flow's site.
+        if let Some(url) = browser.tab_url().await.filter(|u| u.starts_with("http")) {
+            if let Err(reason) = HostPolicy::of(flow).check(&url) {
                 failed = Some(format!(
-                    "replaying command {} failed: {}",
+                    "replay stopped after command {}: {}",
                     i + 1,
-                    resp.get("error")
-                        .and_then(|e| e.as_str())
-                        .unwrap_or("unknown error")
+                    reason
                 ));
                 break;
             }
         }
-        // Bodies arrive on later event drains; wait within the request
-        // timeout until every request that may fall back has its answer.
-        let deadline = started + Duration::from_secs(20);
-        while failed.is_none() {
-            let slice = self.runner.captured_since(mark).await;
-            let ready = |w: &&PreparedRequest| {
-                replay_lookup(&slice, w).is_ok_and(|e| {
-                    e.response_body.is_some() || e.status.is_some_and(|s| !(200..300).contains(&s))
-                })
-            };
-            if wanted.iter().all(ready) || Instant::now() >= deadline {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        if resp.get("success") != Some(&json!(true)) {
+            failed = Some(format!(
+                "replaying command {} failed: {}",
+                i + 1,
+                resp.get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("unknown error")
+            ));
+            break;
         }
-        let entries = self.runner.captured_since(mark).await;
-        self.runner.end_capture().await;
-        Ok(ReplayRun {
-            entries,
-            failure: failed,
-        })
     }
+    // Bodies arrive on later event drains; wait within the request timeout
+    // until every request that may fall back has its answer.
+    let deadline = started + Duration::from_secs(20);
+    while failed.is_none() {
+        let slice = browser.captured_since(mark).await;
+        let ready = |w: &&PreparedRequest| {
+            replay_lookup(&slice, w).is_ok_and(|e| {
+                e.response_body.is_some() || e.status.is_some_and(|s| !(200..300).contains(&s))
+            })
+        };
+        if wanted.iter().all(ready) || Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let entries = browser.captured_since(mark).await;
+    browser.end_capture().await;
+    Ok(ReplayRun {
+        entries,
+        failure: failed,
+    })
 }
