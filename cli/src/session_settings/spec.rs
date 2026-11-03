@@ -107,6 +107,20 @@ pub fn spec_by_name(name: &str) -> Option<&'static Spec> {
     SPECS.iter().find(|s| s.name == name)
 }
 
+/// A value safe to print: secret rows are hidden and the proxy loses any
+/// credentials embedded in its URL.
+pub(super) fn redacted(key: Key, value: &Value) -> Value {
+    if spec(key).secret {
+        return Value::from("<redacted>");
+    }
+    if key == Key::Proxy {
+        if let Some(raw) = value.as_str() {
+            return Value::from(parse_proxy(raw).server);
+        }
+    }
+    value.clone()
+}
+
 fn set(value: Value) -> Option<Requested> {
     Some(Requested::Set(value))
 }

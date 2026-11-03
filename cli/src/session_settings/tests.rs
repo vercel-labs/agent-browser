@@ -743,3 +743,34 @@ fn seeding_from_the_process_environment_reads_the_same_names() {
         Some("/from-env")
     );
 }
+
+#[test]
+fn debug_output_never_contains_secrets() {
+    let r = seeded(&[
+        (
+            "AGENT_BROWSER_PROXY",
+            "http://user:hunter2@proxy.example:8080",
+        ),
+        ("AGENT_BROWSER_PROXY_PASSWORD", "hunter2"),
+        ("AGENT_BROWSER_PROXY_USERNAME", "user"),
+        (
+            "AGENT_BROWSER_CDP_HEADERS",
+            r#"{"Authorization":"Bearer s3cret"}"#,
+        ),
+    ]);
+    let out = format!("{:?} {:#?}", r, r);
+    for secret in ["hunter2", "s3cret"] {
+        assert!(!out.contains(secret), "{secret} leaked: {out}");
+    }
+    assert!(out.contains("proxy.example"));
+
+    let mut f = full_flags();
+    f.proxy = Some("http://user:hunter2@proxy.example:8080".to_string());
+    f.cdp_headers = Some(r#"{"Authorization":"Bearer s3cret"}"#.to_string());
+    let patch = format!("{:?}", Patch::from_flags(&f));
+    for secret in ["hunter2", "s3cret"] {
+        assert!(!patch.contains(secret), "{secret} leaked: {patch}");
+    }
+    // The values themselves are untouched.
+    assert_eq!(r.proxy_password().as_deref(), Some("hunter2"));
+}

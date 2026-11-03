@@ -1,12 +1,13 @@
 //! A patch: the settings one invocation set explicitly.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde_json::{Map, Value};
 
 use crate::flags::Flags;
 
-use super::spec::{spec, spec_by_name, Key, SPECS};
+use super::spec::{redacted, spec, spec_by_name, Key, SPECS};
 use super::SettingsError;
 
 /// What an invocation asks for one setting.
@@ -18,9 +19,22 @@ pub enum Requested {
 }
 
 /// Only what this invocation set. An absent key defers to the running value.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub struct Patch {
     entries: BTreeMap<Key, Requested>,
+}
+
+impl fmt::Debug for Patch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut map = f.debug_map();
+        for (key, requested) in &self.entries {
+            match requested {
+                Requested::Set(v) => map.entry(&spec(*key).name, &redacted(*key, v)),
+                Requested::Default => map.entry(&spec(*key).name, &"<default>"),
+            };
+        }
+        map.finish()
+    }
 }
 
 impl Patch {

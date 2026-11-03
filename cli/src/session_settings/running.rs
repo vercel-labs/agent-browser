@@ -1,12 +1,13 @@
 //! The daemon's view of its session's settings.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde_json::Value;
 
 use crate::native::cdp::chrome::LaunchOptions;
 
-use super::spec::Key;
+use super::spec::{redacted, spec, Key};
 
 /// Applied when no default timeout is set. Intentionally below the CLI's 30s
 /// IPC read timeout so the daemon reports a proper timeout error instead of
@@ -82,7 +83,7 @@ pub struct RestoreView {
 }
 
 /// Values the running session holds. An absent key means the default.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub struct Running {
     values: BTreeMap<Key, Value>,
     /// Verbatim extensions value for the session's extensions file.
@@ -91,6 +92,16 @@ pub struct Running {
     /// Headed as the plugin provider path reads it: any value except `0`,
     /// `false`, `no` or empty counts. Temporary with the env seed.
     pub(super) provider_headed: bool,
+}
+
+impl fmt::Debug for Running {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut map = f.debug_map();
+        for (key, value) in &self.values {
+            map.entry(&spec(*key).name, &redacted(*key, value));
+        }
+        map.finish()
+    }
 }
 
 impl Running {
