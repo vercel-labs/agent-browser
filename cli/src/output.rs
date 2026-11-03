@@ -3817,6 +3817,7 @@ Subcommands:
   list                       List all available skills (default)
   get <name> [name...]       Output a skill's full content
   get <name> --full          Include references and templates
+  get <name> --ref <ref>     Output only one reference or template (repeatable)
   get --all                  Output every skill
   path [name]                Print filesystem path to skill directory
 
@@ -3834,6 +3835,8 @@ Examples:
   agent-browser skills list
   agent-browser skills get core
   agent-browser skills get core --full
+  agent-browser skills get core --ref commands
+  agent-browser skills get core --ref references/authentication.md
   agent-browser skills get protected-vercel-deployments
   agent-browser skills get electron --full
   agent-browser skills get --all
@@ -3940,6 +3943,7 @@ Start here (for AI agents):
   skills [list]                List available skills
   skills get core              Core usage guide (overview + common patterns)
   skills get core --full       Include full command reference and templates
+  skills get core --ref <ref>  Load one reference, e.g. --ref commands
   skills get <name>            Load a specialized skill (electron, slack, ...)
   skills path [name]           Print skill directory path
 
@@ -4284,6 +4288,7 @@ Environment:
   AGENT_BROWSER_ENABLE           Comma-separated built-in init script features (e.g. react-devtools)
   AGENT_BROWSER_HEADED           Show browser window (not headless)
   AGENT_BROWSER_NO_XVFB          Disable automatic Xvfb for headed mode on displayless Linux hosts
+  AGENT_BROWSER_NO_VERSION_CHECK Skip the outdated-Chrome CVE check (it fetches chromereleases.googleblog.com)
   AGENT_BROWSER_WEBGPU           Enable WebGPU (SwiftShader software Vulkan on Linux)
   AGENT_BROWSER_JSON             JSON output
   AGENT_BROWSER_ANNOTATE         Annotated screenshot with numbered labels and legend

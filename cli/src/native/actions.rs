@@ -758,6 +758,8 @@ pub struct DaemonState {
     /// This is tracked separately from cleanup metadata because provider
     /// plugins are allowed to omit a close-session payload.
     active_provider_connection: bool,
+    /// Browser product already checked for an outdated build, so each product is checked once even when the fetch fails.
+    browser_security_checked: Option<String>,
     /// Actions already approved while replaying a confirmed command.
     confirmed_policy_actions: HashSet<String>,
     /// Strict session-to-tab binding (`--pin-tab` / AGENT_BROWSER_PIN_TAB).
@@ -891,6 +893,7 @@ impl DaemonState {
             plugin_init_scripts: Vec::new(),
             active_provider_session: None,
             active_provider_connection: false,
+            browser_security_checked: None,
             confirmed_policy_actions: HashSet::new(),
             pin_tab,
             last_persisted_binding: None,
@@ -2844,6 +2847,46 @@ fn append_launch_policy_actions(
 }
 
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
+    let mut response = execute_command_inner(cmd, state).await;
+    let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    if !skip_launch_action(action) {
+        warn_if_browser_outdated(state, &mut response).await;
+    }
+    response
+}
+
+/// Adds a warning to the response when the connected browser is outdated with known CVEs. Checks each browser product once and never fails.
+async fn warn_if_browser_outdated(state: &mut DaemonState, response: &mut Value) {
+    let disabled =
+        env::var("AGENT_BROWSER_NO_VERSION_CHECK").is_ok_and(|v| v == "1" || v == "true");
+    if state.active_provider_connection || disabled {
+        return;
+    }
+    let Some(mgr) = state.browser.as_ref() else {
+        return;
+    };
+    let Ok(Ok(version)) = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        mgr.client
+            .send_command_no_params("Browser.getVersion", None),
+    )
+    .await
+    else {
+        return;
+    };
+    let Some(product) = version.get("product").and_then(|v| v.as_str()) else {
+        return;
+    };
+    if state.browser_security_checked.as_deref() == Some(product) {
+        return;
+    }
+    state.browser_security_checked = Some(product.to_string());
+    if let Some(w) = crate::browser_security::outdated_warning(product).await {
+        append_warning(response, &w);
+    }
+}
+
+async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     // Unlike normal auth login, no-navigation mode must never launch a
     // browser or manufacture an about:blank page to satisfy the command.
@@ -5281,6 +5324,25 @@ async fn handle_launch_for_target(
     result
 }
 
+/// A local launch without an explicit profile or storage state keeps the
+/// daemon's spawn-time profile, so the launch hash stays stable.
+fn launch_profile_from_command_or_env(cmd: &Value) -> Option<String> {
+    if let Some(profile) = cmd.get("profile").and_then(|v| v.as_str()) {
+        return Some(profile.to_string());
+    }
+    let external_or_stateful = ["cdpUrl", "cdpPort", "provider", "storageState"]
+        .iter()
+        .any(|key| cmd.get(*key).is_some_and(|v| !v.is_null()))
+        || cmd
+            .get("autoConnect")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    if external_or_stateful {
+        return None;
+    }
+    env::var("AGENT_BROWSER_PROFILE").ok()
+}
+
 async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let effective_ca_cert = resolve_effective_ca_cert(cmd, state)?;
     // Absent field falls back to the daemon's spawn-time env (mirrors
@@ -5315,10 +5377,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         .and_then(|v| v.as_str())
         .map(String::from)
         .or_else(|| env::var("AGENT_BROWSER_ENGINE").ok());
-    let profile = cmd
-        .get("profile")
-        .and_then(|v| v.as_str())
-        .map(String::from);
+    let profile = launch_profile_from_command_or_env(cmd);
 
     let requested_allowed_domains = allowed_domains_from_launch_command(cmd);
     let previous_domain_filter = state.domain_filter.read().await.clone();
@@ -15764,6 +15823,33 @@ mod tests {
         assert!(state.restore_loaded_path.is_none());
         assert!(!state.restore_load_failed);
         assert_eq!(state.restore_save_status, "not_attempted");
+    }
+
+    #[test]
+    fn test_launch_profile_falls_back_to_env_only_for_plain_local_launch() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_PROFILE"]);
+        guard.set("AGENT_BROWSER_PROFILE", "/tmp/env-profile");
+
+        assert_eq!(
+            launch_profile_from_command_or_env(&json!({ "action": "launch" })).as_deref(),
+            Some("/tmp/env-profile")
+        );
+        assert_eq!(
+            launch_profile_from_command_or_env(
+                &json!({ "action": "launch", "profile": "/tmp/cli" })
+            )
+            .as_deref(),
+            Some("/tmp/cli")
+        );
+        for cmd in [
+            json!({ "action": "launch", "cdpUrl": "ws://127.0.0.1:9222" }),
+            json!({ "action": "launch", "cdpPort": 9222 }),
+            json!({ "action": "launch", "autoConnect": true }),
+            json!({ "action": "launch", "provider": "browserbase" }),
+            json!({ "action": "launch", "storageState": "/tmp/state.json" }),
+        ] {
+            assert_eq!(launch_profile_from_command_or_env(&cmd), None, "{cmd}");
+        }
     }
 
     #[test]
