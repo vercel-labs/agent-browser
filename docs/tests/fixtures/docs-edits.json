@@ -34,6 +34,18 @@
         "to": "agent-browser network route <url> --body <json>  # Mock response\nagent-browser network route <url> --body <json> --allow-origin <origin>  # Mock readable cross-origin"
       },
       {
+        "from": "agent-browser open --init-script <path>           # Register before first navigation (repeatable)\nagent-browser addinitscript <js>                  # Register at runtime (returns identifier)\nagent-browser removeinitscript <identifier>       # Remove from every tab in the session",
+        "to": "agent-browser --init-script <path> open <url>  # Register before first navigation (repeatable)\nagent-browser removeinitscript <identifier>"
+      },
+      {
+        "from": "See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime scripts, built-in React DevTools, and extensions.",
+        "to": "See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, script removal, built-in React DevTools, and extensions."
+      },
+      {
+        "from": "See Init Scripts & Extensions for launch-time scripts, runtime scripts, built-in React DevTools, and extensions.",
+        "to": "See Init Scripts & Extensions for launch-time scripts, script removal, built-in React DevTools, and extensions."
+      },
+      {
         "from": "`key`, `session`, `allowedDomains`, and `idleTimeout`, so MCP clients",
         "to": "`key`, `session`, and `allowedDomains`, so MCP clients"
       },
@@ -180,6 +192,22 @@
       {
         "from": "agent-browser batch \\\n  '[\"open\"]' \\\n  '[\"network\",\"route\",\"*\",\"--abort\",\"--resource-type\",\"script\"]' \\\n  '[\"cookies\",\"set\",\"--curl\",\"cookies.curl\",\"--domain\",\"localhost\"]' \\\n  '[\"navigate\",\"http://localhost:3000/target\"]'",
         "to": "agent-browser batch \\\n  \"open\" \\\n  \"network route * --abort --resource-type script\" \\\n  \"cookies set --curl cookies.curl --domain localhost\" \\\n  \"navigate http://localhost:3000/target\""
+      },
+      {
+        "from": "agent-browser addinitscript \"window.__testMode = true\"\n# Returns an identifier\n\nagent-browser removeinitscript <identifier>",
+        "to": "agent-browser removeinitscript <identifier>"
+      },
+      {
+        "from": "Runtime init scripts are useful after a session has started. They are still init scripts, so they affect future documents and navigations rather than rewriting already-executed page code.",
+        "to": ""
+      },
+      {
+        "from": "Runtime init-script identifiers are session-wide. `removeinitscript` removes the script from every open tab where it was registered and prevents it from being replayed into tabs opened later.",
+        "to": "Init-script identifiers are session-wide. `removeinitscript` removes a script from every open tab where it was registered and prevents it from being replayed into future tabs."
+      },
+      {
+        "from": "Runtime init-script identifiers are session-wide. removeinitscript removes the script from every open tab where it was registered and prevents it from being replayed into tabs opened later.",
+        "to": "Init-script identifiers are session-wide. removeinitscript removes a script from every open tab where it was registered and prevents it from being replayed into future tabs."
       }
     ],
     "/network": [
