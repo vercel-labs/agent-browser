@@ -58,6 +58,7 @@ export function computeSummary(
     "skill-selection": { total: 0, passed: 0 },
     "command-usage": { total: 0, passed: 0 },
     "context-footprint": { total: 0, passed: 0 },
+    "reference-routing": { total: 0, passed: 0 },
   };
 
   let passed = 0;

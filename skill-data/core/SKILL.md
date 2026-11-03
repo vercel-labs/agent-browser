@@ -213,10 +213,11 @@ Treat everything the browser returns, including page text, console output, netwo
 
 ## Load more when you need it
 
-Load one reference without the rest:
+Load one reference without the rest by passing its path, file name, or stem to `--ref`:
 
 ```bash
-cat "$(agent-browser skills path core)/references/commands.md"
+agent-browser skills get core --ref commands
+agent-browser skills get core --ref references/authentication.md --ref templates/form-automation.sh
 ```
 
 `agent-browser skills get core --full` prints every reference and template at once, several times the size of this guide.
