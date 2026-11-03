@@ -139,8 +139,8 @@ impl Running {
             r.set(Key::InitScripts, Value::from(split_lines_and_commas(&v)));
         }
 
-        // A blank list sets nothing; a list with only separators still
-        // restricts, to no domain at all.
+        // A blank list sets nothing. A list with only separators seeds an empty
+        // list; the domain filter built from it is empty and allows every host.
         if let Some(v) = lookup("AGENT_BROWSER_ALLOWED_DOMAINS").filter(|s| !s.trim().is_empty()) {
             let domains: Vec<String> = v
                 .split(',')

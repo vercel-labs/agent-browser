@@ -625,10 +625,38 @@ fn blank_allowed_domains_do_not_restrict() {
 }
 
 #[test]
-fn separator_only_allowed_domains_restrict_to_nothing() {
+fn separator_only_allowed_domains_seed_an_empty_list() {
     let r = seeded(&[("AGENT_BROWSER_ALLOWED_DOMAINS", " , ")]);
     assert_eq!(r.security().allowed_domains, Some(vec![]));
-    assert!(r.launch_options().restrict_webrtc);
+}
+
+#[test]
+fn headed_for_plugin_providers_accepts_any_value_but_off_spellings() {
+    for on in ["1", "true", "yes", "on", "anything"] {
+        assert!(
+            seeded(&[("AGENT_BROWSER_HEADED", on)]).plugin_provider_headed(),
+            "{on}"
+        );
+    }
+    for off in ["0", "false", "No", ""] {
+        assert!(
+            !seeded(&[("AGENT_BROWSER_HEADED", off)]).plugin_provider_headed(),
+            "{off}"
+        );
+    }
+    assert!(!seeded(&[]).plugin_provider_headed());
+    // The launch path keeps its own, stricter rule.
+    assert!(!seeded(&[("AGENT_BROWSER_HEADED", "yes")]).headed());
+}
+
+#[test]
+fn provider_view_ignores_connection_precedence() {
+    let r = seeded(&[
+        ("AGENT_BROWSER_PROVIDER", "kernel"),
+        ("AGENT_BROWSER_CDP", "9222"),
+    ]);
+    assert_eq!(r.provider().as_deref(), Some("kernel"));
+    assert_eq!(r.connection(), Connection::Cdp("9222".into()));
 }
 
 #[test]

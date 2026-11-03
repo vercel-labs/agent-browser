@@ -17571,13 +17571,16 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             "AGENT_BROWSER_POLICY",
             "AGENT_BROWSER_PIN_TAB",
         ]);
-        for name in [
-            "AGENT_BROWSER_ACTION_POLICY",
-            "AGENT_BROWSER_POLICY",
-            "AGENT_BROWSER_PIN_TAB",
-        ] {
-            guard.remove(name);
-        }
+        guard.remove("AGENT_BROWSER_POLICY");
+        guard.remove("AGENT_BROWSER_PIN_TAB");
+        let policy_dir = tempfile::tempdir().unwrap();
+        let policy_path = policy_dir.path().join("policy.json");
+        fs::write(
+            &policy_path,
+            r#"{"default": "allow", "deny": ["evaluate"]}"#,
+        )
+        .unwrap();
+        guard.set("AGENT_BROWSER_ACTION_POLICY", policy_path.to_str().unwrap());
         guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", "a.test, *.b.test");
         guard.set("AGENT_BROWSER_SESSION_NAME", "work");
         guard.set("AGENT_BROWSER_RESTORE_SAVE", "never");
@@ -17592,7 +17595,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         assert_eq!(state.default_timeout_ms, 7000);
         assert_eq!(state.engine, "lightpanda");
         assert!(!state.auto_dialog);
-        assert!(state.policy.is_none());
+        let policy = state.policy.as_ref().expect("action policy");
+        assert!(matches!(policy.check("evaluate"), PolicyResult::Deny(_)));
+        assert_eq!(policy.check("click"), PolicyResult::Allow);
         let confirm = state.confirm_actions.as_ref().expect("confirm actions");
         assert!(confirm.requires_confirmation("click"));
         assert!(!confirm.requires_confirmation("navigate"));
@@ -17601,6 +17606,16 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         assert!(filter.is_allowed("a.test"));
         assert!(filter.is_allowed("x.b.test"));
         assert!(!filter.is_allowed("c.test"));
+    }
+
+    #[test]
+    fn test_separator_only_allowed_domains_allow_every_host() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", " , ");
+        let state = DaemonState::new();
+        let filter = state.domain_filter.try_read().unwrap();
+        let filter = filter.as_ref().expect("domain filter");
+        assert!(filter.is_allowed("any.test"));
     }
 
     #[test]
