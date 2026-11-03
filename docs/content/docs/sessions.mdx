@@ -48,7 +48,9 @@ Each command carries the settings you set for it, whether from a flag, an enviro
 - Timeouts, `--action-policy`, `--confirm-actions`, `--no-auto-dialog`, and restore and pin settings apply in place.
 - Launch settings such as `--profile`, `--args`, `--headed`, `--proxy`, `--state`, and `--allowed-domains` relaunch the browser. The daemon keeps running.
 
-Every change is reported on stderr, one line each, and in `lifecycle.settings.changes` of the `--json` response. Secrets are redacted.
+Each change that takes effect is printed on stderr, one line each, and every change is listed in `lifecycle.settings.changes` of the `--json` response with `applied: true` or `applied: false`. A launch setting changed while no browser is running is `applied: false` and has no stderr line, since it takes effect at the next launch. Secrets are redacted in both places: passwords and CDP headers are hidden, and CDP URLs lose their credentials and query string.
+
+A command that never launches a browser, such as `get cdp-url` or `session info`, applies only live settings. Launch settings stay pending and are reported with `applied: false` until a command that launches carries them. A launch setting is kept only after the launch that uses it succeeds; if the launch fails, the session keeps its previous launch settings. Setting `--state` replaces an inherited `--profile` or `--extension`, and setting `--profile` or `--extension` replaces an inherited `--state`.
 
 ```bash
 agent-browser --profile ./a open https://example.com
