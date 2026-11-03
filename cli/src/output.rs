@@ -3596,8 +3596,8 @@ arguments or piped as JSON via stdin. Results are printed in order,
 separated by blank lines (or as a JSON array with --json).
 
 Put global flags such as `--init-script` and `--enable` on the outer batch
-invocation. Items reject global flags; command-specific options such as
-`snapshot -i` stay in each item.
+invocation. Keep command-specific options and literal command arguments inside
+each item.
 
 Options:
   --bail               Stop on first error (default: continue all commands)

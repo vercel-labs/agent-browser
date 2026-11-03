@@ -140,7 +140,7 @@ fn batch_rejects_item_global_flags_across_cli_and_mcp() {
     let commands = json!([
         ["stream", "status"],
         ["stream", "enable", "--port", "0"],
-        ["stream", "status", "--init-script", "/tmp/probe.js"],
+        ["open", "--init-script", "/tmp/probe.js"],
         ["stream", "disable"]
     ]);
     let mut expected_error: Option<String> = None;
@@ -165,7 +165,7 @@ fn batch_rejects_item_global_flags_across_cli_and_mcp() {
                     args.extend([
                         "stream status",
                         "stream enable --port 0",
-                        "stream status --init-script /tmp/probe.js",
+                        "open --init-script /tmp/probe.js",
                         "stream disable",
                     ]);
                 }
@@ -193,7 +193,7 @@ fn batch_rejects_item_global_flags_across_cli_and_mcp() {
 
     let fixture = Fixture::new();
     for flag in ["--help", "-h", "--version", "-V"] {
-        let commands = json!([["stream", "status", flag]]);
+        let commands = json!([["open", flag]]);
         let rows = fixture.run(&["batch", "--json"], &commands.to_string(), 1);
         assert_eq!(rows.as_array().unwrap().len(), 1, "{flag}: {rows}");
         assert_identity(&rows[0], &commands[0], 0, false);
@@ -259,6 +259,20 @@ fn e2e_batch_omits_fill_secret_from_cli_and_mcp_output() {
         assert_eq!(value["success"], true);
         assert_eq!(value["data"]["value"], SECRET_VALUE);
     }
+    let commands = json!([
+        ["fill", "#x", "--json"],
+        ["get", "value", "#x"],
+        ["type", "#x", "--clear", "--enable"],
+        ["get", "value", "#x"]
+    ]);
+    let rows = fixture.run(&["batch", "--json", "--bail"], &commands.to_string(), 0);
+    assert!(rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["success"] == true));
+    assert_eq!(rows[1]["result"]["value"], "--json");
+    assert_eq!(rows[3]["result"]["value"], "--enable");
     assert_eq!(fixture.run(&["close", "--json"], "", 0)["success"], true);
 }
 

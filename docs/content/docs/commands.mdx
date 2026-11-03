@@ -704,8 +704,6 @@ agent-browser batch "open https://example.com" "snapshot -i" "screenshot"
 # With --bail to stop on first error
 agent-browser batch --bail "open https://example.com" "click @e1" "screenshot"
 
-agent-browser --enable react-devtools batch "open" "navigate data:text/html,<h1>hi</h1>"
-
 # Stdin mode: pipe commands as JSON
 echo '[
   ["open", "https://example.com"],
@@ -728,7 +726,11 @@ echo '[["fill", "#password", "secret"]]' | agent-browser batch --json --omit-com
   </tbody>
 </table>
 
-Put global flags such as `--init-script` and `--enable` on the outer batch invocation. Items reject global flags; command-specific options such as `snapshot -i` stay in each item.
+Put global flags such as `--init-script` and `--enable` on the outer batch invocation. Keep command-specific options and literal command arguments inside each item.
+
+```bash
+agent-browser --enable react-devtools batch "open" "navigate data:text/html,<h1>hi</h1>"
+```
 
 With `--json --omit-command`, rows use a stable zero-based `index` field on success, failure, or `--bail`; default JSON output keeps the `command` field. This only removes command arrays and does not make output safe for secrets. Errors and response data are unchanged: `type` echoes typed text, and `get value`/`eval` may return input values. The MCP `agent_browser_batch` tool accepts `omitCommand: true`.
 

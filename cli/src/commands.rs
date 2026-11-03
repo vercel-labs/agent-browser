@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::io::{self, BufRead};
 
 use crate::color;
-use crate::flags::Flags;
+use crate::flags::{is_global_flag, Flags};
 use crate::validation::{is_valid_session_name, session_name_error};
 
 /// Error type for command parsing with contextual information
@@ -345,7 +345,20 @@ pub fn parse_cdp_headers(raw: &str) -> Result<Value, String> {
 /// Parses command arguments into normalized command data.
 /// Wait selector `--state` values are accepted only for selector waits.
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
-    let mut result = parse_command_inner(args, flags)?;
+    parse_command_with_batch_scope(args, flags, false)
+}
+
+/// Parses a batch item and rejects global flags that belong on the outer invocation.
+pub fn parse_batch_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
+    parse_command_with_batch_scope(args, flags, true)
+}
+
+fn parse_command_with_batch_scope(
+    args: &[String],
+    flags: &Flags,
+    batch_item: bool,
+) -> Result<Value, ParseError> {
+    let mut result = parse_command_inner(args, flags, batch_item)?;
 
     // Inject AGENT_BROWSER_DEFAULT_TIMEOUT into any wait-family command that
     // doesn't already carry an explicit timeout. Centralised here so that new
@@ -354,6 +367,18 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
     attach_ca_cert_to_launch_command(&mut result, flags);
 
     Ok(result)
+}
+
+fn reject_batch_global_flag(batch_item: bool, arg: &str) -> Result<(), ParseError> {
+    if batch_item && is_global_flag(arg) {
+        Err(ParseError::InvalidValue {
+            message: "Pass global flags on the outer batch invocation, not inside a batch item."
+                .to_string(),
+            usage: "[global flags] batch <commands...>",
+        })
+    } else {
+        Ok(())
+    }
 }
 
 /// Stamps `timeout` on a wait-family command that has none.
@@ -382,7 +407,11 @@ pub fn attach_ca_cert_to_launch_command(cmd: &mut Value, flags: &Flags) {
     }
 }
 
-fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
+fn parse_command_inner(
+    args: &[String],
+    flags: &Flags,
+    batch_item: bool,
+) -> Result<Value, ParseError> {
     if args.is_empty() {
         return Err(ParseError::MissingArguments {
             context: "".to_string(),
@@ -390,6 +419,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         });
     }
 
+    reject_batch_global_flag(batch_item, &args[0])?;
     let cmd = args[0].as_str();
     let rest: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
     let id = gen_id();
@@ -405,6 +435,9 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
         // === Navigation ===
         // Maps to "navigate" action in protocol; reflected in ACTION_CATEGORIES in action-policy.ts
         "open" | "goto" | "navigate" => {
+            for arg in &rest {
+                reject_batch_global_flag(batch_item, arg)?;
+            }
             // `open` without a URL launches the browser but stays on
             // about:blank. Lets agents set up routes, cookies, or init
             // scripts before the first real navigation (see `batch`).
@@ -913,7 +946,10 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         if_changed = true;
                         i += 1;
                     }
-                    arg => positional.push(arg),
+                    arg => {
+                        reject_batch_global_flag(batch_item, arg)?;
+                        positional.push(arg);
+                    }
                 }
                 i += 1;
             }
@@ -1018,7 +1054,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                         obj.insert("full".to_string(), json!(true));
                         obj.insert("delta".to_string(), json!(true));
                     }
-                    _ => {}
+                    _ => reject_batch_global_flag(batch_item, rest[i])?,
                 }
                 i += 1;
             }
