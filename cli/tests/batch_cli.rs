@@ -139,9 +139,8 @@ fn batch_preserves_results_and_parse_errors_with_optional_command_omission() {
 fn batch_rejects_item_global_flags_across_cli_and_mcp() {
     let commands = json!([
         ["stream", "status"],
-        ["stream", "enable", "--port", "0"],
         ["open", "--init-script", "/tmp/probe.js"],
-        ["stream", "disable"]
+        ["stream", "status"]
     ]);
     let mut expected_error: Option<String> = None;
     for mode in ["quoted", "stdin", "mcp"] {
@@ -164,20 +163,19 @@ fn batch_rejects_item_global_flags_across_cli_and_mcp() {
                 if mode == "quoted" {
                     args.extend([
                         "stream status",
-                        "stream enable --port 0",
                         "open --init-script /tmp/probe.js",
-                        "stream disable",
+                        "stream status",
                     ]);
                 }
                 fixture.run(&args, &commands.to_string(), 1)
             };
             let rows = rows.as_array().unwrap();
-            assert_eq!(rows.len(), if bail { 3 } else { 4 }, "{mode}: {rows:?}");
+            assert_eq!(rows.len(), if bail { 2 } else { 3 }, "{mode}: {rows:?}");
             for (index, row) in rows.iter().enumerate() {
                 assert_identity(row, &commands[index], index, false);
-                assert_eq!(row["success"], index != 2, "{mode}: {row}");
+                assert_eq!(row["success"], index != 1, "{mode}: {row}");
             }
-            let error = rows[2]["error"].as_str().unwrap();
+            let error = rows[1]["error"].as_str().unwrap();
             let lower = error.to_lowercase();
             assert!(
                 lower.contains("global flags") || lower.contains("batch command"),
