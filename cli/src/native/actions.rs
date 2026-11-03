@@ -2876,6 +2876,10 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             Some(mgr) => mgr.get_url().await.ok(),
             None => None,
         };
+        if state.flow.paste_pending == Some(seq) {
+            let value = flow_active_field_value(state).await;
+            state.flow.resolve_paste(seq, value);
+        }
         if state.flow.needs_traits == Some(seq) {
             if let Some(traits) = flow_active_field_traits(state).await {
                 state.flow.redact_if_secret(seq, &traits);
@@ -12364,6 +12368,20 @@ async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<V
         ));
     }
     Ok(response)
+}
+
+/// The focused field's current value, when the page exposes one.
+async fn flow_active_field_value(state: &DaemonState) -> Option<String> {
+    let mgr = state.browser.as_ref()?;
+    mgr.evaluate(
+        "(() => { const e = document.activeElement; \
+         return e && typeof e.value === 'string' ? e.value : null; })()",
+        None,
+    )
+    .await
+    .ok()?
+    .as_str()
+    .map(String::from)
 }
 
 /// What the focused element says about itself.

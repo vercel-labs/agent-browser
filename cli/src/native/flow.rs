@@ -50,6 +50,8 @@ pub struct FlowRecorder {
     /// running when the request started.
     pub request_tags: HashMap<String, u64>,
     pub current_seq: Option<u64>,
+    /// A paste whose value is read once the command has finished.
+    pub paste_pending: Option<u64>,
     /// Steps that put a value of unknown content into a secret field.
     pub unknown_secret_seqs: Vec<u64>,
     /// Keys pressed so far in the secret field that has focus.
@@ -352,6 +354,7 @@ impl FlowRecorder {
             // requests it tagged are not saved.
             if action != "keyup" {
                 self.unknown_secret_seqs.push(self.next_seq);
+                self.paste_pending = Some(self.next_seq);
                 self.reset_keys();
             }
             cmd["key"] = json!(REDACTED);
@@ -380,10 +383,27 @@ impl FlowRecorder {
                 if secret {
                     cmd["redacted"] = json!(true);
                     self.unknown_secret_seqs.push(self.next_seq);
+                    self.paste_pending = Some(self.next_seq);
                     self.reset_keys();
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The paste step has finished: the field's value, read from the page,
+    /// becomes a secret in full (any typed prefix included) and later keys
+    /// extend it. When the value cannot be read the step stays unknown and
+    /// the requests it tagged are dropped.
+    pub fn resolve_paste(&mut self, seq: u64, value: Option<String>) {
+        if self.paste_pending != Some(seq) {
+            return;
+        }
+        self.paste_pending = None;
+        if let Some(value) = value.filter(|v| !v.is_empty()) {
+            self.unknown_secret_seqs.retain(|s| *s != seq);
+            self.reset_keys();
+            self.set_key_buffer(value);
         }
     }
 
@@ -5302,5 +5322,116 @@ mod tests {
             None,
         );
         assert!(r.commands[1].1.get("redacted").is_none());
+    }
+
+    #[test]
+    fn a_pasted_password_is_registered_so_a_later_submit_does_not_save_it() {
+        let secret = traits("password", "", "");
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/login" }),
+            None,
+            None,
+        );
+        let paste = r
+            .begin_command(
+                "press",
+                &json!({ "action": "press", "key": "Control+v" }),
+                None,
+                Some(&secret),
+            )
+            .unwrap();
+        assert_eq!(r.paste_pending, Some(paste));
+        r.resolve_paste(paste, Some("pasted-value".to_string()));
+        assert!(r.secrets.contains(&"pasted-value".to_string()));
+        assert!(
+            r.unknown_secret_seqs.is_empty(),
+            "the value was read, so no fallback"
+        );
+        r.begin_command(
+            "click",
+            &json!({ "action": "click", "selector": "#submit" }),
+            None,
+            None,
+        );
+        r.tag_request("login");
+        r.tag_request("me");
+        let mut login = entry(
+            "login",
+            "https://api.example.com.ar/login",
+            "Fetch",
+            "application/json",
+            r#"{"ok":true}"#,
+        );
+        login.method = "POST".to_string();
+        login.post_data = Some(r#"{"password":"pasted-value"}"#.to_string());
+        let me = entry(
+            "me",
+            "https://api.example.com.ar/me",
+            "Fetch",
+            "application/json",
+            r#"{"name":"a"}"#,
+        );
+        let (flow, _) = build_flow(SaveInput {
+            name: "p",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &[login, me],
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        let text = serde_json::to_string(&flow).unwrap();
+        assert!(!text.contains("pasted-value"), "{text}");
+        assert!(!text.contains("api.example.com.ar/login"), "{text}");
+    }
+
+    #[test]
+    fn a_paste_with_a_prefix_registers_the_full_value_and_keeps_extending() {
+        let secret = traits("password", "", "");
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "press",
+            &json!({ "action": "press", "key": "a" }),
+            None,
+            Some(&secret),
+        );
+        let paste = r
+            .begin_command(
+                "press",
+                &json!({ "action": "press", "key": "Meta+v" }),
+                None,
+                Some(&secret),
+            )
+            .unwrap();
+        r.resolve_paste(paste, Some("apasted".to_string()));
+        r.begin_command(
+            "press",
+            &json!({ "action": "press", "key": "!" }),
+            None,
+            Some(&secret),
+        );
+        assert_eq!(r.secrets.last().unwrap(), "apasted!");
+    }
+
+    #[test]
+    fn an_unreadable_paste_keeps_the_fallback() {
+        let secret = traits("password", "", "");
+        let mut r = recorded(&[]);
+        let paste = r
+            .begin_command(
+                "press",
+                &json!({ "action": "press", "key": "Control+v" }),
+                None,
+                Some(&secret),
+            )
+            .unwrap();
+        r.resolve_paste(paste, None);
+        assert_eq!(r.unknown_secret_seqs, vec![paste]);
+        assert_eq!(r.paste_pending, None);
     }
 }
