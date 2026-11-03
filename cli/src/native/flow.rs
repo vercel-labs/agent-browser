@@ -194,8 +194,7 @@ impl FlowRecorder {
         let Some(field) = typed_field(&self.commands[i].1) else {
             return;
         };
-        let hint = traits.hint.to_lowercase();
-        if !(traits.is_secret() || SECRET_MARKERS.iter().any(|m| hint.contains(m))) {
+        if !traits.looks_secret() {
             return;
         }
         let Some(pos) = self.typed.iter().position(|(_, _, s)| *s == seq) else {
@@ -311,11 +310,7 @@ impl FlowRecorder {
     /// the step and joined to the keys before it, so a request carrying the
     /// whole value is dropped at save.
     fn record_key(&mut self, action: &str, cmd: &mut Value, traits: Option<&FieldTraits>) {
-        let secret = traits.is_some_and(|t| {
-            let hint = t.hint.to_lowercase();
-            t.is_secret() || SECRET_MARKERS.iter().any(|m| hint.contains(m))
-        });
-        if !secret {
+        if !traits.is_some_and(FieldTraits::looks_secret) {
             self.reset_keys();
             return;
         }
@@ -375,17 +370,11 @@ impl FlowRecorder {
                     self.add_secret(&text);
                 }
             }
-            Some("paste") => {
-                let secret = traits.is_some_and(|t| {
-                    let hint = t.hint.to_lowercase();
-                    t.is_secret() || SECRET_MARKERS.iter().any(|m| hint.contains(m))
-                });
-                if secret {
-                    cmd["redacted"] = json!(true);
-                    self.unknown_secret_seqs.push(self.next_seq);
-                    self.paste_pending = Some(self.next_seq);
-                    self.reset_keys();
-                }
+            Some("paste") if traits.is_some_and(FieldTraits::looks_secret) => {
+                cmd["redacted"] = json!(true);
+                self.unknown_secret_seqs.push(self.next_seq);
+                self.paste_pending = Some(self.next_seq);
+                self.reset_keys();
             }
             _ => {}
         }
@@ -437,6 +426,11 @@ impl FieldTraits {
         }
     }
 
+    /// A credential field by its type or autocomplete, or by what it is called.
+    fn looks_secret(&self) -> bool {
+        self.is_secret() || has_secret_marker(&self.hint)
+    }
+
     /// Fields whose value is a credential, whatever the page calls them.
     fn is_secret(&self) -> bool {
         let ac = self.autocomplete.trim().to_ascii_lowercase();
@@ -446,6 +440,11 @@ impl FieldTraits {
                     || t.starts_with("cc-")
             })
     }
+}
+
+fn has_secret_marker(text: &str) -> bool {
+    let text = text.to_lowercase();
+    SECRET_MARKERS.iter().any(|m| text.contains(m))
 }
 
 const SECRET_MARKERS: &[&str] = &[
@@ -499,9 +498,7 @@ fn redact_secret(cmd: &mut Value, traits: Option<&FieldTraits>) -> Option<String
         target.push_str(&t.hint);
     }
     let target = target.to_lowercase();
-    let secret =
-        traits.is_some_and(|t| t.is_secret()) || SECRET_MARKERS.iter().any(|m| target.contains(m));
-    if !secret {
+    if !(traits.is_some_and(|t| t.is_secret()) || has_secret_marker(&target)) {
         return None;
     }
     let original = obj.get(field)?.as_str()?.to_string();
@@ -570,22 +567,33 @@ const TELEMETRY_PATH_MARKERS: &[&str] = &[
     "/sentry",
 ];
 
-const DROPPED_HEADERS: &[&str] = &[
-    "cookie",
-    "host",
-    "content-length",
-    "connection",
-    "accept-encoding",
-    "authorization",
-    "proxy-authorization",
-];
+/// How a recorded request header is treated.
+#[derive(PartialEq)]
+enum HeaderClass {
+    /// Carries a credential the session supplies at run time. Never saved; a
+    /// request recorded with one may get a 401 or 403 over HTTP.
+    Credential,
+    /// Per-connection or session-owned. Never saved.
+    Dropped,
+    /// Set by the browser itself; saved, but not sent by an in-page fetch.
+    BrowserSet,
+    Kept,
+}
 
-/// Headers that carry credentials the session supplies at run time. A request
-/// recorded with one gets a 401 or 403 over HTTP when the site wants it back.
-fn is_sensitive_header(lower: &str) -> bool {
-    matches!(lower, "authorization" | "proxy-authorization")
-        || lower.contains("token")
-        || lower.contains("csrf")
+fn classify_header(name: &str) -> HeaderClass {
+    let lower = name.to_ascii_lowercase();
+    match lower.as_str() {
+        "authorization" | "proxy-authorization" => HeaderClass::Credential,
+        _ if lower.contains("token") || lower.contains("csrf") => HeaderClass::Credential,
+        "cookie" | "host" | "content-length" | "connection" | "accept-encoding" => {
+            HeaderClass::Dropped
+        }
+        "user-agent" | "referer" | "origin" | "accept-language" | "priority" | "dnt" => {
+            HeaderClass::BrowserSet
+        }
+        _ if lower.starts_with("sec-") => HeaderClass::BrowserSet,
+        _ => HeaderClass::Kept,
+    }
 }
 
 /// Registrable part of a host, close enough for first-party checks:
@@ -1266,11 +1274,9 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
                 if lower.starts_with(':') {
                     continue;
                 }
-                if DROPPED_HEADERS.contains(&lower.as_str())
-                    || lower.contains("token")
-                    || lower.contains("csrf")
-                {
-                    if is_sensitive_header(&lower) {
+                let class = classify_header(&lower);
+                if matches!(class, HeaderClass::Credential | HeaderClass::Dropped) {
+                    if class == HeaderClass::Credential {
                         stripped_auth = true;
                     }
                     if !dropped_headers.contains(&lower) && lower != "host" {
@@ -2843,18 +2849,10 @@ fn with_retry_after(mut result: TierResult, retry_after: Option<String>) -> Tier
 pub fn page_fetch_script(req: &PreparedRequest) -> String {
     // Headers the browser sets itself. Sending them as app headers turns the
     // request into a CORS preflight the site never allowed.
-    let browser_set = |k: &str| {
-        let k = k.to_ascii_lowercase();
-        k.starts_with("sec-")
-            || matches!(
-                k.as_str(),
-                "user-agent" | "referer" | "origin" | "accept-language" | "priority" | "dnt"
-            )
-    };
     let headers: Map<String, Value> = req
         .headers
         .iter()
-        .filter(|(k, _)| !browser_set(k))
+        .filter(|(k, _)| classify_header(k) != HeaderClass::BrowserSet)
         .map(|(k, v)| (k.clone(), json!(v)))
         .collect();
     let mut init = json!({
