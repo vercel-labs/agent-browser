@@ -118,9 +118,35 @@ impl Running {
         self.values.get(&key)
     }
 
-    /// Profile directory or name the session was started with, if any.
-    pub fn profile(&self) -> Option<String> {
-        self.str(Key::Profile)
+    pub(super) fn remove(&mut self, key: Key) {
+        self.values.remove(&key);
+    }
+
+    /// Stores a value from a plan and keeps the temporary env-seed fields in
+    /// step with it.
+    pub(super) fn assign(&mut self, key: Key, value: Value) {
+        match key {
+            Key::Extensions => {
+                let items: Vec<&str> = value
+                    .as_array()
+                    .map(|a| a.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                self.extensions_file = (!items.is_empty()).then(|| items.join(","));
+            }
+            Key::Headed => self.provider_headed = value.as_bool().unwrap_or(false),
+            _ => {}
+        }
+        self.values.insert(key, value);
+    }
+
+    /// Resets a setting to its default.
+    pub(super) fn unassign(&mut self, key: Key) {
+        match key {
+            Key::Extensions => self.extensions_file = None,
+            Key::Headed => self.provider_headed = false,
+            _ => {}
+        }
+        self.values.remove(&key);
     }
 
     fn str(&self, key: Key) -> Option<String> {
@@ -225,10 +251,6 @@ impl Running {
         self.bool(Key::HideScrollbars).unwrap_or(true)
     }
 
-    pub fn webgpu(&self) -> bool {
-        self.bool(Key::Webgpu).unwrap_or(false)
-    }
-
     pub fn webmcp(&self) -> bool {
         self.bool(Key::Webmcp).unwrap_or(true)
     }
@@ -262,18 +284,6 @@ impl Running {
 
     pub fn no_auto_dialog(&self) -> bool {
         self.bool(Key::NoAutoDialog).unwrap_or(false)
-    }
-
-    pub fn executable_path(&self) -> Option<String> {
-        self.str(Key::ExecutablePath)
-    }
-
-    pub fn proxy_username(&self) -> Option<String> {
-        self.str(Key::ProxyUsername)
-    }
-
-    pub fn proxy_password(&self) -> Option<String> {
-        self.str(Key::ProxyPassword)
     }
 
     /// Built-in init scripts such as `react-devtools`.

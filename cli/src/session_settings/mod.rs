@@ -2,20 +2,20 @@
 //! typed views the daemon reads.
 //!
 //! The module does no IO. `seed` is the one place that reads the environment,
-//! kept as a temporary shim until the patch rides on every command.
+//! kept as a temporary shim until the daemon stops being spawned with the
+//! settings in its environment.
 
-// The patch and the option table have no caller until the CLI sends the
-// patch. The running views and the seed are used by the daemon and stay
-// compiler-checked.
+// Accessors the tests use and the persistence class, which the secured store
+// reads in a later change, have no non-test caller yet.
 #[allow(dead_code)]
 mod patch;
+mod plan;
 mod proxy;
 mod running;
 mod seed;
 #[allow(dead_code)]
 mod spec;
 
-#[allow(unused_imports)]
 pub use patch::{Patch, Requested};
 pub use proxy::parse_proxy;
 #[cfg(test)]
@@ -26,7 +26,6 @@ pub use spec::{spec, spec_by_name, Effect, Key, Persist, Shape, Spec, SPECS};
 
 use std::fmt;
 
-#[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub enum SettingsError {
     NotAnObject,
