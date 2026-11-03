@@ -1378,7 +1378,7 @@ fn ffmpeg_launch_error(error: impl std::fmt::Display) -> String {
 /// This keeps missing-binary failures ahead of browser attachment while the
 /// real encoder process is deferred until that attachment succeeds.
 pub async fn check_ffmpeg_available() -> Result<(), String> {
-    let status = tokio::process::Command::new("ffmpeg")
+    let status = ffmpeg_command()
         .arg("-version")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
