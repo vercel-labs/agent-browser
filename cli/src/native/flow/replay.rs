@@ -365,8 +365,8 @@ impl Sender for ReplaySender<'_> {
         if self.run.is_none() {
             // A replay repeats every recorded command, so it also sends the
             // writes no kept request covers; each must be approved.
-            for w in replay_only_writes(self.flow) {
-                if let Err(reason) = self.runner.write_approved(&w) {
+            for w in self.flow.replay_only_writes() {
+                if let Err(reason) = self.runner.write_approved(w) {
                     return fail(Failure::unavailable(format!(
                         "replaying the recorded commands would also send {} {} ({}): {}",
                         w.method, w.url, w.id, reason

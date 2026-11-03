@@ -2815,7 +2815,7 @@ fn policy_actions_for_command(
         actions.push("navigate".to_string());
     }
     if let Some(flow) = flow.filter(|_| action == "flow_run") {
-        actions.extend(super::flow::request_writes(flow).iter().map(|w| w.action()));
+        actions.extend(flow.run_writes().iter().map(|w| w.action()));
     }
     if action == "auth_login" {
         if let Some(provider) = cmd.get("credentialProvider").and_then(|v| v.as_str()) {
@@ -12117,7 +12117,7 @@ fn uncovered_flow_write<'a>(
     allow: &super::flow::AllowWrite,
     confirmed: &HashSet<String>,
 ) -> Option<&'a super::flow::Write> {
-    super::flow::request_writes(flow)
+    flow.run_writes()
         .into_iter()
         .find(|w| !allow.covers(&w.id) && !confirmed.contains(&w.action()))
 }
@@ -12130,7 +12130,7 @@ fn unconfirmed_flow_write(
     state: &DaemonState,
 ) -> Option<String> {
     let allow = super::flow::AllowWrite::parse(cmd.get("allowWrite")).ok()?;
-    super::flow::check_write_ids(flow, &allow).ok()?;
+    allow.check(flow).ok()?;
     uncovered_flow_write(flow, &allow, &state.confirmed_policy_actions).map(|w| w.action())
 }
 
@@ -12164,7 +12164,7 @@ async fn handle_flow_run_inner(
     let params = super::flow::parse_params(cmd)?;
     let requests = super::flow::prepare(&flow, &params)?;
     let allow = super::flow::AllowWrite::parse(cmd.get("allowWrite"))?;
-    super::flow::check_write_ids(&flow, &allow)?;
+    allow.check(&flow)?;
     if let Some(w) = uncovered_flow_write(&flow, &allow, &state.confirmed_policy_actions) {
         return Err(format!(
             "flow '{}' sends {} {} ({}); rerun with --allow-write {} to send it",

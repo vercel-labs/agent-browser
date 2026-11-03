@@ -1,7 +1,7 @@
 //! Saved flows: record a task once in the browser, then replay its
 //! first-party API requests directly over HTTP.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -613,7 +613,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
     );
     let given = with_page_query_params(&start, &policy, &explicit_and_typed, input.entries);
 
-    let mut steps = Vec::new();
+    let mut steps: Vec<Step> = Vec::new();
     let mut gaps = Vec::new();
     let mut dropped_headers: Vec<String> = Vec::new();
     let mut request_ids: Vec<String> = Vec::new();
@@ -627,7 +627,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
             .iter()
             .filter(|e| input.recorder.request_tags.get(&e.request_id) == Some(seq))
             .collect();
-        let mut requests = Vec::new();
+        let mut requests: Vec<Request> = Vec::new();
         let mut seen = Vec::new();
         for (e, parsed, extract) in candidates(&tagged, &policy) {
             if carries_secret(e, &input.recorder.secrets)
@@ -655,7 +655,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
             }
             seen.push(key);
             let body_len = serde_json::to_string(&parsed).map(|t| t.len()).unwrap_or(0);
-            let mut headers = Map::new();
+            let mut headers = BTreeMap::new();
             let mut stripped_auth = false;
             for (k, v) in &e.request_headers {
                 let lower = k.to_ascii_lowercase();
@@ -672,7 +672,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
                     }
                     continue;
                 }
-                headers.insert(k.clone(), json!(templatize(v, &given, false)));
+                headers.insert(k.clone(), templatize(v, &given, false));
             }
             let item_fields = item_fields(&parsed);
             let id = format!("s{}r{}", index + 1, requests.len() + 1);
@@ -682,22 +682,23 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
             }
             request_ids.push(id.clone());
             har_ids.insert(id.clone(), e.request_id.clone());
-            requests.push(json!({
-                "id": id,
-                "method": e.method,
-                "url": templatize(&e.url, &given, true),
-                "headers": headers,
-                "body": e.post_data.as_deref().map(|b| templatize(b, &given, false)),
-                "expect": {
-                    "status": e.status,
-                    "mime": e.mime_type,
-                    "signature": signature(&parsed),
-                    "bytes": body_len,
-                    "itemFields": item_fields,
-                    "extract": extract,
-                    "strippedAuth": stripped_auth,
+            requests.push(Request {
+                id,
+                method: e.method.clone(),
+                url: templatize(&e.url, &given, true),
+                headers,
+                body: e.post_data.as_deref().map(|b| templatize(b, &given, false)),
+                tier: None,
+                expect: Expect {
+                    status: e.status.map(|s| s as u16),
+                    mime: e.mime_type.clone(),
+                    signature: signature(&parsed),
+                    bytes: body_len as u64,
+                    item_fields,
+                    extract,
+                    stripped_auth,
                 },
-            }));
+            });
         }
         let action = cmd.get("action").and_then(|a| a.as_str()).unwrap_or("");
         let interactive = matches!(
@@ -728,12 +729,12 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
                 json!({ "step": index + 1, "command": describe_command(cmd), "reason": reason }),
             );
         }
-        steps.push(json!({
-            "seq": seq,
-            "ok": input.recorder.is_ok(*seq),
-            "command": cmd,
-            "requests": requests,
-        }));
+        steps.push(Step {
+            seq: *seq,
+            ok: input.recorder.is_ok(*seq),
+            command: cmd.clone(),
+            requests,
+        });
     }
 
     if request_ids.is_empty() {
@@ -747,66 +748,85 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
         .and_then(|u| u.path_segments().map(|p| p.map(String::from).collect()))
         .unwrap_or_default();
     let links = link_requests(&mut steps, &bodies, &har_ids, &page_segments, &given);
-    let mut params: Vec<Value> = given
+    let mut params: Vec<Param> = given
         .iter()
         .map(|(k, v)| {
             if input.params.iter().any(|(n, _)| n == k) {
-                json!({ "name": k, "example": v, "source": "typed" })
+                Param {
+                    name: k.clone(),
+                    example: Some(v.clone()),
+                    source: ParamSource::Typed,
+                    from: None,
+                }
             } else if typed.iter().any(|(n, _)| n == k) {
-                json!({ "name": k, "source": "typed" })
+                Param {
+                    name: k.clone(),
+                    example: None,
+                    source: ParamSource::Typed,
+                    from: None,
+                }
             } else {
-                json!({ "name": k, "example": v, "source": "query", "from": { "pageQuery": k } })
+                Param {
+                    name: k.clone(),
+                    example: Some(v.clone()),
+                    source: ParamSource::Query,
+                    from: Some(ParamFrom {
+                        page_query: Some(k.clone()),
+                        ..ParamFrom::default()
+                    }),
+                }
             }
         })
         .collect();
     for (name, _) in &typed {
         if !given.iter().any(|(n, _)| n == name) {
-            params.push(json!({ "name": name, "source": "typed" }));
+            params.push(Param {
+                name: name.clone(),
+                example: None,
+                source: ParamSource::Typed,
+                from: None,
+            });
         }
     }
-    params.extend(links.params.iter().cloned().map(|mut p| {
-        p["source"] = json!("response");
-        p
-    }));
+    params.extend(links.params);
     let output = match input.output {
         Some(id) if request_ids.iter().any(|r| r == id) => id.to_string(),
         Some(id) => return Err(format!("unknown request id '{}' for --output", id)),
         None => default_output(&steps),
     };
 
-    let flow_json = json!({
-        "version": FLOW_VERSION,
-        "name": input.name,
-        "origin": host,
-        "startUrl": start,
-        "allowedHosts": policy.hosts(),
-        "createdAt": input.created_at,
-        "createdBy": { "tool": "agent-browser", "version": env!("CARGO_PKG_VERSION") },
-        "description": input.description,
-        "redactedSteps": commands
+    let item_fields = steps
+        .iter()
+        .flat_map(|s| s.requests.iter())
+        .find(|r| r.id == output)
+        .map(|r| r.expect.item_fields.clone())
+        .unwrap_or_default();
+    let flow = Flow {
+        version: FLOW_VERSION,
+        name: input.name.to_string(),
+        origin: host.clone(),
+        start_url: start.clone(),
+        allowed_hosts: policy.hosts().to_vec(),
+        created_at: input.created_at.clone(),
+        created_by: Some(CreatedBy {
+            tool: "agent-browser".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }),
+        description: input.description.map(String::from),
+        redacted_steps: commands
             .iter()
             .enumerate()
             .filter(|(_, (_, c))| c["redacted"] == true)
             .map(|(i, _)| i + 1)
-            .collect::<Vec<_>>(),
-        "params": params,
-        "output": output,
-        "itemFields": steps
-            .iter()
-            .flat_map(|s| s["requests"].as_array().into_iter().flatten())
-            .find(|r| r["id"] == output.as_str())
-            .map(|r| r["expect"]["itemFields"].clone())
-            .unwrap_or(json!([])),
-        "provenance": "observed",
-        "writes": [],
-        "verifiedAt": Value::Null,
-        "steps": steps,
-    });
-
-    let mut flow: Flow = serde_json::from_value(flow_json)
-        .map_err(|e| format!("the flow could not be built: {}", e))?;
-    let writes = collect_writes(&input, &policy, &given, &har_ids);
-    flow.writes = writes;
+            .collect(),
+        params,
+        output: output.clone(),
+        item_fields,
+        provenance: "observed".to_string(),
+        verified_at: None,
+        writes: collect_writes(&input, &policy, &given, &har_ids),
+        steps,
+    };
 
     let requests_report: Vec<Value> = flow
         .requests()
@@ -826,12 +846,8 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
         "steps": input.commands.len(),
         "requests": requests_report,
         "output": output,
-        "params": params.iter().map(|p| p["name"].clone()).collect::<Vec<_>>(),
-        "detectedParams": params
-            .iter()
-            .filter(|p| p.get("from").is_some())
-            .cloned()
-            .collect::<Vec<_>>(),
+        "params": flow.params.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
+        "detectedParams": flow.params.iter().filter(|p| p.from.is_some()).collect::<Vec<_>>(),
         "references": links.references,
         "writes": flow.writes,
         "gaps": gaps,
@@ -847,16 +863,16 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
 
 struct Links {
     /// Values that came from an item of an earlier list: the agent picks one.
-    params: Vec<Value>,
+    params: Vec<Param>,
     /// Values that came from a single field of an earlier response: filled in
     /// at run time from that response.
     references: Vec<Value>,
 }
 
 /// Values a request sends: query values, path segments and JSON body scalars.
-fn sent_values(req: &Value) -> Vec<String> {
+fn sent_values(req: &Request) -> Vec<String> {
     let mut out = Vec::new();
-    if let Ok(url) = url::Url::parse(req["url"].as_str().unwrap_or("")) {
+    if let Ok(url) = url::Url::parse(&req.url) {
         out.extend(url.query_pairs().map(|(_, v)| v.into_owned()));
         if let Some(segs) = url.path_segments() {
             out.extend(segs.map(|s| {
@@ -866,8 +882,9 @@ fn sent_values(req: &Value) -> Vec<String> {
             }));
         }
     }
-    if let Some(body) = req["body"]
-        .as_str()
+    if let Some(body) = req
+        .body
+        .as_deref()
         .and_then(|b| serde_json::from_str::<Value>(b).ok())
     {
         collect_scalars(&body, &mut out);
@@ -893,6 +910,16 @@ fn looks_generated(v: &str) -> bool {
     let mixed_case =
         v.chars().any(|c| c.is_ascii_uppercase()) && v.chars().any(|c| c.is_ascii_lowercase());
     v.chars().count() >= 6 && (v.chars().any(|c| c.is_ascii_digit()) || mixed_case)
+}
+
+/// Replace a value, plain or URL-encoded, with a placeholder.
+fn replace_value(text: &str, value: &str, placeholder: &str) -> String {
+    let encoded = urlencoding::encode(value).into_owned();
+    replace_token(
+        &replace_token(text, &encoded, placeholder),
+        value,
+        placeholder,
+    )
 }
 
 /// Replace `needle` only where it stands alone, not inside a longer word:
@@ -939,7 +966,7 @@ fn find_value(body: &Value, needle: &str, path: &str) -> Option<(String, bool)> 
 }
 
 fn link_requests(
-    steps: &mut [Value],
+    steps: &mut [Step],
     bodies: &[(String, Value)],
     har_ids: &HashMap<String, String>,
     page_segments: &[String],
@@ -954,17 +981,13 @@ fn link_requests(
     // from any response that came before it.
     let rank: HashMap<String, usize> = steps
         .iter()
-        .flat_map(|s| s["requests"].as_array().into_iter().flatten())
-        .filter_map(|r| r["id"].as_str())
+        .flat_map(|s| s.requests.iter())
         .enumerate()
-        .map(|(i, id)| (id.to_string(), i))
+        .map(|(i, r)| (r.id.clone(), i))
         .collect();
     for step in steps.iter_mut() {
-        let Some(requests) = step["requests"].as_array_mut() else {
-            continue;
-        };
-        for req in requests.iter_mut() {
-            let id = req["id"].as_str().unwrap_or("").to_string();
+        for req in step.requests.iter_mut() {
+            let id = req.id.clone();
             let own = rank.get(&id).copied().unwrap_or(0);
             let earlier: Vec<(String, Value)> = bodies
                 .iter()
@@ -1007,22 +1030,31 @@ fn link_requests(
                         })
                         .filter(|f| !f.is_empty())
                         .unwrap_or_else(|| "value".to_string());
-                    let name = match links.params.iter().find(|p| p["example"] == value.as_str()) {
-                        Some(p) => p["name"].as_str().unwrap_or("").to_string(),
+                    let name = match links
+                        .params
+                        .iter()
+                        .find(|p| p.example.as_deref() == Some(value.as_str()))
+                    {
+                        Some(p) => p.name.clone(),
                         None => {
                             let mut name = field.clone();
                             let mut n = 2;
-                            while links.params.iter().any(|p| p["name"] == name.as_str())
+                            while links.params.iter().any(|p| p.name == name)
                                 || given.iter().any(|(k, _)| *k == name)
                             {
                                 name = format!("{}{}", field, n);
                                 n += 1;
                             }
-                            links.params.push(json!({
-                                "name": name,
-                                "example": value,
-                                "from": { "request": from, "list": path },
-                            }));
+                            links.params.push(Param {
+                                name: name.clone(),
+                                example: Some(value.clone()),
+                                source: ParamSource::Response,
+                                from: Some(ParamFrom {
+                                    request: Some(from.clone()),
+                                    list: Some(path.clone()),
+                                    ..ParamFrom::default()
+                                }),
+                            });
                             name
                         }
                     };
@@ -1033,17 +1065,11 @@ fn link_requests(
                         .push(json!({ "request": id, "from": from, "path": path }));
                     format!("{{{{@{}.{}}}}}", from, path)
                 };
-                for key in ["url", "body"] {
-                    if let Some(text) = req[key].as_str() {
-                        let encoded = urlencoding::encode(&value).into_owned();
-                        let replaced = replace_token(
-                            &replace_token(text, &encoded, &placeholder),
-                            &value,
-                            &placeholder,
-                        );
-                        req[key] = json!(replaced);
-                    }
-                }
+                req.url = replace_value(&req.url, &value, &placeholder);
+                req.body = req
+                    .body
+                    .as_deref()
+                    .map(|b| replace_value(b, &value, &placeholder));
             }
         }
     }
@@ -1133,25 +1159,19 @@ fn item_fields(body: &Value) -> Vec<String> {
 
 /// The request the flow answers with when the agent does not pick one: the
 /// largest response among requests that use a param, else the largest.
-fn default_output(steps: &[Value]) -> String {
-    let requests: Vec<&Value> = steps
-        .iter()
-        .flat_map(|s| s["requests"].as_array().into_iter().flatten())
-        .collect();
-    let uses_param = |r: &&Value| {
-        r["url"].as_str().unwrap_or("").contains("{{")
-            || r["body"].as_str().unwrap_or("").contains("{{")
-    };
-    let pool: Vec<&Value> = if requests.iter().any(uses_param) {
+fn default_output(steps: &[Step]) -> String {
+    let requests: Vec<&Request> = steps.iter().flat_map(|s| s.requests.iter()).collect();
+    let uses_param =
+        |r: &&Request| r.url.contains("{{") || r.body.as_deref().is_some_and(|b| b.contains("{{"));
+    let pool: Vec<&Request> = if requests.iter().any(uses_param) {
         requests.iter().copied().filter(uses_param).collect()
     } else {
         requests
     };
     pool.iter()
-        .max_by_key(|r| r["expect"]["bytes"].as_u64().unwrap_or(0))
-        .and_then(|r| r["id"].as_str())
+        .max_by_key(|r| r.expect.bytes)
+        .map(|r| r.id.clone())
         .unwrap_or_default()
-        .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1734,33 +1754,25 @@ fn collect_writes(
     writes
 }
 
-/// The writes a run sends over HTTP or from the page: the ones among the
-/// requests the output needs. Each must be allowed or confirmed first.
-pub fn request_writes(flow: &Flow) -> Vec<&Write> {
-    let needed = dependencies(flow, &flow.output);
-    flow.writes
-        .iter()
-        .filter(|w| needed.contains(&w.id))
-        .collect()
-}
+impl Flow {
+    /// The writes a run sends over HTTP or from the page: the ones among the
+    /// requests the output needs. Each must be allowed or confirmed first.
+    pub fn run_writes(&self) -> Vec<&Write> {
+        let needed = dependencies(self, &self.output);
+        self.writes
+            .iter()
+            .filter(|w| needed.contains(&w.id))
+            .collect()
+    }
 
-/// Writes the command replay would send beyond the ones a run sends itself.
-pub fn replay_only_writes(flow: &Flow) -> Vec<Write> {
-    let own = request_writes(flow);
-    flow.writes
-        .iter()
-        .filter(|w| !own.iter().any(|o| o.id == w.id))
-        .cloned()
-        .collect()
-}
-
-/// Ids of every write the recording caused.
-pub fn all_write_ids(flow: &Flow) -> Vec<String> {
-    flow.writes.iter().map(|w| w.id.clone()).collect()
-}
-
-pub fn is_flow_write(flow: &Flow, id: &str) -> bool {
-    flow.write(id).is_some()
+    /// Writes the command replay would send beyond the ones a run sends itself.
+    pub fn replay_only_writes(&self) -> Vec<&Write> {
+        let own = self.run_writes();
+        self.writes
+            .iter()
+            .filter(|w| !own.iter().any(|o| o.id == w.id))
+            .collect()
+    }
 }
 
 /// Which writes `--allow-write` covers: `all`, or a list of write ids.
@@ -1801,25 +1813,25 @@ impl AllowWrite {
     pub fn covers(&self, id: &str) -> bool {
         self.all || self.ids.iter().any(|i| i == id)
     }
-}
 
-/// Check that an id names a write of this flow.
-pub fn check_write_ids(flow: &Flow, allow: &AllowWrite) -> Result<(), String> {
-    for id in &allow.ids {
-        if !is_flow_write(flow, id) {
-            let known: Vec<&str> = flow.writes.iter().map(|w| w.id.as_str()).collect();
-            return Err(format!(
-                "--allow-write names '{}', which is not a write of this flow. Writes: {}",
-                id,
-                if known.is_empty() {
-                    "none".to_string()
-                } else {
-                    known.join(", ")
-                }
-            ));
+    /// Every id given must name a write of the flow.
+    pub fn check(&self, flow: &Flow) -> Result<(), String> {
+        for id in &self.ids {
+            if flow.write(id).is_none() {
+                let known: Vec<&str> = flow.writes.iter().map(|w| w.id.as_str()).collect();
+                return Err(format!(
+                    "--allow-write names '{}', which is not a write of this flow. Writes: {}",
+                    id,
+                    if known.is_empty() {
+                        "none".to_string()
+                    } else {
+                        known.join(", ")
+                    }
+                ));
+            }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 pub fn is_write(method: &str, body: Option<&str>) -> bool {
@@ -2537,7 +2549,7 @@ mod tests {
         assert_eq!(writes[0]["url"], "https://www.example.com.ar/cart?x=1");
         assert_eq!(writes[0]["id"], "s2w1");
         assert!(
-            replay_only_writes(&flow_of(flow.clone())).len() == 1
+            flow_of(flow.clone()).replay_only_writes().len() == 1
                 && write_ids(&flow_of(flow.clone())).is_empty()
         );
     }
@@ -2948,7 +2960,7 @@ mod tests {
         assert!(AllowWrite::parse(Some(&json!(true))).is_err());
         let flow =
             flow_of(json!({ "writes": [{ "id": "s1r2", "method": "POST", "kind": "explicit" }] }));
-        assert!(check_write_ids(&flow, &some).unwrap_err().contains("s3w1"));
+        assert!(some.check(&flow).unwrap_err().contains("s3w1"));
     }
 
     fn traits(input_type: &str, autocomplete: &str, hint: &str) -> FieldTraits {
@@ -3157,9 +3169,10 @@ mod tests {
             ]
         }));
         assert_eq!(write_ids(&only_output), vec!["s2r1"]);
-        let replay: Vec<String> = replay_only_writes(&only_output)
-            .into_iter()
-            .map(|w| w.id)
+        let replay: Vec<&str> = only_output
+            .replay_only_writes()
+            .iter()
+            .map(|w| w.id.as_str())
             .collect();
         assert_eq!(replay, vec!["s1r1", "s3w1"]);
     }
@@ -4142,7 +4155,7 @@ mod tests {
     }
 
     fn write_ids(flow: &Flow) -> Vec<String> {
-        request_writes(flow).iter().map(|w| w.id.clone()).collect()
+        flow.run_writes().iter().map(|w| w.id.clone()).collect()
     }
 
     fn flow_with_request(tier: Option<&str>, write: bool) -> Flow {

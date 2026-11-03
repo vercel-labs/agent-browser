@@ -27,7 +27,7 @@ impl WriteLedger {
     /// The replay repeated every recorded command, writes included.
     pub fn replay_ran(&mut self, flow: &Flow) {
         self.replayed = true;
-        self.sent.extend(all_write_ids(flow));
+        self.sent.extend(flow.writes.iter().map(|w| w.id.clone()));
     }
 
     pub fn already_sent(&self, id: &str) -> bool {
@@ -36,9 +36,10 @@ impl WriteLedger {
 
     /// A write the replay would repeat that this run already sent.
     pub fn first_repeated_by_replay(&self, flow: &Flow) -> Option<String> {
-        all_write_ids(flow)
-            .into_iter()
-            .find(|id| self.sent.contains(id))
+        flow.writes
+            .iter()
+            .find(|w| self.sent.contains(&w.id))
+            .map(|w| w.id.clone())
     }
 }
 
