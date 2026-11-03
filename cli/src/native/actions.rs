@@ -12389,7 +12389,10 @@ async fn flow_field_traits(
     cmd: &Value,
     state: &DaemonState,
 ) -> Option<super::flow::FieldTraits> {
-    let is_text_entry = matches!(action, "inserttext" | "press" | "keydown" | "keyup")
+    let pastes =
+        action == "clipboard" && cmd.get("operation").and_then(|v| v.as_str()) == Some("paste");
+    let is_text_entry = pastes
+        || matches!(action, "inserttext" | "press" | "keydown" | "keyup")
         || (action == "keyboard"
             && matches!(
                 cmd.get("subaction").and_then(|v| v.as_str()),

@@ -50,6 +50,8 @@ pub struct FlowRecorder {
     /// running when the request started.
     pub request_tags: HashMap<String, u64>,
     pub current_seq: Option<u64>,
+    /// Steps that put a value of unknown content into a secret field.
+    pub unknown_secret_seqs: Vec<u64>,
     /// Keys pressed so far in the secret field that has focus.
     key_buffer: String,
     /// The last entry of `secrets` is the current `key_buffer`.
@@ -133,6 +135,8 @@ impl FlowRecorder {
             self.secrets.push(secret);
         } else if is_key {
             self.record_key(action, &mut recorded, traits);
+        } else if action == "clipboard" {
+            self.record_clipboard(&mut recorded, traits);
         } else if let Some(field) = typed_field(&recorded) {
             self.keep_typed_as_param(&mut recorded, field, traits);
         }
@@ -316,28 +320,70 @@ impl FlowRecorder {
         let Some(key) = cmd["key"].as_str().map(String::from) else {
             return;
         };
-        let last = key.rsplit('+').next().unwrap_or("").to_string();
-        if last.chars().count() == 1 || key.chars().count() == 1 {
-            let ch = if key.chars().count() == 1 {
-                key.clone()
-            } else {
-                last
-            };
+        let (mods, last): (Vec<String>, String) = if key == "+" {
+            (Vec::new(), key.clone())
+        } else {
+            let mut parts: Vec<&str> = key.split('+').collect();
+            let last = parts.pop().unwrap_or("").to_string();
+            (parts.iter().map(|m| m.to_ascii_lowercase()).collect(), last)
+        };
+        // Only a bare key or Shift plus a key adds a character.
+        let plain = mods.iter().all(|m| m == "shift");
+        let has = |names: &[&str]| mods.iter().any(|m| names.contains(&m.as_str()));
+        let paste = (has(&["control", "ctrl", "meta", "command", "cmd"])
+            && last.eq_ignore_ascii_case("v"))
+            || (has(&["shift"]) && last.eq_ignore_ascii_case("insert"));
+        if plain && last.chars().count() == 1 {
             if action != "keyup" {
                 let mut buffer = self.key_buffer.clone();
-                buffer.push_str(&ch);
+                buffer.push_str(&last);
                 self.set_key_buffer(buffer);
             }
             cmd["key"] = json!(REDACTED);
             cmd["redacted"] = json!(true);
-        } else if last == "Backspace" {
+        } else if plain && last == "Backspace" {
             if action != "keyup" {
                 let mut buffer = self.key_buffer.clone();
                 buffer.pop();
                 self.set_key_buffer(buffer);
             }
+        } else if paste {
+            // The pasted value is unknown, so the step is redacted and the
+            // requests it tagged are not saved.
+            if action != "keyup" {
+                self.unknown_secret_seqs.push(self.next_seq);
+                self.reset_keys();
+            }
+            cmd["key"] = json!(REDACTED);
+            cmd["redacted"] = json!(true);
         } else if action != "keyup" {
             self.reset_keys();
+        }
+    }
+
+    /// `clipboard write` text is a secret; a `clipboard paste` into a secret
+    /// field puts an unknown value there.
+    fn record_clipboard(&mut self, cmd: &mut Value, traits: Option<&FieldTraits>) {
+        match cmd["operation"].as_str() {
+            Some("write") => {
+                if let Some(text) = cmd["text"].as_str().map(String::from) {
+                    cmd["text"] = json!(REDACTED);
+                    cmd["redacted"] = json!(true);
+                    self.add_secret(&text);
+                }
+            }
+            Some("paste") => {
+                let secret = traits.is_some_and(|t| {
+                    let hint = t.hint.to_lowercase();
+                    t.is_secret() || SECRET_MARKERS.iter().any(|m| hint.contains(m))
+                });
+                if secret {
+                    cmd["redacted"] = json!(true);
+                    self.unknown_secret_seqs.push(self.next_seq);
+                    self.reset_keys();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1146,13 +1192,15 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
         let mut requests = Vec::new();
         let mut seen = Vec::new();
         for (e, parsed, extract) in candidates(&tagged, &base) {
-            if carries_secret(e, &input.recorder.secrets) {
+            if carries_secret(e, &input.recorder.secrets)
+                || input.recorder.unknown_secret_seqs.contains(seq)
+            {
                 if !secret_requests.contains(&e.request_id) {
                     secret_requests.push(e.request_id.clone());
                     gaps.push(json!({
                         "step": index + 1,
                         "command": describe_command(cmd),
-                        "reason": "a request sent a value typed into a secret field, so it was not saved",
+                        "reason": "a request may carry a value typed or pasted into a secret field, so it was not saved",
                     }));
                 }
                 continue;
@@ -2205,7 +2253,10 @@ fn collect_writes(
             .iter()
             .filter(|e| input.recorder.request_tags.get(&e.request_id) == Some(seq))
         {
-            if carries_secret(e, &input.recorder.secrets) || is_telemetry(&e.url) {
+            if carries_secret(e, &input.recorder.secrets)
+                || input.recorder.unknown_secret_seqs.contains(seq)
+                || is_telemetry(&e.url)
+            {
                 continue;
             }
             let kept = har_ids
@@ -5111,5 +5162,145 @@ mod tests {
             "the login request is dropped"
         );
         assert_eq!(flow["steps"][1]["command"]["key"], REDACTED);
+    }
+
+    #[test]
+    fn modifier_chords_do_not_join_the_secret_buffer() {
+        let secret = traits("password", "", "");
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "press",
+            &json!({ "action": "press", "key": "Control+a" }),
+            None,
+            Some(&secret),
+        );
+        for ch in "hunter2".chars() {
+            r.begin_command(
+                "press",
+                &json!({ "action": "press", "key": ch.to_string() }),
+                None,
+                Some(&secret),
+            );
+        }
+        assert_eq!(r.secrets, vec!["hunter2".to_string()]);
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "press",
+            &json!({ "action": "press", "key": "Meta+v" }),
+            None,
+            Some(&secret),
+        );
+        r.begin_command(
+            "press",
+            &json!({ "action": "press", "key": "x" }),
+            None,
+            Some(&secret),
+        );
+        assert_eq!(r.secrets, vec!["x".to_string()]);
+        // Shift is a plain character modifier.
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "press",
+            &json!({ "action": "press", "key": "Shift+H" }),
+            None,
+            Some(&secret),
+        );
+        assert_eq!(r.secrets, vec!["H".to_string()]);
+    }
+
+    #[test]
+    fn a_paste_into_a_secret_field_redacts_the_step_and_drops_what_it_tagged() {
+        let secret = traits("password", "", "");
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/login" }),
+            None,
+            None,
+        );
+        r.begin_command(
+            "press",
+            &json!({ "action": "press", "key": "Control+v" }),
+            None,
+            Some(&secret),
+        );
+        r.tag_request("login");
+        r.tag_request("me");
+        let mut login = entry(
+            "login",
+            "https://api.example.com.ar/login",
+            "Fetch",
+            "application/json",
+            r#"{"ok":true}"#,
+        );
+        login.method = "POST".to_string();
+        login.post_data = Some(r#"{"password":"pasted-value"}"#.to_string());
+        let me = entry(
+            "me",
+            "https://api.example.com.ar/me",
+            "Fetch",
+            "application/json",
+            r#"{"name":"a"}"#,
+        );
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/" }),
+            None,
+            None,
+        );
+        r.tag_request("home");
+        let home = entry(
+            "home",
+            "https://api.example.com.ar/home",
+            "Fetch",
+            "application/json",
+            r#"{"items":[1]}"#,
+        );
+        let (flow, report) = build_flow(SaveInput {
+            name: "p",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &[login, me, home],
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        let text = serde_json::to_string(&flow).unwrap();
+        assert!(!text.contains("pasted-value"));
+        assert_eq!(flow["steps"][1]["command"]["key"], REDACTED);
+        assert_eq!(flow["steps"][1]["requests"], json!([]));
+        assert!(
+            report["gaps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|g| g["step"] == 2),
+            "{report}"
+        );
+        assert_eq!(flow["steps"][2]["requests"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn clipboard_write_text_is_a_secret() {
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "clipboard",
+            &json!({ "action": "clipboard", "operation": "write", "text": "s3cret-token" }),
+            None,
+            None,
+        );
+        assert_eq!(r.commands[0].1["text"], REDACTED);
+        assert_eq!(r.commands[0].1["redacted"], true);
+        assert_eq!(r.secrets, vec!["s3cret-token".to_string()]);
+        r.begin_command(
+            "clipboard",
+            &json!({ "action": "clipboard", "operation": "read" }),
+            None,
+            None,
+        );
+        assert!(r.commands[1].1.get("redacted").is_none());
     }
 }
