@@ -2804,6 +2804,15 @@ fn policy_actions_for_command(
     if action == "a11y" && cmd.get("url").and_then(|v| v.as_str()).is_some() {
         actions.push("navigate".to_string());
     }
+    if action == "flow_run" {
+        if let Some(flow) = flow_for_command(cmd) {
+            actions.extend(
+                super::flow::request_write_ids(&flow)
+                    .iter()
+                    .map(|id| super::flow::write_policy_action(id)),
+            );
+        }
+    }
     if action == "auth_login" {
         if let Some(provider) = cmd.get("credentialProvider").and_then(|v| v.as_str()) {
             let plugins = plugins_from_command_or_env(cmd);
@@ -3109,6 +3118,27 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                     });
                 }
             }
+        }
+    }
+
+    // A write `--allow-write` does not cover needs an explicit confirmation,
+    // whatever the policy file and --confirm-actions say.
+    if action == "flow_run" {
+        if let Some(policy_action) = unconfirmed_flow_write(cmd, state) {
+            state.pending_confirmation = Some(PendingConfirmation {
+                action: policy_action.clone(),
+                cmd: cmd.clone(),
+                approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
+            });
+            return json!({
+                "id": id,
+                "success": true,
+                "data": {
+                    "confirmation_required": true,
+                    "confirmation_id": id,
+                    "action": policy_action,
+                },
+            });
         }
     }
 
@@ -12075,6 +12105,25 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     Ok(report)
 }
 
+fn flow_for_command(cmd: &Value) -> Option<Value> {
+    let name = cmd.get("name").and_then(|v| v.as_str())?;
+    super::flow::load_flow(name, cmd.get("origin").and_then(|v| v.as_str())).ok()
+}
+
+/// The first write of the flow that `--allow-write` does not cover and no
+/// confirmation has approved yet, as its policy action.
+fn unconfirmed_flow_write(cmd: &Value, state: &DaemonState) -> Option<String> {
+    let flow = flow_for_command(cmd)?;
+    let allow = super::flow::AllowWrite::parse(cmd.get("allowWrite")).ok()?;
+    // An id the flow does not have is an error for the run to report.
+    super::flow::check_write_ids(&flow, &allow).ok()?;
+    super::flow::request_write_ids(&flow)
+        .into_iter()
+        .filter(|id| !allow.covers(id))
+        .map(|id| super::flow::write_policy_action(&id))
+        .find(|action| !state.confirmed_policy_actions.contains(action))
+}
+
 async fn handle_flow_run(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     // Commands a run sends to the browser are not part of the recording.
     state.flow.set_suspended(true);
@@ -12093,18 +12142,23 @@ async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<V
     let mut flow = super::flow::load_flow(name, origin)?;
     let params = super::flow::parse_params(cmd)?;
     let requests = super::flow::prepare(&flow, &params)?;
-    let allow_write = cmd
-        .get("allowWrite")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if !allow_write {
-        if let Some(w) = requests
-            .iter()
-            .find(|r| super::flow::is_write(&r.method, r.body.as_deref()))
-        {
+    let allow = super::flow::AllowWrite::parse(cmd.get("allowWrite"))?;
+    super::flow::check_write_ids(&flow, &allow)?;
+    for id in super::flow::request_write_ids(&flow) {
+        let action = super::flow::write_policy_action(&id);
+        if !allow.covers(&id) && !state.confirmed_policy_actions.contains(&action) {
+            let w = flow["writes"]
+                .as_array()
+                .and_then(|ws| ws.iter().find(|w| w["id"] == id.as_str()))
+                .cloned()
+                .unwrap_or_default();
             return Err(format!(
-                "flow '{}' sends {} {} (step {}); rerun with --allow-write to send it",
-                name, w.method, w.url, w.step
+                "flow '{}' sends {} {} ({}); rerun with --allow-write {} to send it",
+                name,
+                w["method"].as_str().unwrap_or(""),
+                w["url"].as_str().unwrap_or(""),
+                w["kind"].as_str().unwrap_or("write"),
+                id
             ));
         }
     }
@@ -12152,21 +12206,20 @@ async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<V
                     super::flow::run_http(&client, req, cookie.as_deref(), routed).await
                 }
                 "page" => run_flow_in_page(&flow, req, state).await,
-                _ => run_flow_replay(&flow, &params, req, allow_write, state).await,
+                _ => run_flow_replay(&flow, &params, req, &allow, state).await,
             };
             let (ok, drift) = (result.ok, result.drift);
             if let Some(body) = result.body.as_ref().filter(|_| ok) {
                 bodies.insert(req.id.clone(), body.clone());
             }
             // A write the site accepted must not be sent again by a lower tier.
-            let accepted_write = super::flow::is_write(&req.method, req.body.as_deref())
+            let accepted_write = super::flow::is_flow_write(&flow, &req.id)
                 && result.status.is_some_and(|st| (200..300).contains(&st));
             results.push(result);
             // A rejected input fails the same way on every tier, except a
             // write the site did not accept: its request tokens may be stale,
             // and the page or the UI can still send it once.
-            let retry_write =
-                super::flow::is_write(&req.method, req.body.as_deref()) && !accepted_write;
+            let retry_write = super::flow::is_flow_write(&flow, &req.id) && !accepted_write;
             if ok || (!drift && !retry_write) || accepted_write {
                 done = ok;
                 break;
@@ -12357,25 +12410,62 @@ async fn run_flow_in_page(
     super::flow::page_result(req, started, value)
 }
 
+/// A write only the command replay sends: the policy file can deny it, and
+/// it needs `--allow-write` or a confirmation like any other write.
+fn replay_write_approved(
+    state: &DaemonState,
+    allow: &super::flow::AllowWrite,
+    id: &str,
+) -> Result<(), String> {
+    let action = super::flow::write_policy_action(id);
+    let confirmed = state.confirmed_policy_actions.contains(&action);
+    if let Some(policy) = state.policy.as_ref() {
+        match policy.check(&action) {
+            PolicyResult::Allow => {}
+            PolicyResult::Deny(reason) => return Err(format!("denied by policy: {}", reason)),
+            PolicyResult::RequiresConfirmation if !confirmed => {
+                return Err("the policy requires confirmation".to_string())
+            }
+            PolicyResult::RequiresConfirmation => {}
+        }
+    }
+    if !confirmed
+        && state
+            .confirm_actions
+            .as_ref()
+            .is_some_and(|ca| ca.requires_confirmation(&action))
+    {
+        return Err("--confirm-actions requires confirmation".to_string());
+    }
+    if allow.covers(id) || confirmed {
+        Ok(())
+    } else {
+        Err(format!("rerun with --allow-write {} to allow it", id))
+    }
+}
+
 async fn run_flow_replay(
     flow: &Value,
     params: &[(String, String)],
     req: &super::flow::PreparedRequest,
-    allow_write: bool,
+    allow: &super::flow::AllowWrite,
     state: &mut DaemonState,
 ) -> super::flow::TierResult {
     let started = std::time::Instant::now();
-    // A replay repeats every recorded command, so it sends every write the
-    // recording caused, not only the ones the output depends on.
-    if !allow_write {
-        if let Some(w) = flow["sideEffects"].as_array().and_then(|a| a.first()) {
+    // A replay repeats every recorded command, so it also sends the writes
+    // no kept request covers; each must be allowed, confirmed and in policy.
+    for w in super::flow::replay_only_writes(flow) {
+        let id = w["id"].as_str().unwrap_or("");
+        if let Err(reason) = replay_write_approved(state, allow, id) {
             return super::flow::replay_unavailable(
                 req,
                 started,
                 format!(
-                    "replaying the recorded commands would also send {} {}; rerun with --allow-write to allow it",
+                    "replaying the recorded commands would also send {} {} ({}): {}",
                     w["method"].as_str().unwrap_or(""),
-                    w["url"].as_str().unwrap_or("")
+                    w["url"].as_str().unwrap_or(""),
+                    id,
+                    reason
                 ),
             );
         }
@@ -19580,6 +19670,122 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             err.contains("example.com") && err.contains("open the flow's site"),
             "{err}"
         );
+    }
+
+    /// A flow with one POST to a local server that answers `{"ok":true}`.
+    fn write_flow_fixture(dir: &std::path::Path, port: u16) {
+        let url = format!("http://127.0.0.1:{}/api/cart", port);
+        let flow = json!({
+            "version": 2, "name": "cart", "origin": "127.0.0.1",
+            "startUrl": format!("http://127.0.0.1:{}/", port), "allowedHosts": ["127.0.0.1"],
+            "params": [], "output": "s1r1", "itemFields": [], "verifiedAt": null,
+            "writes": [{ "id": "s1r1", "method": "POST", "url": url, "kind": "explicit", "step": 1 }],
+            "steps": [{ "seq": 1, "ok": true, "command": { "action": "click" }, "requests": [{
+                "id": "s1r1", "method": "POST", "url": url, "headers": {}, "body": "{}",
+                "expect": { "status": 200, "mime": "application/json",
+                    "signature": super::super::flow::signature(&json!({ "ok": true })),
+                    "bytes": 11, "itemFields": [], "extract": null }
+            }] }]
+        });
+        let _ = dir;
+        super::super::flow::write_flow(&flow).unwrap();
+    }
+
+    fn serve_json_once() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            while let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let body = r#"{"ok":true}"#;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn flow_writes_go_through_confirmation_as_policy_actions() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        write_flow_fixture(dir.path(), serve_json_once());
+        let run = json!({ "id": "r1", "action": "flow_run", "name": "cart", "params": {} });
+        assert_eq!(
+            policy_actions_for_command(&run, "flow_run", false, None),
+            vec!["flow_run".to_string(), "flow_write:s1r1".to_string()]
+        );
+
+        // Not allowed: the run asks, and a confirmation lets it through once.
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        let resp = execute_command(&run, &mut state).await;
+        assert_eq!(resp["data"]["confirmation_required"], true, "{resp}");
+        assert_eq!(resp["data"]["action"], "flow_write:s1r1");
+        let confirmed =
+            execute_command(&json!({ "id": "c1", "action": "confirm" }), &mut state).await;
+        assert_eq!(
+            confirmed["data"]["result"]["data"]["ok"], true,
+            "{confirmed}"
+        );
+
+        // Allowed by id or by all: no confirmation.
+        for allow in ["s1r1", "all"] {
+            let mut cmd = run.clone();
+            cmd["allowWrite"] = json!(allow);
+            let resp = execute_command(&cmd, &mut state).await;
+            assert_eq!(resp["data"]["ok"], true, "{allow}: {resp}");
+        }
+
+        // An id that is not a write of the flow is an error, not a pass.
+        let mut cmd = run.clone();
+        cmd["allowWrite"] = json!("nope");
+        let resp = execute_command(&cmd, &mut state).await;
+        assert!(
+            resp["error"]
+                .as_str()
+                .unwrap()
+                .contains("not a write of this flow"),
+            "{resp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_and_confirm_actions_reach_flow_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        write_flow_fixture(dir.path(), serve_json_once());
+        let mut run = json!({ "id": "r1", "action": "flow_run", "name": "cart", "params": {}, "allowWrite": "all" });
+
+        let policy_path = dir.path().join("policy.json");
+        fs::write(&policy_path, r#"{"deny":["flow_write:s1r1"]}"#).unwrap();
+        let mut state = DaemonState::new();
+        state.policy = Some(ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
+        state.confirm_actions = None;
+        let resp = execute_command(&run, &mut state).await;
+        assert!(
+            resp["error"].as_str().unwrap().contains("denied by policy"),
+            "{resp}"
+        );
+
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = Some(ConfirmActions {
+            categories: ["flow_write:s1r1".to_string()].into_iter().collect(),
+        });
+        run["id"] = json!("r2");
+        let resp = execute_command(&run, &mut state).await;
+        assert_eq!(resp["data"]["confirmation_required"], true, "{resp}");
+        assert_eq!(resp["data"]["action"], "flow_write:s1r1");
     }
 
     #[tokio::test]

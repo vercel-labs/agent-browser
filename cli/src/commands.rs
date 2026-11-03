@@ -2169,7 +2169,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 /// Parse `flow <steps|save|run|list>`: save a task captured with `--capture flow`, replay it over HTTP.
 fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["steps", "save", "run", "list"];
-    const USAGE: &str = "flow <steps [--json]|save <name> [--from <seq|open|last-save>] [--to <seq>] [--param k=v]... [--output <id>] [--description <text>]|run <name> [--param k=v]... [--origin <host>] [--allow-write]|list [--origin <host>]>";
+    const USAGE: &str = "flow <steps [--json]|save <name> [--from <seq|open|last-save>] [--to <seq>] [--param k=v]... [--output <id>] [--description <text>]|run <name> [--param k=v]... [--origin <host>] [--allow-write <all|id,...>]|list [--origin <host>]>";
 
     fn params(args: &[&str], usage: &'static str) -> Result<Value, ParseError> {
         let mut out = serde_json::Map::new();
@@ -2245,15 +2245,25 @@ fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 .ok_or_else(|| ParseError::MissingArguments {
                     context: "flow run".to_string(),
                     usage:
-                        "flow run <name> [--param name=value]... [--origin <host>] [--allow-write]",
+                        "flow run <name> [--param name=value]... [--origin <host>] [--allow-write <all|id,...>]",
                 })?;
             let mut cmd = json!({
                 "id": id,
                 "action": "flow_run",
                 "name": name,
                 "params": params(&rest[2..], "flow run <name> [--param name=value]...")?,
-                "allowWrite": rest.contains(&"--allow-write"),
             });
+            if let Some(pos) = rest.iter().position(|a| *a == "--allow-write") {
+                let usage = "flow run <name> --allow-write <all|id,id,...>";
+                let value = rest
+                    .get(pos + 1)
+                    .filter(|v| !v.starts_with("--"))
+                    .ok_or_else(|| ParseError::InvalidValue {
+                        message: "--allow-write takes `all` or comma-separated write ids; `flow save` lists them".to_string(),
+                        usage,
+                    })?;
+                cmd["allowWrite"] = json!(value);
+            }
             if let Some(origin) = flag_value(rest, "--origin") {
                 cmd["origin"] = json!(origin);
             }
@@ -4621,6 +4631,24 @@ mod tests {
         assert!(parse_flow(&["save"], "1").is_err());
         assert!(parse_flow(&["save", "--from", "1"], "1").is_err());
         assert!(parse_flow(&["save", "a", "--to", "x"], "1").is_err());
+    }
+
+    #[test]
+    fn flow_run_allow_write_takes_all_or_ids() {
+        let cmd = parse_flow(&["run", "cart", "--allow-write", "all"], "1").unwrap();
+        assert_eq!(cmd["allowWrite"], "all");
+        let cmd = parse_flow(
+            &["run", "cart", "--allow-write", "s1r1,s2w1", "--limit", "2"],
+            "1",
+        )
+        .unwrap();
+        assert_eq!(cmd["allowWrite"], "s1r1,s2w1");
+        assert!(parse_flow(&["run", "cart"], "1")
+            .unwrap()
+            .get("allowWrite")
+            .is_none());
+        assert!(parse_flow(&["run", "cart", "--allow-write"], "1").is_err());
+        assert!(parse_flow(&["run", "cart", "--allow-write", "--limit", "2"], "1").is_err());
     }
 
     #[test]

@@ -4783,8 +4783,8 @@
         "additionalProperties": false,
         "properties": {
           "allowWrite": {
-            "description": "Required when the flow sends a non-GET request.",
-            "type": "boolean"
+            "description": "Writes the run may send without asking: `all`, or comma-separated write ids from flow save. Any other write needs confirmation.",
+            "type": "string"
           },
           "allowedDomains": {
             "description": "Restrict browser and read traffic to these domain patterns. Chromium sessions also disable RTCPeerConnection while this is active.",

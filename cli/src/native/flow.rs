@@ -973,21 +973,6 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
         }));
     }
 
-    // Every write the recording caused, kept or not: a command replay sends
-    // them all again.
-    let side_effects: Vec<Value> = input
-        .entries
-        .iter()
-        .filter(|e| {
-            input
-                .recorder
-                .request_tags
-                .get(&e.request_id)
-                .is_some_and(|seq| input.commands.iter().any(|(s, _)| s == seq))
-        })
-        .filter(|e| is_write(&e.method, e.post_data.as_deref()))
-        .map(|e| json!({ "method": e.method, "url": e.url.split('?').next().unwrap_or("") }))
-        .collect();
     if request_ids.is_empty() {
         return Err(format!(
             "no first-party JSON requests were recorded for {}; this flow has nothing to replay over HTTP",
@@ -1016,7 +1001,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
         None => default_output(&steps),
     };
 
-    let flow = json!({
+    let mut flow = json!({
         "version": FLOW_VERSION,
         "name": input.name,
         "origin": host,
@@ -1034,10 +1019,14 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
             .map(|r| r["expect"]["itemFields"].clone())
             .unwrap_or(json!([])),
         "provenance": "observed",
-        "sideEffects": side_effects,
+        "writes": [],
         "verifiedAt": Value::Null,
         "steps": steps,
     });
+
+    let consumed = dependencies(&flow, &output);
+    let writes = collect_writes(&input, &base, &given, &har_ids, &consumed);
+    flow["writes"] = json!(writes);
 
     let requests_report: Vec<Value> = flow["steps"]
         .as_array()
@@ -1067,6 +1056,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
             .cloned()
             .collect::<Vec<_>>(),
         "references": links.references,
+        "writes": flow["writes"],
         "gaps": gaps,
         "droppedHeaders": dropped_headers,
         "verified": false,
@@ -1853,6 +1843,200 @@ impl PreparedRequest {
         }
         Ok(out)
     }
+}
+
+const MUTATING_SEGMENTS: &[&str] = &["logout", "signout", "unsubscribe", "delete", "remove"];
+
+/// Whether a path has a whole segment that names a state change. Substrings
+/// do not count: `/address` is not `/add`.
+fn has_mutating_segment(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|u| {
+        u.path_segments().is_some_and(|mut segments| {
+            segments.any(|s| MUTATING_SEGMENTS.contains(&s.to_ascii_lowercase().as_str()))
+        })
+    })
+}
+
+/// A command that acts on an element, as opposed to navigating or typing.
+fn is_click_command(cmd: &Value) -> bool {
+    let action = cmd["action"].as_str().unwrap_or("");
+    let sub = cmd["subaction"].as_str().unwrap_or("");
+    matches!(action, "click" | "dblclick")
+        || (action == "getbyrole" && matches!(sub, "click" | "dblclick"))
+}
+
+/// The writes a recording caused, kept as requests or not: each one is
+/// sent again by a run (or by the command replay) and must be allowed.
+/// `suspected` marks GET requests that look like state changes: a data
+/// request a click fired that no output depends on, or a path with a
+/// mutating segment.
+fn collect_writes(
+    input: &SaveInput<'_>,
+    base: &str,
+    given: &[(String, String)],
+    har_ids: &HashMap<String, String>,
+    consumed: &[String],
+) -> Vec<Value> {
+    let mut writes: Vec<Value> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for (index, (seq, cmd)) in input.commands.iter().enumerate() {
+        let mut extra = 0;
+        for e in input
+            .entries
+            .iter()
+            .filter(|e| input.recorder.request_tags.get(&e.request_id) == Some(seq))
+        {
+            if carries_secret(e, &input.recorder.secrets) || is_telemetry(&e.url) {
+                continue;
+            }
+            let kept = har_ids
+                .iter()
+                .find(|(_, har)| **har == e.request_id)
+                .map(|(id, _)| id.clone());
+            let first_party = is_first_party(&e.url, base);
+            let explicit = is_write(&e.method, e.post_data.as_deref());
+            let suspected = !explicit
+                && e.method == "GET"
+                && first_party
+                && (has_mutating_segment(&e.url)
+                    || (is_click_command(cmd)
+                        && matches!(e.resource_type.as_str(), "XHR" | "Fetch" | "Ping" | "Other")
+                        && !kept.as_ref().is_some_and(|id| consumed.contains(id))));
+            if !explicit && !suspected {
+                continue;
+            }
+            let key = format!(
+                "{} {} {}",
+                e.method,
+                e.url,
+                e.post_data.as_deref().unwrap_or("")
+            );
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+            let id = kept.unwrap_or_else(|| {
+                extra += 1;
+                format!("s{}w{}", index + 1, extra)
+            });
+            writes.push(json!({
+                "id": id,
+                "method": e.method,
+                "url": templatize(&e.url, given, true),
+                "kind": if explicit { "explicit" } else { "suspected" },
+                "step": index + 1,
+            }));
+        }
+    }
+    writes
+}
+
+/// Ids of the writes a flow's own requests send; a run needs each one
+/// allowed or confirmed before it starts.
+pub fn request_write_ids(flow: &Value) -> Vec<String> {
+    let requests: Vec<&str> = flow["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|s| s["requests"].as_array().into_iter().flatten())
+        .filter_map(|r| r["id"].as_str())
+        .collect();
+    flow["writes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|w| w["id"].as_str())
+        .filter(|id| requests.contains(id))
+        .map(String::from)
+        .collect()
+}
+
+/// Writes the command replay would send that no kept request covers.
+pub fn replay_only_writes(flow: &Value) -> Vec<Value> {
+    let own = request_write_ids(flow);
+    flow["writes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|w| !own.iter().any(|id| w["id"] == id.as_str()))
+        .cloned()
+        .collect()
+}
+
+pub fn is_flow_write(flow: &Value, id: &str) -> bool {
+    flow["writes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|w| w["id"] == id)
+}
+
+/// Which writes `--allow-write` covers: `all`, or a list of write ids.
+#[derive(Default, Clone, Debug, PartialEq)]
+pub struct AllowWrite {
+    pub all: bool,
+    pub ids: Vec<String>,
+}
+
+impl AllowWrite {
+    pub fn parse(value: Option<&Value>) -> Result<AllowWrite, String> {
+        let usage = "--allow-write takes `all` or comma-separated write ids";
+        let items: Vec<String> = match value {
+            None | Some(Value::Null) | Some(Value::Bool(false)) => return Ok(AllowWrite::default()),
+            Some(Value::String(text)) => text.split(',').map(|t| t.trim().to_string()).collect(),
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(|i| i.as_str().map(|t| t.trim().to_string()).ok_or(usage))
+                .collect::<Result<_, _>>()?,
+            Some(_) => return Err(usage.to_string()),
+        };
+        let items: Vec<String> = items.into_iter().filter(|i| !i.is_empty()).collect();
+        if items.is_empty() {
+            return Err(usage.to_string());
+        }
+        if items.iter().any(|i| i == "all") {
+            return Ok(AllowWrite {
+                all: true,
+                ids: Vec::new(),
+            });
+        }
+        Ok(AllowWrite {
+            all: false,
+            ids: items,
+        })
+    }
+
+    pub fn covers(&self, id: &str) -> bool {
+        self.all || self.ids.iter().any(|i| i == id)
+    }
+}
+
+pub fn write_policy_action(id: &str) -> String {
+    format!("flow_write:{}", id)
+}
+
+/// Check that an id names a write of this flow.
+pub fn check_write_ids(flow: &Value, allow: &AllowWrite) -> Result<(), String> {
+    for id in &allow.ids {
+        if !is_flow_write(flow, id) {
+            let known: Vec<&str> = flow["writes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|w| w["id"].as_str())
+                .collect();
+            return Err(format!(
+                "--allow-write names '{}', which is not a write of this flow. Writes: {}",
+                id,
+                if known.is_empty() {
+                    "none".to_string()
+                } else {
+                    known.join(", ")
+                }
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn is_write(method: &str, body: Option<&str>) -> bool {
@@ -3202,10 +3386,13 @@ mod tests {
             login_wall: false,
         })
         .unwrap();
-        assert_eq!(
-            flow["sideEffects"],
-            json!([{ "method": "POST", "url": "https://www.example.com.ar/cart" }])
-        );
+        let writes = flow["writes"].as_array().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0]["method"], "POST");
+        assert_eq!(writes[0]["kind"], "explicit");
+        assert_eq!(writes[0]["url"], "https://www.example.com.ar/cart?x=1");
+        assert_eq!(writes[0]["id"], "s2w1");
+        assert!(replay_only_writes(&flow).len() == 1 && request_write_ids(&flow).is_empty());
     }
 
     #[cfg(unix)]
@@ -3448,5 +3635,143 @@ mod tests {
             .unwrap_err()
             .contains("invalid flow origin"));
         assert!(flow_path("a/b", "x").is_err());
+    }
+
+    #[test]
+    fn mutating_segments_match_whole_segments_only() {
+        for yes in [
+            "https://a.test/logout",
+            "https://a.test/account/signout?x=1",
+            "https://a.test/api/items/delete",
+            "https://a.test/Unsubscribe/abc",
+            "https://a.test/cart/remove",
+        ] {
+            assert!(has_mutating_segment(yes), "{yes}");
+        }
+        for no in [
+            "https://a.test/address",
+            "https://a.test/deleted",
+            "https://a.test/api/removed-items",
+            "https://a.test/logout-help.html",
+            "https://a.test/search?q=logout",
+        ] {
+            assert!(!has_mutating_segment(no), "{no}");
+        }
+    }
+
+    fn writes_after(first: &str, entries: Vec<HarEntry>, tag: &[&str]) -> Value {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/" }),
+            None,
+        );
+        r.begin_command("click", &json!({ "action": first, "selector": "#b" }), None);
+        for t in tag {
+            r.tag_request(t);
+        }
+        build_flow(SaveInput {
+            name: "w",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &entries,
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .map(|(f, _)| f["writes"].clone())
+        .unwrap_or_else(|e| json!(e))
+    }
+
+    #[test]
+    fn a_get_a_click_fired_that_no_output_uses_is_a_suspected_write() {
+        let list = entry(
+            "list",
+            "https://api.example.com.ar/items",
+            "Fetch",
+            "application/json",
+            r#"{"items":[{"id":1}]}"#,
+        );
+        let add = entry(
+            "add",
+            "https://www.example.com.ar/cart/add?id=7",
+            "Fetch",
+            "application/json",
+            r#"{"added":true}"#,
+        );
+        let writes = writes_after("click", vec![list.clone(), add], &["list", "add"]);
+        let writes = writes.as_array().unwrap();
+        assert_eq!(writes.len(), 1, "{writes:?}");
+        assert_eq!(writes[0]["kind"], "suspected");
+        assert_eq!(writes[0]["method"], "GET");
+        assert!(writes[0]["url"]
+            .as_str()
+            .unwrap()
+            .contains("/cart/add?id=7"));
+        let only_list = writes_after("click", vec![list], &["list"]);
+        assert_eq!(only_list, json!([]));
+    }
+
+    #[test]
+    fn a_get_fired_by_navigation_is_a_read_unless_its_path_says_otherwise() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/" }),
+            None,
+        );
+        for t in ["data", "out"] {
+            r.tag_request(t);
+        }
+        let entries = vec![
+            entry(
+                "data",
+                "https://api.example.com.ar/other",
+                "Fetch",
+                "application/json",
+                r#"{"a":[1]}"#,
+            ),
+            entry(
+                "out",
+                "https://www.example.com.ar/logout",
+                "Fetch",
+                "application/json",
+                r#"{"ok":true}"#,
+            ),
+        ];
+        let (flow, _) = build_flow(SaveInput {
+            name: "n",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &entries,
+            params: &[],
+            output: Some("s1r1"),
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        let writes = flow["writes"].as_array().unwrap();
+        assert_eq!(writes.len(), 1);
+        assert!(writes[0]["url"].as_str().unwrap().ends_with("/logout"));
+        assert_eq!(writes[0]["kind"], "suspected");
+    }
+
+    #[test]
+    fn allow_write_takes_all_or_ids() {
+        assert_eq!(AllowWrite::parse(None).unwrap(), AllowWrite::default());
+        assert!(AllowWrite::parse(Some(&json!("all")))
+            .unwrap()
+            .covers("anything"));
+        let some = AllowWrite::parse(Some(&json!("s1r2, s3w1"))).unwrap();
+        assert!(some.covers("s1r2") && some.covers("s3w1") && !some.covers("s1r1"));
+        assert!(AllowWrite::parse(Some(&json!(""))).is_err());
+        assert!(AllowWrite::parse(Some(&json!(true))).is_err());
+        let flow = json!({ "writes": [{ "id": "s1r2" }] });
+        assert!(check_write_ids(&flow, &some).unwrap_err().contains("s3w1"));
     }
 }

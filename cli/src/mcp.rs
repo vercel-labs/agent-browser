@@ -876,7 +876,7 @@ fn tools() -> Vec<Value> {
                 "fields": { "type": "string", "description": "Comma-separated fields to return per item, dotted paths allowed." },
                 "limit": { "type": "integer", "minimum": 1 },
                 "origin": { "type": "string" },
-                "allowWrite": { "type": "boolean", "description": "Required when the flow sends a non-GET request." }
+                "allowWrite": { "type": "string", "description": "Writes the run may send without asking: `all`, or comma-separated write ids from flow save. Any other write needs confirmation." }
             }),
             &["name"],
         ),
@@ -2911,8 +2911,9 @@ fn flow_args(arguments: &Value, sub: &str) -> Result<Vec<String>, ProtocolError>
         args.push("--to".to_string());
         args.push(to.to_string());
     }
-    if optional_bool(arguments, "allowWrite")? == Some(true) {
+    if let Some(allow) = optional_string(arguments, "allowWrite")? {
         args.push("--allow-write".to_string());
+        args.push(allow);
     }
     Ok(args)
 }

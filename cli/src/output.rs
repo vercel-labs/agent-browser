@@ -376,6 +376,22 @@ pub(crate) fn format_flow_text(action: Option<&str>, data: &serde_json::Value) -
                     ));
                 }
             }
+            if let Some(writes) = data
+                .get("writes")
+                .and_then(|w| w.as_array())
+                .filter(|w| !w.is_empty())
+            {
+                out.push_str("Writes (a run needs `--allow-write all` or the ids, or asks to confirm each):\n");
+                for w in writes {
+                    out.push_str(&format!(
+                        "  {} {} {} {}\n",
+                        w["id"].as_str().unwrap_or(""),
+                        w["method"].as_str().unwrap_or(""),
+                        w["url"].as_str().unwrap_or(""),
+                        w["kind"].as_str().unwrap_or("")
+                    ));
+                }
+            }
             let dropped = str_list(&data["droppedHeaders"]);
             if !dropped.is_empty() {
                 out.push_str(&format!(
@@ -4367,7 +4383,7 @@ Saved flows (experimental, open the session with --capture flow):
   flow save <name>           Save the steps since the last open as a flow; accepts --from <seq|open|last-save>,
                              --to <seq>, --param k=v, --output <id>, and --description <text>
   flow run <name>            Replay over HTTP; accepts --param k=v, --where f=v, --fields a,b, --limit n,
-                             --origin <host>, and --allow-write
+                             --origin <host>, and --allow-write <all|id,...>
   flow list [--origin <host>] Saved flows with params and verified state
 
 React (requires `open --enable react-devtools`):

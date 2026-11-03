@@ -201,7 +201,25 @@ Each request must stay on the flow's site, whatever `--allowed-domains` says. `f
 
 The next run starts at the tier that worked. Every tier checks the response against the shape that was recorded. If the shape changed, the run fails, the flow is marked unverified, and the agent continues in the UI. A response that only lacks its lists and counts is treated as no results and leaves the verified state as it was.
 
-Requests other than GET and GraphQL queries are writes and need `--allow-write`. A write the site accepted is never sent again by a lower tier.
+### Writes
+
+`flow save` lists every write the recorded steps caused in the flow's `writes`, each with an id, a method, a URL and a kind. The report prints them.
+
+<table>
+  <thead>
+    <tr><th>Kind</th><th>What it is</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>explicit</code></td><td>Any request other than GET, HEAD or OPTIONS, except GraphQL queries</td></tr>
+    <tr><td><code>suspected</code></td><td>A GET that looks like a state change: a data request fired by a click that no output depends on, or a path with a whole segment of <code>logout</code>, <code>signout</code>, <code>unsubscribe</code>, <code>delete</code> or <code>remove</code>. <code>/address</code> does not match</td></tr>
+  </tbody>
+</table>
+
+```bash
+agent-browser flow run <name> --allow-write <all|id,id,...>
+```
+
+`--allow-write` takes `all` or comma-separated write ids. A write it does not cover is never sent silently: the run stops with a confirmation request, and `confirm` approves one write at a time. Each write is a policy action named `flow_write:<id>`, so `--action-policy` can deny or require confirmation for it and `--confirm-actions flow_write:<id>` asks even when `--allow-write` covers it. These checks apply to the HTTP and in-page tiers. The command replay also sends writes no kept request covers; those need `--allow-write` or a confirmation too, and the policy file can deny them. A write the site accepted is never sent again by a lower tier.
 
 ### Discovery
 
