@@ -19,7 +19,7 @@ impl WriteLedger {
     /// Note a write's answer: only an accepted answer or an unknown outcome
     /// means it may have been applied; a 4xx rejection does not.
     pub fn record(&mut self, req: &PreparedRequest, result: &TierResult) {
-        if req.write && (is_accepted(result.status) || result.kind == Some("outcome_unknown")) {
+        if req.write && (is_accepted(result.status) || result.stop == Some(Stop::OutcomeUnknown)) {
             self.sent.insert(req.id.clone());
         }
     }
@@ -61,7 +61,7 @@ pub fn next_tier(
     };
     // The site answered with something every tier would get again, or the
     // request worked, or a write was accepted.
-    if last.ok || last.kind.is_some() || (req.write && is_accepted(last.status)) {
+    if last.ok || last.stop.is_some() || (req.write && is_accepted(last.status)) {
         return None;
     }
     // A rejected input fails the same way on every tier, except a write the

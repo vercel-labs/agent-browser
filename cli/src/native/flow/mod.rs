@@ -3128,7 +3128,7 @@ mod tests {
             &req,
             Tier::Http,
             Instant::now(),
-            Err(Failure::stop("rate_limited", 429, "x".into())),
+            Err(Failure::stop(Stop::RateLimited, 429, "x".into())),
         );
         assert_eq!(
             with_retry_after(limited, Some("30".into()))
@@ -3140,7 +3140,7 @@ mod tests {
             &req,
             Tier::Http,
             Instant::now(),
-            Err(Failure::stop("auth_expired", 401, "x".into())),
+            Err(Failure::stop(Stop::AuthExpired, 401, "x".into())),
         );
         assert_eq!(with_retry_after(auth, Some("30".into())).retry_after, None);
     }
@@ -3186,28 +3186,28 @@ mod tests {
             &req,
             tier,
             Instant::now(),
-            Err(Failure::stop("auth_expired", status, "x".into())),
+            Err(Failure::stop(Stop::AuthExpired, status, "x".into())),
         )
     }
 
     #[test]
     fn a_401_on_a_request_recorded_with_credentials_falls_through() {
         let http = denied("s1r1", Tier::Http, 401);
-        assert_eq!(http.kind, None);
+        assert_eq!(http.stop, None);
         assert!(http.drift);
         let page = denied("s1r1", Tier::Page, 403);
-        assert_eq!(page.kind, None);
+        assert_eq!(page.stop, None);
         let replay = denied("s1r1", Tier::Replay, 401);
-        assert_eq!(replay.kind, Some("auth_expired"));
+        assert_eq!(replay.stop, Some(Stop::AuthExpired));
         // Without stripped credentials the first 401 still stops the run.
         let req = prepared("s1r1");
         let plain = tier_result(
             &req,
             Tier::Http,
             Instant::now(),
-            Err(Failure::stop("auth_expired", 401, "x".into())),
+            Err(Failure::stop(Stop::AuthExpired, 401, "x".into())),
         );
-        assert_eq!(plain.kind, Some("auth_expired"));
+        assert_eq!(plain.stop, Some(Stop::AuthExpired));
         // When no way gets through, the run reports the sign-in problem.
         let all = vec![
             denied("s1r1", Tier::Http, 401),
@@ -4173,7 +4173,7 @@ mod tests {
         ok: bool,
         status: Option<u16>,
         drift: bool,
-        kind: Option<&'static str>,
+        kind: Option<Stop>,
     ) -> TierResult {
         TierResult {
             id: "s1r1".to_string(),
@@ -4187,7 +4187,7 @@ mod tests {
             shape_changed: false,
             empty: false,
             tier,
-            kind,
+            stop: kind,
             retry_after: None,
         }
     }
@@ -4221,7 +4221,13 @@ mod tests {
             (
                 None,
                 false,
-                vec![result(Http, false, Some(403), false, Some("auth_expired"))],
+                vec![result(
+                    Http,
+                    false,
+                    Some(403),
+                    false,
+                    Some(Stop::AuthExpired),
+                )],
                 None,
             ),
             (
@@ -4261,7 +4267,7 @@ mod tests {
             (
                 None,
                 true,
-                vec![result(Http, false, None, false, Some("outcome_unknown"))],
+                vec![result(Http, false, None, false, Some(Stop::OutcomeUnknown))],
                 None,
             ),
         ];
@@ -4296,7 +4302,7 @@ mod tests {
         );
         ledger.record(
             &req,
-            &result(Tier::Http, false, None, false, Some("outcome_unknown")),
+            &result(Tier::Http, false, None, false, Some(Stop::OutcomeUnknown)),
         );
         assert!(ledger.already_sent("s1r1"));
         assert_eq!(next_tier(&flow, &req, &[], &ledger), None);
@@ -4419,7 +4425,7 @@ mod tests {
             .answer(Tier::Http, "s1r1", Scripted::unknown())
             .answer(Tier::Page, "s1r1", Scripted::json(200, OK_JSON));
         let results = block_on(run_requests(&flow, &requests, &mut senders, &|_| Ok(()))).unwrap();
-        assert_eq!(results.last().unwrap().kind, Some("outcome_unknown"));
+        assert_eq!(results.last().unwrap().stop, Some(Stop::OutcomeUnknown));
         assert_eq!(senders.times("s1r1"), 1);
     }
 
@@ -4571,11 +4577,7 @@ mod tests {
     #[test]
     fn check_response_judges_status_body_and_shape() {
         // (status, body, expected: None = data, Some((kind, drift, shape_changed)))
-        type Case = (
-            u16,
-            &'static str,
-            Option<(Option<&'static str>, bool, bool)>,
-        );
+        type Case = (u16, &'static str, Option<(Option<Stop>, bool, bool)>);
         let cases: Vec<Case> = vec![
             (200, r#"{"data":[{"id":2}]}"#, None),
             (200, r#"{"data":[{"id":1,"note":"captcha solved"}]}"#, None),
@@ -4584,16 +4586,16 @@ mod tests {
             (
                 200,
                 "<html><body>captcha</body></html>",
-                Some((Some("blocked"), false, false)),
+                Some((Some(Stop::Blocked), false, false)),
             ),
             (
                 403,
                 "<div id=cf-chl>",
-                Some((Some("blocked"), false, false)),
+                Some((Some(Stop::Blocked), false, false)),
             ),
-            (401, "{}", Some((Some("auth_expired"), false, false))),
-            (403, "", Some((Some("auth_expired"), false, false))),
-            (429, "{}", Some((Some("rate_limited"), false, false))),
+            (401, "{}", Some((Some(Stop::AuthExpired), false, false))),
+            (403, "", Some((Some(Stop::AuthExpired), false, false))),
+            (429, "{}", Some((Some(Stop::RateLimited), false, false))),
             (400, "{}", Some((None, false, false))),
             (500, "{}", Some((None, false, false))),
             (407, "{}", Some((None, true, false))),
@@ -4604,7 +4606,7 @@ mod tests {
                 (Ok(_), None) => {}
                 (Err(f), Some((kind, drift, shape))) => {
                     assert_eq!(
-                        (f.kind, f.drift, f.shape_changed),
+                        (f.stop, f.drift, f.shape_changed),
                         (kind, drift, shape),
                         "{status} {body}"
                     );
@@ -4682,5 +4684,105 @@ mod tests {
         let mut with_flag = serde_json::to_value(&flow).unwrap();
         with_flag["steps"][0]["requests"][0]["write"] = json!(false);
         assert!(serde_json::from_value::<Flow>(with_flag).is_err());
+    }
+
+    fn attempt_result(
+        tier: Tier,
+        status: Option<u16>,
+        reason: &str,
+        drift: bool,
+        stop: Option<Stop>,
+        retry_after: Option<&str>,
+    ) -> TierResult {
+        TierResult {
+            reason: Some(reason.to_string()),
+            retry_after: retry_after.map(String::from),
+            ..result(tier, false, status, drift, stop)
+        }
+    }
+
+    #[test]
+    fn a_run_outcome_names_what_stopped_the_run() {
+        // (results, flow name, expected message, expected data status)
+        let cases: Vec<(Vec<TierResult>, &str, Option<&str>)> = vec![
+            (
+                vec![attempt_result(Tier::Http, Some(429), "HTTP 429", false, Some(Stop::RateLimited), Some("17"))],
+                "flow 'cart' step 1 (http): HTTP 429; retry after 17. Wait before rerunning",
+                Some("rate_limited"),
+            ),
+            (
+                vec![attempt_result(Tier::Http, Some(401), "HTTP 401", false, Some(Stop::AuthExpired), None)],
+                "flow 'cart' step 1 (http): HTTP 401. Sign in again in the browser, then rerun",
+                Some("auth_expired"),
+            ),
+            (
+                vec![
+                    attempt_result(Tier::Http, Some(401), "soft", true, None, None),
+                    attempt_result(Tier::Page, Some(403), "soft", true, None, None),
+                ],
+                "flow 'cart' step 1 (page): soft. Sign in again in the browser, then rerun",
+                Some("auth_expired"),
+            ),
+            (
+                vec![attempt_result(Tier::Http, None, "sent, no answer", false, Some(Stop::OutcomeUnknown), None)],
+                "flow 'cart' step 1 (http): sent, no answer. Check the site before rerunning; the write is not sent again",
+                Some("outcome_unknown"),
+            ),
+        ];
+        for (results, tail, status) in cases {
+            let outcome = RunOutcome::stopped(&results).expect("a stop");
+            let message = outcome.message("cart");
+            assert!(message.ends_with(tail), "{message}");
+            assert!(message.starts_with(status.unwrap()), "{message}");
+            assert_eq!(outcome.data("cart").unwrap()["status"], status.unwrap());
+        }
+        let fine = vec![result(Tier::Http, true, Some(200), false, None)];
+        assert_eq!(RunOutcome::stopped(&fine), None);
+    }
+
+    #[test]
+    fn a_failed_run_says_drift_or_rejected_params() {
+        let flow = flow_of(json!({ "params": [{ "name": "q", "example": "kettle" }] }));
+        let drift = vec![
+            attempt_result(
+                Tier::Http,
+                Some(200),
+                "response is not JSON",
+                true,
+                None,
+                None,
+            ),
+            attempt_result(Tier::Page, None, "skipped", true, None, None),
+        ];
+        let outcome = RunOutcome::failed(&drift, &flow);
+        assert_eq!(
+            outcome.message("f"),
+            "flow 'f' failed at step 1 (http: response is not JSON; page: skipped). The flow is now marked unverified; drive the browser for this task instead"
+        );
+        assert_eq!(outcome.data("f"), None);
+        let rejected = vec![attempt_result(
+            Tier::Http,
+            Some(400),
+            "HTTP 400",
+            false,
+            None,
+            None,
+        )];
+        assert_eq!(
+            RunOutcome::failed(&rejected, &flow).message("f"),
+            "flow 'f' failed at step 1: HTTP 400. The site likely rejected the param values; the recorded run used q=kettle"
+        );
+        let unreachable = vec![attempt_result(
+            Tier::Http,
+            None,
+            "request failed",
+            false,
+            None,
+            None,
+        )];
+        assert_eq!(
+            RunOutcome::failed(&unreachable, &flow).message("f"),
+            "flow 'f' failed at step 1: request failed"
+        );
     }
 }

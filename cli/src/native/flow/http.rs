@@ -96,7 +96,7 @@ pub async fn run_http(
                         reason: format!("HTTP {}: the redirect to {} was not followed", status, to),
                         drift: false,
                         shape_changed: false,
-                        kind: None,
+                        stop: None,
                     }),
                 );
             }

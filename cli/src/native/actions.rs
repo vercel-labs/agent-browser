@@ -3072,10 +3072,21 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     // The flow is read once per command: policy, confirmation and the run all
     // see the same file.
     let mut run_flow: Option<super::flow::Flow> = if action == "flow_run" {
-        state.preloaded_flow.take().or_else(|| {
-            let name = cmd.get("name")?.as_str()?;
-            super::flow::load_flow(name, cmd.get("origin").and_then(|v| v.as_str())).ok()
-        })
+        match state.preloaded_flow.take() {
+            Some(flow) => Some(flow),
+            None => {
+                let loaded = match cmd.get("name").and_then(|v| v.as_str()) {
+                    Some(name) => {
+                        super::flow::load_flow(name, cmd.get("origin").and_then(|v| v.as_str()))
+                    }
+                    None => Err("flow run requires a name".to_string()),
+                };
+                match loaded {
+                    Ok(flow) => Some(flow),
+                    Err(e) => return error_response(&id, &e),
+                }
+            }
+        }
     } else {
         None
     };
@@ -3443,7 +3454,10 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "video_stop" => handle_video_stop(state).await,
         "flow_steps" => handle_flow_steps(cmd, state),
         "flow_save" => handle_flow_save(cmd, state).await,
-        "flow_run" => handle_flow_run(cmd, state, run_flow.take()).await,
+        "flow_run" => match run_flow.take() {
+            Some(flow) => handle_flow_run(cmd, state, flow).await,
+            None => Err("flow run requires a name".to_string()),
+        },
         "flow_list" => handle_flow_list(cmd),
         "har_start" => handle_har_start(cmd, state).await,
         "har_stop" => handle_har_stop(cmd, state).await,
@@ -12137,7 +12151,7 @@ fn unconfirmed_flow_write(
 async fn handle_flow_run(
     cmd: &Value,
     state: &mut DaemonState,
-    flow: Option<super::flow::Flow>,
+    flow: super::flow::Flow,
 ) -> Result<Value, String> {
     // Commands a run sends to the browser are not part of the recording.
     state.flow.set_suspended(true);
@@ -12149,18 +12163,11 @@ async fn handle_flow_run(
 async fn handle_flow_run_inner(
     cmd: &Value,
     state: &mut DaemonState,
-    loaded: Option<super::flow::Flow>,
+    mut flow: super::flow::Flow,
 ) -> Result<Value, String> {
     let started = std::time::Instant::now();
-    let name = cmd
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or("flow run requires a name")?;
-    let origin = cmd.get("origin").and_then(|v| v.as_str());
-    let mut flow = match loaded {
-        Some(flow) => flow,
-        None => super::flow::load_flow(name, origin)?,
-    };
+    let name = flow.name.clone();
+    let name = name.as_str();
     let params = super::flow::parse_params(cmd)?;
     let requests = super::flow::prepare(&flow, &params)?;
     let allow = super::flow::AllowWrite::parse(cmd.get("allowWrite"))?;
@@ -12181,11 +12188,6 @@ async fn handle_flow_run_inner(
 
     let filter = state.domain_filter.read().await.clone();
     let hosts = super::flow::HostPolicy::of(&flow);
-    for prepared in &requests {
-        hosts
-            .check(&prepared.url)
-            .map_err(|e| format!("flow '{}' step {}: {}", name, prepared.step, e))?;
-    }
     let client = super::flow::http_client(filter.clone(), &flow)?;
     let results = {
         let mut senders = DaemonSenders {
@@ -12209,41 +12211,9 @@ async fn handle_flow_run_inner(
         super::flow::run_requests(&flow, &requests, &mut senders, &check).await?
     };
 
-    // A 401 or 403 that every way of sending the request got means the
-    // session is signed out, even when an earlier tier fell through on it.
-    let every_way_denied = super::flow::denied_everywhere(&results);
-    let stopped_by = results
-        .iter()
-        .rev()
-        .find(|r| r.kind.is_some())
-        .map(|r| (r.kind.unwrap_or("blocked"), r))
-        .or(every_way_denied.map(|r| ("auth_expired", r)));
-    if let Some((kind, stop)) = stopped_by {
-        let mut message = format!(
-            "{}: flow '{}' step {} ({}): {}",
-            kind,
-            name,
-            stop.step,
-            stop.tier.name(),
-            stop.reason.as_deref().unwrap_or("")
-        );
-        if let Some(wait) = stop.retry_after.as_deref() {
-            message.push_str(&format!("; retry after {}", wait));
-        }
-        message.push_str(match kind {
-            "auth_expired" => ". Sign in again in the browser, then rerun",
-            "rate_limited" => ". Wait before rerunning",
-            "outcome_unknown" => ". Check the site before rerunning; the write is not sent again",
-            _ => ". Continue in the UI or let the user clear the challenge",
-        });
-        state.flow_stop = Some(json!({
-            "status": kind,
-            "flow": name,
-            "step": stop.step,
-            "httpStatus": stop.status,
-            "retryAfter": stop.retry_after,
-        }));
-        return Err(message);
+    if let Some(outcome) = super::flow::RunOutcome::stopped(&results) {
+        state.flow_stop = outcome.data(name);
+        return Err(outcome.message(name));
     }
 
     let shape = super::flow::Shape::from_cmd(cmd);
@@ -12271,37 +12241,7 @@ async fn handle_flow_run_inner(
     );
     super::flow::write_flow(&flow)?;
     if response["ok"] != json!(true) {
-        let failure = results.iter().rev().find(|r| !r.ok);
-        let reason = failure.and_then(|r| r.reason.clone()).unwrap_or_default();
-        let step = failure.map(|r| r.step).unwrap_or(0);
-        if results.iter().any(|r| r.step == step && r.drift) {
-            let tried = results
-                .iter()
-                .filter(|r| r.step == step)
-                .map(|r| format!("{}: {}", r.tier.name(), r.reason.as_deref().unwrap_or("ok")))
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(format!(
-                "flow '{}' failed at step {} ({}). The flow is now marked unverified; drive the browser for this task instead",
-                name, step, tried
-            ));
-        }
-        let examples = flow
-            .params
-            .iter()
-            .map(|p| format!("{}={}", p.name, p.example.as_deref().unwrap_or("")))
-            .collect::<Vec<_>>()
-            .join(" ");
-        if failure.and_then(|r| r.status).is_none() {
-            return Err(format!(
-                "flow '{}' failed at step {}: {}",
-                name, step, reason
-            ));
-        }
-        return Err(format!(
-            "flow '{}' failed at step {}: {}. The site likely rejected the param values; the recorded run used {}",
-            name, step, reason, examples
-        ));
+        return Err(super::flow::RunOutcome::failed(&results, &flow).message(name));
     }
     Ok(response)
 }
@@ -19634,9 +19574,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         });
         save_flow_json(flow);
         let mut state = DaemonState::new();
-        let err = handle_flow_run(&json!({ "name": "edited", "params": {} }), &mut state, None)
-            .await
-            .unwrap_err();
+        let err = handle_flow_run(
+            &json!({ "name": "edited", "params": {} }),
+            &mut state,
+            super::super::flow::load_flow("edited", None).unwrap(),
+        )
+        .await
+        .unwrap_err();
         assert!(
             err.contains("evil.test") && err.contains("outside the hosts"),
             "{err}"
@@ -19986,6 +19930,29 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert_eq!(done["data"]["result"]["data"]["ok"], true, "{done}");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(other_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_flow_that_cannot_be_read_fails_before_policy_and_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        let policy_path = dir.path().join("policy.json");
+        fs::write(&policy_path, r#"{"deny":["flow_run"]}"#).unwrap();
+        let mut state = DaemonState::new();
+        state.policy = Some(ActionPolicy::load(policy_path.to_str().unwrap()).unwrap());
+        let resp = execute_command(
+            &json!({ "id": "r", "action": "flow_run", "name": "missing", "params": {} }),
+            &mut state,
+        )
+        .await;
+        let error = resp["error"].as_str().unwrap();
+        assert!(error.contains("no saved flow named 'missing'"), "{error}");
+        let resp = execute_command(&json!({ "id": "r2", "action": "flow_run" }), &mut state).await;
+        assert!(
+            resp["error"].as_str().unwrap().contains("requires a name"),
+            "{resp}"
+        );
     }
 
     #[tokio::test]

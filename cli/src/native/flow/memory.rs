@@ -13,7 +13,7 @@ pub struct Scripted {
     pub status: Option<u16>,
     /// The response text, as the tier would read it.
     pub text: String,
-    pub kind: Option<&'static str>,
+    pub stop: Option<Stop>,
     pub drift: bool,
 }
 
@@ -22,7 +22,7 @@ impl Scripted {
         Scripted {
             status: Some(status),
             text: text.to_string(),
-            kind: None,
+            stop: None,
             drift: false,
         }
     }
@@ -31,7 +31,7 @@ impl Scripted {
         Scripted {
             status: None,
             text: String::new(),
-            kind: Some("outcome_unknown"),
+            stop: Some(Stop::OutcomeUnknown),
             drift: false,
         }
     }
@@ -73,17 +73,17 @@ impl Senders for MemorySenders {
                 Err(Failure::new(true, None, "no scripted answer".to_string())),
             );
         };
-        if let Some(kind) = answer.kind {
+        if let Some(stop) = answer.stop {
             return tier_result(
                 req,
                 tier,
                 started,
                 Err(Failure {
                     status: answer.status,
-                    reason: kind.to_string(),
+                    reason: stop.code().to_string(),
                     drift: answer.drift,
                     shape_changed: false,
-                    kind: Some(kind),
+                    stop: Some(stop),
                 }),
             );
         }

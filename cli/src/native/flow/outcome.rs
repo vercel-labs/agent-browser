@@ -2,6 +2,40 @@
 
 use super::*;
 
+/// Why a run ends without trying anything else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stop {
+    /// A 401 or 403: the session is signed out or lacks access.
+    AuthExpired,
+    /// A 429.
+    RateLimited,
+    /// A bot challenge page instead of data.
+    Blocked,
+    /// A write was sent and no answer came back.
+    OutcomeUnknown,
+}
+
+impl Stop {
+    /// The machine-readable code on the error response.
+    pub fn code(self) -> &'static str {
+        match self {
+            Stop::AuthExpired => "auth_expired",
+            Stop::RateLimited => "rate_limited",
+            Stop::Blocked => "blocked",
+            Stop::OutcomeUnknown => "outcome_unknown",
+        }
+    }
+
+    fn advice(self) -> &'static str {
+        match self {
+            Stop::AuthExpired => "Sign in again in the browser, then rerun",
+            Stop::RateLimited => "Wait before rerunning",
+            Stop::OutcomeUnknown => "Check the site before rerunning; the write is not sent again",
+            Stop::Blocked => "Continue in the UI or let the user clear the challenge",
+        }
+    }
+}
+
 pub struct TierResult {
     pub id: String,
     pub step: usize,
@@ -18,9 +52,8 @@ pub struct TierResult {
     /// which is how many APIs answer a query with no results.
     pub empty: bool,
     pub tier: Tier,
-    /// The response says the run cannot go on, whatever tier sends it:
-    /// `auth_expired`, `rate_limited` or `blocked`.
-    pub kind: Option<&'static str>,
+    /// The response says the run cannot go on, whatever tier sends it.
+    pub stop: Option<Stop>,
     pub retry_after: Option<String>,
 }
 
@@ -44,7 +77,7 @@ impl TierResult {
             shape_changed: f.shape_changed,
             empty: false,
             tier,
-            kind: f.kind,
+            stop: f.stop,
             retry_after: None,
         }
     }
@@ -56,7 +89,7 @@ pub struct Failure {
     pub reason: String,
     pub drift: bool,
     pub shape_changed: bool,
-    pub kind: Option<&'static str>,
+    pub stop: Option<Stop>,
 }
 
 impl Failure {
@@ -77,7 +110,7 @@ impl Failure {
             reason,
             drift: false,
             shape_changed: false,
-            kind: Some("outcome_unknown"),
+            stop: Some(Stop::OutcomeUnknown),
         }
     }
 
@@ -87,19 +120,19 @@ impl Failure {
             reason,
             drift,
             shape_changed: false,
-            kind: None,
+            stop: None,
         }
     }
 
     /// A response that ends the run: another tier would get the same answer,
     /// and it does not mean the site changed.
-    pub(crate) fn stop(kind: &'static str, status: u16, reason: String) -> Failure {
+    pub(crate) fn stop(stop: Stop, status: u16, reason: String) -> Failure {
         Failure {
             status: Some(status),
             reason,
             drift: false,
             shape_changed: false,
-            kind: Some(kind),
+            stop: Some(stop),
         }
     }
 }
@@ -139,7 +172,7 @@ pub fn check_response(
         && looks_like_challenge(text)
     {
         return Err(Failure::stop(
-            "blocked",
+            Stop::Blocked,
             status,
             "bot challenge page instead of data".to_string(),
         ));
@@ -147,14 +180,14 @@ pub fn check_response(
     match status {
         401 | 403 => {
             return Err(Failure::stop(
-                "auth_expired",
+                Stop::AuthExpired,
                 status,
                 format!("HTTP {}: the session is signed out or lacks access", status),
             ))
         }
         429 => {
             return Err(Failure::stop(
-                "rate_limited",
+                Stop::RateLimited,
                 status,
                 "HTTP 429: the site is rate limiting this session".to_string(),
             ))
@@ -185,7 +218,7 @@ pub fn check_response(
             reason: format!("response shape changed: {}", reason),
             drift: true,
             shape_changed: true,
-            kind: None,
+            stop: None,
         });
     }
     Ok((parsed, false))
@@ -225,15 +258,16 @@ pub fn tier_result(
             shape_changed: false,
             empty,
             tier,
-            kind: None,
+            stop: None,
             retry_after: None,
         },
         Err(mut f) => {
             // The recording sent credentials a run cannot copy, so a 401 or
             // 403 may only mean this tier lacks them; the next tier sends
             // them from the page.
-            if f.kind == Some("auth_expired") && tier != Tier::Replay && req.expect.stripped_auth {
-                f.kind = None;
+            if f.stop == Some(Stop::AuthExpired) && tier != Tier::Replay && req.expect.stripped_auth
+            {
+                f.stop = None;
                 f.drift = true;
             }
             TierResult::failed(req, tier, ms, f)
@@ -242,7 +276,7 @@ pub fn tier_result(
 }
 
 pub(crate) fn with_retry_after(mut result: TierResult, retry_after: Option<String>) -> TierResult {
-    if result.kind == Some("rate_limited") {
+    if result.stop == Some(Stop::RateLimited) {
         result.retry_after = retry_after.filter(|v| !v.trim().is_empty());
     }
     result
@@ -346,4 +380,138 @@ pub fn finish_run(
         response["drift"] = json!({ "tier": a.tier, "step": a.step, "reason": a.reason });
     }
     response
+}
+
+/// How a run that did not return data ended.
+#[derive(Debug, PartialEq)]
+pub enum RunOutcome {
+    /// A response that ends the run, or a request every way of sending was
+    /// refused.
+    Stopped {
+        stop: Stop,
+        step: usize,
+        tier: Tier,
+        status: Option<u16>,
+        reason: String,
+        retry_after: Option<String>,
+    },
+    /// Every tier failed in a way that says the site changed.
+    Drift { step: usize, tried: String },
+    /// A request failed; `examples` are the recorded param values when the
+    /// site answered, since it likely rejected the new ones.
+    Failed {
+        step: usize,
+        reason: String,
+        examples: Option<String>,
+    },
+}
+
+impl RunOutcome {
+    /// A stop in the results, before anything is judged.
+    pub fn stopped(results: &[TierResult]) -> Option<RunOutcome> {
+        let (stop, result) = results
+            .iter()
+            .rev()
+            .find_map(|r| r.stop.map(|s| (s, r)))
+            .or_else(|| denied_everywhere(results).map(|r| (Stop::AuthExpired, r)))?;
+        Some(RunOutcome::Stopped {
+            stop,
+            step: result.step,
+            tier: result.tier,
+            status: result.status,
+            reason: result.reason.clone().unwrap_or_default(),
+            retry_after: result.retry_after.clone(),
+        })
+    }
+
+    /// Why a run that finished without data failed.
+    pub fn failed(results: &[TierResult], flow: &Flow) -> RunOutcome {
+        let failure = results.iter().rev().find(|r| !r.ok);
+        let step = failure.map(|r| r.step).unwrap_or(0);
+        if results.iter().any(|r| r.step == step && r.drift) {
+            let tried = results
+                .iter()
+                .filter(|r| r.step == step)
+                .map(|r| format!("{}: {}", r.tier.name(), r.reason.as_deref().unwrap_or("ok")))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return RunOutcome::Drift { step, tried };
+        }
+        let examples = flow
+            .params
+            .iter()
+            .map(|p| format!("{}={}", p.name, p.example.as_deref().unwrap_or("")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        RunOutcome::Failed {
+            step,
+            reason: failure.and_then(|r| r.reason.clone()).unwrap_or_default(),
+            examples: failure.and_then(|r| r.status).map(|_| examples),
+        }
+    }
+
+    pub fn message(&self, name: &str) -> String {
+        match self {
+            RunOutcome::Stopped {
+                stop,
+                step,
+                tier,
+                reason,
+                retry_after,
+                ..
+            } => {
+                let wait = retry_after
+                    .as_deref()
+                    .map(|w| format!("; retry after {}", w))
+                    .unwrap_or_default();
+                format!(
+                    "{}: flow '{}' step {} ({}): {}{}. {}",
+                    stop.code(),
+                    name,
+                    step,
+                    tier.name(),
+                    reason,
+                    wait,
+                    stop.advice()
+                )
+            }
+            RunOutcome::Drift { step, tried } => format!(
+                "flow '{}' failed at step {} ({}). The flow is now marked unverified; drive the browser for this task instead",
+                name, step, tried
+            ),
+            RunOutcome::Failed {
+                step,
+                reason,
+                examples: None,
+            } => format!("flow '{}' failed at step {}: {}", name, step, reason),
+            RunOutcome::Failed {
+                step,
+                reason,
+                examples: Some(examples),
+            } => format!(
+                "flow '{}' failed at step {}: {}. The site likely rejected the param values; the recorded run used {}",
+                name, step, reason, examples
+            ),
+        }
+    }
+
+    /// The error response's `code` and `data`, for a stop.
+    pub fn data(&self, name: &str) -> Option<Value> {
+        match self {
+            RunOutcome::Stopped {
+                stop,
+                step,
+                status,
+                retry_after,
+                ..
+            } => Some(json!({
+                "status": stop.code(),
+                "flow": name,
+                "step": step,
+                "httpStatus": status,
+                "retryAfter": retry_after,
+            })),
+            _ => None,
+        }
+    }
 }
