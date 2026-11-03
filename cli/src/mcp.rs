@@ -2661,9 +2661,22 @@ fn cli_tool_args(
     // a selector could otherwise carry its own --allowed-domains or --session.
     let trusted: Vec<&str> = args.iter().map(|a| global_flag_name(a)).collect();
     let wait_selector_state = wait_selector_state_flag_index(&command_args);
+    let text_boundary = if matches!(
+        command_args.first().map(String::as_str),
+        Some("fill" | "type")
+    ) {
+        command_args
+            .iter()
+            .enumerate()
+            .skip(2)
+            .find_map(|(i, arg)| (arg == "--").then_some(i))
+    } else {
+        None
+    };
     let tokens = command_args
         .iter()
         .enumerate()
+        .take(text_boundary.unwrap_or(command_args.len()))
         .map(|(i, t)| (t, MCP_TOOL_GLOBALS, Some(i)))
         .chain(extra_args.iter().map(|t| (t, &[][..], None)));
     for (token, tool_globals, command_index) in tokens {
@@ -2692,8 +2705,14 @@ fn cli_tool_args(
             )));
         }
     }
-    args.extend(command_args);
-    args.extend(extra_args);
+    if let Some(boundary) = text_boundary {
+        args.extend(command_args[..boundary].iter().cloned());
+        args.extend(extra_args);
+        args.extend(command_args[boundary..].iter().cloned());
+    } else {
+        args.extend(command_args);
+        args.extend(extra_args);
+    }
     Ok(args)
 }
 
@@ -2942,23 +2961,29 @@ fn call_click(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn call_fill(arguments: &Value) -> Result<Value, ProtocolError> {
-    let selector = required_string(arguments, "selector")?;
-    let text = required_string(arguments, "text")?;
-    call_cli_tool(arguments, vec!["fill".to_string(), selector, text], None)
+    call_cli_tool(arguments, text_command_args(arguments, "fill")?, None)
 }
 
 fn call_type(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, text_command_args(arguments, "type")?, None)
+}
+
+fn text_command_args(arguments: &Value, command: &str) -> Result<Vec<String>, ProtocolError> {
     let selector = required_string(arguments, "selector")?;
     let text = required_string(arguments, "text")?;
-    let mut args = vec!["type".to_string(), selector, text];
-    if optional_bool(arguments, "clear")?.unwrap_or(false) {
-        args.push("--clear".to_string());
+    let mut args = vec![command.to_string(), selector];
+    if command == "type" {
+        if optional_bool(arguments, "clear")?.unwrap_or(false) {
+            args.push("--clear".to_string());
+        }
+        if let Some(delay) = optional_u64(arguments, "delayMs")? {
+            args.push("--delay".to_string());
+            args.push(delay.to_string());
+        }
     }
-    if let Some(delay) = optional_u64(arguments, "delayMs")? {
-        args.push("--delay".to_string());
-        args.push(delay.to_string());
-    }
-    call_cli_tool(arguments, args, None)
+    args.push("--".to_string());
+    args.push(text);
+    Ok(args)
 }
 
 fn call_press(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -5259,6 +5284,63 @@ mod tests {
         .unwrap();
 
         assert_eq!(args, vec!["click", "@e1", "--new-tab"]);
+    }
+
+    #[test]
+    fn fill_and_type_text_remains_literal_through_cli_parser() {
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_CONFIG",
+        ]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        guard.remove("AGENT_BROWSER_CONFIG");
+
+        for command in ["fill", "type"] {
+            for text in ["--config", "--session", "--help", "--clear"] {
+                let extra_args = if command == "type" && text == "--clear" {
+                    vec!["--session", "work", "--clear"]
+                } else {
+                    vec!["--session", "work"]
+                };
+                let arguments = json!({
+                    "selector": "#input",
+                    "text": text,
+                    "clear": text != "--clear",
+                    "delayMs": 17,
+                    "extraArgs": extra_args
+                });
+                let args = cli_tool_args(
+                    &arguments,
+                    text_command_args(&arguments, command).unwrap(),
+                    None,
+                )
+                .unwrap();
+                let flags = crate::flags::parse_flags(&args);
+                let parsed =
+                    crate::commands::parse_command(&crate::flags::clean_args(&args), &flags)
+                        .unwrap();
+                assert_eq!(flags.session, "work");
+                assert_eq!(parsed["selector"], "#input");
+                if command == "fill" {
+                    assert_eq!(parsed["value"], text);
+                } else {
+                    assert_eq!(parsed["text"], text);
+                    assert_eq!(parsed["clear"], true);
+                    assert_eq!(parsed["delay"], 17);
+                }
+            }
+            for extra in [
+                vec!["--config", "/tmp/config"],
+                vec!["--", "--state", "/tmp/state"],
+            ] {
+                let arguments = json!({"selector": "#input", "text": "--help", "extraArgs": extra});
+                let args = text_command_args(&arguments, command).unwrap();
+                assert!(cli_tool_args(&arguments, args, None).is_err());
+            }
+            let arguments = json!({"selector": "--config", "text": "--help"});
+            let args = text_command_args(&arguments, command).unwrap();
+            assert!(cli_tool_args(&arguments, args, None).is_err());
+        }
     }
 
     #[test]
