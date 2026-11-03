@@ -1,3 +1,4 @@
+mod browser_security;
 mod ca_bundle;
 mod chat;
 mod color;
