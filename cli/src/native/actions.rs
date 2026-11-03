@@ -12110,7 +12110,11 @@ async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<V
     }
 
     let filter = state.domain_filter.read().await.clone();
-    let client = super::flow::http_client(filter.clone())?;
+    for prepared in &requests {
+        super::flow::check_allowed_host(&flow, &prepared.url)
+            .map_err(|e| format!("flow '{}' step {}: {}", name, prepared.step, e))?;
+    }
+    let client = super::flow::http_client(filter.clone(), &flow)?;
     let mut results = Vec::new();
     let mut bodies: HashMap<String, Value> = HashMap::new();
     for prepared in &requests {
@@ -12121,6 +12125,8 @@ async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<V
                 break;
             }
         };
+        super::flow::check_allowed_host(&flow, &req.url)
+            .map_err(|e| format!("flow '{}' step {}: {}", name, req.step, e))?;
         // Saved destinations follow the session's current domain allowlist,
         // not the one in force when the flow was recorded.
         if let Some(reason) = filter.as_ref().and_then(|f| f.check_url(&req.url).err()) {
@@ -12311,36 +12317,25 @@ async fn flow_ensure_browser(state: &mut DaemonState) -> Result<(), String> {
     Ok(())
 }
 
-/// Put the tab on the flow's site, so an in-page request is same-site.
-async fn flow_ensure_on_site(flow: &Value, state: &mut DaemonState) -> Result<(), String> {
-    flow_ensure_browser(state).await?;
-    let start = flow["startUrl"].as_str().unwrap_or("");
-    let want = super::flow::base_domain(flow["origin"].as_str().unwrap_or(""));
+/// The in-page tier needs a tab that is already on the flow's site.
+async fn flow_tab_on_site(flow: &Value, state: &DaemonState) -> Result<(), String> {
+    let allowed = super::flow::derive_allowed_hosts(flow["startUrl"].as_str().unwrap_or(""));
     let current = match state.browser.as_ref() {
         Some(mgr) => mgr.get_url().await.ok(),
         None => None,
     };
-    let on_site = current
-        .as_deref()
-        .and_then(|u| url::Url::parse(u).ok())
-        .and_then(|u| u.host_str().map(super::flow::base_domain))
-        .is_some_and(|h| h == want);
-    if on_site {
-        return Ok(());
+    let site = allowed.join(", ");
+    match current.as_deref() {
+        Some(url) if super::flow::check_allowed_host(flow, url).is_ok() => Ok(()),
+        Some(url) => Err(format!(
+            "the active tab ({}) is not on the flow's site ({}); open the site to use the in-page request",
+            url, site
+        )),
+        None => Err(format!(
+            "no browser is open; open the flow's site ({}) to use the in-page request",
+            site
+        )),
     }
-    let resp = Box::pin(execute_command(
-        &json!({ "id": "flow-tier", "action": "navigate", "url": start }),
-        state,
-    ))
-    .await;
-    if resp.get("success") != Some(&json!(true)) {
-        return Err(resp
-            .get("error")
-            .and_then(|e| e.as_str())
-            .unwrap_or("could not open the flow's start URL")
-            .to_string());
-    }
-    Ok(())
 }
 
 async fn run_flow_in_page(
@@ -12349,15 +12344,15 @@ async fn run_flow_in_page(
     state: &mut DaemonState,
 ) -> super::flow::TierResult {
     let started = std::time::Instant::now();
-    let value = match flow_ensure_on_site(flow, state).await {
-        Ok(()) => match state.browser.as_ref() {
-            Some(mgr) => {
-                mgr.evaluate(&super::flow::page_fetch_script(req), None)
-                    .await
-            }
-            None => Err("Browser not launched".to_string()),
-        },
-        Err(e) => Err(e),
+    if let Err(reason) = flow_tab_on_site(flow, state).await {
+        return super::flow::page_skipped(req, started, reason);
+    }
+    let value = match state.browser.as_ref() {
+        Some(mgr) => {
+            mgr.evaluate(&super::flow::page_fetch_script(req), None)
+                .await
+        }
+        None => Err("Browser not launched".to_string()),
     };
     super::flow::page_result(req, started, value)
 }
@@ -12405,6 +12400,18 @@ async fn run_flow_replay(
             return super::flow::replay_unavailable(req, started, e);
         }
     };
+    if let Some(url) = commands
+        .iter()
+        .filter(|c| c["action"] == "navigate")
+        .filter_map(|c| c["url"].as_str())
+        .find(|u| super::flow::check_allowed_host(flow, u).is_err())
+    {
+        let reason = super::flow::check_allowed_host(flow, url).unwrap_err();
+        if started_har {
+            state.har_recording = false;
+        }
+        return super::flow::replay_unavailable(req, started, reason);
+    }
     for (i, c) in commands.into_iter().enumerate() {
         let mut c = c;
         c["id"] = json!(format!("flow-replay-{}", i + 1));
@@ -19536,6 +19543,43 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert!(state.har_recording);
         let start = handle_har_start(&json!({}), &mut state).await.unwrap_err();
         assert!(start.contains("--capture flow"), "{start}");
+    }
+
+    #[tokio::test]
+    async fn a_flow_edited_to_reach_another_host_is_rejected_before_any_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        let flow = json!({
+            "version": 2, "name": "edited", "origin": "example.com",
+            "startUrl": "https://example.com/", "allowedHosts": ["example.com"],
+            "params": [], "output": "s1r1", "itemFields": [], "verifiedAt": null,
+            "steps": [{ "seq": 1, "ok": true, "command": { "action": "navigate" }, "requests": [{
+                "id": "s1r1", "method": "GET", "url": "https://evil.test/steal",
+                "headers": {}, "body": null,
+                "expect": { "status": 200, "mime": "application/json", "signature": {}, "bytes": 2, "itemFields": [], "extract": null }
+            }] }]
+        });
+        super::super::flow::write_flow(&flow).unwrap();
+        let mut state = DaemonState::new();
+        let err = handle_flow_run(&json!({ "name": "edited", "params": {} }), &mut state)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("evil.test") && err.contains("outside the hosts"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_page_tier_needs_a_tab_on_the_flows_site() {
+        let state = DaemonState::new();
+        let flow = json!({ "startUrl": "https://example.com/" });
+        let err = flow_tab_on_site(&flow, &state).await.unwrap_err();
+        assert!(
+            err.contains("example.com") && err.contains("open the flow's site"),
+            "{err}"
+        );
     }
 
     #[tokio::test]

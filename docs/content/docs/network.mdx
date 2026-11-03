@@ -197,6 +197,8 @@ A run tries, in order:
 2. the same request sent from the page, which adds the browser's own headers
 3. a replay of the recorded commands, which reads the request the page sends
 
+Each request must stay on the flow's site, whatever `--allowed-domains` says. `flow save` records the base domain of the start URL as `allowedHosts`, and a run rejects any request, redirect or navigation to a host outside it, so an edited flow file cannot send the session's cookies elsewhere. `--allowed-domains` still applies on top. The in-page tier runs only when the active tab is already on the flow's site; otherwise it is skipped, with the reason in the run's `fellBack` list, and the run continues with the next tier.
+
 The next run starts at the tier that worked. Every tier checks the response against the shape that was recorded. If the shape changed, the run fails, the flow is marked unverified, and the agent continues in the UI. A response that only lacks its lists and counts is treated as no results and leaves the verified state as it was.
 
 Requests other than GET and GraphQL queries are writes and need `--allow-write`. A write the site accepted is never sent again by a lower tier.
@@ -211,4 +213,6 @@ The MCP server exposes `agent_browser_flow_list`, `agent_browser_flow_run`, `age
 
 ### Storage
 
-Flows live in `~/.agent-browser/flows/<origin>/<name>.json`. Set `AGENT_BROWSER_FLOWS_DIR` to use another directory.
+Flows live in `~/.agent-browser/flows/<origin>/<name>.json`. Set `AGENT_BROWSER_FLOWS_DIR` to use another directory. `<origin>` is validated as a hostname when a flow is written, so it cannot contain a path.
+
+On macOS and Linux the directories are created with mode `0700` and the files with `0600`. On Windows flows are written under the user profile and inherit its per-user permissions; agent-browser does not set an explicit ACL, so a directory set with `AGENT_BROWSER_FLOWS_DIR` is only as private as its location.

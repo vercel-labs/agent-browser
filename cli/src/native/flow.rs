@@ -286,6 +286,9 @@ const DROPPED_HEADERS: &[&str] = &[
 /// Registrable part of a host, close enough for first-party checks:
 /// `api.example.com.ar` -> `example.com.ar`, `www.example.org` -> `example.org`.
 pub fn base_domain(host: &str) -> String {
+    if host.parse::<std::net::IpAddr>().is_ok() || host.starts_with('[') {
+        return host.to_string();
+    }
     let labels: Vec<&str> = host.trim_end_matches('.').split('.').collect();
     if labels.len() <= 2 {
         return host.to_string();
@@ -302,6 +305,77 @@ pub fn base_domain(host: &str) -> String {
         2
     };
     labels[labels.len() - keep..].join(".")
+}
+
+/// Hosts a flow may talk to: the base domain of its start URL.
+pub fn derive_allowed_hosts(start_url: &str) -> Vec<String> {
+    host_of(start_url)
+        .map(|h| vec![base_domain(&h)])
+        .unwrap_or_default()
+}
+
+fn host_matches(host: &str, allowed: &str) -> bool {
+    if allowed.parse::<std::net::IpAddr>().is_ok() {
+        return host == allowed;
+    }
+    host == allowed || host.ends_with(&format!(".{}", allowed))
+}
+
+/// Reject a URL outside the hosts a flow was recorded on. The start URL's
+/// base domain is always required; `allowedHosts` in the file can only narrow it.
+pub fn check_allowed_host(flow: &Value, url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|_| format!("'{}' is not a valid URL", url))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!("'{}' is not an http(s) URL", url));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("'{}' has no host", url))?
+        .to_ascii_lowercase();
+    let base = derive_allowed_hosts(flow["startUrl"].as_str().unwrap_or(""));
+    let listed: Vec<String> = flow["allowedHosts"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|h| h.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let in_base = base.iter().any(|a| host_matches(&host, a));
+    let in_listed = listed.is_empty() || listed.iter().any(|a| host_matches(&host, a));
+    if in_base && in_listed {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} is outside the hosts this flow may reach ({})",
+            host,
+            if base.is_empty() {
+                "none".to_string()
+            } else {
+                base.join(", ")
+            }
+        ))
+    }
+}
+
+/// A flow origin becomes a directory name, so it must be a plain hostname.
+pub fn validate_origin(origin: &str) -> Result<(), String> {
+    let ok = !origin.is_empty()
+        && origin.len() <= 253
+        && !origin.starts_with('.')
+        && !origin.ends_with('.')
+        && !origin.contains("..")
+        && origin
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid flow origin '{}': expected a hostname",
+            origin
+        ))
+    }
 }
 
 fn host_of(url: &str) -> Option<String> {
@@ -947,6 +1021,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
         "name": input.name,
         "origin": host,
         "startUrl": start,
+        "allowedHosts": derive_allowed_hosts(&start),
         "createdAt": input.created_at,
         "createdBy": { "tool": "agent-browser", "version": env!("CARGO_PKG_VERSION") },
         "description": input.description,
@@ -1492,8 +1567,10 @@ pub fn validate_name(name: &str) -> Result<(), String> {
     valid_name(name)
 }
 
-pub fn flow_path(origin: &str, name: &str) -> PathBuf {
-    flows_dir().join(origin).join(format!("{}.json", name))
+pub fn flow_path(origin: &str, name: &str) -> Result<PathBuf, String> {
+    validate_origin(origin)?;
+    valid_name(name)?;
+    Ok(flows_dir().join(origin).join(format!("{}.json", name)))
 }
 
 /// Flow files hold recorded URLs and form values, so only the owner can read
@@ -1540,7 +1617,7 @@ fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
 pub fn write_flow(flow: &Value) -> Result<PathBuf, String> {
     let origin = flow["origin"].as_str().ok_or("flow has no origin")?;
     let name = flow["name"].as_str().ok_or("flow has no name")?;
-    let path = flow_path(origin, name);
+    let path = flow_path(origin, name)?;
     if let Some(parent) = path.parent() {
         create_private_dirs(parent)
             .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
@@ -1651,7 +1728,7 @@ pub fn load_flow(name: &str, origin: Option<&str>) -> Result<Value, String> {
             name
         )),
         [one] => {
-            let path = flow_path(one["origin"].as_str().unwrap_or_default(), name);
+            let path = flow_path(one["origin"].as_str().unwrap_or_default(), name)?;
             let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
             let flow: Value = serde_json::from_str(&text)
                 .map_err(|e| format!("{} is not valid JSON: {}", path.display(), e))?;
@@ -2076,6 +2153,11 @@ pub fn page_fetch_script(req: &PreparedRequest) -> String {
     )
 }
 
+/// The in-page tier runs only on a tab that is already on the flow's site.
+pub fn page_skipped(req: &PreparedRequest, started: Instant, reason: String) -> TierResult {
+    tier_result(req, "page", started, Err(Failure::new(true, None, reason)))
+}
+
 pub fn page_result(
     req: &PreparedRequest,
     started: Instant,
@@ -2300,11 +2382,17 @@ pub fn tiers_for(flow: &Value, id: &str) -> Vec<&'static str> {
 /// session's domain filter allows, the same rule browser requests follow.
 pub fn http_client(
     filter: Option<super::network::DomainFilter>,
+    flow: &Value,
 ) -> Result<reqwest::Client, String> {
+    let flow = flow.clone();
     let policy = reqwest::redirect::Policy::custom(move |attempt| {
-        let blocked = filter
-            .as_ref()
-            .and_then(|f| f.check_url(attempt.url().as_str()).err());
+        let blocked = check_allowed_host(&flow, attempt.url().as_str())
+            .err()
+            .or_else(|| {
+                filter
+                    .as_ref()
+                    .and_then(|f| f.check_url(attempt.url().as_str()).err())
+            });
         match blocked {
             Some(reason) => attempt.error(reason),
             // reqwest's default redirect limit.
@@ -2534,6 +2622,8 @@ mod tests {
         assert_eq!(flow["steps"][0]["requests"].as_array().unwrap().len(), 1);
         assert_eq!(flow["output"], "s1r1");
         assert_eq!(flow["verifiedAt"], Value::Null);
+        assert_eq!(flow["allowedHosts"], json!(["example.com.ar"]));
+        assert_eq!(flow["version"], 2);
         assert!(!serde_json::to_string(&flow).unwrap().contains("secret"));
         assert_eq!(report["gaps"][0]["step"], 2);
         assert_eq!(
@@ -3306,5 +3396,57 @@ mod tests {
         write_flow(&flow).unwrap();
         assert!(load_flow("old", None).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hosts_outside_the_start_domain_are_rejected() {
+        let flow =
+            json!({ "startUrl": "https://www.example.com/shop", "allowedHosts": ["example.com"] });
+        assert!(check_allowed_host(&flow, "https://api.example.com/x").is_ok());
+        assert!(check_allowed_host(&flow, "https://example.com/x").is_ok());
+        for bad in [
+            "https://evil.com/x",
+            "https://example.com.evil.com/x",
+            "https://notexample.com/x",
+            "ftp://example.com/x",
+            "not a url",
+        ] {
+            assert!(check_allowed_host(&flow, bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_edited_allowed_hosts_list_cannot_widen_the_start_domain() {
+        let flow = json!({ "startUrl": "https://example.com/", "allowedHosts": ["example.com", "evil.com"] });
+        assert!(check_allowed_host(&flow, "https://evil.com/x").is_err());
+        let narrow =
+            json!({ "startUrl": "https://example.com/", "allowedHosts": ["api.example.com"] });
+        assert!(check_allowed_host(&narrow, "https://www.example.com/x").is_err());
+        assert!(check_allowed_host(&narrow, "https://api.example.com/x").is_ok());
+    }
+
+    #[test]
+    fn ip_hosts_match_exactly() {
+        let flow = json!({ "startUrl": "http://127.0.0.1:3000/", "allowedHosts": ["127.0.0.1"] });
+        assert!(check_allowed_host(&flow, "http://127.0.0.1:3000/api").is_ok());
+        assert!(check_allowed_host(&flow, "http://10.0.0.1/api").is_err());
+        assert_eq!(base_domain("127.0.0.1"), "127.0.0.1");
+    }
+
+    #[test]
+    fn origins_must_be_plain_hostnames() {
+        for ok in ["example.com", "127.0.0.1", "my-site.co.uk", "localhost"] {
+            assert!(validate_origin(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "", "..", "a/b", "../x", "a..b", ".hidden", "a\\b", "a b", "x.com/",
+        ] {
+            assert!(validate_origin(bad).is_err(), "{bad}");
+        }
+        let flow = json!({ "version": 2, "name": "x", "origin": "../escape" });
+        assert!(write_flow(&flow)
+            .unwrap_err()
+            .contains("invalid flow origin"));
+        assert!(flow_path("a/b", "x").is_err());
     }
 }
