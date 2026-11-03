@@ -1568,6 +1568,16 @@ pub fn load_flow(name: &str, origin: Option<&str>) -> Result<Flow, String> {
                     name, stored.flow.version
                 ));
             }
+            // A request that changes state must be listed as a write, or a run
+            // would send it with no gate.
+            if let Some(r) = stored.flow.requests().find(|r| {
+                is_write(&r.method, r.body.as_deref()) && stored.flow.write(&r.id).is_none()
+            }) {
+                return Err(format!(
+                    "flow '{}' sends {} {} without listing it as a write; re-save it",
+                    name, r.method, r.url
+                ));
+            }
             Ok(stored.flow)
         }
         _ => Err(format!(
