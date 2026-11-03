@@ -357,6 +357,39 @@ fn launch_connection_identity(
     ("local", None)
 }
 
+fn webdriver_launch_target(
+    cmd: &Value,
+    connection_kind: &str,
+    provider_name: Option<&str>,
+    connection_target: Option<String>,
+) -> Option<String> {
+    match (
+        connection_kind,
+        provider_name.map(str::to_ascii_lowercase).as_deref(),
+    ) {
+        ("provider", Some("ios")) => Some(
+            json!([
+                "ios",
+                cmd.get("deviceName").and_then(Value::as_str),
+                cmd.get("udid").and_then(Value::as_str),
+                cmd.get("platformVersion").and_then(Value::as_str)
+            ])
+            .to_string(),
+        ),
+        ("provider", Some("safari")) => Some(
+            json!([
+                "safari",
+                cmd.get("port")
+                    .and_then(Value::as_u64)
+                    .map(|p| p as u16)
+                    .filter(|p| *p > 0)
+            ])
+            .to_string(),
+        ),
+        _ => connection_target,
+    }
+}
+
 /// Launch fields that only describe a browser agent-browser starts itself. The CLI never
 /// sends them with an external target, so a launch that inherits one drops them.
 const LOCAL_ONLY_LAUNCH_FIELDS: &[&str] = &[
@@ -3040,7 +3073,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         } else if let Some(ref mut mgr) = state.browser {
             mgr.has_process_exited() || !mgr.is_connection_alive().await
         } else {
-            true
+            state.webdriver_backend.is_none()
         }
     } else {
         false
@@ -5487,7 +5520,12 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
 
     let (connection_kind, connection_target) =
         launch_connection_identity(cdp_url, cdp_port, auto_connect, provider_name);
-    let connection_target = with_cdp_headers(connection_target, cmd);
+    let connection_target = webdriver_launch_target(
+        cmd,
+        connection_kind,
+        provider_name,
+        with_cdp_headers(connection_target, cmd),
+    );
     let new_hash = launch_hash(
         &launch_options,
         &allowed_domains,
@@ -5502,6 +5540,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
     // Hash comparison and fast process-exit check are evaluated before the
     // async is_connection_alive to skip the expensive CDP liveness probe
     // when a relaunch is already certain.
+    let webdriver_active = state.webdriver_backend.is_some();
     let needs_relaunch = if let Some(ref mut mgr) = state.browser {
         let is_external =
             launch_connection_is_external(cdp_url, cdp_port, auto_connect, provider_name);
@@ -5513,12 +5552,17 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
             || storage_state_requires_clean_launch
             || mgr.has_process_exited()
             || !mgr.is_connection_alive().await
+    } else if webdriver_active {
+        state.launch_hash != Some(new_hash)
     } else {
         true
     };
 
-    let had_browser_before_launch =
-        state.browser.is_some() || state.active_provider_session.is_some();
+    let had_browser_before_launch = state.browser.is_some()
+        || state.active_provider_session.is_some()
+        || webdriver_active
+        || state.appium.is_some()
+        || state.safari_driver.is_some();
 
     if needs_relaunch {
         if local_launch {
@@ -5528,7 +5572,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         }
         if had_browser_before_launch {
             let _ = auto_save_restore_state(state).await;
-            close_current_browser(state).await?;
+            close_all_browser_backends(state).await?;
         }
     } else {
         load_storage_state(state, &storage_state_owned).await?;
@@ -5628,6 +5672,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
             "ios" => {
                 let result = launch_ios(cmd, state).await;
                 if result.is_ok() {
+                    state.launch_hash = Some(new_hash);
                     state.effective_ca_cert = effective_ca_cert;
                 }
                 return result;
@@ -5635,6 +5680,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
             "safari" => {
                 let result = launch_safari(cmd, state).await;
                 if result.is_ok() {
+                    state.launch_hash = Some(new_hash);
                     state.effective_ca_cert = effective_ca_cert;
                 }
                 return result;
