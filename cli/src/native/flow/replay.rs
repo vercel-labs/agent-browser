@@ -434,6 +434,17 @@ async fn capture(
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         };
+        // The next command may depend on what this one fetched (a token the
+        // page keeps), so let its requests finish first.
+        loop {
+            let seen = browser.captured_since(mark).await;
+            if seen.iter().all(|e| e.loading_finished_timestamp.is_some())
+                || Instant::now() >= started + Duration::from_secs(20)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
         // The replay stops as soon as the tab leaves the flow's site.
         if let Some(url) = browser.tab_url().await.filter(|u| u.starts_with("http")) {
             if let Err(reason) = HostPolicy::of(flow).check(&url) {
