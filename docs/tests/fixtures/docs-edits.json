@@ -32,6 +32,14 @@
       {
         "from": "agent-browser network route <url> --body <json>  # Mock response",
         "to": "agent-browser network route <url> --body <json>  # Mock response\nagent-browser network route <url> --body <json> --allow-origin <origin>  # Mock readable cross-origin"
+      },
+      {
+        "from": "agent-browser console --clear         # Clear console log",
+        "to": "agent-browser console --clear         # Clear console log\nagent-browser console --follow        # Stream console messages until Ctrl+C"
+      },
+      {
+        "from": "agent-browser errors --clear          # Clear error log",
+        "to": "agent-browser errors --clear          # Clear error log\nagent-browser errors --follow         # Stream page errors until Ctrl+C"
       }
     ],
     "/configuration": [
@@ -276,6 +284,16 @@
       {
         "from": "pnpm install\npnpm build\npnpm build:native\n./bin/agent-browser install\npnpm link --global",
         "to": "pnpm install\npnpm build:source\npnpm link --global\nagent-browser install"
+      }
+    ],
+    "/debugging": [
+      {
+        "from": "agent-browser console --clear",
+        "to": "agent-browser console --clear\nagent-browser console --follow"
+      },
+      {
+        "from": "agent-browser errors --clear",
+        "to": "agent-browser errors --clear\nagent-browser errors --follow"
       }
     ]
   },
