@@ -9,8 +9,23 @@ use serde_json::{json, Map, Value};
 
 use super::actions::HarEntry;
 
+mod hint;
+mod http;
+#[cfg(test)]
+mod memory;
 mod model;
+mod outcome;
+mod page;
+mod replay;
+mod send;
+
+pub use hint::*;
+pub use http::*;
 pub use model::*;
+pub use outcome::*;
+pub use page::*;
+pub use replay::*;
+pub use send::*;
 
 /// Values `--capture` accepts.
 pub const CAPTURE_MODES: &[&str] = &["flow"];
@@ -2480,1020 +2495,8 @@ fn is_graphql_query(body: Option<&str>) -> bool {
         })
 }
 
-pub struct TierResult {
-    pub id: String,
-    pub step: usize,
-    pub ok: bool,
-    pub status: Option<u16>,
-    pub reason: Option<String>,
-    pub body: Option<Value>,
-    pub ms: u128,
-    /// The failure says the site or its gate changed, not that the inputs were wrong.
-    pub drift: bool,
-    /// The response came back with a different shape than the recording.
-    pub shape_changed: bool,
-    /// The response matches the recording except that its lists are absent,
-    /// which is how many APIs answer a query with no results.
-    pub empty: bool,
-    pub tier: Tier,
-    /// The response says the run cannot go on, whatever tier sends it:
-    /// `auth_expired`, `rate_limited` or `blocked`.
-    pub kind: Option<&'static str>,
-    pub retry_after: Option<String>,
-}
-
-impl TierResult {
-    fn failed(req: &PreparedRequest, tier: Tier, ms: u128, f: Failure) -> TierResult {
-        TierResult {
-            id: req.id.clone(),
-            step: req.step,
-            ok: false,
-            status: f.status,
-            reason: Some(f.reason),
-            body: None,
-            ms,
-            drift: f.drift,
-            shape_changed: f.shape_changed,
-            empty: false,
-            tier,
-            kind: f.kind,
-            retry_after: None,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct Failure {
-    pub status: Option<u16>,
-    pub reason: String,
-    pub drift: bool,
-    pub shape_changed: bool,
-    pub kind: Option<&'static str>,
-}
-
-impl Failure {
-    fn new(drift: bool, status: Option<u16>, reason: String) -> Failure {
-        Failure {
-            status,
-            reason,
-            drift,
-            shape_changed: false,
-            kind: None,
-        }
-    }
-
-    /// A response that ends the run: another tier would get the same answer,
-    /// and it does not mean the site changed.
-    fn stop(kind: &'static str, status: u16, reason: String) -> Failure {
-        Failure {
-            status: Some(status),
-            reason,
-            drift: false,
-            shape_changed: false,
-            kind: Some(kind),
-        }
-    }
-}
-
-/// Challenge pages are HTML; a JSON body that mentions a captcha is data.
-/// A write whose outcome is not known is never sent again by another tier.
-fn unknown_outcome(reason: String) -> Failure {
-    Failure {
-        status: None,
-        reason,
-        drift: false,
-        shape_changed: false,
-        kind: Some("outcome_unknown"),
-    }
-}
-
-fn looks_like_html(body: &str) -> bool {
-    let head = body.trim_start();
-    head.starts_with('<') && serde_json::from_str::<Value>(body).is_err()
-}
-
-fn looks_like_challenge(body: &str) -> bool {
-    let head: String = body
-        .chars()
-        .take(4000)
-        .collect::<String>()
-        .to_ascii_lowercase();
-    [
-        "cf-chl",
-        "captcha",
-        "challenge-platform",
-        "px-captcha",
-        "_incapsula_",
-    ]
-    .iter()
-    .any(|m| head.contains(m))
-}
-
-/// Judge a response the same way on every tier: blocked, rejected input,
-/// changed shape, or data.
-pub fn check_response(
-    req: &PreparedRequest,
-    status: u16,
-    text: &str,
-) -> Result<(Value, bool), Failure> {
-    if (matches!(status, 401 | 403 | 429) || (200..300).contains(&status))
-        && looks_like_html(text)
-        && looks_like_challenge(text)
-    {
-        return Err(Failure::stop(
-            "blocked",
-            status,
-            "bot challenge page instead of data".to_string(),
-        ));
-    }
-    match status {
-        401 | 403 => {
-            return Err(Failure::stop(
-                "auth_expired",
-                status,
-                format!("HTTP {}: the session is signed out or lacks access", status),
-            ))
-        }
-        429 => {
-            return Err(Failure::stop(
-                "rate_limited",
-                status,
-                "HTTP 429: the site is rate limiting this session".to_string(),
-            ))
-        }
-        407 => return Err(Failure::new(true, Some(status), format!("HTTP {}", status))),
-        _ => {}
-    }
-    if !(200..300).contains(&status) {
-        return Err(Failure::new(
-            false,
-            Some(status),
-            format!("HTTP {}", status),
-        ));
-    }
-    let parsed: Value = serde_json::from_str(text)
-        .map_err(|_| Failure::new(true, Some(status), "response is not JSON".to_string()))?;
-    let current = signature(&parsed);
-    if let Err(reason) = signature_matches(&req.expect.signature, &current) {
-        // A list that only went missing reads as no results; a list that
-        // appeared under a new name means the contract moved.
-        if matches_without_lists(&req.expect.signature, &current)
-            && new_lists(&req.expect.signature, &current, "").is_empty()
-        {
-            return Ok((parsed, true));
-        }
-        return Err(Failure {
-            status: Some(status),
-            reason: format!("response shape changed: {}", reason),
-            drift: true,
-            shape_changed: true,
-            kind: None,
-        });
-    }
-    Ok((parsed, false))
-}
-
-pub fn tier_result(
-    req: &PreparedRequest,
-    tier: Tier,
-    started: Instant,
-    outcome: Result<(u16, String), Failure>,
-) -> TierResult {
-    let ms = started.elapsed().as_millis();
-    let outcome = match req.expect.extract.as_ref().filter(|x| !x.is_null()) {
-        Some(spec) => outcome.and_then(|(status, text)| match extract_embedded(&text, spec) {
-            Some(json) => Ok((status, json)),
-            None if (200..300).contains(&status) => Err(Failure::new(
-                true,
-                Some(status),
-                "the page no longer embeds the recorded data".to_string(),
-            )),
-            None => Ok((status, text)),
-        }),
-        None => outcome,
-    };
-    let checked = outcome
-        .and_then(|(status, text)| check_response(req, status, &text).map(|body| (status, body)));
-    match checked {
-        Ok((status, (body, empty))) => TierResult {
-            id: req.id.clone(),
-            step: req.step,
-            ok: true,
-            status: Some(status),
-            reason: None,
-            body: Some(body),
-            ms,
-            drift: false,
-            shape_changed: false,
-            empty,
-            tier,
-            kind: None,
-            retry_after: None,
-        },
-        Err(mut f) => {
-            // The recording sent credentials a run cannot copy, so a 401 or
-            // 403 may only mean this tier lacks them; the next tier sends
-            // them from the page.
-            if f.kind == Some("auth_expired") && tier != Tier::Replay && req.expect.stripped_auth {
-                f.kind = None;
-                f.drift = true;
-            }
-            TierResult::failed(req, tier, ms, f)
-        }
-    }
-}
-
-/// A session route (`network route`) that matches the request answers it on
-/// the HTTP tier too, so mocks apply to the whole session.
-pub struct RoutedResponse {
-    pub abort: bool,
-    pub status: u16,
-    pub body: String,
-}
-
-/// Tier 1: send the request directly, with cookies from the live session.
-pub async fn run_http(
-    client: &reqwest::Client,
-    req: &PreparedRequest,
-    cookie_header: Option<&str>,
-    routed: Option<RoutedResponse>,
-) -> TierResult {
-    let started = Instant::now();
-    if let Some(r) = routed {
-        let outcome = if r.abort {
-            Err(Failure::new(
-                false,
-                None,
-                "request aborted by a session route".to_string(),
-            ))
-        } else {
-            Ok((r.status, r.body))
-        };
-        return tier_result(req, Tier::Http, started, outcome);
-    }
-    let method = match reqwest::Method::from_bytes(req.method.as_bytes()) {
-        Ok(m) => m,
-        Err(_) => {
-            return tier_result(
-                req,
-                Tier::Http,
-                started,
-                Err(Failure::new(
-                    true,
-                    None,
-                    format!("unsupported method {}", req.method),
-                )),
-            )
-        }
-    };
-    let mut builder = client.request(method, &req.url);
-    for (k, v) in &req.headers {
-        builder = builder.header(k, v);
-    }
-    if let Some(cookie) = cookie_header.filter(|c| !c.is_empty()) {
-        builder = builder.header("cookie", cookie);
-    }
-    // Browsers send Origin on every write; sites check it against CSRF.
-    let has_origin = req
-        .headers
-        .iter()
-        .any(|(k, _)| k.eq_ignore_ascii_case("origin"));
-    if is_write(&req.method, req.body.as_deref()) && !has_origin {
-        if let Some(origin) = req
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("referer"))
-            .and_then(|(_, v)| url::Url::parse(v).ok())
-            .map(|u| u.origin().ascii_serialization())
-        {
-            builder = builder.header("origin", origin);
-        }
-    }
-    if let Some(body) = &req.body {
-        builder = builder.body(body.clone());
-    }
-    let mut retry_after = None;
-    let outcome = match builder.send().await {
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            retry_after = resp
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .map(String::from);
-            if resp.status().is_redirection() {
-                let to = resp
-                    .headers()
-                    .get("location")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_string();
-                return tier_result(
-                    req,
-                    Tier::Http,
-                    started,
-                    Err(Failure {
-                        status: Some(status),
-                        reason: format!("HTTP {}: the redirect to {} was not followed", status, to),
-                        drift: false,
-                        shape_changed: false,
-                        kind: None,
-                    }),
-                );
-            }
-            resp.text().await.map(|t| (status, t)).map_err(|e| {
-                Failure::new(true, Some(status), format!("could not read body: {}", e))
-            })
-        }
-        // A write that left the machine may have been applied.
-        Err(e) if req.write && !e.is_connect() => Err(unknown_outcome(format!(
-            "the write was sent but no response came back: {}",
-            e
-        ))),
-        Err(e) => Err(Failure::new(false, None, format!("request failed: {}", e))),
-    };
-    with_retry_after(tier_result(req, Tier::Http, started, outcome), retry_after)
-}
-
-fn with_retry_after(mut result: TierResult, retry_after: Option<String>) -> TierResult {
-    if result.kind == Some("rate_limited") {
-        result.retry_after = retry_after.filter(|v| !v.trim().is_empty());
-    }
-    result
-}
-
-/// Tier 2: the page sends the request itself, so the browser adds its own
-/// cookies, client hints and any headers the site's scripts would not.
-pub fn page_fetch_script(req: &PreparedRequest) -> String {
-    // Headers the browser sets itself. Sending them as app headers turns the
-    // request into a CORS preflight the site never allowed.
-    let headers: Map<String, Value> = req
-        .headers
-        .iter()
-        .filter(|(k, _)| classify_header(k) != HeaderClass::BrowserSet)
-        .map(|(k, v)| (k.clone(), json!(v)))
-        .collect();
-    let mut init = json!({
-        "method": req.method,
-        "headers": headers,
-        "body": req.body,
-    });
-    // A write must not follow a redirect to another site; the 3xx counts as
-    // the site's answer.
-    if req.write {
-        init["redirect"] = json!("manual");
-    }
-    // Cross-origin APIs differ on credentials: some need cookies, some reject
-    // a credentialed request outright. Try with, then without.
-    // A write is never sent a second time: a thrown fetch may still have
-    // reached the server, so it is reported as an unknown outcome instead.
-    let send = if req.write {
-        "const r = await fetch(u, { ...i, credentials: 'include' });"
-    } else {
-        "let r; try { r = await fetch(u, { ...i, credentials: 'include' }); } \
-         catch (e) { r = await fetch(u, i); }"
-    };
-    format!(
-        "(async () => {{ const u = {url}, i = {init}; \
-         {send} \
-         return {{ status: r.type === 'opaqueredirect' ? 302 : r.status, retryAfter: r.headers.get('retry-after'), text: await r.text() }}; }})()",
-        url = json!(req.url),
-        init = init,
-        send = send
-    )
-}
-
-/// The in-page tier runs only on a tab that is already on the flow's site.
-pub fn page_skipped(req: &PreparedRequest, started: Instant, reason: String) -> TierResult {
-    tier_result(
-        req,
-        Tier::Page,
-        started,
-        Err(Failure::new(true, None, reason)),
-    )
-}
-
-pub fn page_result(
-    req: &PreparedRequest,
-    started: Instant,
-    value: Result<Value, String>,
-) -> TierResult {
-    let retry_after = value
-        .as_ref()
-        .ok()
-        .and_then(|v| v["retryAfter"].as_str())
-        .map(String::from);
-    let outcome = match value {
-        Ok(v) => match (v["status"].as_u64(), v["text"].as_str()) {
-            (Some(status), Some(text)) => Ok((status as u16, text.to_string())),
-            _ => Err(Failure::new(
-                true,
-                None,
-                "in-page fetch returned no response".to_string(),
-            )),
-        },
-        Err(e) if req.write => Err(unknown_outcome(format!(
-            "the in-page write may have been sent: {}",
-            e
-        ))),
-        Err(e) => Err(Failure::new(
-            true,
-            None,
-            format!("in-page fetch failed: {}", e),
-        )),
-    };
-    with_retry_after(tier_result(req, Tier::Page, started, outcome), retry_after)
-}
-
-/// Tier 3: the recorded commands with the run's params swapped in. A param
-/// whose recorded value no command contains cannot be replayed: the browser
-/// would answer with the recorded value instead.
-pub fn replay_commands(flow: &Flow, cmd_params: &[(String, String)]) -> Result<Vec<Value>, String> {
-    let given = |name: &str| cmd_params.iter().find(|(k, _)| k == name).map(|(_, v)| v);
-    let swaps: Vec<(String, String)> = flow
-        .params
-        .iter()
-        .filter_map(|p| {
-            let example = p.example.as_deref()?;
-            let value = given(&p.name)?.clone();
-            (!example.is_empty() && example != value).then(|| (example.to_string(), value))
-        })
-        .collect();
-    // Typed values are stored as `{{name}}` and take the run's value, or the
-    // recorded example when the run gives none.
-    let placeholders: Vec<(String, String)> = flow
-        .params
-        .iter()
-        .filter_map(|p| {
-            let value = given(&p.name).cloned().or_else(|| p.example.clone())?;
-            Some((format!("{{{{{}}}}}", p.name), value))
-        })
-        .collect();
-    let recorded = serde_json::to_string(
-        &flow
-            .steps
-            .iter()
-            .map(|s| s.command.clone())
-            .collect::<Vec<_>>(),
-    )
-    .unwrap_or_default();
-    for p in &flow.params {
-        if given(&p.name).is_none()
-            && p.example.is_none()
-            && recorded.contains(&format!("{{{{{}}}}}", p.name))
-        {
-            return Err(format!(
-                "missing --param {}: the recording did not keep the typed value",
-                p.name
-            ));
-        }
-    }
-    let in_commands = |text: &str| {
-        recorded.contains(text) || recorded.contains(urlencoding::encode(text).as_ref())
-    };
-    if let Some((from, _)) = swaps.iter().find(|(from, _)| {
-        let named = flow.params.iter().any(|p| {
-            p.example.as_deref() == Some(from.as_str())
-                && recorded.contains(&format!("{{{{{}}}}}", p.name))
-        });
-        !named && !in_commands(from)
-    }) {
-        let name = flow
-            .params
-            .iter()
-            .find(|p| p.example.as_deref() == Some(from.as_str()))
-            .map(|p| p.name.as_str())
-            .unwrap_or("?");
-        return Err(format!(
-            "param '{}' is not in the recorded commands, so a replay would return the recorded value {}",
-            name, from
-        ));
-    }
-    if flow.steps.iter().any(|s| s.command["redacted"] == true) {
-        return Err(
-            "the recording typed a secret, which is not stored, so the commands cannot be replayed"
-                .to_string(),
-        );
-    }
-    let opens_page = flow.steps.iter().any(|s| s.command["action"] == "navigate");
-    // A flow recorded on an already open page starts from that page.
-    let start = (!opens_page).then(|| json!({ "action": "navigate", "url": flow.start_url }));
-    Ok(start
-        .into_iter()
-        .chain(flow.steps.iter().filter(|s| s.ok).map(|s| {
-            let mut cmd = s.command.clone();
-            let _ = map_strings(&mut cmd, &|text| {
-                let mut text = text.to_string();
-                for (from, to) in &swaps {
-                    text = text.replace(from.as_str(), to);
-                    let (ef, et) = (urlencoding::encode(from), urlencoding::encode(to));
-                    if ef != *from {
-                        text = text.replace(ef.as_ref(), et.as_ref());
-                    }
-                }
-                for (ph, value) in &placeholders {
-                    text = text.replace(ph.as_str(), value);
-                }
-                Ok(text)
-            });
-            cmd
-        }))
-        .collect())
-}
-
-/// Commands a replay may send. Anything that runs page script, or that the
-/// recorder does not know to be a plain interaction, is left out.
-const REPLAY_ACTIONS: &[&str] = &[
-    "navigate",
-    "click",
-    "dblclick",
-    "fill",
-    "type",
-    "press",
-    "select",
-    "check",
-    "uncheck",
-    "hover",
-    "focus",
-    "scroll",
-    "scrollintoview",
-    "wait",
-    "snapshot",
-    "getbyrole",
-    "getbytext",
-    "getbylabel",
-    "getbyplaceholder",
-    "getbyalttext",
-    "getbytitle",
-    "getbytestid",
-    "keyboard",
-    "inserttext",
-    "back",
-    "forward",
-    "reload",
-    "tab_new",
-    "tab_switch",
-];
-
-const SCRIPT_KEYS: &[&str] = &["script", "expression", "function", "fn", "js", "code"];
-
-const URL_KEYS: &[&str] = &[
-    "url", "href", "src", "action", "uri", "location", "origin", "target",
-];
-
-/// Check one value the way a browser reads it: the URL parser drops tabs,
-/// newlines and leading control characters, so a string that parses as an
-/// http(s) URL is host-checked whatever it looks like before parsing.
-fn check_value(
-    flow: &Flow,
-    v: &Value,
-    key: Option<&str>,
-    scripts: &mut bool,
-) -> Result<(), String> {
-    match v {
-        Value::String(text) => {
-            let forced = key.is_some_and(|k| URL_KEYS.contains(&k));
-            if let Ok(parsed) = url::Url::parse(text) {
-                match parsed.scheme() {
-                    "http" | "https" => check_allowed_host(flow, text)?,
-                    "about" if parsed.as_str() == "about:blank" => {}
-                    scheme
-                        if forced
-                            || matches!(
-                                scheme,
-                                "ws" | "wss" | "ftp" | "file" | "javascript" | "data" | "blob"
-                            ) =>
-                    {
-                        return Err(format!("'{}' is not an http(s) URL", text.trim()));
-                    }
-                    _ => {}
-                }
-            }
-            Ok(())
-        }
-        Value::Array(items) => items
-            .iter()
-            .try_for_each(|i| check_value(flow, i, key, scripts)),
-        Value::Object(map) => {
-            for (k, item) in map {
-                if SCRIPT_KEYS.contains(&k.as_str()) && item.is_string() {
-                    *scripts = true;
-                }
-                check_value(flow, item, Some(k), scripts)?;
-            }
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
-/// Check that every command a replay would send is a plain interaction and
-/// every URL in it stays on the flow's site.
-pub fn check_replay_commands(flow: &Flow, commands: &[Value]) -> Result<(), String> {
-    for cmd in commands {
-        let action = cmd["action"].as_str().unwrap_or("");
-        if !REPLAY_ACTIONS.contains(&action) {
-            return Err(format!(
-                "the recorded command '{}' is not allowed in a replay",
-                action
-            ));
-        }
-        let mut scripts = false;
-        check_value(flow, cmd, None, &mut scripts)?;
-        if scripts {
-            return Err(format!(
-                "the recorded command '{}' carries a script, which a replay does not run",
-                action
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// The entry captured during a replay that stands for a recorded request:
-/// same method, host and path, the same recorded query, and for requests with
-/// a body the same body or GraphQL operation (one endpoint serves every
-/// query). Query parameters the replay added and the recording never had,
-/// such as cache-busters, are ignored. An exact URL wins; otherwise exactly
-/// one entry must match, so an ambiguous or missing match is an error.
-pub fn replay_lookup<'a>(
-    entries: &'a [HarEntry],
-    req: &PreparedRequest,
-) -> Result<&'a HarEntry, String> {
-    let key = |u: &str| {
-        url::Url::parse(u)
-            .ok()
-            .map(|u| (u.host_str().unwrap_or("").to_string(), u.path().to_string()))
-    };
-    let operation = |b: Option<&str>| {
-        b.and_then(|b| serde_json::from_str::<Value>(b).ok())
-            .and_then(|v| v["operationName"].as_str().map(String::from))
-    };
-    let want = key(&req.url);
-    let want_op = operation(req.body.as_deref());
-    let same_body = |e: &HarEntry| match &req.body {
-        None => true,
-        Some(b) => {
-            let same_json = || {
-                let (a, c) = (
-                    serde_json::from_str::<Value>(b).ok()?,
-                    serde_json::from_str::<Value>(e.post_data.as_deref()?).ok()?,
-                );
-                Some(a == c)
-            };
-            e.post_data.as_deref() == Some(b.as_str())
-                || same_json() == Some(true)
-                || (want_op.is_some() && operation(e.post_data.as_deref()) == want_op)
-        }
-    };
-    let candidates: Vec<&HarEntry> = entries
-        .iter()
-        .rev()
-        .filter(|e| e.method == req.method && key(&e.url) == want && same_body(e))
-        .collect();
-    if let Some(exact) = candidates.iter().find(|e| e.url == req.url) {
-        return Ok(exact);
-    }
-    let wanted_query: Vec<(String, String)> = url::Url::parse(&req.url)
-        .map(|u| {
-            u.query_pairs()
-                .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                .collect()
-        })
-        .unwrap_or_default();
-    let has_query = |e: &HarEntry| {
-        let pairs: Vec<(String, String)> = url::Url::parse(&e.url)
-            .map(|u| {
-                u.query_pairs()
-                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        wanted_query.iter().all(|(k, v)| {
-            pairs
-                .iter()
-                .any(|(pk, pv)| pk == k && (v.contains("{{") || pv == v))
-        })
-    };
-    let matching: Vec<&HarEntry> = candidates.into_iter().filter(|e| has_query(e)).collect();
-    match matching.as_slice() {
-        [] => Err(format!(
-            "no replayed request matches {} {} with its recorded query",
-            req.method, req.url
-        )),
-        [one] => Ok(one),
-        _ => Err(format!(
-            "{} {} matches several replayed requests, so none is used",
-            req.method, req.url
-        )),
-    }
-}
-
-pub fn replay_match<'a>(entries: &'a [HarEntry], req: &PreparedRequest) -> Option<&'a HarEntry> {
-    replay_lookup(entries, req).ok()
-}
-
-/// A write the replay already sent has no answer to read back: it is not
-/// sent again.
-pub fn replay_write_unanswered(
-    req: &PreparedRequest,
-    started: Instant,
-    reason: String,
-) -> TierResult {
-    tier_result(req, Tier::Replay, started, Err(unknown_outcome(reason)))
-}
-
-pub fn replay_result(
-    req: &PreparedRequest,
-    started: Instant,
-    entry: Option<&HarEntry>,
-) -> TierResult {
-    let outcome = match entry {
-        None => Err(Failure::new(
-            true,
-            None,
-            "replaying the recorded commands did not send this request".to_string(),
-        )),
-        Some(e) => match (e.status, e.response_body.as_deref()) {
-            (Some(status), Some(body)) if !e.response_body_base64 => {
-                Ok((status as u16, body.to_string()))
-            }
-            (Some(status), _) => Err(Failure::new(
-                true,
-                Some(status as u16),
-                "the replayed request has no readable body".to_string(),
-            )),
-            _ => Err(Failure::new(
-                true,
-                None,
-                "the replayed request got no response".to_string(),
-            )),
-        },
-    };
-    let retry_after = entry.and_then(|e| {
-        e.response_headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("retry-after"))
-            .map(|(_, v)| v.clone())
-    });
-    with_retry_after(
-        tier_result(req, Tier::Replay, started, outcome),
-        retry_after,
-    )
-}
-
-pub fn replay_failed(req: &PreparedRequest, started: Instant, reason: String) -> TierResult {
-    tier_result(
-        req,
-        Tier::Replay,
-        started,
-        Err(Failure::new(true, None, reason)),
-    )
-}
-
-/// The replay tier cannot express this run; that says nothing about the site.
-pub fn replay_unavailable(req: &PreparedRequest, started: Instant, reason: String) -> TierResult {
-    tier_result(
-        req,
-        Tier::Replay,
-        started,
-        Err(Failure::new(false, None, reason)),
-    )
-}
-
-/// A reference the run could not fill: the earlier response changed.
-pub fn unresolved(req: &PreparedRequest, reason: String) -> TierResult {
-    tier_result(
-        req,
-        Tier::Http,
-        Instant::now(),
-        Err(Failure::new(true, None, reason)),
-    )
-}
-
-/// The last failed attempt, when every way of sending that request was
-/// refused with a 401 or 403.
-pub fn denied_everywhere(results: &[TierResult]) -> Option<&TierResult> {
-    let last = results.last().filter(|r| !r.ok)?;
-    let attempts: Vec<&TierResult> = results.iter().filter(|r| r.id == last.id).collect();
-    (attempts.iter().all(|r| !r.ok) && attempts.iter().any(|r| matches!(r.status, Some(401 | 403))))
-        .then_some(last)
-}
-
-fn is_accepted(status: Option<u16>) -> bool {
-    matches!(status, Some(200..=399))
-}
-
-/// The writes a run has sent, by any tier. A write goes out once per run.
-#[derive(Default)]
-pub struct WriteLedger {
-    sent: std::collections::HashSet<String>,
-    replayed: bool,
-}
-
-impl WriteLedger {
-    /// Note a write's answer: only an accepted answer or an unknown outcome
-    /// means it may have been applied; a 4xx rejection does not.
-    pub fn record(&mut self, req: &PreparedRequest, result: &TierResult) {
-        if req.write && (is_accepted(result.status) || result.kind == Some("outcome_unknown")) {
-            self.sent.insert(req.id.clone());
-        }
-    }
-
-    /// The replay repeated every recorded command, writes included.
-    pub fn replay_ran(&mut self, flow: &Flow) {
-        self.replayed = true;
-        self.sent.extend(all_write_ids(flow));
-    }
-
-    pub fn already_sent(&self, id: &str) -> bool {
-        self.sent.contains(id)
-    }
-
-    /// A write the replay would repeat that this run already sent.
-    pub fn first_repeated_by_replay(&self, flow: &Flow) -> Option<String> {
-        all_write_ids(flow)
-            .into_iter()
-            .find(|id| self.sent.contains(id))
-    }
-}
-
-/// The tier to try next for a request, given the attempts made so far, or
-/// `None` when the request is settled. A write that was already sent is only
-/// answered from the replay's capture, never sent again.
-pub fn next_tier(
-    flow: &Flow,
-    req: &PreparedRequest,
-    attempts: &[TierResult],
-    ledger: &WriteLedger,
-) -> Option<Tier> {
-    if req.write && ledger.already_sent(&req.id) {
-        return (attempts.is_empty() && ledger.replayed).then_some(Tier::Replay);
-    }
-    let order = tiers_for(flow, &req.id);
-    let Some(last) = attempts.last() else {
-        return order.first().copied();
-    };
-    // The site answered with something every tier would get again, or the
-    // request worked, or a write was accepted.
-    if last.ok || last.kind.is_some() || (req.write && is_accepted(last.status)) {
-        return None;
-    }
-    // A rejected input fails the same way on every tier, except a write the
-    // site did not accept: its tokens may be stale and the page can send it once.
-    if !last.drift && !req.write {
-        return None;
-    }
-    let at = order.iter().position(|t| *t == last.tier)?;
-    order.get(at + 1).copied()
-}
-
-/// Whether a request starts at the replay tier.
-pub fn starts_at_replay(flow: &Flow, id: &str) -> bool {
-    tiers_for(flow, id).first() == Some(&Tier::Replay)
-}
-
-/// Tiers to try for a request, starting from the one that last worked.
-fn tiers_for(flow: &Flow, id: &str) -> Vec<Tier> {
-    let preferred = flow
-        .request(id)
-        .and_then(|r| r.tier)
-        .and_then(|t| Tier::ALL.iter().position(|x| *x == t))
-        .unwrap_or(0);
-    Tier::ALL[preferred..].to_vec()
-}
-
-/// The direct-HTTP client. Redirects are followed only to hosts the
-/// session's domain filter allows, the same rule browser requests follow.
-pub fn http_client(
-    filter: Option<super::network::DomainFilter>,
-    flow: &Flow,
-) -> Result<reqwest::Client, String> {
-    let flow = flow.clone();
-    let policy = reqwest::redirect::Policy::custom(move |attempt| {
-        let blocked = check_allowed_host(&flow, attempt.url().as_str())
-            .err()
-            .or_else(|| {
-                filter
-                    .as_ref()
-                    .and_then(|f| f.check_url(attempt.url().as_str()).err())
-            });
-        match blocked {
-            // The 3xx comes back as the response, so a write that was sent
-            // counts as answered.
-            Some(_) => attempt.stop(),
-            // reqwest's default redirect limit.
-            None if attempt.previous().len() >= 10 => attempt.stop(),
-            None => attempt.follow(),
-        }
-    });
-    reqwest::Client::builder()
-        .redirect(policy)
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {}", e))
-}
-
-pub fn cookie_header(cookies: &[super::cookies::Cookie]) -> String {
-    cookies
-        .iter()
-        .map(|c| format!("{}={}", c.name, c.value))
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
-/// Fold tier results into the run response. `attempts` holds every tier
-/// tried, in order; the last attempt per request is the one that counts.
-/// The flow is verified only when every request came back with the recorded
-/// shape and no tier saw that shape change.
-pub fn finish_run(
-    flow: &mut Flow,
-    attempts: &[TierResult],
-    now: &str,
-    total_ms: u128,
-    shape: &Shape,
-) -> Value {
-    let mut last: Vec<&TierResult> = Vec::new();
-    for a in attempts {
-        match last.iter().position(|r| r.id == a.id) {
-            Some(i) => last[i] = a,
-            None => last.push(a),
-        }
-    }
-    let all_ok = !last.is_empty() && last.iter().all(|r| r.ok);
-    let shape_changed = attempts.iter().find(|a| a.shape_changed);
-    // An empty answer cannot confirm the recorded lists still exist, so it
-    // leaves the verified state as it was.
-    let empty = last.iter().any(|r| r.ok && r.empty);
-    if all_ok && shape_changed.is_none() && empty {
-    } else if all_ok && shape_changed.is_none() {
-        flow.verified_at = Some(now.to_string());
-    } else if shape_changed.is_some() || (!all_ok && attempts.iter().any(|r| !r.ok && r.drift)) {
-        flow.verified_at = None;
-    }
-    // Remember the tier that worked, so the next run starts there.
-    for r in last.iter().filter(|r| r.ok) {
-        for req in flow
-            .steps
-            .iter_mut()
-            .flat_map(|s| s.requests.iter_mut())
-            .filter(|req| req.id == r.id)
-        {
-            req.tier = (r.tier != Tier::Http).then_some(r.tier);
-        }
-    }
-    let output = last
-        .iter()
-        .find(|r| r.id == flow.output && r.ok)
-        .and_then(|r| r.body.clone())
-        .map(|b| {
-            if empty {
-                json!({ "total": 0, "matched": 0, "items": [] })
-            } else {
-                apply_shape(b, shape)
-            }
-        });
-    let steps: Vec<Value> = last
-        .iter()
-        .map(|r| {
-            let fell_back: Vec<Value> = attempts
-                .iter()
-                .filter(|a| a.id == r.id && !std::ptr::eq(*a, *r))
-                .map(|a| json!({ "tier": a.tier, "error": a.reason }))
-                .collect();
-            let mut step = json!({
-                "id": r.id,
-                "step": r.step,
-                "tier": if r.ok { json!(r.tier) } else { Value::Null },
-                "status": r.status,
-                "ms": r.ms,
-                "error": r.reason,
-            });
-            if !fell_back.is_empty() {
-                step["fellBack"] = json!(fell_back);
-            }
-            step
-        })
-        .collect();
-    let mut response = json!({
-        "name": flow.name,
-        "origin": flow.origin,
-        "ok": all_ok,
-        "verified": all_ok && shape_changed.is_none() && !empty,
-        "ms": total_ms,
-        "steps": steps,
-        "data": output,
-    });
-    if empty {
-        response["empty"] = json!(true);
-    }
-    if let Some(a) = shape_changed {
-        response["drift"] = json!({ "tier": a.tier, "step": a.step, "reason": a.reason });
-    }
-    response
-}
-
 /// A flow from a partial fixture: the required fields are filled in.
+
 #[cfg(test)]
 pub(crate) fn flow_of(mut v: Value) -> Flow {
     let o = v.as_object_mut().unwrap();
@@ -6061,6 +5064,140 @@ mod tests {
                 .first_repeated_by_replay(&flow_writes)
                 .as_deref(),
             Some("s1r1")
+        );
+    }
+
+    fn run_flow(rows: Value) -> (Flow, Vec<PreparedRequest>) {
+        let flow = flow_of(json!({
+            "output": rows["output"],
+            "writes": rows["writes"],
+            "steps": rows["steps"],
+        }));
+        let requests = prepare(&flow, &[]).unwrap();
+        (flow, requests)
+    }
+
+    fn block_on<T>(f: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
+    const OK_JSON: &str = r#"{"ok":true}"#;
+
+    fn ok_expect() -> Value {
+        json!({ "signature": signature(&json!({ "ok": true })) })
+    }
+
+    #[test]
+    fn the_run_loop_sends_an_accepted_write_once_and_falls_back_for_reads() {
+        use memory::{MemorySenders, Scripted};
+        let (flow, requests) = run_flow(json!({
+            "output": "s2r1",
+            "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
+            "steps": [
+                { "command": {}, "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "write": true, "expect": ok_expect() }] },
+                { "command": {}, "requests": [{ "id": "s2r1", "method": "GET", "url": "https://a.test/items?c={{@s1r1.ok}}", "expect": ok_expect() }] }
+            ]
+        }));
+        let mut senders = MemorySenders::default()
+            .answer(Tier::Http, "s1r1", Scripted::json(200, OK_JSON))
+            .answer(
+                Tier::Http,
+                "s2r1",
+                Scripted::json(200, "<html>sign in</html>"),
+            )
+            .answer(Tier::Page, "s2r1", Scripted::json(200, OK_JSON));
+        let results = block_on(run_requests(&flow, &requests, &mut senders, &|_| Ok(()))).unwrap();
+        assert!(results.iter().all(|r| r.ok || r.tier == Tier::Http));
+        assert_eq!(senders.times("s1r1"), 1);
+        assert_eq!(
+            senders.sent,
+            vec![
+                (Tier::Http, "s1r1".to_string()),
+                (Tier::Http, "s2r1".to_string()),
+                (Tier::Page, "s2r1".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_run_loop_never_resends_a_write_the_replay_sent() {
+        use memory::{MemorySenders, Scripted};
+        let (flow, requests) = run_flow(json!({
+            "output": "s2r1",
+            "writes": [{ "id": "s2r1", "method": "POST", "kind": "explicit" }],
+            "steps": [
+                { "command": {}, "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/session", "tier": "replay", "expect": ok_expect() }] },
+                { "command": {}, "requests": [{ "id": "s2r1", "method": "POST", "url": "https://a.test/cart?c={{@s1r1.ok}}", "write": true, "expect": ok_expect() }] }
+            ]
+        }));
+        // The replay answers the session read and, having repeated every
+        // command, the write too; the write is then read back, not sent.
+        let mut senders = MemorySenders::default()
+            .answer(Tier::Replay, "s1r1", Scripted::json(200, OK_JSON))
+            .answer(Tier::Replay, "s2r1", Scripted::json(200, OK_JSON))
+            .answer(Tier::Http, "s2r1", Scripted::json(200, OK_JSON));
+        let results = block_on(run_requests(&flow, &requests, &mut senders, &|_| Ok(()))).unwrap();
+        assert!(results.iter().all(|r| r.ok));
+        assert_eq!(
+            senders.sent,
+            vec![
+                (Tier::Replay, "s1r1".to_string()),
+                (Tier::Replay, "s2r1".to_string()),
+            ],
+            "the write is answered by the replay, not by HTTP"
+        );
+    }
+
+    #[test]
+    fn the_run_loop_stops_on_an_unknown_write_outcome() {
+        use memory::{MemorySenders, Scripted};
+        let (flow, requests) = run_flow(json!({
+            "output": "s1r1",
+            "writes": [{ "id": "s1r1", "method": "POST", "kind": "explicit" }],
+            "steps": [{ "command": {}, "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/cart", "write": true, "expect": ok_expect() }] }]
+        }));
+        let mut senders = MemorySenders::default()
+            .answer(Tier::Http, "s1r1", Scripted::unknown())
+            .answer(Tier::Page, "s1r1", Scripted::json(200, OK_JSON));
+        let results = block_on(run_requests(&flow, &requests, &mut senders, &|_| Ok(()))).unwrap();
+        assert_eq!(results.last().unwrap().kind, Some("outcome_unknown"));
+        assert_eq!(senders.times("s1r1"), 1);
+    }
+
+    #[test]
+    fn the_run_loop_refuses_a_request_the_check_rejects() {
+        use memory::MemorySenders;
+        let (flow, requests) = run_flow(json!({
+            "output": "s1r1", "writes": [],
+            "steps": [{ "command": {}, "requests": [{ "id": "s1r1", "method": "GET", "url": "https://evil.test/x", "expect": ok_expect() }] }]
+        }));
+        let mut senders = MemorySenders::default();
+        let check = |r: &PreparedRequest| Err(format!("{} refused", r.url));
+        let err = block_on(run_requests(&flow, &requests, &mut senders, &check))
+            .err()
+            .unwrap();
+        assert!(err.contains("evil.test"));
+        assert!(senders.sent.is_empty());
+    }
+
+    #[test]
+    fn the_page_tier_needs_a_tab_on_the_flows_site() {
+        let flow = flow_of(json!({ "startUrl": "https://example.com/" }));
+        for (tab, ok) in [
+            (None, false),
+            (Some("https://evil.test/"), false),
+            (Some("https://app.example.com/x"), true),
+        ] {
+            assert_eq!(tab_on_site(&flow, tab).is_ok(), ok, "{tab:?}");
+        }
+        let err = tab_on_site(&flow, None).unwrap_err();
+        assert!(
+            err.contains("example.com") && err.contains("open the flow's site"),
+            "{err}"
         );
     }
 }

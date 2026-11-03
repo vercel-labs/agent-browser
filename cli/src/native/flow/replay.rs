@@ -1,0 +1,531 @@
+//! The replay tier: the recorded commands run once, requests read from what they sent.
+
+use async_trait::async_trait;
+
+use super::*;
+
+/// Tier 3: the recorded commands with the run's params swapped in. A param
+/// whose recorded value no command contains cannot be replayed: the browser
+/// would answer with the recorded value instead.
+pub fn replay_commands(flow: &Flow, cmd_params: &[(String, String)]) -> Result<Vec<Value>, String> {
+    let given = |name: &str| cmd_params.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+    let swaps: Vec<(String, String)> = flow
+        .params
+        .iter()
+        .filter_map(|p| {
+            let example = p.example.as_deref()?;
+            let value = given(&p.name)?.clone();
+            (!example.is_empty() && example != value).then(|| (example.to_string(), value))
+        })
+        .collect();
+    // Typed values are stored as `{{name}}` and take the run's value, or the
+    // recorded example when the run gives none.
+    let placeholders: Vec<(String, String)> = flow
+        .params
+        .iter()
+        .filter_map(|p| {
+            let value = given(&p.name).cloned().or_else(|| p.example.clone())?;
+            Some((format!("{{{{{}}}}}", p.name), value))
+        })
+        .collect();
+    let recorded = serde_json::to_string(
+        &flow
+            .steps
+            .iter()
+            .map(|s| s.command.clone())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_default();
+    for p in &flow.params {
+        if given(&p.name).is_none()
+            && p.example.is_none()
+            && recorded.contains(&format!("{{{{{}}}}}", p.name))
+        {
+            return Err(format!(
+                "missing --param {}: the recording did not keep the typed value",
+                p.name
+            ));
+        }
+    }
+    let in_commands = |text: &str| {
+        recorded.contains(text) || recorded.contains(urlencoding::encode(text).as_ref())
+    };
+    if let Some((from, _)) = swaps.iter().find(|(from, _)| {
+        let named = flow.params.iter().any(|p| {
+            p.example.as_deref() == Some(from.as_str())
+                && recorded.contains(&format!("{{{{{}}}}}", p.name))
+        });
+        !named && !in_commands(from)
+    }) {
+        let name = flow
+            .params
+            .iter()
+            .find(|p| p.example.as_deref() == Some(from.as_str()))
+            .map(|p| p.name.as_str())
+            .unwrap_or("?");
+        return Err(format!(
+            "param '{}' is not in the recorded commands, so a replay would return the recorded value {}",
+            name, from
+        ));
+    }
+    if flow.steps.iter().any(|s| s.command["redacted"] == true) {
+        return Err(
+            "the recording typed a secret, which is not stored, so the commands cannot be replayed"
+                .to_string(),
+        );
+    }
+    let opens_page = flow.steps.iter().any(|s| s.command["action"] == "navigate");
+    // A flow recorded on an already open page starts from that page.
+    let start = (!opens_page).then(|| json!({ "action": "navigate", "url": flow.start_url }));
+    Ok(start
+        .into_iter()
+        .chain(flow.steps.iter().filter(|s| s.ok).map(|s| {
+            let mut cmd = s.command.clone();
+            let _ = map_strings(&mut cmd, &|text| {
+                let mut text = text.to_string();
+                for (from, to) in &swaps {
+                    text = text.replace(from.as_str(), to);
+                    let (ef, et) = (urlencoding::encode(from), urlencoding::encode(to));
+                    if ef != *from {
+                        text = text.replace(ef.as_ref(), et.as_ref());
+                    }
+                }
+                for (ph, value) in &placeholders {
+                    text = text.replace(ph.as_str(), value);
+                }
+                Ok(text)
+            });
+            cmd
+        }))
+        .collect())
+}
+
+/// Commands a replay may send. Anything that runs page script, or that the
+/// recorder does not know to be a plain interaction, is left out.
+const REPLAY_ACTIONS: &[&str] = &[
+    "navigate",
+    "click",
+    "dblclick",
+    "fill",
+    "type",
+    "press",
+    "select",
+    "check",
+    "uncheck",
+    "hover",
+    "focus",
+    "scroll",
+    "scrollintoview",
+    "wait",
+    "snapshot",
+    "getbyrole",
+    "getbytext",
+    "getbylabel",
+    "getbyplaceholder",
+    "getbyalttext",
+    "getbytitle",
+    "getbytestid",
+    "keyboard",
+    "inserttext",
+    "back",
+    "forward",
+    "reload",
+    "tab_new",
+    "tab_switch",
+];
+
+const SCRIPT_KEYS: &[&str] = &["script", "expression", "function", "fn", "js", "code"];
+
+const URL_KEYS: &[&str] = &[
+    "url", "href", "src", "action", "uri", "location", "origin", "target",
+];
+
+/// Check one value the way a browser reads it: the URL parser drops tabs,
+/// newlines and leading control characters, so a string that parses as an
+/// http(s) URL is host-checked whatever it looks like before parsing.
+fn check_value(
+    flow: &Flow,
+    v: &Value,
+    key: Option<&str>,
+    scripts: &mut bool,
+) -> Result<(), String> {
+    match v {
+        Value::String(text) => {
+            let forced = key.is_some_and(|k| URL_KEYS.contains(&k));
+            if let Ok(parsed) = url::Url::parse(text) {
+                match parsed.scheme() {
+                    "http" | "https" => check_allowed_host(flow, text)?,
+                    "about" if parsed.as_str() == "about:blank" => {}
+                    scheme
+                        if forced
+                            || matches!(
+                                scheme,
+                                "ws" | "wss" | "ftp" | "file" | "javascript" | "data" | "blob"
+                            ) =>
+                    {
+                        return Err(format!("'{}' is not an http(s) URL", text.trim()));
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+        Value::Array(items) => items
+            .iter()
+            .try_for_each(|i| check_value(flow, i, key, scripts)),
+        Value::Object(map) => {
+            for (k, item) in map {
+                if SCRIPT_KEYS.contains(&k.as_str()) && item.is_string() {
+                    *scripts = true;
+                }
+                check_value(flow, item, Some(k), scripts)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Check that every command a replay would send is a plain interaction and
+/// every URL in it stays on the flow's site.
+pub fn check_replay_commands(flow: &Flow, commands: &[Value]) -> Result<(), String> {
+    for cmd in commands {
+        let action = cmd["action"].as_str().unwrap_or("");
+        if !REPLAY_ACTIONS.contains(&action) {
+            return Err(format!(
+                "the recorded command '{}' is not allowed in a replay",
+                action
+            ));
+        }
+        let mut scripts = false;
+        check_value(flow, cmd, None, &mut scripts)?;
+        if scripts {
+            return Err(format!(
+                "the recorded command '{}' carries a script, which a replay does not run",
+                action
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The entry captured during a replay that stands for a recorded request:
+/// same method, host and path, the same recorded query, and for requests with
+/// a body the same body or GraphQL operation (one endpoint serves every
+/// query). Query parameters the replay added and the recording never had,
+/// such as cache-busters, are ignored. An exact URL wins; otherwise exactly
+/// one entry must match, so an ambiguous or missing match is an error.
+pub fn replay_lookup<'a>(
+    entries: &'a [HarEntry],
+    req: &PreparedRequest,
+) -> Result<&'a HarEntry, String> {
+    let key = |u: &str| {
+        url::Url::parse(u)
+            .ok()
+            .map(|u| (u.host_str().unwrap_or("").to_string(), u.path().to_string()))
+    };
+    let operation = |b: Option<&str>| {
+        b.and_then(|b| serde_json::from_str::<Value>(b).ok())
+            .and_then(|v| v["operationName"].as_str().map(String::from))
+    };
+    let want = key(&req.url);
+    let want_op = operation(req.body.as_deref());
+    let same_body = |e: &HarEntry| match &req.body {
+        None => true,
+        Some(b) => {
+            let same_json = || {
+                let (a, c) = (
+                    serde_json::from_str::<Value>(b).ok()?,
+                    serde_json::from_str::<Value>(e.post_data.as_deref()?).ok()?,
+                );
+                Some(a == c)
+            };
+            e.post_data.as_deref() == Some(b.as_str())
+                || same_json() == Some(true)
+                || (want_op.is_some() && operation(e.post_data.as_deref()) == want_op)
+        }
+    };
+    let candidates: Vec<&HarEntry> = entries
+        .iter()
+        .rev()
+        .filter(|e| e.method == req.method && key(&e.url) == want && same_body(e))
+        .collect();
+    if let Some(exact) = candidates.iter().find(|e| e.url == req.url) {
+        return Ok(exact);
+    }
+    let wanted_query: Vec<(String, String)> = url::Url::parse(&req.url)
+        .map(|u| {
+            u.query_pairs()
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let has_query = |e: &HarEntry| {
+        let pairs: Vec<(String, String)> = url::Url::parse(&e.url)
+            .map(|u| {
+                u.query_pairs()
+                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        wanted_query.iter().all(|(k, v)| {
+            pairs
+                .iter()
+                .any(|(pk, pv)| pk == k && (v.contains("{{") || pv == v))
+        })
+    };
+    let matching: Vec<&HarEntry> = candidates.into_iter().filter(|e| has_query(e)).collect();
+    match matching.as_slice() {
+        [] => Err(format!(
+            "no replayed request matches {} {} with its recorded query",
+            req.method, req.url
+        )),
+        [one] => Ok(one),
+        _ => Err(format!(
+            "{} {} matches several replayed requests, so none is used",
+            req.method, req.url
+        )),
+    }
+}
+
+pub fn replay_match<'a>(entries: &'a [HarEntry], req: &PreparedRequest) -> Option<&'a HarEntry> {
+    replay_lookup(entries, req).ok()
+}
+
+/// A write the replay already sent has no answer to read back: it is not
+/// sent again.
+pub fn replay_write_unanswered(
+    req: &PreparedRequest,
+    started: Instant,
+    reason: String,
+) -> TierResult {
+    tier_result(req, Tier::Replay, started, Err(unknown_outcome(reason)))
+}
+
+pub fn replay_result(
+    req: &PreparedRequest,
+    started: Instant,
+    entry: Option<&HarEntry>,
+) -> TierResult {
+    let outcome = match entry {
+        None => Err(Failure::new(
+            true,
+            None,
+            "replaying the recorded commands did not send this request".to_string(),
+        )),
+        Some(e) => match (e.status, e.response_body.as_deref()) {
+            (Some(status), Some(body)) if !e.response_body_base64 => {
+                Ok((status as u16, body.to_string()))
+            }
+            (Some(status), _) => Err(Failure::new(
+                true,
+                Some(status as u16),
+                "the replayed request has no readable body".to_string(),
+            )),
+            _ => Err(Failure::new(
+                true,
+                None,
+                "the replayed request got no response".to_string(),
+            )),
+        },
+    };
+    let retry_after = entry.and_then(|e| {
+        e.response_headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("retry-after"))
+            .map(|(_, v)| v.clone())
+    });
+    with_retry_after(
+        tier_result(req, Tier::Replay, started, outcome),
+        retry_after,
+    )
+}
+
+pub fn replay_failed(req: &PreparedRequest, started: Instant, reason: String) -> TierResult {
+    tier_result(
+        req,
+        Tier::Replay,
+        started,
+        Err(Failure::new(true, None, reason)),
+    )
+}
+
+/// The replay tier cannot express this run; that says nothing about the site.
+pub fn replay_unavailable(req: &PreparedRequest, started: Instant, reason: String) -> TierResult {
+    tier_result(
+        req,
+        Tier::Replay,
+        started,
+        Err(Failure::new(false, None, reason)),
+    )
+}
+
+/// What the single replay of a run captured.
+pub struct ReplayRun {
+    entries: Vec<HarEntry>,
+    failure: Option<String>,
+}
+
+/// The replay tier over a command runner. The recording runs at most once
+/// per run; every request that falls back to it reads from that capture.
+pub struct ReplaySender<'a> {
+    pub flow: &'a Flow,
+    pub params: &'a [(String, String)],
+    pub runner: &'a mut dyn CommandRunner,
+    pub run: &'a mut Option<ReplayRun>,
+}
+
+#[allow(clippy::double_must_use)]
+#[async_trait]
+impl Sender for ReplaySender<'_> {
+    async fn send(&mut self, req: &PreparedRequest, ctx: &SendCtx<'_>) -> TierResult {
+        let started = Instant::now();
+        // A write that was already sent is only read back, never sent again.
+        if req.write && ctx.ledger.already_sent(&req.id) {
+            return match self.run.as_ref().map(|r| replay_lookup(&r.entries, req)) {
+                Some(Ok(entry)) => replay_result(req, started, Some(entry)),
+                other => replay_write_unanswered(
+                    req,
+                    started,
+                    match other {
+                        Some(Err(reason)) => format!(
+                            "the write was already sent in this run and its answer cannot be read back: {}",
+                            reason
+                        ),
+                        _ => "the write was already sent in this run".to_string(),
+                    },
+                ),
+            };
+        }
+        if self.run.is_none() {
+            // A replay repeats every recorded command, so it also sends the
+            // writes no kept request covers; each must be approved.
+            for w in replay_only_writes(self.flow) {
+                if let Err(reason) = self.runner.write_approved(&w.id) {
+                    return replay_unavailable(
+                        req,
+                        started,
+                        format!(
+                            "replaying the recorded commands would also send {} {} ({}): {}",
+                            w.method, w.url, w.id, reason
+                        ),
+                    );
+                }
+            }
+            // A write another tier already sent would go out a second time.
+            if let Some(id) = ctx.ledger.first_repeated_by_replay(self.flow) {
+                return replay_unavailable(
+                    req,
+                    started,
+                    format!(
+                        "replaying the recorded commands would send write {} again; it was already sent in this run",
+                        id
+                    ),
+                );
+            }
+            match self.capture(ctx.wanted, started).await {
+                Ok(captured) => *self.run = Some(captured),
+                Err(Ok(reason)) => return replay_unavailable(req, started, reason),
+                Err(Err(reason)) => return replay_failed(req, started, reason),
+            }
+        }
+        let Some(captured) = self.run.as_ref() else {
+            return replay_failed(req, started, "the replay did not run".to_string());
+        };
+        if let Some(reason) = captured.failure.clone() {
+            return replay_failed(req, started, reason);
+        }
+        match replay_lookup(&captured.entries, req) {
+            Ok(entry) => replay_result(req, started, Some(entry)),
+            Err(reason) => replay_failed(req, started, reason),
+        }
+    }
+}
+
+impl ReplaySender<'_> {
+    /// Run the recorded commands once and capture the requests they send.
+    /// `Err(Ok(reason))` means the replay cannot run at all, `Err(Err(reason))`
+    /// that it could not start.
+    async fn capture(
+        &mut self,
+        wanted: &[&PreparedRequest],
+        started: Instant,
+    ) -> Result<ReplayRun, Result<String, String>> {
+        self.runner.ensure_browser().await.map_err(Err)?;
+        let mark = self.runner.begin_capture().await.map_err(Err)?;
+        let commands = match replay_commands(self.flow, self.params) {
+            Ok(c) => c,
+            Err(e) => {
+                self.runner.end_capture().await;
+                return Err(Ok(e));
+            }
+        };
+        if let Err(reason) = check_replay_commands(self.flow, &commands) {
+            self.runner.end_capture().await;
+            return Err(Ok(reason));
+        }
+        let mut failed = None;
+        for (i, c) in commands.into_iter().enumerate() {
+            let mut c = c;
+            c["id"] = json!(format!("flow-replay-{}", i + 1));
+            // A page opened by the replay may still be rendering the element.
+            let resp = loop {
+                let resp = self.runner.run(&c).await;
+                let missing = resp.get("error").and_then(|e| e.as_str()).is_some_and(|e| {
+                    e.contains("No element found") || e.contains("Element not found")
+                });
+                if !missing || Instant::now() >= started + Duration::from_secs(20) {
+                    break resp;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            };
+            // The replay stops as soon as the tab leaves the flow's site.
+            if let Some(url) = self
+                .runner
+                .tab_url()
+                .await
+                .filter(|u| u.starts_with("http"))
+            {
+                if let Err(reason) = check_allowed_host(self.flow, &url) {
+                    failed = Some(format!(
+                        "replay stopped after command {}: {}",
+                        i + 1,
+                        reason
+                    ));
+                    break;
+                }
+            }
+            if resp.get("success") != Some(&json!(true)) {
+                failed = Some(format!(
+                    "replaying command {} failed: {}",
+                    i + 1,
+                    resp.get("error")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("unknown error")
+                ));
+                break;
+            }
+        }
+        // Bodies arrive on later event drains; wait within the request
+        // timeout until every request that may fall back has its answer.
+        let deadline = started + Duration::from_secs(20);
+        while failed.is_none() {
+            let slice = self.runner.captured_since(mark).await;
+            let ready = |w: &&PreparedRequest| {
+                replay_lookup(&slice, w).is_ok_and(|e| {
+                    e.response_body.is_some() || e.status.is_some_and(|s| !(200..300).contains(&s))
+                })
+            };
+            if wanted.iter().all(ready) || Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let entries = self.runner.captured_since(mark).await;
+        self.runner.end_capture().await;
+        Ok(ReplayRun {
+            entries,
+            failure: failed,
+        })
+    }
+}

@@ -9,7 +9,7 @@ use serde_json::Value;
 pub const FLOW_VERSION: u32 = 1;
 
 /// A way of sending a request, in the order a run tries them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Tier {
     Http,
