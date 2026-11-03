@@ -11,9 +11,11 @@ Use debugging commands to inspect browser logs, page errors, JavaScript dialogs,
 agent-browser console
 agent-browser console --json
 agent-browser console --clear
+agent-browser console --follow
 
 agent-browser errors
 agent-browser errors --clear
+agent-browser errors --follow
 ```
 
 <table>
@@ -24,8 +26,10 @@ agent-browser errors --clear
     <tr><td><code>console</code></td><td>Show browser console messages</td></tr>
     <tr><td><code>console --json</code></td><td>Show structured console output with raw CDP arguments</td></tr>
     <tr><td><code>console --clear</code></td><td>Clear the console log captured by agent-browser</td></tr>
+    <tr><td><code>console --follow</code>, <code>console -f</code></td><td>Stream new console messages until Ctrl+C. Add <code>--json</code> for one JSON object per line</td></tr>
     <tr><td><code>errors</code></td><td>Show captured page errors and uncaught JavaScript exceptions</td></tr>
     <tr><td><code>errors --clear</code></td><td>Clear the captured page error log</td></tr>
+    <tr><td><code>errors --follow</code>, <code>errors -f</code></td><td>Stream new page errors until Ctrl+C</td></tr>
   </tbody>
 </table>
 
@@ -68,6 +72,18 @@ agent-browser trace stop ./trace.json
 `trace start` begins a Chrome DevTools trace. `trace stop [path]` ends tracing and saves a Chrome Trace Event JSON file. If no path is provided, agent-browser writes an auto-generated trace file under its temp directory.
 
 Use [Profiler](/profiler) when you want curated performance categories and event counts. Use raw traces when you need a general Chrome trace for lower-level debugging.
+
+## Timeouts
+
+Standard operations such as clicks, fills, and waits time out after 25 seconds by default. The CLI waits at least 30 seconds for the daemon's reply, so the daemon reports its own timeout error before the CLI gives up on the socket. Set `AGENT_BROWSER_DEFAULT_TIMEOUT` in milliseconds to change the default:
+
+```bash
+export AGENT_BROWSER_DEFAULT_TIMEOUT=45000
+```
+
+Wait commands extend the CLI's read timeout to match their budget. Other commands keep the 30-second floor, so a value above 30000 can make a slow action outlive the CLI's read. Read-only commands such as `snapshot`, `url`, and `get text` are retried automatically. A command that changes the page or launches the browser is not re-sent after the daemon receives it, because it may already have run; it fails with code `outcome_unknown` instead.
+
+When a command times out because the page stopped responding, for example a script stuck in `while(true){}`, it fails with code `page_wedged`. If agent-browser launched the browser and the next command also times out, agent-browser replaces the stuck tab with a blank one, so later commands work again after you navigate. A page that recovers in between keeps its tab. With `--cdp` or `--auto-connect`, the tab belongs to your browser and is left as is. The tab is also left as is when an action policy denies `tab_new` or `tab_close` or requires confirmation for them.
 
 ## Related tools
 

@@ -456,7 +456,7 @@ pub fn load_config(args: &[String]) -> Result<Config, String> {
             .ok_or_else(|| format!("failed to load config from {}", path_str));
     }
 
-    let user_config = dirs::home_dir()
+    let user_config = std::env::home_dir()
         .map(|d| d.join(CONFIG_DIR).join(CONFIG_FILENAME))
         .and_then(|p| read_config_file(&p, false))
         .unwrap_or_default();

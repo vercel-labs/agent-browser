@@ -405,20 +405,23 @@ agent-browser state load auth.json    # Restore saved state
 agent-browser stream status --json    # Enabled state, port, client count
 agent-browser stream enable           # Start the WebSocket stream server
 agent-browser stream enable --port 9223
-
-# Experimental WebMCP page tools
-# Browser results announce brief summaries only when the catalog changes.
-# Choose a relevant tool, fetch its schema, then invoke within the user task.
-agent-browser webmcp list <tool> --frame <frame-id> --json
-agent-browser webmcp list --json  # Full catalog or context recovery
-agent-browser webmcp invoke <tool> --frame <frame-id> --params '{"key":"value"}'
-agent-browser webmcp invoke <tool> --params @input.json --detach
-agent-browser webmcp result <invocation-id>
-agent-browser webmcp cancel <invocation-id>
 agent-browser stream disable          # Stop it
 ```
 
 Clients connect to `ws://127.0.0.1:<port>` and receive `frame`, `status`, `tabs`, `url`, and `console` messages. They send `input_mouse`, `input_keyboard`, and `input_touch` to drive the page, `{"type":"config","maxFps":N}` (1 to 120, `0` = uncapped) to cap their own frame rate, and `{"type":"config","pacing":"ack"}` to receive one frame at a time, acknowledged with `{"type":"ack","seq":N}`. Both settings can be declared on the URL instead (`ws://127.0.0.1:<port>/?pacing=ack&maxFps=10`). See [streaming.md](streaming.md).
+
+## WebMCP page tools
+
+Experimental. Browser responses announce brief tool summaries (names, short descriptions, origins, and frame IDs) on first discovery and when the catalog changes. Choose a relevant tool, fetch its schema, then invoke it within the user's task. Schemas and annotations are never included proactively. Omission means no update; an empty or unavailable update invalidates earlier tools. Support is enabled by default in managed Chrome; `--no-webmcp` or `AGENT_BROWSER_NO_WEBMCP` opts out. See [trust-boundaries.md](trust-boundaries.md#webmcp-tools-are-page-content) for how to treat tool metadata and results.
+
+```bash
+agent-browser webmcp list <tool> --frame <frame-id> --json   # One tool's schema
+agent-browser webmcp list --json                             # Full catalog, or recover context after compaction
+agent-browser webmcp invoke <tool> --frame <frame-id> --params '{"key":"value"}'
+agent-browser webmcp invoke <tool> --params @input.json --detach
+agent-browser webmcp result <invocation-id>
+agent-browser webmcp cancel <invocation-id>
+```
 
 ## Observability Dashboard
 
@@ -429,11 +432,25 @@ agent-browser dashboard start --allowed-origins https://dashboard.example.com
 agent-browser dashboard stop
 ```
 
-Loopback origins are allowed by default over IPv4 and IPv6 without an access token. Set `--allowed-origins` or `AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS` to a comma-separated list of exact HTTPS reverse-proxied origins. Every origin must be valid, and custom ports must be integers from 1 to 65535. Unknown options, missing values, invalid ports, and malformed origins fail without starting the server. The command prints private tokenized access URLs only for external origins; open the matching URL once to establish the browser session and do not share it. Open `http://localhost:<port>` directly for local access. Repeated starts reuse the running dashboard only when the port and allowed origins match; stop it before changing either setting.
+The dashboard runs on port 4848 by default, independent of browser sessions. It can also be opened through a proxied or forwarded URL such as `https://dashboard.agent-browser.localhost`; stay on the dashboard origin, because session tabs, status, and stream traffic are proxied internally and session ports do not need to be exposed. Loopback origins are allowed by default over IPv4 and IPv6 without an access token. Set `--allowed-origins` or `AGENT_BROWSER_DASHBOARD_ALLOWED_ORIGINS` to a comma-separated list of exact HTTPS reverse-proxied origins. Every origin must be valid, and custom ports must be integers from 1 to 65535. Unknown options, missing values, invalid ports, and malformed origins fail without starting the server. The command prints private tokenized access URLs only for external origins; open the matching URL once to establish the browser session and do not share it. The URL's token is carried in the initial fragment, then stored in a Secure, host-bound, same-site cookie for dashboard API and stream requests. Configure the reverse proxy to redact cookies from logs. The dashboard rejects requests with missing or cross-origin browser provenance. Open `http://localhost:<port>` directly for local access. Repeated starts reuse the running dashboard only when the port and allowed origins match; stop it before changing either setting.
 
 ## Browser installation
 
 `agent-browser install` downloads Chrome for Testing. On macOS versions below 13, the command stops before the download and prints instructions to update macOS or install Chrome manually. If `sw_vers -productVersion` is unavailable, exits with an error, returns no version, or returns a malformed version, the command reports a detection error and stops before making a network request. On Linux, `--with-deps` also installs system dependencies and exits nonzero if the package manager cannot install every required browser library.
+
+## Diagnostics
+
+Run `doctor` first when a command fails unexpectedly (`Unknown command`, `Failed to connect`, stale daemons, version mismatches after `upgrade`, missing Chrome).
+
+```bash
+agent-browser doctor                     # Full diagnosis: env, Chrome, daemons, config, providers, network, launch test
+agent-browser doctor --offline --quick   # Fast, local-only
+agent-browser doctor --fix               # Also run destructive repairs (reinstall Chrome, purge old state)
+agent-browser doctor --json              # Structured output
+agent-browser doctor --webgpu            # Check the WebGPU pipeline
+```
+
+`doctor` cleans stale socket, pid, and version sidecar files on every run. Destructive actions require `--fix`. The exit code is `0` when all checks pass (warnings allowed) and `1` when any fail.
 
 ## MCP Server
 
@@ -477,9 +494,15 @@ Common tools include:
 - `agent_browser_eval`
 - `agent_browser_close`
 
-Tool calls use the same config files and environment variables as the CLI by default. Each tool accepts typed arguments plus `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. The typed `allowedDomains` argument is rejected when the server's environment or selected config already sets allowed domains. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the `session` tool argument or `AGENT_BROWSER_SESSION` to isolate browser state.
+Tool calls use the same config files and environment variables as the CLI by default. Each tool accepts typed arguments plus `extraArgs` for per-command options and display or emulation flags such as `--engine`; `extraArgs` cannot set `--config` or global flags that change network, file, policy, or host access. Set host-wide options in the MCP server's environment or selected config. The typed `allowedDomains` argument is rejected when the server's environment or selected config already sets allowed domains. The common `allowedDomains` array maps to `--allowed-domains` and activates the same WebRTC containment and launch-mode restrictions. Tool discovery is paginated and includes read-only/open-world annotations so modern MCP clients can load the large typed surface incrementally. Use the `session` tool argument or `AGENT_BROWSER_SESSION` to isolate browser state. Undeclared argument keys are rejected with an invalid-params error that names them. The typed `idleTimeout` argument maps to `--idle-timeout`.
+
+For eve agents, mount the `@agent-browser/eve` extension instead of hand-writing browser tools. It adds namespaced tools such as `browser__open`, `browser__snapshot`, `browser__click`, `browser__fill`, `browser__find`, and `browser__screenshot`, backed by agent-browser inside the eve sandbox. The sandbox bootstrap helpers (`installAgentBrowser`, `agentBrowserRevalidationKey`) ship in `@agent-browser/eve/sandbox`.
 
 Pass `--config <trusted-path>` to `agent-browser mcp` or `agent-browser mcp call` to select one trusted config file. MCP tool child processes load only that file, replacing default user/project discovery. Put any required safety policy in it. Environment variables and accepted per-tool CLI arguments keep their normal precedence.
+
+## Configuration files
+
+The auto-discovered `./agent-browser.json` accepts only `headed`, `json`, `debug`, `userAgent`, `hideScrollbars`, `annotate`, `colorScheme`, `maxOutput`, `screenshotQuality`, `screenshotFormat`, and `idleTimeout`. Other runtime keys, including `extensions`, `initScripts`, state, trust, policy, session, connection, and path settings, are ignored with a warning. The `$schema` key is ignored silently. Put advanced settings in `~/.agent-browser/config.json` or load a trusted file with `--config` or `AGENT_BROWSER_CONFIG`. An explicit config replaces default discovery and loads only that file.
 
 ## Global Options
 
@@ -505,6 +528,14 @@ agent-browser --ca-cert <path>        # Trust a CA for CLI requests, and in loca
 agent-browser --no-ca-cert            # Clear CA trust retained by the running session
 agent-browser --use-system-ca         # OS trust store for CLI requests (read, install, upgrade, doctor)
 agent-browser --hide-scrollbars false # Keep native scrollbars visible in headless Chromium screenshots
+agent-browser --engine <name> ...     # chrome (default), lightpanda, obscura (experimental)
+agent-browser --auto-connect ...      # Connect to an already-running Chrome
+agent-browser --profile <name|path>   # Use a Chrome profile (login state survives)
+agent-browser --state <path> ...      # Load saved auth state from JSON
+agent-browser --restore [name] ...    # Auto-save and restore session state; defaults to --session
+agent-browser --restore-save <policy> # auto (default), always, or never
+agent-browser --namespace <name> ...  # Isolate daemon sockets and restore-state directories
+agent-browser --idle-timeout <time>   # Daemon idle shutdown (default 1h; 0 disables)
 agent-browser --help                  # Show help (-h)
 agent-browser --version               # Show version (-V)
 agent-browser <command> --help        # Show detailed help for a command
@@ -520,8 +551,10 @@ agent-browser --cdp 9222 snapshot         # Connect via CDP port
 agent-browser connect 9222                # Alternative: connect command
 agent-browser console                     # View console messages
 agent-browser console --clear             # Clear console
+agent-browser console --follow            # Stream console messages until Ctrl+C
 agent-browser errors                      # View page errors
 agent-browser errors --clear              # Clear errors
+agent-browser errors --follow             # Stream page errors until Ctrl+C
 agent-browser highlight @e1               # Highlight element
 agent-browser inspect                     # Open Chrome DevTools for this session
 agent-browser trace start                 # Start recording trace
