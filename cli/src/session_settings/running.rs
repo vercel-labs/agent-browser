@@ -118,6 +118,11 @@ impl Running {
         self.values.get(&key)
     }
 
+    /// Profile directory or name the session was started with, if any.
+    pub fn profile(&self) -> Option<String> {
+        self.str(Key::Profile)
+    }
+
     fn str(&self, key: Key) -> Option<String> {
         self.get(key).and_then(Value::as_str).map(String::from)
     }
