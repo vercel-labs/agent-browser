@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 
 use crate::flags::Flags;
 
-use super::spec::{redacted, spec, spec_by_name, Key, SPECS};
+use super::spec::{redacted, spec, spec_by_name, Effect, Key, Persist, SPECS};
 use super::SettingsError;
 
 /// What an invocation asks for one setting.
@@ -81,6 +81,16 @@ impl Patch {
         self.changed_in_place.contains(&key)
     }
 
+    /// The patch without its launch settings and without a forced relaunch:
+    /// what a command that never launches a browser can apply.
+    pub fn without_launch_settings(&self) -> Patch {
+        let mut live = self.clone();
+        live.relaunch = false;
+        live.entries
+            .retain(|key, _| spec(*key).effect == Effect::Live);
+        live
+    }
+
     /// Drops a key the patch would otherwise carry.
     pub fn remove(&mut self, key: Key) {
         self.entries.remove(&key);
@@ -140,6 +150,14 @@ impl Patch {
             }
             let s = spec_by_name(name).ok_or_else(|| SettingsError::UnknownKey(name.clone()))?;
             let requested = if value.is_null() {
+                if s.persist == Persist::Secured {
+                    // Containment is never cleared by a bare null; a reset
+                    // needs an explicit flag.
+                    return Err(SettingsError::Invalid(
+                        s.key,
+                        "a security setting cannot be cleared this way".to_string(),
+                    ));
+                }
                 Requested::Default
             } else if s.shape.accepts(value) {
                 Requested::Set(value.clone())

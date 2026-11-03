@@ -1109,3 +1109,107 @@ fn a_value_marked_changed_in_place_is_a_change_even_when_equal() {
     assert_eq!(changed_keys(&plan), vec![Key::CaCert]);
     assert!(plan.relaunch);
 }
+
+// ---- review fixes ----
+
+#[test]
+fn cdp_headers_do_not_follow_the_session_to_another_endpoint() {
+    let running = running_with(&[
+        (Key::Cdp, json!("wss://a.example/cdp")),
+        (Key::CdpHeaders, json!(r#"{"Authorization":"Bearer a"}"#)),
+    ]);
+
+    let moved = running.plan(&patch_of(&[is(Key::Cdp, json!("wss://b.example/cdp"))]));
+    assert_eq!(changed_keys(&moved), vec![Key::Cdp, Key::CdpHeaders]);
+    assert_eq!(moved.next.cdp_headers(), None);
+
+    let same = running.plan(&patch_of(&[is(Key::Cdp, json!("wss://a.example/cdp"))]));
+    assert!(same.is_empty());
+    assert!(same.next.cdp_headers().is_some());
+
+    let with_headers = running.plan(&patch_of(&[
+        is(Key::Cdp, json!("wss://b.example/cdp")),
+        is(Key::CdpHeaders, json!(r#"{"Authorization":"Bearer b"}"#)),
+    ]));
+    assert_eq!(
+        with_headers.next.cdp_headers().as_deref(),
+        Some(r#"{"Authorization":"Bearer b"}"#)
+    );
+}
+
+#[test]
+fn cdp_urls_are_reported_without_userinfo_or_query() {
+    let url = "wss://user:pw@host.example:9222/devtools/browser/abc?token=SECRET#frag";
+    let plan = Running::defaults().plan(&patch_of(&[is(Key::Cdp, json!(url))]));
+    let reported = plan.changes[0].to_json(true);
+    assert_eq!(
+        reported["requested"],
+        json!("wss://host.example:9222/devtools/browser/abc?<redacted>")
+    );
+    for leaked in ["SECRET", "user:pw", "frag"] {
+        assert!(!reported.to_string().contains(leaked), "{reported}");
+    }
+    assert!(!format!("{:?}", plan.next).contains("SECRET"));
+    assert!(!format!("{:?}", patch_of(&[is(Key::Cdp, json!(url))])).contains("SECRET"));
+    assert_eq!(super::spec::redact_url("9222"), "9222");
+    assert_eq!(
+        super::spec::redact_url("http://127.0.0.1:9222/json/version"),
+        "http://127.0.0.1:9222/json/version"
+    );
+}
+
+#[test]
+fn storage_state_displaces_an_inherited_profile_and_extensions() {
+    let running = running_with(&[
+        (Key::Profile, json!("/p")),
+        (Key::Extensions, json!(["/e"])),
+    ]);
+    let plan = running.plan(&patch_of(&[is(Key::StorageState, json!("/s.json"))]));
+    assert_eq!(
+        changed_keys(&plan),
+        vec![Key::StorageState, Key::Profile, Key::Extensions]
+    );
+    assert_eq!(plan.next.get(Key::Profile), None);
+    assert_eq!(plan.next.get(Key::Extensions), None);
+    assert!(plan.relaunch);
+
+    // And the other way round: the one set last wins.
+    let back = plan.next.plan(&patch_of(&[is(Key::Profile, json!("/p"))]));
+    assert_eq!(back.next.get(Key::StorageState), None);
+}
+
+#[test]
+fn a_conflict_inside_one_patch_is_left_for_the_launch_to_reject() {
+    let plan = Running::defaults().plan(&patch_of(&[
+        is(Key::Profile, json!("/p")),
+        is(Key::StorageState, json!("/s.json")),
+    ]));
+    assert_eq!(plan.next.get(Key::Profile), Some(&json!("/p")));
+    assert_eq!(plan.next.get(Key::StorageState), Some(&json!("/s.json")));
+}
+
+#[test]
+fn security_settings_cannot_be_cleared_with_a_null() {
+    for name in ["allowed-domains", "action-policy", "confirm-actions"] {
+        let wire = json!({ name: null });
+        assert!(
+            matches!(
+                Patch::from_wire(Some(&wire)),
+                Err(SettingsError::Invalid(_, _))
+            ),
+            "{name}"
+        );
+    }
+    assert!(Patch::from_wire(Some(&json!({"proxy-bypass": null}))).is_ok());
+}
+
+#[test]
+fn a_patch_without_launch_settings_keeps_only_live_ones() {
+    let patch = patch_of(&[
+        is(Key::Profile, json!("/p")),
+        is(Key::DefaultTimeout, json!(5000)),
+    ]);
+    let live = patch.without_launch_settings();
+    assert!(live.get(Key::Profile).is_none());
+    assert!(live.get(Key::DefaultTimeout).is_some());
+}

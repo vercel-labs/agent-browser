@@ -139,6 +139,14 @@ impl Running {
         self.values.insert(key, value);
     }
 
+    /// Puts a setting back to a value it had, or to its default.
+    pub fn put_back(&mut self, key: Key, value: Option<Value>) {
+        match value {
+            Some(value) => self.assign(key, value),
+            None => self.unassign(key),
+        }
+    }
+
     /// Resets a setting to its default.
     pub(super) fn unassign(&mut self, key: Key) {
         match key {

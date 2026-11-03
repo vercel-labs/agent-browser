@@ -129,6 +129,25 @@ impl Running {
                     if CONNECTION_KEYS.contains(&key) {
                         displace_other_targets(&mut next, key, &mut changes);
                     }
+                    // Headers belong to the endpoint they were set for.
+                    if key == Key::Cdp {
+                        displace(&mut next, patch, &[Key::CdpHeaders], &mut changes);
+                    }
+                    // Storage state needs a clean browser, and a profile or
+                    // extensions cannot be combined with it. The one set last
+                    // wins, so an inherited value cannot wedge the session.
+                    match key {
+                        Key::StorageState => displace(
+                            &mut next,
+                            patch,
+                            &[Key::Profile, Key::Extensions],
+                            &mut changes,
+                        ),
+                        Key::Profile | Key::Extensions => {
+                            displace(&mut next, patch, &[Key::StorageState], &mut changes)
+                        }
+                        _ => {}
+                    }
                 }
                 Requested::Default => {
                     let Some(current) = self.get(key) else {
@@ -170,6 +189,24 @@ impl Running {
             }
         }
         h.finish()
+    }
+}
+
+/// Resets inherited settings that cannot coexist with the one just set. A
+/// key the same patch sets is left alone: that conflict is the caller's.
+fn displace(next: &mut Running, patch: &Patch, keys: &[Key], changes: &mut Vec<Change>) {
+    for key in keys {
+        if patch.get(*key).is_some() {
+            continue;
+        }
+        if let Some(current) = next.get(*key).cloned() {
+            changes.push(Change {
+                key: *key,
+                requested: Requested::Default,
+                running: Some(current),
+            });
+            next.unassign(*key);
+        }
     }
 }
 

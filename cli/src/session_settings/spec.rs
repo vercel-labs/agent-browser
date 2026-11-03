@@ -118,7 +118,32 @@ pub(super) fn redacted(key: Key, value: &Value) -> Value {
             return Value::from(parse_proxy(raw).server);
         }
     }
+    if key == Key::Cdp {
+        if let Some(raw) = value.as_str() {
+            return Value::from(redact_url(raw));
+        }
+    }
     value.clone()
+}
+
+/// A URL without userinfo and with its query and fragment hidden, since both
+/// commonly carry tokens. A bare port or anything that is not a URL is kept.
+pub(super) fn redact_url(raw: &str) -> String {
+    let Some(scheme_end) = raw.find("://") else {
+        return raw.to_string();
+    };
+    let (scheme, rest) = raw.split_at(scheme_end + 3);
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let (path, hidden) = match tail.find(['?', '#']) {
+        Some(at) => (&tail[..at], true),
+        None => (tail, false),
+    };
+    format!(
+        "{scheme}{host}{path}{}",
+        if hidden { "?<redacted>" } else { "" }
+    )
 }
 
 fn set(value: Value) -> Option<Requested> {
