@@ -2940,14 +2940,18 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
 
     // The settings this invocation set ride on the command. Apply them before
     // the policy checks so a changed policy governs this command too.
-    let settings_outcome = if action == "close" {
+    let mut settings_outcome = if action == "close" {
         SettingsOutcome::default()
     } else {
         let patch = match Patch::from_wire(cmd.get("settings")) {
             Ok(patch) => patch,
             Err(e) => return error_response(&id, &e.to_string()),
         };
-        match apply_settings_patch(state, &patch).await {
+        // A command that never launches a browser leaves launch settings
+        // pending instead of closing the browser it did not mean to touch.
+        let launches =
+            (!skip_launch_action(action) || action == "launch") && !auth_login_no_navigate;
+        match apply_settings_patch(state, &patch, launches).await {
             Ok(outcome) => outcome,
             Err(e) => return error_response(&id, &e),
         }
@@ -3077,7 +3081,10 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                     state.settings.connection(),
                     Connection::Cdp(_)
                 ));
-                return error_response(&id, &format!("{}: {}", context, e));
+                rollback_launch_settings(state, &mut settings_outcome).await;
+                let mut resp = error_response(&id, &format!("{}: {}", context, e));
+                attach_settings_outcome(&mut resp, &settings_outcome);
+                return resp;
             }
             state.webmcp_enabled = state.settings.webmcp();
             lifecycle_launched = true;
@@ -3163,6 +3170,8 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
             let result = handle_launch(cmd, state).await;
             if result.is_ok() {
                 state.webmcp_enabled = state.settings.webmcp();
+            } else {
+                rollback_launch_settings(state, &mut settings_outcome).await;
             }
             result
         }
@@ -3401,6 +3410,9 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         (Err(e), None) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
     };
     attach_tab_gone_data(&mut resp, state);
+    if resp.get("success").and_then(Value::as_bool) == Some(false) {
+        attach_settings_outcome(&mut resp, &settings_outcome);
+    }
     if let Some(report) = wedge {
         state.undelivered_wedge = Some((id.clone(), report));
     } else if let Some((_, report)) = state.undelivered_wedge.take() {
@@ -5239,20 +5251,68 @@ struct SettingsOutcome {
     forced: bool,
     /// A running browser was closed so the next launch uses the new settings.
     relaunched_browser: bool,
+    /// What to put back if the launch that follows fails.
+    pending: Option<PendingSettings>,
+}
+
+/// The launch settings in force before a patch, kept until the launch that
+/// uses the new ones succeeds.
+struct PendingSettings {
+    keys: Vec<Key>,
+    before: Running,
+    filter: Option<DomainFilter>,
+    ca_cert: Option<EffectiveCaCert>,
+    attached: Option<AttachedTarget>,
+}
+
+impl SettingsOutcome {
+    /// Called when the launch failed and the launch settings were put back.
+    fn mark_rolled_back(&mut self) {
+        self.relaunched_browser = false;
+        for change in &mut self.changes {
+            if change["effect"] == "relaunch" {
+                change["applied"] = json!(false);
+            }
+        }
+    }
+}
+
+/// Puts back the launch settings a failed launch tried to use, so later
+/// commands launch with what worked before. Live settings stay applied.
+async fn rollback_launch_settings(state: &mut DaemonState, outcome: &mut SettingsOutcome) {
+    let Some(pending) = outcome.pending.take() else {
+        return;
+    };
+    for key in &pending.keys {
+        state
+            .settings
+            .put_back(*key, pending.before.get(*key).cloned());
+    }
+    *state.domain_filter.write().await = pending.filter;
+    state.effective_ca_cert = pending.ca_cert;
+    state.attached_target = pending.attached;
+    outcome.mark_rolled_back();
 }
 
 /// Plans `patch` against the session's settings and applies the plan. Live
-/// settings change in place; launch settings close the running browser so the
-/// next launch picks them up. The command then dispatches as usual.
+/// settings change in place. Launch settings close the running browser so the
+/// launch that follows uses them, and they are committed for good only once
+/// that launch succeeds (`rollback_launch_settings` puts them back).
+///
+/// A command that never launches a browser (`launches` is false) applies only
+/// the live settings. Its launch changes are reported as not applied and stay
+/// pending until a command that launches carries them again.
 async fn apply_settings_patch(
     state: &mut DaemonState,
     patch: &Patch,
+    launches: bool,
 ) -> Result<SettingsOutcome, String> {
     let mut patch = patch.clone();
     if let Some(path) = patch
         .value(Key::CaCert)
         .and_then(Value::as_str)
         .map(String::from)
+        .filter(|_| launches)
     {
         // CA trust is compared by content, not by path.
         let requested = resolve_effective_ca_cert(&json!({ "caCert": path }), state)?;
@@ -5272,11 +5332,25 @@ async fn apply_settings_patch(
             CaTrustChange::Replaced => {}
         }
     }
-    let patch = &patch;
-    let plan = state.settings.plan(patch);
-    if plan.is_empty() {
+
+    let full = state.settings.plan(&patch);
+    if full.is_empty() {
         return Ok(SettingsOutcome::default());
     }
+    let (plan, deferred) = if launches {
+        (full, Vec::new())
+    } else {
+        let deferred: Vec<Value> = full
+            .changes
+            .iter()
+            .filter(|change| change.effect() == Effect::Launch)
+            .map(|change| change.to_json(false))
+            .collect();
+        (
+            state.settings.plan(&patch.without_launch_settings()),
+            deferred,
+        )
+    };
     let changed = |key: Key| plan.changes.iter().any(|change| change.key == key);
 
     // Load the CA trust first: a bad bundle fails before anything changes.
@@ -5292,7 +5366,7 @@ async fn apply_settings_patch(
 
     let had_browser = has_active_browser_session(state);
     let relaunched_browser = plan.relaunch && had_browser;
-    let changes: Vec<Value> = plan
+    let mut changes: Vec<Value> = plan
         .changes
         .iter()
         .map(|change| {
@@ -5303,12 +5377,34 @@ async fn apply_settings_patch(
             change.to_json(applied)
         })
         .collect();
+    changes.extend(deferred);
     let connection_changed = [Key::Cdp, Key::AutoConnect, Key::Provider, Key::CdpHeaders]
         .into_iter()
         .any(changed);
-    let (next, relaunch) = (plan.next.clone(), plan.relaunch);
     let touched: Vec<Key> = plan.changes.iter().map(|change| change.key).collect();
     let was = |key: Key| touched.contains(&key);
+
+    let pending = if plan.relaunch {
+        let mut keys: Vec<Key> = plan
+            .changes
+            .iter()
+            .filter(|change| change.effect() == Effect::Launch)
+            .map(|change| change.key)
+            .collect();
+        if keys.contains(&Key::ClearCaCert) {
+            keys.push(Key::CaCert);
+        }
+        Some(PendingSettings {
+            keys,
+            before: state.settings.clone(),
+            filter: state.domain_filter.read().await.clone(),
+            ca_cert: state.effective_ca_cert.clone(),
+            attached: state.attached_target.clone(),
+        })
+    } else {
+        None
+    };
+    let (next, relaunch) = (plan.next, plan.relaunch);
 
     if was(Key::DefaultTimeout) {
         state.default_timeout_ms = next.default_timeout_ms();
@@ -5356,8 +5452,9 @@ async fn apply_settings_patch(
 
     Ok(SettingsOutcome {
         changes,
-        forced: patch.forces_relaunch(),
+        forced: launches && patch.forces_relaunch(),
         relaunched_browser,
+        pending,
     })
 }
 
@@ -5386,9 +5483,24 @@ fn ca_trust_change(
     }
 }
 
-/// Reports what a settings patch did in `lifecycle.settings`.
+/// Reports what a settings patch did in `lifecycle.settings`. A failed
+/// response carries it too, so the caller can see what was applied before the
+/// failure.
 fn attach_settings_outcome(resp: &mut Value, outcome: &SettingsOutcome) {
     if outcome.changes.is_empty() && !outcome.forced {
+        return;
+    }
+    let report = json!({ "changes": outcome.changes, "forcedRelaunch": outcome.forced });
+    if resp.get("success").and_then(Value::as_bool) == Some(false) {
+        let data = resp
+            .as_object_mut()
+            .map(|obj| obj.entry("data").or_insert_with(|| json!({})));
+        if let Some(data) = data.and_then(Value::as_object_mut) {
+            let lifecycle = data.entry("lifecycle").or_insert_with(|| json!({}));
+            if let Some(lifecycle) = lifecycle.as_object_mut() {
+                lifecycle.insert("settings".to_string(), report);
+            }
+        }
         return;
     }
     let Some(lifecycle) = resp
@@ -5398,10 +5510,7 @@ fn attach_settings_outcome(resp: &mut Value, outcome: &SettingsOutcome) {
     else {
         return;
     };
-    lifecycle.insert(
-        "settings".to_string(),
-        json!({ "changes": outcome.changes, "forcedRelaunch": outcome.forced }),
-    );
+    lifecycle.insert("settings".to_string(), report);
 }
 
 async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -5411,15 +5520,9 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         .map(String::from)
         .or_else(|| state.settings.engine());
     let patch = launch_envelope_patch(cmd, engine.as_deref());
-
-    let settings_before = state.settings.clone();
-    let filter_before = state.domain_filter.read().await.clone();
-    let ca_cert_before = state.effective_ca_cert.clone();
     let had_browser_before_launch = has_active_browser_session(state);
 
-    let attached_before = state.attached_target.clone();
-
-    let outcome = apply_settings_patch(state, &patch).await?;
+    let mut outcome = apply_settings_patch(state, &patch, true).await?;
     let reusable = !outcome.relaunched_browser
         && match state.browser.as_mut() {
             Some(mgr) => !mgr.has_process_exited() && mgr.is_connection_alive().await,
@@ -5441,10 +5544,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
             Ok(result)
         }
         Err(e) => {
-            state.settings = settings_before;
-            *state.domain_filter.write().await = filter_before;
-            state.effective_ca_cert = ca_cert_before;
-            state.attached_target = attached_before;
+            rollback_launch_settings(state, &mut outcome).await;
             Err(e)
         }
     }
@@ -19346,7 +19446,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             set_to(Key::IdleTimeout, json!("120000")),
         ]);
 
-        let outcome = apply_settings_patch(&mut state, &patch).await.unwrap();
+        let outcome = apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
 
         assert_eq!(state.default_timeout_ms, 9000);
         assert!(!state.auto_dialog);
@@ -19374,7 +19476,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             Key::ActionPolicy,
             json!(path.to_str().unwrap()),
         )]);
-        apply_settings_patch(&mut state, &patch).await.unwrap();
+        apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
 
         assert!(state.policy.is_some());
     }
@@ -19387,9 +19491,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             set_to(Key::Profile, json!("/tmp/p")),
             set_to(Key::DefaultTimeout, json!(9000)),
         ]);
-        apply_settings_patch(&mut state, &patch).await.unwrap();
+        apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
 
-        let again = apply_settings_patch(&mut state, &patch).await.unwrap();
+        let again = apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
 
         assert!(again.changes.is_empty());
         assert!(!again.relaunched_browser && !again.forced);
@@ -19401,7 +19509,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         state.settings = Running::defaults();
         let patch = patch_with(vec![set_to(Key::Profile, json!("/tmp/p"))]);
 
-        let outcome = apply_settings_patch(&mut state, &patch).await.unwrap();
+        let outcome = apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
 
         assert!(!outcome.relaunched_browser);
         assert_eq!(outcome.changes[0]["option"], "profile");
@@ -19421,6 +19531,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut state,
             &patch_with(vec![set_to(Key::AllowedDomains, json!(["a.test"]))]),
+            true,
         )
         .await
         .unwrap();
@@ -19429,6 +19540,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut state,
             &patch_with(vec![(Key::AllowedDomains, Requested::Default)]),
+            true,
         )
         .await
         .unwrap();
@@ -19444,6 +19556,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         apply_settings_patch(
             &mut state,
             &patch_with(vec![set_to(Key::Provider, json!("browserless"))]),
+            true,
         )
         .await
         .unwrap();
@@ -19471,7 +19584,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             .iter()
             .filter_map(|c| c["option"].as_str())
             .collect();
-        assert_eq!(options, ["profile", "proxy-password", "default-timeout"]);
+        // Live settings first; launch settings wait for a command that launches.
+        assert_eq!(options, ["default-timeout", "profile", "proxy-password"]);
+        assert_eq!(changes[1]["applied"], false);
         assert!(!resp.to_string().contains("\"pw\""), "{resp}");
         assert_eq!(resp["data"]["lifecycle"]["relaunchedBrowser"], false);
     }
@@ -19543,6 +19658,132 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert_eq!(
             ca_trust_change(None, None, "/ca.pem", a),
             CaTrustChange::Replaced
+        );
+    }
+    #[tokio::test]
+    async fn test_cdp_headers_are_not_sent_to_another_endpoint() {
+        let mut state = DaemonState::new();
+        state.settings = Running::defaults();
+        let first = patch_with(vec![
+            set_to(Key::Cdp, json!("wss://a.example/cdp")),
+            set_to(Key::CdpHeaders, json!(r#"{"Authorization":"Bearer a"}"#)),
+        ]);
+        apply_settings_patch(&mut state, &first, true)
+            .await
+            .unwrap();
+        assert!(cdp_headers_from_settings(&state.settings).is_some());
+
+        let second = patch_with(vec![set_to(Key::Cdp, json!("wss://b.example/cdp"))]);
+        apply_settings_patch(&mut state, &second, true)
+            .await
+            .unwrap();
+
+        assert!(cdp_headers_from_settings(&state.settings).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_a_command_that_never_launches_leaves_launch_settings_pending() {
+        let mut state = DaemonState::new();
+        state.settings = Running::defaults();
+        let patch = patch_with(vec![
+            set_to(Key::Profile, json!("/tmp/p")),
+            set_to(Key::DefaultTimeout, json!(9000)),
+        ]);
+
+        let outcome = apply_settings_patch(&mut state, &patch, false)
+            .await
+            .unwrap();
+
+        assert_eq!(state.default_timeout_ms, 9000, "live settings still apply");
+        assert_eq!(
+            state.settings.get(Key::Profile),
+            None,
+            "launch settings wait"
+        );
+        assert!(!outcome.relaunched_browser);
+        let profile = outcome
+            .changes
+            .iter()
+            .find(|c| c["option"] == "profile")
+            .expect("the pending change is reported");
+        assert_eq!(profile["applied"], false);
+    }
+
+    #[tokio::test]
+    async fn test_get_cdp_url_style_commands_do_not_relaunch() {
+        let mut state = DaemonState::new();
+        state.settings = Running::defaults();
+        let cmd = json!({
+            "id": "1",
+            "action": "cdp_url",
+            "settings": { "profile": "/tmp/p", "relaunch": true }
+        });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(state.settings.get(Key::Profile), None);
+        let lifecycle = &resp["data"]["lifecycle"];
+        assert_ne!(lifecycle["relaunchedBrowser"], true, "{resp}");
+        assert!(state.browser.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_failed_launch_keeps_the_previous_settings() {
+        let mut state = DaemonState::new();
+        state.settings = Running::defaults();
+        state
+            .settings
+            .set(Key::StorageState, json!("/tmp/previous-state.json"));
+        let cmd = json!({
+            "id": "1",
+            "action": "navigate",
+            "url": "about:blank",
+            "settings": { "allowed-domains": ["a.test"], "profile": "/tmp/p" }
+        });
+
+        let resp = execute_command(&cmd, &mut state).await;
+
+        assert_eq!(resp["success"], false, "{resp}");
+        assert_eq!(state.settings.get(Key::Profile), None);
+        assert_eq!(state.settings.get(Key::AllowedDomains), None);
+        assert!(state.domain_filter.read().await.is_none());
+        let changes = resp["data"]["lifecycle"]["settings"]["changes"]
+            .as_array()
+            .expect("a failed response reports the changes");
+        assert!(changes.iter().all(|c| c["applied"] == false), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn test_storage_state_after_a_profile_does_not_wedge_the_session() {
+        let mut state = DaemonState::new();
+        state.settings = Running::defaults();
+        state.settings.set(Key::Profile, json!("/tmp/inherited"));
+        let patch = patch_with(vec![set_to(Key::StorageState, json!("/tmp/s.json"))]);
+
+        apply_settings_patch(&mut state, &patch, true)
+            .await
+            .unwrap();
+
+        let options = state.settings.launch_options();
+        assert_eq!(options.profile, None);
+        assert_eq!(options.storage_state.as_deref(), Some("/tmp/s.json"));
+    }
+
+    #[tokio::test]
+    async fn test_a_plain_launch_keeps_the_running_profile() {
+        // Bare `open` after `--profile` stays on that profile (#2287).
+        let mut state = DaemonState::new();
+        state.settings = Running::defaults();
+        state.settings.set(Key::Profile, json!("/tmp/p"));
+
+        let outcome = apply_settings_patch(&mut state, &Patch::default(), true)
+            .await
+            .unwrap();
+
+        assert!(outcome.changes.is_empty());
+        assert_eq!(
+            state.settings.launch_options().profile.as_deref(),
+            Some("/tmp/p")
         );
     }
 }
