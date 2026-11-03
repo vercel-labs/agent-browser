@@ -9,6 +9,7 @@ Multiple isolated browser sessions with state persistence and concurrent browsin
 - [Named Sessions](#named-sessions)
 - [Session Isolation Properties](#session-isolation-properties)
 - [Tab Pinning in a Shared Browser](#tab-pinning-in-a-shared-browser)
+- [Changing settings on a running session](#changing-settings-on-a-running-session)
 - [Session State Persistence](#session-state-persistence)
 - [Common Patterns](#common-patterns)
 - [Default Session](#default-session)
@@ -72,6 +73,10 @@ The flag is sticky per session: pass it once at session creation and later comma
 The structured `lastUrl` is limited to sanitized HTTP(S) URLs and `about:blank`. Credentials, query strings, and fragments are removed from HTTP(S) URLs. Opaque URLs such as `data:` are omitted. In batch JSON, the recovery object appears under `result` instead of `data`.
 
 When re-running a shared-tab script such as the repro from #1530, add `--pin-tab` to the first command for every session. Without it, `open` intentionally preserves the legacy behavior and navigates the shared active tab, so the original script still collides. The same rule applies when sessions attach with `--auto-connect` instead of `--cdp`.
+
+## Changing settings on a running session
+
+Each command carries the settings you set for it (flag, environment variable, or config). The daemon compares them with the running session. A setting you omit keeps its running value, and a setting equal to the running one does nothing, so repeating `--profile ./work` on every command never relaunches the browser. Timeouts, `--action-policy`, `--confirm-actions`, `--no-auto-dialog`, and restore and pin settings apply in place. Launch settings (`--profile`, `--args`, `--headed`, `--proxy`, `--state`, `--allowed-domains`, and similar) relaunch the browser without restarting the daemon. Each change prints one line on stderr, for example `⚠ profile: ./a → ./b (--profile), relaunched browser`, and appears in `lifecycle.settings.changes` with `--json`, with secrets redacted. `--state <path>` loads the file at launch only; pass `--relaunch` to relaunch the browser and load it again.
 
 ## Session State Persistence
 

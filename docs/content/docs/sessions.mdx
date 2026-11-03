@@ -39,6 +39,25 @@ Each session has its own:
 - Navigation history
 - Authentication state
 
+## Changing settings on a running session
+
+Each command carries the settings you set for it, whether from a flag, an environment variable, or the config file. The daemon compares them with what the session is running and acts on the difference:
+
+- A setting you omit keeps its running value.
+- A setting equal to the running value does nothing, so repeating `--profile ./work` on every command never relaunches the browser.
+- Timeouts, `--action-policy`, `--confirm-actions`, `--no-auto-dialog`, and restore and pin settings apply in place.
+- Launch settings such as `--profile`, `--args`, `--headed`, `--proxy`, `--state`, and `--allowed-domains` relaunch the browser. The daemon keeps running.
+
+Every change is reported on stderr, one line each, and in `lifecycle.settings.changes` of the `--json` response. Secrets are redacted.
+
+```bash
+agent-browser --profile ./a open https://example.com
+agent-browser --profile ./b get url
+# ⚠ profile: ./a → ./b (--profile), relaunched browser
+```
+
+`--state <path>` loads the file when the browser launches. Passing the same path again does not reload it; pass `--relaunch` to relaunch the browser and load it again.
+
 ## Tab pinning in a shared browser
 
 Full isolation applies when each session launches its own browser. When sessions instead share one Chrome over `--cdp`, only the tab selection separates them. Each session remembers which tab it is bound to (by CDP target id, persisted across daemon restarts), so a restarted daemon reattaches to the session's own tab instead of adopting the most recently active one.
