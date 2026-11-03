@@ -5,6 +5,8 @@ navTitle: "Commands"
 
 ## Core
 
+Unknown commands exit with status 1, including when you request command help.
+
 When the top-level Chrome/CDP `eval` result is a value JSON cannot represent, plain output prints its exact JavaScript token, including `NaN`, `Infinity`, `-Infinity`, `-0`, BigInt literals, and `undefined`. With `--json`, `data.result` stays `null` and sibling `data.unserializable` contains the token. MCP text prints the token, and structured responses expose it at `structuredContent.response.data.unserializable`.
 
 ```bash
@@ -237,7 +239,7 @@ agent-browser storage session         # Same for sessionStorage
 
 Reads accept at most one key, sets require one key and one value, and clears take no operands. A bare key is shorthand for a one-key read.
 
-Cookie attributes use kebab-case flags such as `--http-only` and `--same-site`. The legacy `--httpOnly` and `--sameSite` spellings remain accepted. When setting one cookie, unknown flags and extra arguments return an error.
+Cookie operations are `get` (the default), `set`, and `clear`; unknown operations return an error. Cookie attributes use kebab-case flags such as `--http-only` and `--same-site`. The legacy `--httpOnly` and `--sameSite` spellings remain accepted. When setting one cookie, unknown flags and extra arguments return an error.
 
 ```bash
 agent-browser cookies set session_id abc123 --http-only --same-site Strict
@@ -628,12 +630,11 @@ The default output lists violations and incomplete checks with impact, rule ID, 
 ## Init scripts
 
 ```bash
-agent-browser open --init-script <path>           # Register before first navigation (repeatable)
-agent-browser addinitscript <js>                  # Register at runtime (returns identifier)
-agent-browser removeinitscript <identifier>       # Remove from every tab in the session
+agent-browser --init-script <path> open <url>  # Register before first navigation (repeatable)
+agent-browser removeinitscript <identifier>
 ```
 
-See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, runtime scripts, built-in React DevTools, and extensions.
+See [Init Scripts & Extensions](/init-scripts) for launch-time scripts, script removal, built-in React DevTools, and extensions.
 
 ## Global options
 

@@ -1,6 +1,6 @@
 # Command Reference
 
-Complete reference for all agent-browser commands. For quick start and common patterns, see SKILL.md.
+Complete reference for all agent-browser commands. For quick start and common patterns, see SKILL.md. Unknown commands exit with status 1, including when you request command help.
 
 ## Linux dependencies
 
@@ -10,8 +10,8 @@ On Linux, `agent-browser install --with-deps` installs system dependencies with 
 
 ```bash
 agent-browser open            # Launch browser (no navigation); stays on about:blank.
-                              # Pair with `network route`, `cookies set --curl`, or
-                              # `addinitscript` to stage state before the first navigation.
+                              # Pair with `network route` or `cookies set --curl` to
+                              # stage state before the first navigation.
 agent-browser open <url>      # Launch + navigate (aliases: goto, navigate)
                               # Supports: https://, http://, file://, about:, data://
                               # Auto-prepends https:// if no protocol given
@@ -47,7 +47,7 @@ agent-browser batch \
   "navigate http://localhost:3000/target"
 ```
 
-`open` with no URL gives you a clean launch so any interception, cookies, or init scripts you register take effect on the *first* real navigation. Use for SSR-only debug (`--resource-type script`), protected-origin auth, or capturing fresh `react suspense`/`vitals` state without noise from a prior page.
+`open` with no URL gives you a clean launch so interception rules and cookies can take effect on the *first* real navigation. Pass `--init-script <path>` at launch to install a script before navigation. Use this flow for SSR-only debug (`--resource-type script`), protected-origin auth, or capturing fresh `react suspense`/`vitals` state without noise from a prior page.
 
 With `--json`, `--omit-command` replaces each `command` array with a stable zero-based `index` field on success, failure, or `--bail`; default output is unchanged. This only removes command arrays and does not make output safe for secrets. Errors and response data are unchanged: `type` echoes typed text, and `get value`/`eval` may return input values. The MCP `agent_browser_batch` tool accepts `omitCommand: true`.
 
@@ -233,7 +233,7 @@ agent-browser storage local clear         # Clear all
 
 Reads accept at most one key, sets require one key and one value, and clears take no operands. A bare key is shorthand for a one-key read.
 
-Cookie attributes use kebab-case flags such as `--http-only` and `--same-site`. The legacy `--httpOnly` and `--sameSite` spellings remain accepted. When setting one cookie, unknown flags and extra arguments return an error.
+Cookie operations are `get` (the default), `set`, and `clear`; unknown operations return an error. Cookie attributes use kebab-case flags such as `--http-only` and `--same-site`. The legacy `--httpOnly` and `--sameSite` spellings remain accepted. When setting one cookie, unknown flags and extra arguments return an error.
 
 ```bash
 agent-browser cookies set session_id abc123 --http-only --same-site Strict
@@ -598,12 +598,11 @@ agent-browser a11y <url> --json                     # Structured results for aut
 ## Init scripts
 
 ```bash
-agent-browser open --init-script <path>             # Register before first navigation (repeatable)
-agent-browser addinitscript <js>                    # Register at runtime (returns identifier)
-agent-browser removeinitscript <identifier>         # Remove from every tab in the session
+agent-browser --init-script <path> open <url>  # Register before first navigation (repeatable)
+agent-browser removeinitscript <identifier>
 ```
 
-Runtime init-script identifiers are session-wide. Removing one clears it from every open tab where it was registered and from the setup replayed into future tabs.
+Init-script identifiers are session-wide. `removeinitscript` removes a script from every open tab where it was registered and prevents it from being replayed into future tabs.
 
 ## cURL cookie import
 
