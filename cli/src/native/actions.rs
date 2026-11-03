@@ -2731,11 +2731,11 @@ pub(crate) async fn close_all_browser_backends(state: &mut DaemonState) -> Resul
     let close_result = close_current_browser(state).await;
 
     if let Some(ref mut webdriver) = state.webdriver_backend {
-        let _ = webdriver.close().await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), webdriver.close()).await;
     }
     state.webdriver_backend = None;
     if let Some(ref mut appium) = state.appium {
-        let _ = appium.close().await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), appium.close()).await;
     }
     state.appium = None;
     if let Some(ref mut driver) = state.safari_driver {
@@ -5552,8 +5552,8 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
             || storage_state_requires_clean_launch
             || mgr.has_process_exited()
             || !mgr.is_connection_alive().await
-    } else if webdriver_active {
-        state.launch_hash != Some(new_hash)
+    } else if let Some(ref webdriver) = state.webdriver_backend {
+        state.launch_hash != Some(new_hash) || !webdriver.is_connection_alive().await
     } else {
         true
     };
@@ -15494,37 +15494,48 @@ mod tests {
         for name in vars {
             guard.remove(name);
         }
-        let cmd = json!({ "action": "launch", "provider": "safari", "port": 0, "headless": true });
-        let hash = safari_launch_hash(0);
-        let (port, server) = start_webdriver_response_server(vec![(
-            "DELETE /session/test-session",
-            json!({ "value": null }),
-        )])
-        .await;
-        let mut state = DaemonState::new();
-        state.backend_type = BackendType::WebDriver;
-        state.webdriver_backend = Some(WebDriverBackend::new(
-            crate::native::webdriver::client::WebDriverClient::new_with_session(
-                port,
-                "test-session".to_string(),
-            ),
-        ));
-        state.launch_hash = Some(hash);
+        for changed_config in [false, true] {
+            let mut cmd =
+                json!({ "action": "launch", "provider": "safari", "port": 0, "headless": true });
+            let hash = safari_launch_hash(0);
+            let invalid_session = json!({ "value": { "error": "invalid session id", "message": "Session has ended" } });
+            let mut responses = vec![(
+                "/session/test-session/window/handles",
+                json!({ "value": ["window-1"] }),
+            )];
+            if !changed_config {
+                responses.push((
+                    "/session/test-session/window/handles",
+                    invalid_session.clone(),
+                ));
+            }
+            responses.push(("DELETE /session/test-session", invalid_session));
+            let (port, server) = start_webdriver_response_server(responses).await;
+            let mut state = DaemonState::new();
+            state.backend_type = BackendType::WebDriver;
+            state.webdriver_backend = Some(WebDriverBackend::new(
+                crate::native::webdriver::client::WebDriverClient::new_with_session(
+                    port,
+                    "test-session".to_string(),
+                ),
+            ));
+            state.launch_hash = Some(hash);
 
-        let response = handle_launch_inner(&cmd, &mut state).await.unwrap();
+            let response = handle_launch_inner(&cmd, &mut state).await.unwrap();
 
-        assert_eq!(response["reused"], true);
-        assert!(state.webdriver_backend.is_some());
-        assert_eq!(state.launch_hash, Some(hash));
-        let result = handle_launch_inner(
-            &json!({ "action": "launch", "provider": "safari", "port": 12346, "headless": true }),
-            &mut state,
-        )
-        .await;
-        assert_eq!(server.await.unwrap(), 1);
-        assert!(result.is_err());
-        assert!(state.webdriver_backend.is_none());
-        assert_eq!(state.launch_hash, None);
+            assert_eq!(response["reused"], true);
+            assert!(state.webdriver_backend.is_some());
+            assert_eq!(state.launch_hash, Some(hash));
+            if changed_config {
+                cmd["port"] = json!(12346);
+            }
+            let result = handle_launch_inner(&cmd, &mut state).await;
+            assert!(result.is_err());
+            assert!(state.webdriver_backend.is_none());
+            assert!(state.browser.is_none());
+            assert_eq!(state.launch_hash, None);
+            assert_eq!(server.await.unwrap(), if changed_config { 2 } else { 3 });
+        }
     }
 
     fn unique_socket_dir(label: &str) -> PathBuf {
