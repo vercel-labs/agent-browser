@@ -50,7 +50,13 @@ Each command carries the settings you set for it, whether from a flag, an enviro
 
 Each change that takes effect is printed on stderr, one line each, and every change is listed in `lifecycle.settings.changes` of the `--json` response with `applied: true` or `applied: false`. A launch setting changed while no browser is running is `applied: false` and has no stderr line, since it takes effect at the next launch. Secrets are redacted in both places: passwords and CDP headers are hidden, and CDP URLs lose their credentials and query string.
 
-A command that never launches a browser, such as `get cdp-url` or `session info`, applies only live settings. Launch settings stay pending and are reported with `applied: false` until a command that launches carries them. A launch setting is kept only after the launch that uses it succeeds; if the launch fails, the session keeps its previous launch settings. Setting `--state` replaces an inherited `--profile` or `--extension`, and setting `--profile` or `--extension` replaces an inherited `--state`.
+A command that never launches a browser, such as `get cdp-url` or `session info`, applies only live settings. `get cdp-url` sends no launch settings at all. For the others, launch settings are not applied and not kept; a command that launches carries them again. A launch setting is kept only after the launch that uses it succeeds; if the launch fails, the session keeps its previous launch settings, except `--allowed-domains`, which stays installed after a failed launch so containment is never widened. A command that is denied by policy or waits for confirmation changes no launch settings and leaves the browser running.
+
+Settings that describe a browser agent-browser starts itself (`--profile`, `--args`, `--executable-path`, `--extension`, `--proxy`, `--user-agent`, `--state`, and similar) are ignored for a session attached over `--cdp`, `--auto-connect` or a provider. They never relaunch it or start a new cloud session, and they appear in `lifecycle.settings.changes` with `effect: "ignored"`. Setting `--state` replaces an inherited `--profile` or `--extension`, and setting `--profile` or `--extension` replaces an inherited `--state`.
+
+With `--relaunch` in a batch, the browser is relaunched once, for the first command.
+
+The first command of a session still seeds its settings from the environment the daemon was spawned with, so a value from an earlier invocation's environment counts as running until a later slice removes that seed.
 
 ```bash
 agent-browser --profile ./a open https://example.com
