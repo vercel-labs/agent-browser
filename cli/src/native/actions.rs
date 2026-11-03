@@ -12241,8 +12241,7 @@ async fn handle_flow_run_inner(
     // The recording replays at most once per run; every request that falls
     // back to it reads its answer from that one replay.
     let mut replay_run: Option<ReplayRun> = None;
-    // Writes already sent in this run, by any tier.
-    let mut completed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut ledger = super::flow::WriteLedger::default();
     for (index, prepared) in requests.iter().enumerate() {
         let req = &match prepared.resolve(&bodies) {
             Ok(r) => r,
@@ -12258,15 +12257,18 @@ async fn handle_flow_run_inner(
         if let Some(reason) = filter.as_ref().and_then(|f| f.check_url(&req.url).err()) {
             return Err(format!("flow '{}' step {}: {}", name, req.step, reason));
         }
+        let first_attempt = results.len();
         let mut done = false;
-        for tier in super::flow::tiers_for(&flow, &req.id) {
-            let already_sent = tier != super::flow::Tier::Replay
-                && super::flow::is_flow_write(&flow, &req.id)
-                && completed.contains(&req.id);
-            let result = if already_sent {
+        while let Some(tier) =
+            super::flow::next_tier(&flow, req, &results[first_attempt..], &ledger)
+        {
+            let result = if ledger.already_sent(&req.id) {
                 // The replay already sent this write; read its answer back.
                 let started = std::time::Instant::now();
-                match replay_run.as_ref().map(|r| super::flow::replay_lookup(&r.entries, req)) {
+                match replay_run
+                    .as_ref()
+                    .map(|r| super::flow::replay_lookup(&r.entries, req))
+                {
                     Some(Ok(entry)) => super::flow::replay_result(req, started, Some(entry)),
                     other => super::flow::replay_write_unanswered(
                         req,
@@ -12301,14 +12303,13 @@ async fn handle_flow_run_inner(
                         super::flow::run_http(&client, req, cookie.as_deref(), routed).await
                     }
                     super::flow::Tier::Page => run_flow_in_page(&flow, req, state).await,
-                    _ => {
+                    super::flow::Tier::Replay => {
                         let wanted: Vec<&super::flow::PreparedRequest> = requests[index..]
                             .iter()
                             .filter(|r| {
                                 r.id == req.id
-                                    || super::flow::is_flow_write(&flow, &r.id)
-                                    || super::flow::tiers_for(&flow, &r.id).first()
-                                        == Some(&super::flow::Tier::Replay)
+                                    || r.write
+                                    || super::flow::starts_at_replay(&flow, &r.id)
                             })
                             .collect();
                         let result = run_flow_replay(
@@ -12319,43 +12320,22 @@ async fn handle_flow_run_inner(
                             state,
                             &mut replay_run,
                             &wanted,
-                            &completed,
+                            &ledger,
                         )
                         .await;
                         if replay_run.is_some() {
-                            // The replay repeated every recorded command, writes included.
-                            completed.extend(super::flow::all_write_ids(&flow));
+                            ledger.replay_ran(&flow);
                         }
                         result
                     }
                 }
             };
-            let (ok, drift, stopped) = (result.ok, result.drift, result.kind.is_some());
-            if let Some(body) = result.body.as_ref().filter(|_| ok) {
+            if let Some(body) = result.body.as_ref().filter(|_| result.ok) {
                 bodies.insert(req.id.clone(), body.clone());
             }
-            // A write the site accepted must not be sent again by a lower tier.
-            let accepted_write = super::flow::is_flow_write(&flow, &req.id)
-                && result.status.is_some_and(|st| (200..400).contains(&st));
-            if super::flow::is_flow_write(&flow, &req.id)
-                && (result.status.is_some_and(|st| (200..400).contains(&st))
-                    || result.kind == Some("outcome_unknown"))
-            {
-                completed.insert(req.id.clone());
-            }
+            ledger.record(req, &result);
+            done = result.ok;
             results.push(result);
-            // The site answered with something every tier would get again.
-            if stopped {
-                break;
-            }
-            // A rejected input fails the same way on every tier, except a
-            // write the site did not accept: its request tokens may be stale,
-            // and the page or the UI can still send it once.
-            let retry_write = super::flow::is_flow_write(&flow, &req.id) && !accepted_write;
-            if ok || (!drift && !retry_write) || accepted_write {
-                done = ok;
-                break;
-            }
         }
         if !done {
             break;
@@ -12679,7 +12659,7 @@ async fn run_flow_replay(
     state: &mut DaemonState,
     run: &mut Option<ReplayRun>,
     wanted: &[&super::flow::PreparedRequest],
-    completed: &std::collections::HashSet<String>,
+    ledger: &super::flow::WriteLedger,
 ) -> super::flow::TierResult {
     let started = std::time::Instant::now();
     if run.is_none() {
@@ -12699,10 +12679,7 @@ async fn run_flow_replay(
             }
         }
         // A write another tier already sent would go out a second time.
-        if let Some(id) = super::flow::all_write_ids(flow)
-            .into_iter()
-            .find(|id| completed.contains(id))
-        {
+        if let Some(id) = ledger.first_repeated_by_replay(flow) {
             return super::flow::replay_unavailable(
                 req,
                 started,

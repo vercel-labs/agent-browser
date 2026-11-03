@@ -3280,8 +3280,81 @@ pub fn denied_everywhere(results: &[TierResult]) -> Option<&TierResult> {
         .then_some(last)
 }
 
+fn is_accepted(status: Option<u16>) -> bool {
+    matches!(status, Some(200..=399))
+}
+
+/// The writes a run has sent, by any tier. A write goes out once per run.
+#[derive(Default)]
+pub struct WriteLedger {
+    sent: std::collections::HashSet<String>,
+    replayed: bool,
+}
+
+impl WriteLedger {
+    /// Note a write's answer: only an accepted answer or an unknown outcome
+    /// means it may have been applied; a 4xx rejection does not.
+    pub fn record(&mut self, req: &PreparedRequest, result: &TierResult) {
+        if req.write && (is_accepted(result.status) || result.kind == Some("outcome_unknown")) {
+            self.sent.insert(req.id.clone());
+        }
+    }
+
+    /// The replay repeated every recorded command, writes included.
+    pub fn replay_ran(&mut self, flow: &Flow) {
+        self.replayed = true;
+        self.sent.extend(all_write_ids(flow));
+    }
+
+    pub fn already_sent(&self, id: &str) -> bool {
+        self.sent.contains(id)
+    }
+
+    /// A write the replay would repeat that this run already sent.
+    pub fn first_repeated_by_replay(&self, flow: &Flow) -> Option<String> {
+        all_write_ids(flow)
+            .into_iter()
+            .find(|id| self.sent.contains(id))
+    }
+}
+
+/// The tier to try next for a request, given the attempts made so far, or
+/// `None` when the request is settled. A write that was already sent is only
+/// answered from the replay's capture, never sent again.
+pub fn next_tier(
+    flow: &Flow,
+    req: &PreparedRequest,
+    attempts: &[TierResult],
+    ledger: &WriteLedger,
+) -> Option<Tier> {
+    if req.write && ledger.already_sent(&req.id) {
+        return (attempts.is_empty() && ledger.replayed).then_some(Tier::Replay);
+    }
+    let order = tiers_for(flow, &req.id);
+    let Some(last) = attempts.last() else {
+        return order.first().copied();
+    };
+    // The site answered with something every tier would get again, or the
+    // request worked, or a write was accepted.
+    if last.ok || last.kind.is_some() || (req.write && is_accepted(last.status)) {
+        return None;
+    }
+    // A rejected input fails the same way on every tier, except a write the
+    // site did not accept: its tokens may be stale and the page can send it once.
+    if !last.drift && !req.write {
+        return None;
+    }
+    let at = order.iter().position(|t| *t == last.tier)?;
+    order.get(at + 1).copied()
+}
+
+/// Whether a request starts at the replay tier.
+pub fn starts_at_replay(flow: &Flow, id: &str) -> bool {
+    tiers_for(flow, id).first() == Some(&Tier::Replay)
+}
+
 /// Tiers to try for a request, starting from the one that last worked.
-pub fn tiers_for(flow: &Flow, id: &str) -> Vec<Tier> {
+fn tiers_for(flow: &Flow, id: &str) -> Vec<Tier> {
     let preferred = flow
         .request(id)
         .and_then(|r| r.tier)
@@ -5825,5 +5898,169 @@ mod tests {
         write_flow(&loaded).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn flow_with_request(tier: Option<&str>, write: bool) -> Flow {
+        flow_of(json!({
+            "output": "s1r1",
+            "steps": [{ "command": {}, "requests": [{
+                "id": "s1r1", "method": if write { "POST" } else { "GET" },
+                "url": "https://a.test/x", "tier": tier, "write": write
+            }] }]
+        }))
+    }
+
+    fn result(
+        tier: Tier,
+        ok: bool,
+        status: Option<u16>,
+        drift: bool,
+        kind: Option<&'static str>,
+    ) -> TierResult {
+        TierResult {
+            id: "s1r1".to_string(),
+            step: 1,
+            ok,
+            status,
+            reason: None,
+            body: None,
+            ms: 0,
+            drift,
+            shape_changed: false,
+            empty: false,
+            tier,
+            kind,
+            retry_after: None,
+        }
+    }
+
+    #[test]
+    fn next_tier_follows_the_order_and_never_resends_a_write() {
+        use Tier::*;
+        // (preferred tier, write, attempts so far, expected next)
+        type Case = (Option<&'static str>, bool, Vec<TierResult>, Option<Tier>);
+        let cases: Vec<Case> = vec![
+            (None, false, vec![], Some(Http)),
+            (Some("page"), false, vec![], Some(Page)),
+            (
+                None,
+                false,
+                vec![result(Http, true, Some(200), false, None)],
+                None,
+            ),
+            (
+                None,
+                false,
+                vec![result(Http, false, Some(200), true, None)],
+                Some(Page),
+            ),
+            (
+                None,
+                false,
+                vec![result(Http, false, Some(400), false, None)],
+                None,
+            ),
+            (
+                None,
+                false,
+                vec![result(Http, false, Some(403), false, Some("auth_expired"))],
+                None,
+            ),
+            (
+                None,
+                false,
+                vec![
+                    result(Http, false, Some(200), true, None),
+                    result(Page, false, None, true, None),
+                ],
+                Some(Replay),
+            ),
+            (
+                None,
+                false,
+                vec![result(Replay, false, None, true, None)],
+                None,
+            ),
+            // A write the site rejected may go out again; an accepted one may not.
+            (
+                None,
+                true,
+                vec![result(Http, false, Some(500), false, None)],
+                Some(Page),
+            ),
+            (
+                None,
+                true,
+                vec![result(Http, false, Some(401), false, None)],
+                Some(Page),
+            ),
+            (
+                None,
+                true,
+                vec![result(Http, false, Some(303), false, None)],
+                None,
+            ),
+            (
+                None,
+                true,
+                vec![result(Http, false, None, false, Some("outcome_unknown"))],
+                None,
+            ),
+        ];
+        for (i, (tier, write, attempts, want)) in cases.into_iter().enumerate() {
+            let flow = flow_with_request(tier, write);
+            let req = PreparedRequest {
+                write,
+                ..prepared("s1r1")
+            };
+            let got = next_tier(&flow, &req, &attempts, &WriteLedger::default());
+            assert_eq!(got, want, "case {i}");
+        }
+    }
+
+    #[test]
+    fn a_sent_write_is_only_read_back_from_the_replay() {
+        let flow = flow_with_request(None, true);
+        let req = PreparedRequest {
+            write: true,
+            ..prepared("s1r1")
+        };
+        let mut ledger = WriteLedger::default();
+        ledger.record(&req, &result(Tier::Http, false, Some(500), false, None));
+        assert!(
+            !ledger.already_sent("s1r1"),
+            "a 5xx is not an accepted write"
+        );
+        ledger.record(&req, &result(Tier::Http, false, Some(401), false, None));
+        assert!(
+            !ledger.already_sent("s1r1"),
+            "a rejection is not a sent write"
+        );
+        ledger.record(
+            &req,
+            &result(Tier::Http, false, None, false, Some("outcome_unknown")),
+        );
+        assert!(ledger.already_sent("s1r1"));
+        assert_eq!(next_tier(&flow, &req, &[], &ledger), None);
+        let mut flow_writes = flow.clone();
+        flow_writes.writes = vec![Write {
+            id: "s1r1".to_string(),
+            method: "POST".to_string(),
+            url: String::new(),
+            kind: WriteKind::Explicit,
+            step: 1,
+        }];
+        let mut after_replay = WriteLedger::default();
+        after_replay.replay_ran(&flow_writes);
+        assert_eq!(
+            next_tier(&flow, &req, &[], &after_replay),
+            Some(Tier::Replay)
+        );
+        assert_eq!(
+            after_replay
+                .first_repeated_by_replay(&flow_writes)
+                .as_deref(),
+            Some("s1r1")
+        );
     }
 }
