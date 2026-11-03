@@ -57,6 +57,13 @@ Auto-discovered `./agent-browser.json` is repository-controlled and accepts only
 
 The hook in particular exposes `window.__REACT_DEVTOOLS_GLOBAL_HOOK__` to every page in the browsing context, including third-party iframes. For production-auditing tasks against sites that handle secrets, consider whether you want that global exposed during the session.
 
+## Browser version and documented CVEs
+
+Every command that drives the browser passes one gate before it runs, so a build behind the current stable release is refused before any navigation, snapshot, or input, and the error lists the CVE IDs that build lacks. Do not route around it by inventing a browser path or a provider: run `agent-browser install` and retry. Passing `--allow-outdated-browser` (or `AGENT_BROWSER_ALLOW_OUTDATED_BROWSER=1`) is a decision for the user, because an out-of-date browser can be compromised by any page the session visits, and the opt-out applies to the command that carries it.
+
+- The gate covers Chrome and Chromium whatever launched them, including `--cdp` and `--auto-connect` attachments. Provider sessions are skipped because the browser runs on infrastructure the user cannot update, and Lightpanda, Obscura, iOS, and Safari have no published advisory feed. The absence of a warning is not proof that those browsers are current.
+- Advisories are cached for 24 hours in `~/.agent-browser/security-advisories.json`. With no network and no usable cache, the command proceeds. A machine that is blocked keeps working for `close`, `dialog`, `confirm`, and `deny`.
+
 ## Network interception and automation artifacts
 
 - `--allowed-domains` blocks non-allowlisted HTTP traffic, WebSocket and EventSource connections, and `sendBeacon` calls. It also disables `RTCPeerConnection` for supported Chromium sessions because STUN, TURN, and related DNS traffic do not pass through CDP HTTP interception. Dedicated and shared workers are guarded with a bootstrap wrapper; if a page CSP forbids that wrapper, the worker fails closed rather than running without the allowlist guard. Locally launched Chrome additionally disables non-proxied WebRTC UDP. Pre-existing CDP sessions, auto-connect, Chrome profiles, direct-page provider plugins, agent-browser restore or state-file replay, raw Chrome args that select profiles, restore sessions, or open startup pages, iOS, and Safari reject this option because agent-browser cannot install equivalent containment before page scripts run. Treat this as browser-level containment and combine it with host or container egress controls when you need an operating-system security boundary.

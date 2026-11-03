@@ -362,6 +362,34 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
     Ok(result)
 }
 
+/// The caller's outdated-browser opt-out for this CLI invocation.
+///
+/// Stamped once from the parsed flags and read when a command leaves the CLI,
+/// so every request carries it: parsed commands, the launch envelopes the CLI
+/// synthesizes for `--headed`, `--executable-path`, `--cdp`, and
+/// `--auto-connect`, and anything MCP forwards through the CLI.
+static ALLOW_OUTDATED_BROWSER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+pub fn set_allow_outdated_browser(allow: bool) {
+    let _ = ALLOW_OUTDATED_BROWSER.set(allow);
+}
+
+/// Attach the opt-out to an outbound command. Absence means "no opinion", and
+/// the daemon falls back to its spawn-time environment.
+pub fn with_browser_security_override(cmd: Value) -> Value {
+    stamp_browser_security_override(cmd, ALLOW_OUTDATED_BROWSER.get().copied().unwrap_or(false))
+}
+
+pub(crate) fn stamp_browser_security_override(mut cmd: Value, allow: bool) -> Value {
+    if allow {
+        if let Some(object) = cmd.as_object_mut() {
+            // A command that already speaks for itself keeps its value.
+            object.entry("allowOutdatedBrowser").or_insert(json!(true));
+        }
+    }
+    cmd
+}
+
 pub fn attach_ca_cert_to_launch_command(cmd: &mut Value, flags: &Flags) {
     if cmd.get("action").and_then(Value::as_str) != Some("launch") {
         return;
@@ -3722,6 +3750,7 @@ mod tests {
             clear_ca_cert: false,
             use_system_ca: false,
             allow_file_access: false,
+            allow_outdated_browser: false,
             hide_scrollbars: true,
             webgpu: false,
             no_webmcp: false,
@@ -3750,6 +3779,7 @@ mod tests {
             cli_ca_cert: false,
             cli_use_system_ca: false,
             cli_allow_file_access: false,
+            cli_allow_outdated_browser: false,
             cli_hide_scrollbars: false,
             cli_annotate: false,
             cli_download_path: false,

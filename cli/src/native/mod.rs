@@ -27,6 +27,8 @@ pub mod network;
 #[allow(dead_code)]
 pub mod policy;
 #[allow(dead_code)]
+pub mod preflight;
+#[allow(dead_code)]
 pub mod providers;
 #[allow(dead_code)]
 pub mod react;

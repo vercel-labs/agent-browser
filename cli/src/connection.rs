@@ -1120,6 +1120,9 @@ fn is_read_only(cmd: &Value) -> bool {
 }
 
 pub fn send_command(cmd: Value, session: &str) -> Result<Response, String> {
+    // Single place a command leaves the CLI, so the caller's security opt-out
+    // rides on every envelope without each builder remembering it.
+    let cmd = crate::commands::with_browser_security_override(cmd);
     send_with_retry(is_read_only(&cmd), || send_command_once(&cmd, session))
 }
 

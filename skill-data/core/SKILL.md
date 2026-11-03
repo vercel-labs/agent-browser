@@ -72,6 +72,8 @@ agent-browser get url                                # also: title, value, html,
 
 Use `read` for documentation and other text pages. A read with a URL fetches over HTTP without launching Chrome.
 
+The daemon also refuses to launch a browser that is behind the current stable release and missing documented security fixes, and prints the CVE IDs it lacks. Treat that as a real blocker: run `agent-browser install` and retry. Only pass `--allow-outdated-browser` (or set `AGENT_BROWSER_ALLOW_OUTDATED_BROWSER=1`) when the user explicitly accepts driving the older build. The verdict is cached for 24 hours in `~/.agent-browser/security-advisories.json`, unsupported engines are not audited, and the check fails open when no verdict can be fetched.
+
 ## Interacting
 
 ```bash

@@ -709,6 +709,17 @@ pub struct DaemonState {
     pub mouse_state: MouseState,
     /// Session-wide pointer behavior, configured by `--input-mode`.
     pub input_mode: String,
+    /// The caller's opt-out for this command, resolved from the command's
+    /// `allowOutdatedBrowser` field and falling back to the daemon's
+    /// spawn-time environment. Reset on every command so one call site cannot
+    /// leave the daemon permanently opted out.
+    pub allow_outdated_browser: bool,
+    /// The daemon's spawn-time opt-out, the fallback for commands that do not
+    /// speak to the setting themselves.
+    pub allow_outdated_env: bool,
+    /// Blocking preflight verdict for the connected browser, keyed by its CDP
+    /// product string. See `native::preflight`.
+    pub browser_block: Option<(String, String)>,
     /// Tracks the currently open JavaScript dialog (alert/confirm/prompt), if any.
     pub pending_dialog: Option<PendingDialog>,
     /// A `page_wedged` report whose response may not have reached the client,
@@ -863,6 +874,9 @@ impl DaemonState {
             dialog_handler_task: None,
             mouse_state: MouseState::default(),
             input_mode: "instant".to_string(),
+            allow_outdated_browser: crate::browser_security::override_requested(),
+            allow_outdated_env: crate::browser_security::override_requested(),
+            browser_block: None,
             pending_dialog: None,
             undelivered_wedge: None,
             pending_pointer_release: None,
@@ -2549,6 +2563,16 @@ fn has_active_browser_session(state: &DaemonState) -> bool {
     state.browser.is_some() || state.active_provider_session.is_some()
 }
 
+impl DaemonState {
+    /// True when the connected browser belongs to a provider session, which
+    /// runs on infrastructure the user cannot update. The connection flag is
+    /// authoritative: `active_provider_session` also carries cleanup metadata
+    /// that provider plugins may legitimately omit.
+    pub fn is_provider_session(&self) -> bool {
+        self.active_provider_connection
+    }
+}
+
 async fn close_before_implicit_relaunch(state: &mut DaemonState) -> Result<(), String> {
     let browser_use = state
         .active_provider_session
@@ -2652,6 +2676,26 @@ async fn close_active_provider_session(state: &mut DaemonState) -> Result<(), St
     }
     state.active_provider_session = None;
     state.active_provider_connection = false;
+    Ok(())
+}
+
+/// Adopt a freshly connected browser and gate it before any page work.
+///
+/// Every launch path (local, `--cdp`, auto-connect, provider) funnels through
+/// here, so the ordering "connect, judge, then restore or script anything" is
+/// defined once. A refused browser is closed so the failure leaves nothing
+/// running behind it.
+async fn adopt_browser(
+    state: &mut DaemonState,
+    browser: BrowserManager,
+    launch_hash: u64,
+) -> Result<(), String> {
+    state.browser = Some(browser);
+    state.launch_hash = Some(launch_hash);
+    if let Err(message) = super::preflight::run("launch", state).await {
+        let _ = close_current_browser(state).await;
+        return Err(message);
+    }
     Ok(())
 }
 
@@ -2776,6 +2820,19 @@ fn skip_launch_action(action: &str) -> bool {
     )
 }
 
+/// True when `read` renders the live tab instead of fetching over HTTP.
+///
+/// A present-but-null `url` is treated as absent, because that is how
+/// `handle_read` reads it: it falls through to the active page.
+fn read_uses_active_tab(cmd: &Value) -> bool {
+    cmd.get("url").and_then(Value::as_str).is_none()
+        && cmd.get("llms").is_none_or(Value::is_null)
+        && !cmd
+            .get("requireMd")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
 fn should_validate_restore_after_action(action: &str) -> bool {
     action != "launch"
 }
@@ -2859,6 +2916,13 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         // for this command, including --human and MCP's human argument.
         state.input_mode = mode.to_string();
     }
+    // The browser security gate reads this. Resolve it per command so an
+    // opt-out cannot outlive the command that asked for it, and so an explicit
+    // `false` (or a later command without the field) restores the check.
+    state.allow_outdated_browser = cmd
+        .get("allowOutdatedBrowser")
+        .and_then(Value::as_bool)
+        .unwrap_or(state.allow_outdated_env);
     let id = cmd
         .get("id")
         .and_then(|v| v.as_str())
@@ -3117,6 +3181,21 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                     let _ = mgr.ensure_page().await;
                 }
             }
+        }
+    }
+
+    // Single pre-execution gate: every command that is about to drive the
+    // browser passes through the same checks, whichever path launched or
+    // attached that browser. A few skip-launch actions still reach the live
+    // browser: `read` without a URL renders the active tab, and
+    // `stream_enable` hands the browser to the stream server, whose input
+    // goes straight to CDP.
+    let drives_browser = !skip_launch
+        || (action == "read" && read_uses_active_tab(cmd))
+        || action == "stream_enable";
+    if drives_browser && state.browser.is_some() {
+        if let Err(e) = super::preflight::run(action, state).await {
+            return error_response(&id, &e);
         }
     }
 
@@ -4433,8 +4512,7 @@ async fn auto_launch_inner(
             Some(cdp.as_str()),
         );
         state.reset_input_state();
-        state.browser = Some(mgr);
-        state.launch_hash = Some(hash);
+        adopt_browser(state, mgr, hash).await?;
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -4533,8 +4611,7 @@ async fn auto_launch_inner(
                         Some(p.as_str()),
                     );
                     state.reset_input_state();
-                    state.browser = Some(mgr);
-                    state.launch_hash = Some(hash);
+                    adopt_browser(state, mgr, hash).await?;
                     state.subscribe_to_browser_events();
                     state.start_fetch_handler();
                     state.start_dialog_handler();
@@ -4599,8 +4676,7 @@ async fn auto_launch_inner(
     state.session_setup = SessionSetup::from_launch_options(&options);
     let mgr = BrowserManager::launch(options, engine.as_deref()).await?;
     state.reset_input_state();
-    state.browser = Some(mgr);
-    state.launch_hash = Some(hash);
+    adopt_browser(state, mgr, hash).await?;
     state.effective_ca_cert = effective_ca_cert;
     state.subscribe_to_browser_events();
     state.start_fetch_handler();
@@ -5255,6 +5331,15 @@ async fn handle_launch_for_target(
 }
 
 async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    // Establish first so the gate sees the browser the caller asked for,
+    // including attached and provider connections, then judge it before the
+    // launch is reported as usable.
+    let result = establish_launch(cmd, state).await?;
+    super::preflight::run("launch", state).await?;
+    Ok(result)
+}
+
+async fn establish_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let effective_ca_cert = resolve_effective_ca_cert(cmd, state)?;
     // Absent field falls back to the daemon's spawn-time env (mirrors
     // hideScrollbars/webgpu), keeping the launch hash stable when follow-up
@@ -5677,8 +5762,12 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
     write_extensions_file_from_paths(&state.session_id, launch_options.extensions.as_deref());
     state.reset_input_state();
     state.session_setup = SessionSetup::from_launch_options(&launch_options);
-    state.browser = Some(BrowserManager::launch(launch_options, engine.as_deref()).await?);
-    state.launch_hash = Some(new_hash);
+    adopt_browser(
+        state,
+        BrowserManager::launch(launch_options, engine.as_deref()).await?,
+        new_hash,
+    )
+    .await?;
     state.subscribe_to_browser_events();
     state.start_fetch_handler();
     state.start_dialog_handler();

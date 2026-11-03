@@ -2620,6 +2620,7 @@ const MCP_EXTRA_ARGS_GLOBALS: &[&str] = &[
     "--debug",
     "--hide-scrollbars",
     "--annotate",
+    "--allow-outdated-browser",
     "--pin-tab",
     "--no-pin-tab",
     "-v",
@@ -5436,6 +5437,34 @@ mod tests {
         let flags = crate::flags::parse_flags(&operator_cli);
         assert_eq!(flags.state.as_deref(), Some("/tmp/auth.json"));
         assert!(flags.cli_state);
+    }
+
+    #[test]
+    fn extra_args_forward_the_outdated_browser_override() {
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_ALLOW_OUTDATED_BROWSER"]);
+        guard.remove("AGENT_BROWSER_ALLOW_OUTDATED_BROWSER");
+
+        let arguments = json!({ "extraArgs": ["--allow-outdated-browser"] });
+        let args = cli_tool_args(&arguments, vec!["open".to_string()], None).unwrap();
+        assert!(args.iter().any(|arg| arg == "--allow-outdated-browser"));
+        let flags = crate::flags::parse_flags(&args);
+        assert!(flags.allow_outdated_browser);
+
+        // Outbound envelopes carry the opt-out, and an envelope that already
+        // states one is left alone.
+        let plain = json!({ "action": "navigate", "url": "https://example.com" });
+        let sent = crate::commands::stamp_browser_security_override(plain, true);
+        assert_eq!(sent["allowOutdatedBrowser"], true);
+        let declined = crate::commands::stamp_browser_security_override(
+            json!({ "action": "navigate" }),
+            false,
+        );
+        assert!(declined.get("allowOutdatedBrowser").is_none());
+        let explicit = crate::commands::stamp_browser_security_override(
+            json!({ "action": "navigate", "allowOutdatedBrowser": false }),
+            true,
+        );
+        assert_eq!(explicit["allowOutdatedBrowser"], false);
     }
 
     #[test]

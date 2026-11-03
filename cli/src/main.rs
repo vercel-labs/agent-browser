@@ -1,3 +1,4 @@
+mod browser_security;
 mod ca_bundle;
 mod chat;
 mod color;
@@ -1482,6 +1483,9 @@ fn main() {
 
     let args: Vec<String> = env::args().skip(1).collect();
     let mut flags = parse_flags(&args);
+    // One place records the opt-out; `connection::send_command` stamps it onto
+    // every envelope that leaves the CLI.
+    commands::set_allow_outdated_browser(flags.allow_outdated_browser);
     if flags.restore_uses_session {
         flags.restore = Some(flags.session.clone());
     }

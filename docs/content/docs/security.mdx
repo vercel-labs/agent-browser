@@ -5,11 +5,11 @@ navTitle: "Security"
 
 agent-browser includes security features to protect against credential exposure, prompt injection via untrusted page content, and unauthorized browser actions.
 
-Navigation, action, and output controls are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Auto-discovered project config filtering applies by default; see Project config trust.
+Navigation, action, and output controls are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. The browser version check is the exception, because an out-of-date browser undermines every other control here. Auto-discovered project config filtering applies by default; see Project config trust.
 
 ## Project config trust
 
-The auto-discovered `./agent-browser.json` accepts only `headed`, `json`, `debug`, `userAgent`, `hideScrollbars`, `annotate`, `colorScheme`, `maxOutput`, `screenshotQuality`, `screenshotFormat`, and `idleTimeout`. Other runtime keys, including `extensions`, `initScripts`, state, trust, policy, session, connection, and path settings, are ignored with a warning. The `$schema` metadata key is ignored silently. Put advanced settings in `~/.agent-browser/config.json` or load a trusted file with `--config` or `AGENT_BROWSER_CONFIG`. An explicit config replaces default discovery and loads only that file. See [Configuration](/configuration) for details.
+The auto-discovered `./agent-browser.json` accepts only `headed`, `json`, `debug`, `userAgent`, `hideScrollbars`, `annotate`, `colorScheme`, `maxOutput`, `screenshotQuality`, `screenshotFormat`, and `idleTimeout`. Other runtime keys, including `allowOutdatedBrowser`, `extensions`, `initScripts`, state, trust, policy, session, connection, and path settings, are ignored with a warning. The `$schema` metadata key is ignored silently. Put advanced settings in `~/.agent-browser/config.json` or load a trusted file with `--config` or `AGENT_BROWSER_CONFIG`. An explicit config replaces default discovery and loads only that file. See [Configuration](/configuration) for details.
 
 ## Threat Model
 
@@ -312,6 +312,34 @@ export AGENT_BROWSER_MAX_OUTPUT=50000
 
 Affected output types: `snapshot`, `get text`, `get html`, `eval`, `console`.
 
+## Browser Version Check
+
+Every command passes through one preflight gate before it drives the browser, so the build is judged before any navigation, snapshot, or input runs, whether the session launched Chrome, attached to it with `--cdp` or `--auto-connect`, or reused a browser an earlier command started. The gate refuses a build that is behind the current stable release: every stable update ships security fixes, so an older build is missing them, and the warning names the documented CVEs the build lacks so overriding is an informed decision.
+
+```text
+Refusing to drive Chrome 155.0.8059.85: the current stable build is 156.0.8078.80.
+
+3 documented security fix(es) shipped after this build: CVE-2026-4101, CVE-2026-4102, CVE-2026-4103
+
+Update with `agent-browser install`. To launch this build anyway, pass `--allow-outdated-browser` or set AGENT_BROWSER_ALLOW_OUTDATED_BROWSER=1.
+```
+
+Update the browser, or override for this launch:
+
+```bash
+agent-browser install
+agent-browser --allow-outdated-browser open https://example.com
+AGENT_BROWSER_ALLOW_OUTDATED_BROWSER=1 agent-browser open https://example.com
+```
+
+How the verdict is made:
+
+- The current stable version comes from the Chrome for Testing `last-known-good-versions.json` endpoint. Documented fixes come from the Chrome Releases blog, which records the CVE IDs each stable desktop update fixed. Firefox release versions come from Mozilla's `product-details` feed, which has no matching CVE data, so Firefox gets a version verdict without a CVE list.
+- Results are cached for 24 hours in `~/.agent-browser/security-advisories.json`, so a warm cache makes no network requests.
+- The check fails open. When neither the cache nor the network supplies a verdict, the command proceeds.
+- Provider sessions are skipped because the browser runs on infrastructure the user cannot update. The Lightpanda and Obscura engines, iOS, and Safari have no published advisory feed to check against, so they pass as well.
+- Escape hatches stay usable on a rejected build: `close`, `dialog`, `confirm`, and `deny` are never gated.
+
 ## Environment Variables
 
 <table>
@@ -322,6 +350,7 @@ Affected output types: `snapshot`, `get text`, `get html`, `eval`, `console`.
     <tr><td><code>AGENT_BROWSER_CONTENT_BOUNDARIES</code></td><td>Wrap page output in boundary markers</td></tr>
     <tr><td><code>AGENT_BROWSER_MAX_OUTPUT</code></td><td>Max characters for page output</td></tr>
     <tr><td><code>AGENT_BROWSER_ALLOWED_DOMAINS</code></td><td>Comma-separated allowed domain patterns; requires a fresh controllable browser context without profile/session startup args, restore/state replay, or direct-page provider plugins</td></tr>
+    <tr><td><code>AGENT_BROWSER_ALLOW_OUTDATED_BROWSER</code></td><td>Launch a browser that is behind stable and missing documented security fixes</td></tr>
     <tr><td><code>AGENT_BROWSER_ACTION_POLICY</code></td><td>Path to action policy JSON file</td></tr>
     <tr><td><code>AGENT_BROWSER_CONFIRM_ACTIONS</code></td><td>Comma-separated action categories requiring confirmation</td></tr>
     <tr><td><code>AGENT_BROWSER_CONFIRM_INTERACTIVE</code></td><td>Enable interactive confirmation prompts</td></tr>

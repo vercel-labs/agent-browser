@@ -4173,6 +4173,8 @@ Options:
   --use-system-ca            Use the OS trust store for CLI requests (read, install, upgrade, doctor)
                              (or AGENT_BROWSER_USE_SYSTEM_CA)
   --allow-file-access        Allow file:// URLs to access local files (Chromium only)
+  --allow-outdated-browser   Drive a browser that is behind the current stable release
+                             (or AGENT_BROWSER_ALLOW_OUTDATED_BROWSER)
   --hide-scrollbars <bool>   Hide native scrollbars in headless Chromium screenshots (default: true)
                              Use --hide-scrollbars false to keep scrollbars visible
   -p, --provider <name>      Browser provider: ios, browserbase, kernel, browseruse, browserless, agentcore, or plugin name
@@ -4300,6 +4302,7 @@ Environment:
   AGENT_BROWSER_AUTO_CONNECT     Auto-discover and connect to running Chrome
   AGENT_BROWSER_PIN_TAB          Pin the session to its bound tab (strict tab binding)
   AGENT_BROWSER_ALLOW_FILE_ACCESS Allow file:// URLs to access local files
+  AGENT_BROWSER_ALLOW_OUTDATED_BROWSER Drive a browser that is behind the current stable release
   AGENT_BROWSER_HIDE_SCROLLBARS  Hide scrollbars in headless Chromium screenshots (default: true)
   AGENT_BROWSER_COLOR_SCHEME     Color scheme preference (dark, light, no-preference)
   AGENT_BROWSER_DOWNLOAD_PATH    Default download directory for browser downloads

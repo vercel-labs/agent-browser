@@ -140,6 +140,10 @@
       "type": "boolean",
       "description": "Allow file:// URLs to access local files."
     },
+    "allowOutdatedBrowser": {
+      "type": "boolean",
+      "description": "Drive a browser that is behind the current stable release instead of refusing it."
+    },
     "cdp": {
       "type": "string",
       "description": "Chrome DevTools Protocol endpoint URL."
