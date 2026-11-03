@@ -3252,6 +3252,7 @@ fn parse_find(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     }
 }
 
+/// Parse mouse arguments, requiring finite coordinates and wheel deltas.
 fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["move", "down", "up", "wheel"];
 
@@ -3265,18 +3266,8 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 context: "mouse move".to_string(),
                 usage: "mouse move <x> <y>",
             })?;
-            let x = x_str
-                .parse::<i32>()
-                .map_err(|_| ParseError::MissingArguments {
-                    context: "mouse move".to_string(),
-                    usage: "mouse move <x> <y>",
-                })?;
-            let y = y_str
-                .parse::<i32>()
-                .map_err(|_| ParseError::MissingArguments {
-                    context: "mouse move".to_string(),
-                    usage: "mouse move <x> <y>",
-                })?;
+            let x = parse_finite_f64(x_str, "mouse move x", "mouse move <x> <y>")?;
+            let y = parse_finite_f64(y_str, "mouse move y", "mouse move <x> <y>")?;
             let mut cmd = json!({ "id": id, "action": "mousemove", "x": x, "y": y });
             let mut i = 3;
             while i < rest.len() {
@@ -3311,11 +3302,15 @@ fn parse_mouse(rest: &[&str], id: &str) -> Result<Value, ParseError> {
             Ok(json!({ "id": id, "action": "mouseup", "button": rest.get(1).unwrap_or(&"left") }))
         }
         Some("wheel") => {
-            let dy = rest
-                .get(1)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(100);
-            let dx = rest.get(2).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+            let usage = "mouse wheel [deltaY] [deltaX]";
+            let dy = match rest.get(1) {
+                Some(raw) => parse_finite_f64(raw, "mouse wheel deltaY", usage)?,
+                None => 100.0,
+            };
+            let dx = match rest.get(2) {
+                Some(raw) => parse_finite_f64(raw, "mouse wheel deltaX", usage)?,
+                None => 0.0,
+            };
             Ok(json!({ "id": id, "action": "wheel", "deltaX": dx, "deltaY": dy }))
         }
         Some(sub) => Err(ParseError::UnknownSubcommand {
@@ -4696,6 +4691,32 @@ mod tests {
     }
 
     #[test]
+    fn test_mouse_move_decimal_coordinates() {
+        let cmd = parse_command(&args("mouse move 10.5 20.25"), &default_flags()).unwrap();
+        assert_eq!(cmd["x"], 10.5);
+        assert_eq!(cmd["y"], 20.25);
+    }
+
+    #[test]
+    fn test_mouse_rejects_invalid_or_nonfinite_values() {
+        for command in [
+            "mouse move nope 1",
+            "mouse move NaN 1",
+            "mouse move 1 nope",
+            "mouse move 1 inf",
+            "mouse wheel nope",
+            "mouse wheel NaN",
+            "mouse wheel 1 nope",
+            "mouse wheel 1 -inf",
+        ] {
+            assert!(matches!(
+                parse_command(&args(command), &default_flags()),
+                Err(ParseError::InvalidValue { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn test_fill() {
         let cmd = parse_command(&args("fill #input hello world"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "fill");
@@ -5828,10 +5849,21 @@ mod tests {
 
     #[test]
     fn test_mouse_wheel() {
-        let cmd = parse_command(&args("mouse wheel 100 50"), &default_flags()).unwrap();
+        let cmd = parse_command(&args("mouse wheel 100.5 50.25"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "wheel");
-        assert_eq!(cmd["deltaY"], 100);
-        assert_eq!(cmd["deltaX"], 50);
+        assert_eq!(cmd["deltaY"], 100.5);
+        assert_eq!(cmd["deltaX"], 50.25);
+    }
+
+    #[test]
+    fn test_mouse_wheel_defaults_and_zero() {
+        let defaults = parse_command(&args("mouse wheel"), &default_flags()).unwrap();
+        assert_eq!(defaults["deltaY"], 100.0);
+        assert_eq!(defaults["deltaX"], 0.0);
+
+        let zero = parse_command(&args("mouse wheel 0 0"), &default_flags()).unwrap();
+        assert_eq!(zero["deltaY"], 0.0);
+        assert_eq!(zero["deltaX"], 0.0);
     }
 
     #[test]
