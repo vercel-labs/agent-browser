@@ -893,7 +893,7 @@ fn tools() -> Vec<Value> {
             "Save recorded steps as a flow so later runs can skip the browser. The session must be opened with capture flow. By default the flow starts at the last navigation after the previous save. params maps a param name to the value you typed, so later runs can change it.",
             json!({
                 "name": { "type": "string" },
-                "from": { "type": "string", "description": "First step: a step number, open (the last navigation), or last-save." },
+                "from": { "type": "integer", "minimum": 1, "description": "First step number; defaults to the last navigation after the previous save." },
                 "to": { "type": "integer", "minimum": 1, "description": "Last step; defaults to the latest." },
                 "description": { "type": "string", "description": "One line saying what the flow does." },
                 "params": { "type": "object", "additionalProperties": { "type": "string" } },
@@ -2895,7 +2895,6 @@ fn flow_args(arguments: &Value, sub: &str) -> Result<Vec<String>, ProtocolError>
         ("fields", "--fields"),
         ("origin", "--origin"),
         ("output", "--output"),
-        ("from", "--from"),
         ("description", "--description"),
     ] {
         if let Some(v) = optional_string(arguments, key)? {
@@ -2907,9 +2906,11 @@ fn flow_args(arguments: &Value, sub: &str) -> Result<Vec<String>, ProtocolError>
         args.push("--limit".to_string());
         args.push(limit.to_string());
     }
-    if let Some(to) = arguments.get("to").and_then(Value::as_u64) {
-        args.push("--to".to_string());
-        args.push(to.to_string());
+    for (key, flag) in [("from", "--from"), ("to", "--to")] {
+        if let Some(n) = arguments.get(key).and_then(Value::as_u64) {
+            args.push(flag.to_string());
+            args.push(n.to_string());
+        }
     }
     if let Some(allow) = optional_string(arguments, "allowWrite")? {
         args.push("--allow-write".to_string());
@@ -5674,13 +5675,13 @@ mod tests {
         );
         assert_eq!(
             flow_args(
-                &json!({ "name": "cart", "from": "open", "to": 7, "description": "Adds", "params": { "q": "x" } }),
+                &json!({ "name": "cart", "from": 3, "to": 7, "description": "Adds", "params": { "q": "x" } }),
                 "save"
             )
             .unwrap(),
             vec![
-                "flow", "save", "cart", "--param", "q=x", "--from", "open", "--description",
-                "Adds", "--to", "7"
+                "flow", "save", "cart", "--param", "q=x", "--description", "Adds",
+                "--from", "3", "--to", "7"
             ]
         );
         assert!(flow_args(&json!({}), "save").is_err());

@@ -142,7 +142,7 @@ Every recorded command returns `recorded: {seq}` in its JSON response. Failed co
 `flow steps --json` returns the same data.
 
 ```bash
-agent-browser flow save <name> [--from <seq|open|last-save>] [--to <seq>] [--param k=v]... [--output <id>] [--description <text>]
+agent-browser flow save <name> [--from <seq>] [--to <seq>] [--param k=v]... [--output <id>] [--description <text>]
 ```
 
 <table>
@@ -150,7 +150,7 @@ agent-browser flow save <name> [--from <seq|open|last-save>] [--to <seq>] [--par
     <tr><th>Option</th><th>Meaning</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>--from</code></td><td>First step. A step number, <code>open</code> for the last navigation, or <code>last-save</code> for the step after the previous save. Defaults to the last navigation after the previous save</td></tr>
+    <tr><td><code>--from</code></td><td>First step number. Defaults to the last navigation after the previous save</td></tr>
     <tr><td><code>--to</code></td><td>Last step. Defaults to the latest</td></tr>
     <tr><td><code>--param</code></td><td>A value you typed during the task, so later runs can change it</td></tr>
     <tr><td><code>--output</code></td><td>Request id whose response the flow returns</td></tr>
@@ -242,7 +242,7 @@ A bot challenge is recognized only in HTML responses, never in JSON. The in-page
   </thead>
   <tbody>
     <tr><td><code>explicit</code></td><td>Any request other than GET, HEAD or OPTIONS, except GraphQL queries</td></tr>
-    <tr><td><code>suspected</code></td><td>A GET that looks like a state change: a data request fired by a click that no output depends on, or a path with a whole segment of <code>logout</code>, <code>signout</code>, <code>unsubscribe</code>, <code>delete</code> or <code>remove</code>. <code>/address</code> does not match</td></tr>
+    <tr><td><code>suspected</code></td><td>A GET whose path has a whole segment of <code>logout</code>, <code>signout</code>, <code>unsubscribe</code>, <code>delete</code> or <code>remove</code>. <code>/address</code> does not match</td></tr>
   </tbody>
 </table>
 

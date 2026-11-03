@@ -4957,8 +4957,9 @@
             "type": "array"
           },
           "from": {
-            "description": "First step: a step number, open (the last navigation), or last-save.",
-            "type": "string"
+            "description": "First step number; defaults to the last navigation after the previous save.",
+            "minimum": 1,
+            "type": "integer"
           },
           "idleTimeout": {
             "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Values too large to convert to milliseconds produce a warning and are ignored. Defaults to 1h; 0 disables idle shutdown.",

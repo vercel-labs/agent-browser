@@ -15067,7 +15067,7 @@ const FLOW_FIXTURE_PAGE: &str = r#"<!doctype html><html><body>
 <button id="items" onclick="items()">Items</button>
 <button id="gql" onclick="gql()">Gql</button>
 <button id="add" onclick="add()">Add</button>
-<button id="cartadd" onclick="fetch('/cart/add?id=7')">CartAdd</button>
+<button id="cartadd" onclick="fetch('/cart/remove?id=7')">CartAdd</button>
 <script>
 let csrf = ''; let user = '';
 async function login() { await fetch('/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: document.getElementById('email').value, pw: document.getElementById('pw').value }) }); }
@@ -15231,7 +15231,7 @@ async fn flow_fixture() -> FlowFixture {
                 ("POST", "/api/cart") => {
                     reply(&mut stream, "403 Forbidden", "application/json", "", "{}").await
                 }
-                ("GET", p) if p.starts_with("/cart/add") => {
+                ("GET", p) if p.starts_with("/cart/remove") => {
                     reply(
                         &mut stream,
                         "200 OK",
@@ -15425,7 +15425,7 @@ async fn e2e_flow_capture_save_run_and_guards() {
     let resaved = exec(
         &run(
             &mut n,
-            json!({ "action": "flow_save", "name": "cart", "from": "1", "to": 9, "output": add_id }),
+            json!({ "action": "flow_save", "name": "cart", "from": 1, "to": 9, "output": add_id }),
         ),
         &mut state,
     )
@@ -15440,7 +15440,7 @@ async fn e2e_flow_capture_save_run_and_guards() {
         .iter()
         .any(|w| w["method"] == "POST" && w["url"].as_str().unwrap().ends_with("/login")));
     assert!(writes.iter().any(|w| w["method"] == "GET"
-        && w["url"].as_str().unwrap().contains("/cart/add?id=7")
+        && w["url"].as_str().unwrap().contains("/cart/remove?id=7")
         && w["kind"] == "suspected"));
 
     // A second flow in the same session, from the step after the first save.
@@ -15454,10 +15454,7 @@ async fn e2e_flow_capture_save_run_and_guards() {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
     let saved2 = exec(
-        &run(
-            &mut n,
-            json!({ "action": "flow_save", "name": "browse", "from": "last-save" }),
-        ),
+        &run(&mut n, json!({ "action": "flow_save", "name": "browse" })),
         &mut state,
     )
     .await;
@@ -15702,7 +15699,7 @@ async fn e2e_flow_comment_8_replay_runs_once_per_run() {
     let resaved = exec(
         &run(
             &mut n,
-            json!({ "action": "flow_save", "name": "ci", "from": "1", "output": items_id }),
+            json!({ "action": "flow_save", "name": "ci", "from": 1, "output": items_id }),
         ),
         &mut state,
     )
@@ -15799,7 +15796,7 @@ async fn e2e_flow_a_write_the_replay_sent_is_not_sent_again_by_a_later_request()
         &exec(
             &run(
                 &mut n,
-                json!({ "action": "flow_save", "name": "cs", "from": "1", "output": add_id }),
+                json!({ "action": "flow_save", "name": "cs", "from": 1, "output": add_id }),
             ),
             &mut state,
         )

@@ -805,8 +805,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
 
     let mut flow: Flow = serde_json::from_value(flow_json)
         .map_err(|e| format!("the flow could not be built: {}", e))?;
-    let consumed = dependencies(&flow, &output);
-    let writes = collect_writes(&input, &policy, &given, &har_ids, &consumed);
+    let writes = collect_writes(&input, &policy, &given, &har_ids);
     for r in flow.steps.iter_mut().flat_map(|s| s.requests.iter_mut()) {
         r.write = writes.iter().any(|w| w.id == r.id);
     }
@@ -1673,29 +1672,18 @@ fn has_mutating_segment(url: &str) -> bool {
     })
 }
 
-/// A command that acts on an element, as opposed to navigating or typing.
-fn is_click_command(cmd: &Value) -> bool {
-    let action = cmd["action"].as_str().unwrap_or("");
-    let sub = cmd["subaction"].as_str().unwrap_or("");
-    matches!(action, "click" | "dblclick")
-        || (action == "getbyrole" && matches!(sub, "click" | "dblclick"))
-}
-
 /// The writes a recording caused, kept as requests or not: each one is
 /// sent again by a run (or by the command replay) and must be allowed.
-/// `suspected` marks GET requests that look like state changes: a data
-/// request a click fired that no output depends on, or a path with a
-/// mutating segment.
+/// `suspected` marks a GET whose path has a whole mutating segment.
 fn collect_writes(
     input: &SaveInput<'_>,
     policy: &HostPolicy,
     given: &[(String, String)],
     har_ids: &HashMap<String, String>,
-    consumed: &[String],
 ) -> Vec<Write> {
     let mut writes: Vec<Write> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
-    for (index, (seq, cmd)) in input.commands.iter().enumerate() {
+    for (index, (seq, _)) in input.commands.iter().enumerate() {
         let mut extra = 0;
         for e in input
             .entries
@@ -1714,13 +1702,8 @@ fn collect_writes(
                 .map(|(id, _)| id.clone());
             let first_party = policy.allows_url(&e.url);
             let explicit = is_write(&e.method, e.post_data.as_deref());
-            let suspected = !explicit
-                && e.method == "GET"
-                && first_party
-                && (has_mutating_segment(&e.url)
-                    || (is_click_command(cmd)
-                        && matches!(e.resource_type.as_str(), "XHR" | "Fetch" | "Ping" | "Other")
-                        && !kept.as_ref().is_some_and(|id| consumed.contains(id))));
+            let suspected =
+                !explicit && e.method == "GET" && first_party && has_mutating_segment(&e.url);
             if !explicit && !suspected {
                 continue;
             }
@@ -2722,8 +2705,7 @@ mod tests {
             ("click", true),
         ]);
         assert_eq!(r.resolve_range(None, None).unwrap(), (3, 4));
-        assert_eq!(r.resolve_range(Some("open"), None).unwrap(), (3, 4));
-        assert_eq!(r.resolve_range(Some("2"), Some(3)).unwrap(), (2, 3));
+        assert_eq!(r.resolve_range(Some(2), Some(3)).unwrap(), (2, 3));
         r.last_save_seq = 4;
         assert_eq!(r.unsaved_steps(), 0);
         assert!(r.resolve_range(None, None).is_err());
@@ -2732,9 +2714,9 @@ mod tests {
             .unwrap();
         r.finish_command(seq, true, None);
         assert_eq!(r.resolve_range(None, None).unwrap(), (5, 5));
-        assert_eq!(r.resolve_range(Some("last-save"), None).unwrap(), (5, 5));
+        assert_eq!(r.resolve_range(Some(5), None).unwrap(), (5, 5));
         assert_eq!(r.unsaved_steps(), 1);
-        assert!(r.resolve_range(Some("x"), None).is_err());
+        assert!(r.resolve_range(Some(9), None).is_err());
         assert!(r.resolve_range(None, Some(9)).is_err());
     }
 
@@ -2934,32 +2916,30 @@ mod tests {
     }
 
     #[test]
-    fn a_get_a_click_fired_that_no_output_uses_is_a_suspected_write() {
-        let list = entry(
-            "list",
-            "https://api.example.com.ar/items",
-            "Fetch",
-            "application/json",
-            r#"{"items":[{"id":1}]}"#,
-        );
-        let add = entry(
-            "add",
-            "https://www.example.com.ar/cart/add?id=7",
-            "Fetch",
-            "application/json",
-            r#"{"added":true}"#,
-        );
-        let writes = writes_after("click", vec![list.clone(), add], &["list", "add"]);
-        let writes = writes.as_array().unwrap();
-        assert_eq!(writes.len(), 1, "{writes:?}");
-        assert_eq!(writes[0]["kind"], "suspected");
-        assert_eq!(writes[0]["method"], "GET");
-        assert!(writes[0]["url"]
-            .as_str()
-            .unwrap()
-            .contains("/cart/add?id=7"));
-        let only_list = writes_after("click", vec![list], &["list"]);
-        assert_eq!(only_list, json!([]));
+    fn a_get_a_click_fired_is_a_write_only_when_its_path_says_so() {
+        // (path, suspected)
+        for (path, suspected) in [
+            ("/cart/add?id=7", false),
+            ("/cart/remove?id=7", true),
+            ("/account/logout", true),
+            ("/address/list", false),
+            ("/api/items", false),
+        ] {
+            let call = entry(
+                "call",
+                &format!("https://www.example.com.ar{}", path),
+                "Fetch",
+                "application/json",
+                r#"{"ok":true}"#,
+            );
+            let writes = writes_after("click", vec![call], &["call"]);
+            let writes = writes.as_array().unwrap();
+            assert_eq!(writes.len(), usize::from(suspected), "{path}: {writes:?}");
+            if suspected {
+                assert_eq!(writes[0]["kind"], "suspected");
+                assert_eq!(writes[0]["method"], "GET");
+            }
+        }
     }
 
     #[test]

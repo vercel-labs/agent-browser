@@ -12100,7 +12100,7 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     let entries = state.har_entries.clone();
     state.flow.save(super::flow::SaveArgs {
         name: &name,
-        from: cmd.get("from").and_then(|v| v.as_str()),
+        from: cmd.get("from").and_then(|v| v.as_u64()),
         to: cmd.get("to").and_then(|v| v.as_u64()),
         description: cmd.get("description").and_then(|v| v.as_str()),
         params: &params,

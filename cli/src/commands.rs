@@ -2169,7 +2169,7 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
 /// Parse `flow <steps|save|run|list>`: save a task captured with `--capture flow`, replay it over HTTP.
 fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["steps", "save", "run", "list"];
-    const USAGE: &str = "flow <steps [--json]|save <name> [--from <seq|open|last-save>] [--to <seq>] [--param k=v]... [--output <id>] [--description <text>]|run <name> [--param k=v]... [--origin <host>] [--allow-write <all|id,...>]|list [--origin <host>]>";
+    const USAGE: &str = "flow <steps [--json]|save <name> [--from <seq>] [--to <seq>] [--param k=v]... [--output <id>] [--description <text>]|run <name> [--param k=v]... [--origin <host>] [--allow-write <all|id,...>]|list [--origin <host>]>";
 
     fn params(args: &[&str], usage: &'static str) -> Result<Value, ParseError> {
         let mut out = serde_json::Map::new();
@@ -2206,7 +2206,7 @@ fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     match rest.first().copied() {
         Some("steps") => Ok(json!({ "id": id, "action": "flow_steps" })),
         Some("save") => {
-            const SAVE_USAGE: &str = "flow save <name> [--from <seq|open|last-save>] [--to <seq>] [--param name=value]... [--output <request-id>] [--description <text>]";
+            const SAVE_USAGE: &str = "flow save <name> [--from <seq>] [--to <seq>] [--param name=value]... [--output <request-id>] [--description <text>]";
             let name = rest
                 .get(1)
                 .filter(|n| !n.starts_with("--"))
@@ -2224,7 +2224,11 @@ fn parse_flow(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 cmd["output"] = json!(output);
             }
             if let Some(from) = flag_value(rest, "--from") {
-                cmd["from"] = json!(from);
+                let n: u64 = from.parse().map_err(|_| ParseError::InvalidValue {
+                    message: format!("Invalid --from '{}': expected a step number", from),
+                    usage: SAVE_USAGE,
+                })?;
+                cmd["from"] = json!(n);
             }
             if let Some(to) = flag_value(rest, "--to") {
                 let n: u64 = to.parse().map_err(|_| ParseError::InvalidValue {
@@ -4611,7 +4615,7 @@ mod tests {
                 "save",
                 "cart",
                 "--from",
-                "open",
+                "3",
                 "--to",
                 "7",
                 "--param",
@@ -4624,12 +4628,13 @@ mod tests {
         .unwrap();
         assert_eq!(cmd["action"], "flow_save");
         assert_eq!(cmd["name"], "cart");
-        assert_eq!(cmd["from"], "open");
+        assert_eq!(cmd["from"], 3);
         assert_eq!(cmd["to"], 7);
         assert_eq!(cmd["params"]["q"], "x");
         assert_eq!(cmd["description"], "Adds");
         assert!(parse_flow(&["save"], "1").is_err());
         assert!(parse_flow(&["save", "--from", "1"], "1").is_err());
+        assert!(parse_flow(&["save", "a", "--from", "open"], "1").is_err());
         assert!(parse_flow(&["save", "a", "--to", "x"], "1").is_err());
     }
 

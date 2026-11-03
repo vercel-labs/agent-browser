@@ -28,7 +28,7 @@ pub fn parse_capture(values: &[String]) -> Result<(), String> {
 /// What a save needs besides the recording.
 pub struct SaveArgs<'a> {
     pub name: &'a str,
-    pub from: Option<&'a str>,
+    pub from: Option<u64>,
     pub to: Option<u64>,
     pub description: Option<&'a str>,
     pub params: &'a [(String, String)],
@@ -362,12 +362,11 @@ impl FlowRecorder {
         }
     }
 
-    /// The first and last step a save covers. `from` is a sequence number,
-    /// `open` (the last navigation) or `last-save`; without it the save
+    /// The first and last step a save covers. Without `from` the save
     /// starts at the last navigation after the previous save.
     pub(super) fn resolve_range(
         &self,
-        from: Option<&str>,
+        from: Option<u64>,
         to: Option<u64>,
     ) -> Result<(u64, u64), String> {
         let last = self.next_seq;
@@ -381,34 +380,19 @@ impl FlowRecorder {
                 to, last
             ));
         }
-        let navigations: Vec<u64> = self
-            .commands
-            .iter()
-            .filter(|(seq, c)| {
-                *seq <= to && c.get("action").and_then(|a| a.as_str()) == Some("navigate")
-            })
-            .map(|(seq, _)| *seq)
-            .collect();
-        let after_save = self.last_save_seq + 1;
-        let from = match from {
-            None => navigations
+        let from = from.unwrap_or_else(|| {
+            self.commands
                 .iter()
                 .rev()
-                .find(|seq| **seq > self.last_save_seq)
-                .copied()
-                .unwrap_or(after_save),
-            Some("open") => navigations
-                .last()
-                .copied()
-                .ok_or("no `open <url>` step to start from; pass --from <seq>")?,
-            Some("last-save") => after_save,
-            Some(n) => n.parse::<u64>().map_err(|_| {
-                format!(
-                    "invalid --from '{}': use a step number, `open` or `last-save`",
-                    n
-                )
-            })?,
-        };
+                .filter(|(seq, c)| {
+                    *seq <= to
+                        && *seq > self.last_save_seq
+                        && c.get("action").and_then(|a| a.as_str()) == Some("navigate")
+                })
+                .map(|(seq, _)| *seq)
+                .next()
+                .unwrap_or(self.last_save_seq + 1)
+        });
         if from == 0 || from > to {
             return Err(format!(
                 "no recorded steps from {} to {}; run `flow steps` to see them",
