@@ -351,16 +351,24 @@ pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError
     // Inject AGENT_BROWSER_DEFAULT_TIMEOUT into any wait-family command that
     // doesn't already carry an explicit timeout. Centralised here so that new
     // wait variants automatically inherit the default without per-variant wiring.
-    if let Some(action) = result.get("action").and_then(|a| a.as_str()) {
-        if action.starts_with("wait") && result.get("timeout").is_none() {
-            if let Some(t) = flags.default_timeout {
-                result["timeout"] = json!(t);
-            }
-        }
-    }
+    inherit_wait_timeout(&mut result, flags.default_timeout);
     attach_ca_cert_to_launch_command(&mut result, flags);
 
     Ok(result)
+}
+
+/// Stamps `timeout` on a wait-family command that has none.
+pub fn inherit_wait_timeout(cmd: &mut Value, timeout: Option<u64>) {
+    let Some(timeout) = timeout else {
+        return;
+    };
+    let is_wait = cmd
+        .get("action")
+        .and_then(Value::as_str)
+        .is_some_and(|action| action.starts_with("wait"));
+    if is_wait && cmd.get("timeout").is_none() {
+        cmd["timeout"] = json!(timeout);
+    }
 }
 
 pub fn attach_ca_cert_to_launch_command(cmd: &mut Value, flags: &Flags) {

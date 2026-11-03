@@ -1937,8 +1937,8 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SKILLS_GET,
             "Skills get",
-            "Get skill content, including home-directory skills when no package root is found. Package discovery looks for the bundled skill-data/core/SKILL.md file.",
-            json!({ "names": string_array_schema("Skill names."), "all": { "type": "boolean" }, "full": { "type": "boolean" } }),
+            "Get skill content, including home-directory skills when no package root is found. Package discovery looks for the bundled skill-data/core/SKILL.md file. Pass refs with one skill name to load only those references or templates, such as [\"commands\"].",
+            json!({ "names": string_array_schema("Skill names."), "all": { "type": "boolean" }, "full": { "type": "boolean" }, "refs": string_array_schema("References or templates to load from one skill, by path, file name, or stem (references/commands.md, commands.md, or commands). Returns only those files.") }),
             &[],
         ),
         tool(
@@ -3935,6 +3935,12 @@ fn call_skills_get(arguments: &Value) -> Result<Value, ProtocolError> {
     }
     if optional_bool(arguments, "full")?.unwrap_or(false) {
         args.push("--full".to_string());
+    }
+    if let Some(refs) = optional_string_array(arguments, "refs")? {
+        for reference in refs {
+            args.push("--ref".to_string());
+            args.push(reference);
+        }
     }
     call_cli_tool(arguments, args, None)
 }

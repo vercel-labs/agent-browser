@@ -58,9 +58,10 @@ Chrome for Testing is the default browser. You can also attach to a running Chro
 The CLI ships skills that match its version:
 
 ```bash
-agent-browser skills get core          # the core loop, refs, waiting, and common workflows
-agent-browser skills get core --full   # adds the full command reference and templates
-agent-browser skills list              # specialized skills: electron, slack, dogfood, and more
+agent-browser skills get core                 # the core loop, refs, waiting, and common workflows
+agent-browser skills get core --ref commands  # one reference, such as the full command list
+agent-browser skills get core --full          # adds the full command reference and templates
+agent-browser skills list                     # specialized skills: electron, slack, dogfood, and more
 ```
 
 Install the discovery skill into an agent harness from [skills.sh](https://skills.sh/vercel-labs/agent-browser):
