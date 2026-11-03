@@ -26,8 +26,11 @@ fn mcp_batch_rejects_unknown_cookie_subcommands() {
     let batch: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(batch["isError"], true, "{batch}");
     assert_eq!(batch["structuredContent"]["exitCode"], 1, "{batch}");
-    assert!(batch["structuredContent"]["response"][0]["error"]
-        .as_str()
-        .unwrap()
-        .contains("Unknown subcommand: delete"), "{batch}");
+    assert!(
+        batch["structuredContent"]["response"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown subcommand: delete"),
+        "{batch}"
+    );
 }
