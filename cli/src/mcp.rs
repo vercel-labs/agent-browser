@@ -5345,21 +5345,24 @@ mod tests {
         assert_eq!(flags.engine.as_deref(), Some("obscura"));
         assert_eq!(flags.executable_path.as_deref(), Some("/tmp/obscura"));
         assert_eq!(flags.proxy_bypass.as_deref(), Some("localhost"));
-        let mut launch = json!({"action": "launch"});
-        crate::attach_obscura_proxy_bypass(&mut launch, &flags);
-        assert_eq!(launch["proxyBypass"], "localhost");
-        assert!(launch.get("proxy").is_none());
+        use crate::session_settings::{Key, Patch, Requested};
+        let patch = Patch::from_flags(&flags);
+        assert_eq!(patch.value(Key::ProxyBypass), Some(&json!("localhost")));
+        assert!(patch.get(Key::Proxy).is_none());
 
         let mut flags = flags;
         flags.proxy_bypass = None;
-        crate::attach_obscura_proxy_bypass(&mut launch, &flags);
-        assert_eq!(launch.get("proxyBypass"), Some(&Value::Null));
+        assert_eq!(
+            Patch::from_flags(&flags).get(Key::ProxyBypass),
+            Some(&Requested::Default),
+            "an unset bypass is an explicit clear for Obscura"
+        );
         for engine in [None, Some("chrome"), Some("lightpanda")] {
             flags.engine = engine.map(String::from);
-            flags.proxy_bypass = Some("localhost".into());
-            let mut launch = json!({"action": "launch"});
-            crate::attach_obscura_proxy_bypass(&mut launch, &flags);
-            assert_eq!(launch, json!({"action": "launch"}));
+            assert!(
+                Patch::from_flags(&flags).get(Key::ProxyBypass).is_none(),
+                "only Obscura clears the bypass"
+            );
         }
     }
 
