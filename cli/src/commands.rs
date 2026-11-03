@@ -1642,7 +1642,11 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                     Ok(json!({ "id": id, "action": "cookies_set", "cookies": [cookie] }))
                 }
                 "clear" => Ok(json!({ "id": id, "action": "cookies_clear" })),
-                _ => Ok(json!({ "id": id, "action": "cookies_get" })),
+                "get" => Ok(json!({ "id": id, "action": "cookies_get" })),
+                _ => Err(ParseError::UnknownSubcommand {
+                    subcommand: op.to_string(),
+                    valid_options: &["get", "set", "clear"],
+                }),
             }
         }
 
