@@ -42,6 +42,10 @@ Agents retrieve skill content at runtime using the `agent-browser skills` comman
       <td>Include references and templates alongside the skill</td>
     </tr>
     <tr>
+      <td><code>agent-browser skills get &lt;name&gt; --ref &lt;ref&gt;</code></td>
+      <td>Output only the named reference or template, by path, file name, or stem. Repeat <code>--ref</code> to load several</td>
+    </tr>
+    <tr>
       <td><code>agent-browser skills get --all</code></td>
       <td>Output every skill</td>
     </tr>
@@ -77,6 +81,8 @@ This design solves the version drift problem: the installed SKILL.md rarely chan
 - **agentcore**: Run agent-browser on AWS Bedrock AgentCore cloud browsers.
 
 Use `agent-browser skills list` to see all available skills, then `agent-browser skills get <name>` to load one. Start with `agent-browser skills get core`. It routes to its references when a task needs more detail, and `--full` prints all of them at once.
+
+To load one reference, pass it to `--ref`, for example `agent-browser skills get core --ref commands`. MCP clients pass the same values in the `refs` argument of `agent_browser_skills_get`.
 
 ## eve agents
 
