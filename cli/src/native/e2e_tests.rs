@@ -1284,11 +1284,13 @@ async fn verify_obscura_page(auto_launch: bool) {
     let obscura_bin = required_obscura_binary();
     let env = obscura_test_environment();
     let fixture = obscura_fixture().await;
-    let mut state = DaemonState::new();
     if auto_launch {
         env.set("AGENT_BROWSER_ENGINE", "obscura");
         env.set("AGENT_BROWSER_EXECUTABLE_PATH", &obscura_bin);
-    } else {
+    }
+    // The daemon reads its settings once, when the state is created.
+    let mut state = DaemonState::new();
+    if !auto_launch {
         let resp = obscura_command(
             &mut state,
             json!({

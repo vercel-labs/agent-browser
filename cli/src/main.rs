@@ -13,6 +13,7 @@ mod output;
 mod plugins;
 mod read;
 mod session_files;
+mod session_settings;
 mod skills;
 #[cfg(test)]
 mod test_utils;
@@ -46,6 +47,7 @@ use install::run_install;
 use output::{
     print_command_help, print_help, print_response_with_opts, print_version, OutputOptions,
 };
+use session_settings::parse_proxy;
 use upgrade::run_upgrade;
 
 fn serialize_json_value(value: &serde_json::Value) -> String {
@@ -632,69 +634,6 @@ fn run_interactive_confirmations(
 
     print_response_with_opts(&resp, None, output_opts);
     resp
-}
-
-struct ParsedProxy {
-    server: String,
-    username: Option<String>,
-    password: Option<String>,
-}
-
-fn parse_proxy(proxy_str: &str) -> ParsedProxy {
-    let Some(protocol_end) = proxy_str.find("://") else {
-        return ParsedProxy {
-            server: proxy_str.to_string(),
-            username: None,
-            password: None,
-        };
-    };
-    let protocol = &proxy_str[..protocol_end + 3];
-    let rest = &proxy_str[protocol_end + 3..];
-
-    let Some(at_pos) = rest.rfind('@') else {
-        return ParsedProxy {
-            server: proxy_str.to_string(),
-            username: None,
-            password: None,
-        };
-    };
-
-    let creds = &rest[..at_pos];
-    let server_part = &rest[at_pos + 1..];
-    let server = format!("{}{}", protocol, server_part);
-
-    let (username, password) = match creds.find(':') {
-        Some(colon_pos) => {
-            let u = &creds[..colon_pos];
-            let p = &creds[colon_pos + 1..];
-            (
-                if u.is_empty() {
-                    None
-                } else {
-                    Some(u.to_string())
-                },
-                if p.is_empty() {
-                    None
-                } else {
-                    Some(p.to_string())
-                },
-            )
-        }
-        None => (
-            if creds.is_empty() {
-                None
-            } else {
-                Some(creds.to_string())
-            },
-            None,
-        ),
-    };
-
-    ParsedProxy {
-        server,
-        username,
-        password,
-    }
 }
 
 fn run_profiles(json_mode: bool) {
@@ -2648,6 +2587,53 @@ mod tests {
             assert!(
                 parse_dashboard_command(&args).is_err(),
                 "unexpectedly accepted {args:?}"
+            );
+        }
+    }
+
+    /// The settings patch carries every value the launch envelope helpers
+    /// attach to a launch command.
+    #[test]
+    fn test_settings_patch_carries_launch_envelope_values() {
+        use crate::session_settings::tests::full_flags;
+        use crate::session_settings::{Key, Patch};
+
+        let mut flags = full_flags();
+        flags.engine = Some("obscura".to_string());
+        let patch = Patch::from_flags(&flags);
+
+        let mut cmd = build_provider_launch_command("browserless", &flags);
+        attach_pin_tab_to_command(&mut cmd, &flags);
+        attach_obscura_proxy_bypass(&mut cmd, &flags);
+        apply_hide_scrollbars_launch_option(
+            &mut cmd,
+            flags.cli_hide_scrollbars,
+            flags.hide_scrollbars,
+        );
+
+        let envelope_fields = [
+            ("initScripts", Key::InitScripts),
+            ("enable", Key::Enable),
+            ("webmcp", Key::Webmcp),
+            ("allowedDomains", Key::AllowedDomains),
+            ("restoreKey", Key::RestoreKey),
+            ("restoreSave", Key::RestoreSave),
+            ("restoreCheckUrl", Key::RestoreCheckUrl),
+            ("restoreCheckText", Key::RestoreCheckText),
+            ("restoreCheckFn", Key::RestoreCheckFn),
+            ("caCert", Key::CaCert),
+            ("clearCaCert", Key::ClearCaCert),
+            ("colorScheme", Key::ColorScheme),
+            ("pinTab", Key::PinTab),
+            ("hideScrollbars", Key::HideScrollbars),
+            ("proxyBypass", Key::ProxyBypass),
+            ("plugins", Key::Plugins),
+        ];
+        for (field, key) in envelope_fields {
+            assert_eq!(
+                patch.value(key),
+                Some(&cmd[field]),
+                "{field} differs from the patch"
             );
         }
     }
