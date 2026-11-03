@@ -15061,6 +15061,7 @@ async fn e2e_state_load_keeps_storage_away_from_page_scripts_and_redirects() {
 const FLOW_FIXTURE_PAGE: &str = r#"<!doctype html><html><body>
 <input id="email" type="text" placeholder="Email">
 <input id="code" autocomplete="one-time-code">
+<input id="pw" type="password">
 <button id="login" onclick="login()">Login</button>
 <button id="session" onclick="session()">Session</button>
 <button id="items" onclick="items()">Items</button>
@@ -15359,6 +15360,7 @@ async fn e2e_flow_capture_save_run_and_guards() {
         ("click", "#session", None),
         ("click", "#add", None),
         ("click", "#cartadd", None),
+        ("click", "#pw", None),
     ] {
         let mut cmd = json!({ "action": action, "selector": selector });
         if let Some(v) = value {
@@ -15368,6 +15370,16 @@ async fn e2e_flow_capture_save_run_and_guards() {
         assert_success(&resp);
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
+    let typed = exec(
+        &run(
+            &mut n,
+            json!({ "action": "keyboard", "subaction": "type", "text": "s3cret!" }),
+        ),
+        &mut state,
+    )
+    .await;
+    assert_success(&typed);
+
     let failed = exec(
         &run(
             &mut n,
@@ -15384,21 +15396,21 @@ async fn e2e_flow_capture_save_run_and_guards() {
 
     let steps = exec(&run(&mut n, json!({ "action": "flow_steps" })), &mut state).await;
     assert_success(&steps);
-    assert_eq!(steps["data"]["steps"].as_array().unwrap().len(), 8);
-    assert_eq!(steps["data"]["steps"][7]["ok"], false);
+    assert_eq!(steps["data"]["steps"].as_array().unwrap().len(), 10);
+    assert_eq!(steps["data"]["steps"][9]["ok"], false);
 
     // Save the first flow without the failed step, keep recording.
     let saved = exec(
         &run(
             &mut n,
-            json!({ "action": "flow_save", "name": "cart", "to": 7, "description": "Add to cart" }),
+            json!({ "action": "flow_save", "name": "cart", "to": 9, "description": "Add to cart" }),
         ),
         &mut state,
     )
     .await;
     assert_success(&saved);
     assert_eq!(saved["data"]["from"], 1);
-    assert_eq!(saved["data"]["to"], 7);
+    assert_eq!(saved["data"]["to"], 9);
     assert!(state.flow.active(), "save keeps the capture running");
     // The flow answers with the cart write, picked by request id.
     let add_id = saved["data"]["requests"]
@@ -15412,7 +15424,7 @@ async fn e2e_flow_capture_save_run_and_guards() {
     let resaved = exec(
         &run(
             &mut n,
-            json!({ "action": "flow_save", "name": "cart", "from": "1", "to": 7, "output": add_id }),
+            json!({ "action": "flow_save", "name": "cart", "from": "1", "to": 9, "output": add_id }),
         ),
         &mut state,
     )
@@ -15449,7 +15461,7 @@ async fn e2e_flow_capture_save_run_and_guards() {
     )
     .await;
     assert_success(&saved2);
-    assert_eq!(saved2["data"]["from"], 8);
+    assert_eq!(saved2["data"]["from"], 10);
     assert_eq!(
         saved2["data"]["writes"],
         json!([]),
@@ -15461,6 +15473,14 @@ async fn e2e_flow_capture_save_run_and_guards() {
     let cart_path = dir.path().join("127.0.0.1").join("cart.json");
     let cart_text = std::fs::read_to_string(&cart_path).unwrap();
     assert!(!cart_text.contains("482913"));
+    assert!(
+        !cart_text.contains("s3cret!"),
+        "keyboard text into a password field is redacted"
+    );
+    assert!(
+        !cart_text.contains("ana@example.com"),
+        "typed values are not stored as examples"
+    );
     assert!(cart_text.contains(r#""source": "typed""#));
     assert!(cart_text.contains("{{email}}"));
     assert!(cart_text.contains("<redacted>"));
@@ -15479,7 +15499,7 @@ async fn e2e_flow_capture_save_run_and_guards() {
     let ask = exec(
         &run(
             &mut n,
-            json!({ "action": "flow_run", "name": "cart", "params": {} }),
+            json!({ "action": "flow_run", "name": "cart", "params": { "email": "ana@example.com" } }),
         ),
         &mut state,
     )
@@ -15494,7 +15514,7 @@ async fn e2e_flow_capture_save_run_and_guards() {
     let sent = exec(
         &run(
             &mut n,
-            json!({ "action": "flow_run", "name": "cart", "params": {}, "allowWrite": "all" }),
+            json!({ "action": "flow_run", "name": "cart", "params": { "email": "ana@example.com" }, "allowWrite": "all" }),
         ),
         &mut state,
     )
@@ -15549,7 +15569,7 @@ async fn e2e_flow_capture_save_run_and_guards() {
 
     // Runs are not recorded, and close reports nothing unsaved after the last save.
     let steps = exec(&run(&mut n, json!({ "action": "flow_steps" })), &mut state).await;
-    assert_eq!(steps["data"]["steps"].as_array().unwrap().len(), 10);
+    assert_eq!(steps["data"]["steps"].as_array().unwrap().len(), 12);
     let closed = exec(&run(&mut n, json!({ "action": "close" })), &mut state).await;
     assert_success(&closed);
     assert!(closed["data"].get("unsaved").is_none(), "{closed}");

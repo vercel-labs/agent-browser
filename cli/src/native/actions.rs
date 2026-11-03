@@ -2876,6 +2876,11 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
             Some(mgr) => mgr.get_url().await.ok(),
             None => None,
         };
+        if state.flow.needs_traits == Some(seq) {
+            if let Some(traits) = flow_active_field_traits(state).await {
+                state.flow.redact_if_secret(seq, &traits);
+            }
+        }
         state.flow.finish_command(seq, ok, url);
         resp["recorded"] = json!({ "seq": seq });
     }
@@ -12106,7 +12111,7 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         login_wall,
     })?;
     let path = super::flow::write_flow(&flow)?;
-    state.flow.last_save_seq = last;
+    state.flow.mark_saved(last);
     state.flow.saved.push((
         flow["origin"].as_str().unwrap_or_default().to_string(),
         name,
@@ -12226,7 +12231,7 @@ async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<V
             }
             // A write the site accepted must not be sent again by a lower tier.
             let accepted_write = super::flow::is_flow_write(&flow, &req.id)
-                && result.status.is_some_and(|st| (200..300).contains(&st));
+                && result.status.is_some_and(|st| (200..400).contains(&st));
             results.push(result);
             // The site answered with something every tier would get again.
             if stopped {
@@ -12246,8 +12251,16 @@ async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<V
         }
     }
 
-    if let Some(stop) = results.iter().rev().find(|r| r.kind.is_some()) {
-        let kind = stop.kind.unwrap_or("blocked");
+    // A 401 or 403 that every way of sending the request got means the
+    // session is signed out, even when an earlier tier fell through on it.
+    let every_way_denied = super::flow::denied_everywhere(&results);
+    let stopped_by = results
+        .iter()
+        .rev()
+        .find(|r| r.kind.is_some())
+        .map(|r| (r.kind.unwrap_or("blocked"), r))
+        .or(every_way_denied.map(|r| ("auth_expired", r)));
+    if let Some((kind, stop)) = stopped_by {
         let mut message = format!(
             "{}: flow '{}' step {} ({}): {}",
             kind,
@@ -12262,6 +12275,7 @@ async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<V
         message.push_str(match kind {
             "auth_expired" => ". Sign in again in the browser, then rerun",
             "rate_limited" => ". Wait before rerunning",
+            "outcome_unknown" => ". Check the site before rerunning; the write is not sent again",
             _ => ". Continue in the UI or let the user clear the challenge",
         });
         state.flow_stop = Some(json!({
@@ -12350,12 +12364,38 @@ async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<V
     Ok(response)
 }
 
+/// What the focused element says about itself.
+async fn flow_active_field_traits(state: &DaemonState) -> Option<super::flow::FieldTraits> {
+    let mgr = state.browser.as_ref()?;
+    let value = mgr
+        .evaluate(
+            "(() => { const e = document.activeElement; if (!e) return null; \
+             const label = (e.labels && e.labels[0] && e.labels[0].innerText) || ''; \
+             const a = (n) => (e.getAttribute && e.getAttribute(n)) || ''; \
+             return { type: e.type || '', autocomplete: a('autocomplete'), \
+             hint: [a('name'), e.id, a('aria-label'), a('placeholder'), label].filter(Boolean).join(' ') }; })()",
+            None,
+        )
+        .await
+        .ok()?;
+    (!value.is_null()).then(|| super::flow::FieldTraits::from_value(&value))
+}
+
 /// The page's own description of the field a `fill` or `type` writes to.
 async fn flow_field_traits(
     action: &str,
     cmd: &Value,
     state: &DaemonState,
 ) -> Option<super::flow::FieldTraits> {
+    let is_text_entry = matches!(action, "inserttext")
+        || (action == "keyboard"
+            && matches!(
+                cmd.get("subaction").and_then(|v| v.as_str()),
+                Some("type" | "insertText")
+            ));
+    if is_text_entry {
+        return flow_active_field_traits(state).await;
+    }
     if !matches!(action, "fill" | "type") {
         return None;
     }
@@ -12558,13 +12598,7 @@ async fn run_flow_replay(
             return super::flow::replay_unavailable(req, started, e);
         }
     };
-    if let Some(url) = commands
-        .iter()
-        .filter(|c| c["action"] == "navigate")
-        .filter_map(|c| c["url"].as_str())
-        .find(|u| super::flow::check_allowed_host(flow, u).is_err())
-    {
-        let reason = super::flow::check_allowed_host(flow, url).unwrap_err();
+    if let Err(reason) = super::flow::check_replay_commands(flow, &commands) {
         if started_har {
             state.har_recording = false;
         }
@@ -12586,6 +12620,19 @@ async fn run_flow_replay(
             }
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         };
+        // The replay stops as soon as the tab leaves the flow's site.
+        if let Some(mgr) = state.browser.as_ref() {
+            if let Some(url) = mgr.get_url().await.ok().filter(|u| u.starts_with("http")) {
+                if let Err(reason) = super::flow::check_allowed_host(flow, &url) {
+                    failed = Some(format!(
+                        "replay stopped after command {}: {}",
+                        i + 1,
+                        reason
+                    ));
+                    break;
+                }
+            }
+        }
         if resp.get("success") != Some(&json!(true)) {
             failed = Some(format!(
                 "replaying command {} failed: {}",
@@ -19838,6 +19885,56 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             }
         });
         port
+    }
+
+    /// A server that counts the requests it reads and answers with `response`,
+    /// or closes the connection when it is empty.
+    fn serve_counting(
+        response: &'static str,
+    ) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = hits.clone();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            while let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if !response.is_empty() {
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            }
+        });
+        (port, hits)
+    }
+
+    #[tokio::test]
+    async fn a_write_is_sent_once_when_it_redirects_off_site_or_gets_no_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        let cases: [(&'static str, &str); 2] = [
+            ("HTTP/1.1 303 See Other\r\nLocation: http://localhost:9/x\r\ncontent-length: 0\r\nconnection: close\r\n\r\n", "was not followed"),
+            ("", "outcome_unknown"),
+        ];
+        for (response, expect) in cases {
+            let (port, hits) = serve_counting(response);
+            write_flow_fixture(dir.path(), port);
+            let run = json!({ "id": "r", "action": "flow_run", "name": "cart", "params": {}, "allowWrite": "all" });
+            let mut state = DaemonState::new();
+            state.policy = None;
+            state.confirm_actions = None;
+            let resp = execute_command(&run, &mut state).await;
+            assert_eq!(resp["success"], false, "{resp}");
+            assert!(resp["error"].as_str().unwrap().contains(expect), "{resp}");
+            assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1, "{resp}");
+            assert!(state.browser.is_none(), "no lower tier ran");
+            if response.is_empty() {
+                assert_eq!(resp["code"], "outcome_unknown");
+            }
+        }
     }
 
     #[tokio::test]

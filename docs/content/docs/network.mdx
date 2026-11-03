@@ -173,7 +173,7 @@ Flow files are version 2. A flow saved by an earlier version fails to run with a
 
 ### Params
 
-Every value typed with `fill` or `type` is either a param or redacted, and a step never stores it as a literal. A value typed into an ordinary field becomes a param named after the field, with `source: typed`; the step keeps a `{{name}}` placeholder and the value survives only as the param's recorded example. Pass `flow save --param name=value` to choose the name. `flow save` also finds params on its own:
+Every value typed with `fill`, `type`, `keyboard type` or `inserttext` is either a param or redacted, and a step never stores it as a literal. A value typed into an ordinary field becomes a param named after the field, with `source: typed`; the step keeps a `{{name}}` placeholder and the file keeps no copy of the value, so a run must pass `--param name=value`. A `--param` you give at save time names the value and keeps it as the recorded example. Values shorter than three characters are still params but are not replaced inside request URLs and bodies, to avoid rewriting unrelated text; secret fields are redacted whatever their length. Pass `flow save --param name=value` to choose the name. `flow save` also finds params on its own:
 
 - a query value of the page URL that the requests also sent, such as `?q=` (`source: query`)
 - a value the task picked from a list in an earlier response, such as an id from a list of stores (`source: response`)
@@ -181,7 +181,7 @@ Every value typed with `fill` or `type` is either a param or redacted, and a ste
 
 ### Redaction
 
-A value typed into a secret field is stored as `<redacted>` and listed in `redactedSteps`. Any request that carried the value is dropped from the flow, and the flow cannot be replayed through the UI. agent-browser reads the field itself, not only the command, so an unlabeled field is covered. A field is secret when:
+A value typed into a secret field is stored as `<redacted>` and listed in `redactedSteps`. Any request that carried the value is dropped from the flow, and the flow cannot be replayed through the UI. agent-browser reads the field itself, or the focused element for `keyboard type` and `inserttext`, not only the command, so an unlabeled field is covered. A field is secret when:
 
 <table>
   <thead>
@@ -212,7 +212,7 @@ A run tries, in order:
 2. the same request sent from the page, which adds the browser's own headers
 3. a replay of the recorded commands, which reads the request the page sends
 
-Each request must stay on the flow's site, whatever `--allowed-domains` says. `flow save` records the base domain of the start URL as `allowedHosts`, and a run rejects any request, redirect or navigation to a host outside it, so an edited flow file cannot send the session's cookies elsewhere. `--allowed-domains` still applies on top. The in-page tier runs only when the active tab is already on the flow's site; otherwise it is skipped, with the reason in the run's `fellBack` list, and the run continues with the next tier.
+Each request must stay on the flow's site, whatever `--allowed-domains` says. `flow save` records the base domain of the start URL, as defined by the public suffix list, so `a.vercel.app` does not allow `b.vercel.app`, and a run rejects any request or redirect to a host outside it. A flow whose origin directory does not match its start URL fails to load with a message to save it again. The command replay runs only plain interactions (no `evaluate` or other script), checks every URL in a recorded command against the same hosts, and stops as soon as the tab leaves the site. It cannot install `--allowed-domains` for its own duration, because that filter is set up when the session opens, so it relies on these checks and on any `--allowed-domains` the session already has. The in-page tier runs only when the active tab is already on the flow's site; otherwise it is skipped, with the reason in the run's `fellBack` list, and the run continues with the next tier.
 
 The next run starts at the tier that worked. Every tier checks the response against the shape that was recorded. If the shape changed, the run fails, the flow is marked unverified, and the agent continues in the UI. A response that only lacks its lists and counts is treated as no results and leaves the verified state as it was.
 
@@ -223,13 +223,14 @@ Some responses end the run instead of falling to the next tier, because every ti
     <tr><th>Response</th><th>Error code</th><th>Meaning</th></tr>
   </thead>
   <tbody>
-    <tr><td>401 or 403</td><td><code>auth_expired</code></td><td>The session is signed out or lacks access. Sign in again in the browser, then rerun</td></tr>
+    <tr><td>401 or 403</td><td><code>auth_expired</code></td><td>The session is signed out or lacks access. When the recording sent a credential header that a run cannot copy (<code>authorization</code> or a token or CSRF header), the run first tries the in-page request and the command replay, and reports this only when every way is refused. Sign in again in the browser, then rerun</td></tr>
     <tr><td>429</td><td><code>rate_limited</code></td><td>The site is rate limiting the session. <code>data.retryAfter</code> carries the <code>Retry-After</code> value when the site sent one</td></tr>
+    <tr><td>A write with no answer</td><td><code>outcome_unknown</code></td><td>The write was sent but no response came back. It is not sent again; check the site before rerunning</td></tr>
     <tr><td>A bot challenge page</td><td><code>blocked</code></td><td>The site served a challenge instead of data. Continue in the UI or let the user clear it</td></tr>
   </tbody>
 </table>
 
-The code is in the JSON response as `code`, with `data.status`, `data.step` and `data.httpStatus`.
+A bot challenge is recognized only in HTML responses, never in JSON. A write that gets any 2xx or 3xx answer counts as accepted and is not sent again; a redirect to another site is not followed, and the in-page request for a write does not follow redirects. The code is in the JSON response as `code`, with `data.status`, `data.step` and `data.httpStatus`.
 
 ### Writes
 

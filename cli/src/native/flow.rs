@@ -50,6 +50,8 @@ pub struct FlowRecorder {
     /// running when the request started.
     pub request_tags: HashMap<String, u64>,
     pub current_seq: Option<u64>,
+    /// A typed step saved as a param before its field could be read.
+    pub needs_traits: Option<u64>,
     /// Sequence number the command being executed was recorded under.
     pub begun: Option<u64>,
     /// Values typed into secret fields, kept in memory only, so save can
@@ -156,8 +158,40 @@ impl FlowRecorder {
                 typed_param_name(traits, &taken)
             }
         };
+        if traits.is_none() {
+            self.needs_traits = Some(self.next_seq);
+        }
         self.typed.push((name.clone(), value, self.next_seq));
         cmd[field] = json!(format!("{{{{{}}}}}", name));
+    }
+
+    /// A typed command whose field could not be read beforehand: once it has
+    /// run, the focused element says whether it was a secret.
+    pub fn redact_if_secret(&mut self, seq: u64, traits: &FieldTraits) {
+        if self.needs_traits != Some(seq) {
+            return;
+        }
+        self.needs_traits = None;
+        let Some(i) = self.commands.iter().position(|(s, _)| *s == seq) else {
+            return;
+        };
+        let Some(field) = typed_field(&self.commands[i].1) else {
+            return;
+        };
+        let hint = traits.hint.to_lowercase();
+        if !(traits.is_secret() || SECRET_MARKERS.iter().any(|m| hint.contains(m))) {
+            return;
+        }
+        let Some(pos) = self.typed.iter().position(|(_, _, s)| *s == seq) else {
+            return;
+        };
+        let (_, value, _) = self.typed.remove(pos);
+        let cmd = &mut self.commands[i].1;
+        cmd[field] = json!(REDACTED);
+        cmd["redacted"] = json!(true);
+        if !value.is_empty() {
+            self.secrets.push(value);
+        }
     }
 
     pub fn finish_command(&mut self, seq: u64, ok: bool, url: Option<String>) {
@@ -228,6 +262,10 @@ impl FlowRecorder {
         Ok((from, to))
     }
 
+    pub fn mark_saved(&mut self, last: u64) {
+        self.last_save_seq = self.last_save_seq.max(last);
+    }
+
     pub fn is_ok(&self, seq: u64) -> bool {
         self.meta.get(&seq).is_some_and(|m| m.ok)
     }
@@ -281,14 +319,14 @@ const SECRET_MARKERS: &[&str] = &[
 fn typed_field(cmd: &Value) -> Option<&'static str> {
     let action = cmd["action"].as_str().unwrap_or("");
     let sub = cmd["subaction"].as_str().unwrap_or("");
-    let kind = if matches!(action, "fill" | "type") {
+    let kind = if matches!(action, "fill" | "type" | "inserttext") {
         action
     } else {
         sub
     };
     let field = match kind {
         "fill" => "value",
-        "type" => "text",
+        "type" | "inserttext" | "insertText" => "text",
         _ => return None,
     };
     cmd[field].as_str().map(|_| field)
@@ -397,28 +435,25 @@ const DROPPED_HEADERS: &[&str] = &[
     "proxy-authorization",
 ];
 
+/// Headers that carry credentials the session supplies at run time. A request
+/// recorded with one gets a 401 or 403 over HTTP when the site wants it back.
+fn is_sensitive_header(lower: &str) -> bool {
+    matches!(lower, "authorization" | "proxy-authorization")
+        || lower.contains("token")
+        || lower.contains("csrf")
+}
+
 /// Registrable part of a host, close enough for first-party checks:
 /// `api.example.com.ar` -> `example.com.ar`, `www.example.org` -> `example.org`.
 pub fn base_domain(host: &str) -> String {
+    let host = host.trim_end_matches('.');
     if host.parse::<std::net::IpAddr>().is_ok() || host.starts_with('[') {
         return host.to_string();
     }
-    let labels: Vec<&str> = host.trim_end_matches('.').split('.').collect();
-    if labels.len() <= 2 {
-        return host.to_string();
-    }
-    let second_level = labels[labels.len() - 2];
-    let tld = labels[labels.len() - 1];
-    let keep = if tld.len() == 2
-        && matches!(
-            second_level,
-            "com" | "co" | "org" | "net" | "gov" | "gob" | "edu" | "ac"
-        ) {
-        3
-    } else {
-        2
-    };
-    labels[labels.len() - keep..].join(".")
+    // The public suffix list keeps `a.vercel.app` and `b.vercel.app` apart.
+    psl::domain_str(&host.to_ascii_lowercase())
+        .map(String::from)
+        .unwrap_or_else(|| host.to_ascii_lowercase())
 }
 
 /// Hosts a flow may talk to: the base domain of its start URL.
@@ -1056,6 +1091,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
             seen.push(key);
             let body_len = serde_json::to_string(&parsed).map(|t| t.len()).unwrap_or(0);
             let mut headers = Map::new();
+            let mut stripped_auth = false;
             for (k, v) in &e.request_headers {
                 let lower = k.to_ascii_lowercase();
                 if lower.starts_with(':') {
@@ -1065,6 +1101,9 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
                     || lower.contains("token")
                     || lower.contains("csrf")
                 {
+                    if is_sensitive_header(&lower) {
+                        stripped_auth = true;
+                    }
                     if !dropped_headers.contains(&lower) && lower != "host" {
                         dropped_headers.push(lower);
                     }
@@ -1093,6 +1132,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
                     "bytes": body_len,
                     "itemFields": item_fields,
                     "extract": extract,
+                    "strippedAuth": stripped_auth,
                 },
             }));
         }
@@ -1147,16 +1187,18 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
     let mut params: Vec<Value> = given
         .iter()
         .map(|(k, v)| {
-            if input.params.iter().any(|(n, _)| n == k) || typed.iter().any(|(n, _)| n == k) {
+            if input.params.iter().any(|(n, _)| n == k) {
                 json!({ "name": k, "example": v, "source": "typed" })
+            } else if typed.iter().any(|(n, _)| n == k) {
+                json!({ "name": k, "source": "typed" })
             } else {
                 json!({ "name": k, "example": v, "source": "query", "from": { "pageQuery": k } })
             }
         })
         .collect();
-    for (name, value) in &typed {
+    for (name, _) in &typed {
         if !given.iter().any(|(n, _)| n == name) {
-            params.push(json!({ "name": name, "example": value, "source": "typed" }));
+            params.push(json!({ "name": name, "source": "typed" }));
         }
     }
     params.extend(links.params.iter().cloned().map(|mut p| {
@@ -1820,9 +1862,11 @@ pub fn list_flows(origin: Option<&str>) -> Vec<Value> {
             };
             out.push(json!({
                 "name": flow["name"],
-                "origin": flow["origin"],
+                "origin": dir_origin,
+                "valid": flow["origin"] == dir_origin.as_str()
+                    && flow["startUrl"].as_str().and_then(host_of).as_deref() == Some(dir_origin.as_str()),
                 "params": flow["params"].as_array().map(|ps| ps.iter().map(|p| p["name"].clone()).collect::<Vec<_>>()).unwrap_or_default(),
-                "examples": flow["params"].as_array().map(|ps| ps.iter().filter_map(|p| Some((p["name"].as_str()?.to_string(), p["example"].clone()))).collect::<Map<String, Value>>()).unwrap_or_default(),
+                "examples": flow["params"].as_array().map(|ps| ps.iter().filter_map(|p| Some((p["name"].as_str()?.to_string(), if p["example"].is_string() { p["example"].clone() } else { json!("<value>") }))).collect::<Map<String, Value>>()).unwrap_or_default(),
                 "description": tool_description(&flow),
                 "inputSchema": input_schema(&flow),
                 "paramSources": flow["params"].as_array().map(|ps| ps.iter().filter_map(|p| Some((p["name"].as_str()?.to_string(), json!(format!("{} {}", p["from"]["request"].as_str()?, p["from"]["list"].as_str()?))))).collect::<Map<String, Value>>()).unwrap_or_default(),
@@ -1868,7 +1912,10 @@ pub fn input_schema(flow: &Value) -> Value {
         let Some(name) = p["name"].as_str() else {
             continue;
         };
-        let mut description = format!("Recorded value: {}", p["example"].as_str().unwrap_or(""));
+        let mut description = match p["example"].as_str() {
+            Some(example) => format!("Recorded value: {}", example),
+            None => "Typed during the recording; pass a value".to_string(),
+        };
         if let Some(list) = p["from"]["list"].as_str() {
             description.push_str(&format!(". One of the site's {} values", list));
         }
@@ -1890,6 +1937,11 @@ pub fn load_flow(name: &str, origin: Option<&str>) -> Result<Value, String> {
         [] => Err(format!(
             "no saved flow named '{}'. Run `flow list` to see saved flows",
             name
+        )),
+        [one] if one["valid"] != true => Err(format!(
+            "flow '{}' does not match its origin directory {}; re-save it",
+            name,
+            one["origin"].as_str().unwrap_or("")
         )),
         [one] => {
             let path = flow_path(one["origin"].as_str().unwrap_or_default(), name)?;
@@ -1960,7 +2012,12 @@ pub fn prepare_all(
             ))
         })
         .collect();
-    let known: Vec<String> = params.keys().cloned().collect();
+    let known: Vec<String> = flow["params"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p["name"].as_str().map(String::from))
+        .collect();
     for (k, v) in cmd_params {
         if !known.contains(k) {
             return Err(format!(
@@ -2000,7 +2057,16 @@ pub fn prepare_all(
                     Some(b) => Some(map_body(b, &|t| fill(t, &params, false))?),
                     None => None,
                 },
-                expect: r["expect"].clone(),
+                expect: {
+                    let mut expect = r["expect"].clone();
+                    if let Some(o) = expect.as_object_mut() {
+                        o.insert(
+                            "write".to_string(),
+                            json!(is_flow_write(flow, r["id"].as_str().unwrap_or(""))),
+                        );
+                    }
+                    expect
+                },
             });
         }
     }
@@ -2307,6 +2373,23 @@ impl Failure {
     }
 }
 
+/// Challenge pages are HTML; a JSON body that mentions a captcha is data.
+/// A write whose outcome is not known is never sent again by another tier.
+fn unknown_outcome(reason: String) -> Failure {
+    Failure {
+        status: None,
+        reason,
+        drift: false,
+        shape_changed: false,
+        kind: Some("outcome_unknown"),
+    }
+}
+
+fn looks_like_html(body: &str) -> bool {
+    let head = body.trim_start();
+    head.starts_with('<') && serde_json::from_str::<Value>(body).is_err()
+}
+
 fn looks_like_challenge(body: &str) -> bool {
     let head: String = body
         .chars()
@@ -2332,6 +2415,7 @@ pub fn check_response(
     text: &str,
 ) -> Result<(Value, bool), Failure> {
     if (matches!(status, 401 | 403 | 429) || (200..300).contains(&status))
+        && looks_like_html(text)
         && looks_like_challenge(text)
     {
         return Err(Failure::stop(
@@ -2424,7 +2508,19 @@ pub fn tier_result(
             kind: None,
             retry_after: None,
         },
-        Err(f) => TierResult::failed(req, tier, ms, f),
+        Err(mut f) => {
+            // The recording sent credentials a run cannot copy, so a 401 or
+            // 403 may only mean this tier lacks them; the next tier sends
+            // them from the page.
+            if f.kind == Some("auth_expired")
+                && tier != "replay"
+                && req.expect["strippedAuth"] == true
+            {
+                f.kind = None;
+                f.drift = true;
+            }
+            TierResult::failed(req, tier, ms, f)
+        }
     }
 }
 
@@ -2506,10 +2602,35 @@ pub async fn run_http(
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .map(String::from);
+            if resp.status().is_redirection() {
+                let to = resp
+                    .headers()
+                    .get("location")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                return tier_result(
+                    req,
+                    "http",
+                    started,
+                    Err(Failure {
+                        status: Some(status),
+                        reason: format!("HTTP {}: the redirect to {} was not followed", status, to),
+                        drift: false,
+                        shape_changed: false,
+                        kind: None,
+                    }),
+                );
+            }
             resp.text().await.map(|t| (status, t)).map_err(|e| {
                 Failure::new(true, Some(status), format!("could not read body: {}", e))
             })
         }
+        // A write that left the machine may have been applied.
+        Err(e) if req.expect["write"] == true && !e.is_connect() => Err(unknown_outcome(format!(
+            "the write was sent but no response came back: {}",
+            e
+        ))),
         Err(e) => Err(Failure::new(false, None, format!("request failed: {}", e))),
     };
     with_retry_after(tier_result(req, "http", started, outcome), retry_after)
@@ -2541,18 +2662,23 @@ pub fn page_fetch_script(req: &PreparedRequest) -> String {
         .filter(|(k, _)| !browser_set(k))
         .map(|(k, v)| (k.clone(), json!(v)))
         .collect();
-    let init = json!({
+    let mut init = json!({
         "method": req.method,
         "headers": headers,
         "body": req.body,
     });
+    // A write must not follow a redirect to another site; the 3xx counts as
+    // the site's answer.
+    if req.expect["write"] == true {
+        init["redirect"] = json!("manual");
+    }
     // Cross-origin APIs differ on credentials: some need cookies, some reject
     // a credentialed request outright. Try with, then without.
     format!(
         "(async () => {{ const u = {url}, i = {init}; \
          let r; try {{ r = await fetch(u, {{ ...i, credentials: 'include' }}); }} \
          catch (e) {{ r = await fetch(u, i); }} \
-         return {{ status: r.status, retryAfter: r.headers.get('retry-after'), text: await r.text() }}; }})()",
+         return {{ status: r.type === 'opaqueredirect' ? 302 : r.status, retryAfter: r.headers.get('retry-after'), text: await r.text() }}; }})()",
         url = json!(req.url),
         init = init
     )
@@ -2582,6 +2708,10 @@ pub fn page_result(
                 "in-page fetch returned no response".to_string(),
             )),
         },
+        Err(e) if req.expect["write"] == true => Err(unknown_outcome(format!(
+            "the in-page write may have been sent: {}",
+            e
+        ))),
         Err(e) => Err(Failure::new(
             true,
             None,
@@ -2634,6 +2764,19 @@ pub fn replay_commands(
             .collect::<Vec<_>>(),
     )
     .unwrap_or_default();
+    for p in flow["params"].as_array().into_iter().flatten() {
+        let name = p["name"].as_str().unwrap_or("");
+        let given = cmd_params.iter().any(|(k, _)| k == name);
+        if !given
+            && p["example"].as_str().is_none()
+            && recorded.contains(&format!("{{{{{}}}}}", name))
+        {
+            return Err(format!(
+                "missing --param {}: the recording did not keep the typed value",
+                name
+            ));
+        }
+    }
     let in_commands = |text: &str| {
         recorded.contains(text) || recorded.contains(urlencoding::encode(text).as_ref())
     };
@@ -2708,6 +2851,102 @@ pub fn replay_commands(
                 }),
         )
         .collect())
+}
+
+/// Commands a replay may send. Anything that runs page script, or that the
+/// recorder does not know to be a plain interaction, is left out.
+const REPLAY_ACTIONS: &[&str] = &[
+    "navigate",
+    "click",
+    "dblclick",
+    "fill",
+    "type",
+    "press",
+    "select",
+    "check",
+    "uncheck",
+    "hover",
+    "focus",
+    "scroll",
+    "scrollintoview",
+    "wait",
+    "snapshot",
+    "getbyrole",
+    "getbytext",
+    "getbylabel",
+    "getbyplaceholder",
+    "getbyalttext",
+    "getbytitle",
+    "getbytestid",
+    "keyboard",
+    "inserttext",
+    "back",
+    "forward",
+    "reload",
+    "tab_new",
+    "tab_switch",
+];
+
+const SCRIPT_KEYS: &[&str] = &["script", "expression", "function", "fn", "js", "code"];
+
+fn url_like(text: &str) -> bool {
+    let lower = text.trim_start().to_ascii_lowercase();
+    [
+        "http:",
+        "https:",
+        "ws:",
+        "wss:",
+        "ftp:",
+        "file:",
+        "javascript:",
+        "data:",
+        "blob:",
+    ]
+    .iter()
+    .any(|scheme| lower.starts_with(scheme))
+}
+
+fn collect_urls(v: &Value, out: &mut Vec<String>, scripts: &mut bool) {
+    match v {
+        Value::String(text) if url_like(text) => out.push(text.clone()),
+        Value::Array(items) => items.iter().for_each(|i| collect_urls(i, out, scripts)),
+        Value::Object(map) => {
+            for (k, item) in map {
+                if SCRIPT_KEYS.contains(&k.as_str()) && item.is_string() {
+                    *scripts = true;
+                }
+                collect_urls(item, out, scripts);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Check that every command a replay would send is a plain interaction and
+/// every URL in it stays on the flow's site.
+pub fn check_replay_commands(flow: &Value, commands: &[Value]) -> Result<(), String> {
+    for cmd in commands {
+        let action = cmd["action"].as_str().unwrap_or("");
+        if !REPLAY_ACTIONS.contains(&action) {
+            return Err(format!(
+                "the recorded command '{}' is not allowed in a replay",
+                action
+            ));
+        }
+        let mut urls = Vec::new();
+        let mut scripts = false;
+        collect_urls(cmd, &mut urls, &mut scripts);
+        if scripts {
+            return Err(format!(
+                "the recorded command '{}' carries a script, which a replay does not run",
+                action
+            ));
+        }
+        for url in urls {
+            check_allowed_host(flow, &url)?;
+        }
+    }
+    Ok(())
 }
 
 /// The entry captured during a replay that stands for a recorded request:
@@ -2809,6 +3048,15 @@ pub fn unresolved(req: &PreparedRequest, reason: String) -> TierResult {
     )
 }
 
+/// The last failed attempt, when every way of sending that request was
+/// refused with a 401 or 403.
+pub fn denied_everywhere(results: &[TierResult]) -> Option<&TierResult> {
+    let last = results.last().filter(|r| !r.ok)?;
+    let attempts: Vec<&TierResult> = results.iter().filter(|r| r.id == last.id).collect();
+    (attempts.iter().all(|r| !r.ok) && attempts.iter().any(|r| matches!(r.status, Some(401 | 403))))
+        .then_some(last)
+}
+
 /// Tiers to try for a request, starting from the one that last worked.
 pub fn tiers_for(flow: &Value, id: &str) -> Vec<&'static str> {
     let preferred = flow["steps"]
@@ -2839,7 +3087,9 @@ pub fn http_client(
                     .and_then(|f| f.check_url(attempt.url().as_str()).err())
             });
         match blocked {
-            Some(reason) => attempt.error(reason),
+            // The 3xx comes back as the response, so a write that was sent
+            // counts as answered.
+            Some(_) => attempt.stop(),
             // reqwest's default redirect limit.
             None if attempt.previous().len() >= 10 => attempt.stop(),
             None => attempt.follow(),
@@ -3854,7 +4104,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let _guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
         _guard.set("AGENT_BROWSER_FLOWS_DIR", dir.to_str().unwrap());
-        let mut flow = json!({ "version": 1, "name": "old", "origin": "a.test", "steps": [] });
+        let mut flow = json!({ "version": 1, "name": "old", "origin": "a.test", "startUrl": "https://a.test/", "steps": [] });
         write_flow(&flow).unwrap();
         let err = load_flow("old", None).unwrap_err();
         assert!(err.contains("re-save"), "{err}");
@@ -4152,7 +4402,7 @@ mod tests {
             .find(|p| p["name"] == "email")
             .unwrap();
         assert_eq!(param["source"], "typed");
-        assert_eq!(param["example"], "ana@example.com");
+        assert!(param.get("example").is_none(), "{param}");
         assert_eq!(flow["steps"][1]["command"]["value"], "{{email}}");
         assert_eq!(
             flow["steps"][1]["requests"][0]["body"],
@@ -4163,7 +4413,7 @@ mod tests {
         let text = serde_json::to_string(&flow).unwrap();
         assert!(!text.contains("482913"));
         // The step holds no literal; only the param keeps the recorded example.
-        assert_eq!(text.matches("ana@example.com").count(), 1);
+        assert_eq!(text.matches("ana@example.com").count(), 0);
     }
 
     #[test]
@@ -4320,5 +4570,273 @@ mod tests {
             .filter_map(|w| w["id"].as_str().map(String::from))
             .collect();
         assert_eq!(replay, vec!["s1r1", "s3w1"]);
+    }
+
+    fn denied(id: &str, tier: &'static str, status: u16) -> TierResult {
+        let req = PreparedRequest {
+            expect: json!({ "signature": signature(&json!({})), "strippedAuth": true }),
+            ..prepared(id)
+        };
+        tier_result(
+            &req,
+            tier,
+            Instant::now(),
+            Err(Failure::stop("auth_expired", status, "x".into())),
+        )
+    }
+
+    #[test]
+    fn a_401_on_a_request_recorded_with_credentials_falls_through() {
+        let http = denied("s1r1", "http", 401);
+        assert_eq!(http.kind, None);
+        assert!(http.drift);
+        let page = denied("s1r1", "page", 403);
+        assert_eq!(page.kind, None);
+        let replay = denied("s1r1", "replay", 401);
+        assert_eq!(replay.kind, Some("auth_expired"));
+        // Without stripped credentials the first 401 still stops the run.
+        let req = prepared("s1r1");
+        let plain = tier_result(
+            &req,
+            "http",
+            Instant::now(),
+            Err(Failure::stop("auth_expired", 401, "x".into())),
+        );
+        assert_eq!(plain.kind, Some("auth_expired"));
+        // When no way gets through, the run reports the sign-in problem.
+        let all = vec![denied("s1r1", "http", 401), denied("s1r1", "page", 403)];
+        assert!(denied_everywhere(&all).is_some());
+        let recovered = vec![
+            denied("s1r1", "http", 401),
+            attempt(
+                "s1r1",
+                "page",
+                Ok((200, r#"{"data":[{"id":1}]}"#.to_string())),
+            ),
+        ];
+        assert!(denied_everywhere(&recovered).is_none());
+    }
+
+    #[test]
+    fn save_records_whether_credential_headers_were_stripped() {
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/" }),
+            None,
+            None,
+        );
+        r.tag_request("api");
+        let mut api = entry(
+            "api",
+            "https://api.example.com.ar/items",
+            "Fetch",
+            "application/json",
+            r#"{"items":[{"id":1}]}"#,
+        );
+        api.request_headers = vec![
+            ("Authorization".into(), "Bearer abc".into()),
+            ("Accept".into(), "*/*".into()),
+        ];
+        let (flow, _) = build_flow(SaveInput {
+            name: "t",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &[api],
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        assert_eq!(
+            flow["steps"][0]["requests"][0]["expect"]["strippedAuth"],
+            true
+        );
+        assert!(!serde_json::to_string(&flow).unwrap().contains("Bearer"));
+    }
+
+    #[test]
+    fn json_that_mentions_a_captcha_is_data_not_a_challenge() {
+        let req = prepared("s1r1");
+        assert!(
+            check_response(&req, 200, r#"{"data":[{"id":1,"note":"captcha solved"}]}"#).is_ok()
+        );
+        let html = check_response(&req, 200, "<html><body>captcha</body></html>").unwrap_err();
+        assert_eq!(html.kind, Some("blocked"));
+    }
+
+    #[test]
+    fn replay_runs_only_plain_interactions_on_the_flows_site() {
+        let flow = json!({ "startUrl": "https://example.com/", "allowedHosts": ["example.com"] });
+        let ok = vec![
+            json!({ "action": "navigate", "url": "https://example.com/a" }),
+            json!({ "action": "click", "selector": "a[href='https://other.test']" }),
+            json!({ "action": "tab_new", "url": "https://www.example.com/" }),
+        ];
+        assert!(check_replay_commands(&flow, &ok).is_ok());
+        for bad in [
+            json!({ "action": "evaluate", "script": "fetch('https://evil.test')" }),
+            json!({ "action": "tab_new", "url": "https://evil.test/" }),
+            json!({ "action": "window_new", "url": "https://example.com/" }),
+            json!({ "action": "click", "selector": "x", "extra": { "url": "https://evil.test" } }),
+            json!({ "action": "navigate", "url": "javascript:alert(1)" }),
+            json!({ "action": "click", "script": "fetch('/x')" }),
+        ] {
+            assert!(
+                check_replay_commands(&flow, &[bad.clone()]).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn public_suffixes_keep_sibling_sites_apart() {
+        assert_eq!(base_domain("a.vercel.app"), "a.vercel.app");
+        assert_ne!(base_domain("a.vercel.app"), base_domain("b.vercel.app"));
+        assert_eq!(base_domain("api.example.com.ar"), "example.com.ar");
+        assert_eq!(base_domain("localhost"), "localhost");
+        let flow = json!({ "startUrl": "https://a.vercel.app/", "allowedHosts": ["a.vercel.app"] });
+        assert!(check_allowed_host(&flow, "https://api.a.vercel.app/x").is_ok());
+        assert!(check_allowed_host(&flow, "https://b.vercel.app/x").is_err());
+    }
+
+    #[test]
+    fn a_flow_whose_origin_does_not_match_its_directory_or_start_url_is_refused() {
+        let dir = std::env::temp_dir().join(format!("ab-flow-origin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.to_str().unwrap());
+        let good = json!({ "version": 2, "name": "f", "origin": "a.test", "startUrl": "https://a.test/", "steps": [] });
+        write_flow(&good).unwrap();
+        assert!(load_flow("f", None).is_ok());
+        // Moved under another origin's directory, or start URL edited.
+        let moved = dir.join("b.test");
+        std::fs::create_dir_all(&moved).unwrap();
+        std::fs::copy(dir.join("a.test").join("f.json"), moved.join("g.json")).unwrap();
+        let err = load_flow("f", Some("b.test")).unwrap_err();
+        assert!(
+            err.contains("re-save") || err.contains("no saved flow"),
+            "{err}"
+        );
+        std::fs::remove_dir_all(&moved).unwrap();
+        let mut edited = good.clone();
+        edited["startUrl"] = json!("https://evil.test/");
+        std::fs::write(
+            dir.join("a.test").join("f.json"),
+            serde_json::to_string(&edited).unwrap(),
+        )
+        .unwrap();
+        assert!(load_flow("f", None).unwrap_err().contains("re-save"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_marker_never_moves_back_when_an_earlier_range_is_saved() {
+        let mut r = recorded(&[("navigate", true), ("click", true), ("click", true)]);
+        r.mark_saved(3);
+        r.mark_saved(1);
+        assert_eq!(r.last_save_seq, 3);
+        assert_eq!(r.unsaved_steps(), 0);
+    }
+
+    #[test]
+    fn short_secrets_are_redacted_and_short_plain_values_are_not_templated() {
+        for kind in ["fill", "inserttext"] {
+            let mut r = recorded(&[]);
+            let cmd = if kind == "fill" {
+                json!({ "action": "fill", "selector": "@e1", "value": "42" })
+            } else {
+                json!({ "action": "inserttext", "text": "42" })
+            };
+            r.begin_command(kind, &cmd, None, Some(&traits("text", "one-time-code", "")));
+            let c = &r.commands[0].1;
+            assert!(c["value"] == REDACTED || c["text"] == REDACTED, "{c}");
+            assert_eq!(r.secrets, vec!["42".to_string()]);
+        }
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/" }),
+            None,
+            None,
+        );
+        r.begin_command(
+            "fill",
+            &json!({ "action": "fill", "selector": "#q", "value": "ab" }),
+            None,
+            Some(&traits("text", "", "q")),
+        );
+        r.tag_request("s");
+        let entries = vec![entry(
+            "s",
+            "https://api.example.com.ar/s?q=ab",
+            "Fetch",
+            "application/json",
+            r#"{"items":[{"id":1}]}"#,
+        )];
+        let (flow, _) = build_flow(SaveInput {
+            name: "t",
+            recorder: &r,
+            commands: &r.commands,
+            description: None,
+            entries: &entries,
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        assert_eq!(flow["steps"][1]["command"]["value"], "{{q}}");
+        assert_eq!(
+            flow["steps"][1]["requests"][0]["url"],
+            "https://api.example.com.ar/s?q=ab"
+        );
+    }
+
+    #[test]
+    fn keyboard_and_inserttext_are_typed_fields_and_late_traits_redact() {
+        let mut r = recorded(&[]);
+        let seq = r
+            .begin_command(
+                "keyboard",
+                &json!({ "action": "keyboard", "subaction": "type", "text": "s3cret!" }),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(r.commands[0].1["text"], "{{typed}}");
+        assert_eq!(r.needs_traits, Some(seq));
+        r.redact_if_secret(seq, &traits("password", "", ""));
+        assert_eq!(r.commands[0].1["text"], REDACTED);
+        assert!(r.typed.is_empty());
+        assert_eq!(r.secrets, vec!["s3cret!".to_string()]);
+        let mut r = recorded(&[]);
+        r.begin_command(
+            "inserttext",
+            &json!({ "action": "inserttext", "text": "plain" }),
+            None,
+            Some(&traits("text", "", "note")),
+        );
+        assert_eq!(r.commands[0].1["text"], "{{note}}");
+    }
+
+    #[test]
+    fn typed_params_are_required_at_run_time_and_listed_without_a_value() {
+        let flow = json!({
+            "startUrl": "https://a.test/",
+            "params": [{ "name": "email", "source": "typed" }],
+            "steps": [{ "ok": true, "command": { "action": "fill", "selector": "#e", "value": "{{email}}" }, "requests": [] }]
+        });
+        assert!(replay_commands(&flow, &[])
+            .unwrap_err()
+            .contains("missing --param email"));
+        let cmds = replay_commands(&flow, &[("email".to_string(), "x@y.z".to_string())]).unwrap();
+        assert_eq!(cmds[1]["value"], "x@y.z");
+        assert!(input_schema(&flow)["properties"]["email"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("pass a value"));
     }
 }
