@@ -1555,20 +1555,26 @@ fn main() {
     if let Some(ref namespace) = flags.namespace {
         env::set_var("AGENT_BROWSER_NAMESPACE", namespace);
     }
-    let clean = clean_args(&args);
+    let mut clean = clean_args(&args);
     tls::configure_process(&flags);
 
     let has_help = args.iter().any(|a| a == "--help" || a == "-h");
     let has_version = args.iter().any(|a| a == "--version" || a == "-V");
 
     if has_help {
+        clean.retain(|arg| arg != "--help" && arg != "-h");
+        if clean.is_empty() || clean.iter().all(|arg| arg.starts_with('-')) {
+            print_help();
+            return;
+        }
         if let Some(cmd) = clean.first() {
-            if print_command_help(cmd) {
+            if commands::is_top_level_command(cmd) {
+                if !print_command_help(cmd) {
+                    print_help();
+                }
                 return;
             }
         }
-        print_help();
-        return;
     }
 
     if has_version {
