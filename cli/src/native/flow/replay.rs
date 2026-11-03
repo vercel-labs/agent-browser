@@ -144,7 +144,7 @@ const URL_KEYS: &[&str] = &[
 /// newlines and leading control characters, so a string that parses as an
 /// http(s) URL is host-checked whatever it looks like before parsing.
 fn check_value(
-    flow: &Flow,
+    policy: &HostPolicy,
     v: &Value,
     key: Option<&str>,
     scripts: &mut bool,
@@ -154,7 +154,7 @@ fn check_value(
             let forced = key.is_some_and(|k| URL_KEYS.contains(&k));
             if let Ok(parsed) = url::Url::parse(text) {
                 match parsed.scheme() {
-                    "http" | "https" => check_allowed_host(flow, text)?,
+                    "http" | "https" => policy.check(text)?,
                     "about" if parsed.as_str() == "about:blank" => {}
                     scheme
                         if forced
@@ -172,13 +172,13 @@ fn check_value(
         }
         Value::Array(items) => items
             .iter()
-            .try_for_each(|i| check_value(flow, i, key, scripts)),
+            .try_for_each(|i| check_value(policy, i, key, scripts)),
         Value::Object(map) => {
             for (k, item) in map {
                 if SCRIPT_KEYS.contains(&k.as_str()) && item.is_string() {
                     *scripts = true;
                 }
-                check_value(flow, item, Some(k), scripts)?;
+                check_value(policy, item, Some(k), scripts)?;
             }
             Ok(())
         }
@@ -189,6 +189,7 @@ fn check_value(
 /// Check that every command a replay would send is a plain interaction and
 /// every URL in it stays on the flow's site.
 pub fn check_replay_commands(flow: &Flow, commands: &[Value]) -> Result<(), String> {
+    let policy = HostPolicy::of(flow);
     for cmd in commands {
         let action = cmd["action"].as_str().unwrap_or("");
         if !REPLAY_ACTIONS.contains(&action) {
@@ -198,7 +199,7 @@ pub fn check_replay_commands(flow: &Flow, commands: &[Value]) -> Result<(), Stri
             ));
         }
         let mut scripts = false;
-        check_value(flow, cmd, None, &mut scripts)?;
+        check_value(&policy, cmd, None, &mut scripts)?;
         if scripts {
             return Err(format!(
                 "the recorded command '{}' carries a script, which a replay does not run",
@@ -288,20 +289,6 @@ pub fn replay_lookup<'a>(
     }
 }
 
-pub fn replay_match<'a>(entries: &'a [HarEntry], req: &PreparedRequest) -> Option<&'a HarEntry> {
-    replay_lookup(entries, req).ok()
-}
-
-/// A write the replay already sent has no answer to read back: it is not
-/// sent again.
-pub fn replay_write_unanswered(
-    req: &PreparedRequest,
-    started: Instant,
-    reason: String,
-) -> TierResult {
-    tier_result(req, Tier::Replay, started, Err(unknown_outcome(reason)))
-}
-
 pub fn replay_result(
     req: &PreparedRequest,
     started: Instant,
@@ -341,25 +328,6 @@ pub fn replay_result(
     )
 }
 
-pub fn replay_failed(req: &PreparedRequest, started: Instant, reason: String) -> TierResult {
-    tier_result(
-        req,
-        Tier::Replay,
-        started,
-        Err(Failure::new(true, None, reason)),
-    )
-}
-
-/// The replay tier cannot express this run; that says nothing about the site.
-pub fn replay_unavailable(req: &PreparedRequest, started: Instant, reason: String) -> TierResult {
-    tier_result(
-        req,
-        Tier::Replay,
-        started,
-        Err(Failure::new(false, None, reason)),
-    )
-}
-
 /// What the single replay of a run captured.
 pub struct ReplayRun {
     entries: Vec<HarEntry>,
@@ -380,64 +348,53 @@ pub struct ReplaySender<'a> {
 impl Sender for ReplaySender<'_> {
     async fn send(&mut self, req: &PreparedRequest, ctx: &SendCtx<'_>) -> TierResult {
         let started = Instant::now();
+        let fail = |f: Failure| TierResult::fail(req, Tier::Replay, started, f);
         // A write that was already sent is only read back, never sent again.
         if req.write && ctx.ledger.already_sent(&req.id) {
             return match self.run.as_ref().map(|r| replay_lookup(&r.entries, req)) {
                 Some(Ok(entry)) => replay_result(req, started, Some(entry)),
-                other => replay_write_unanswered(
-                    req,
-                    started,
-                    match other {
-                        Some(Err(reason)) => format!(
-                            "the write was already sent in this run and its answer cannot be read back: {}",
-                            reason
-                        ),
-                        _ => "the write was already sent in this run".to_string(),
-                    },
-                ),
+                Some(Err(reason)) => fail(Failure::unknown_outcome(format!(
+                    "the write was already sent in this run and its answer cannot be read back: {}",
+                    reason
+                ))),
+                None => fail(Failure::unknown_outcome(
+                    "the write was already sent in this run".to_string(),
+                )),
             };
         }
         if self.run.is_none() {
             // A replay repeats every recorded command, so it also sends the
             // writes no kept request covers; each must be approved.
             for w in replay_only_writes(self.flow) {
-                if let Err(reason) = self.runner.write_approved(&w.id) {
-                    return replay_unavailable(
-                        req,
-                        started,
-                        format!(
-                            "replaying the recorded commands would also send {} {} ({}): {}",
-                            w.method, w.url, w.id, reason
-                        ),
-                    );
+                if let Err(reason) = self.runner.write_approved(&w) {
+                    return fail(Failure::unavailable(format!(
+                        "replaying the recorded commands would also send {} {} ({}): {}",
+                        w.method, w.url, w.id, reason
+                    )));
                 }
             }
             // A write another tier already sent would go out a second time.
             if let Some(id) = ctx.ledger.first_repeated_by_replay(self.flow) {
-                return replay_unavailable(
-                    req,
-                    started,
-                    format!(
-                        "replaying the recorded commands would send write {} again; it was already sent in this run",
-                        id
-                    ),
-                );
+                return fail(Failure::unavailable(format!(
+                    "replaying the recorded commands would send write {} again; it was already sent in this run",
+                    id
+                )));
             }
             match self.capture(ctx.wanted, started).await {
                 Ok(captured) => *self.run = Some(captured),
-                Err(Ok(reason)) => return replay_unavailable(req, started, reason),
-                Err(Err(reason)) => return replay_failed(req, started, reason),
+                Err(Ok(reason)) => return fail(Failure::unavailable(reason)),
+                Err(Err(reason)) => return fail(Failure::drift(reason)),
             }
         }
         let Some(captured) = self.run.as_ref() else {
-            return replay_failed(req, started, "the replay did not run".to_string());
+            return fail(Failure::drift("the replay did not run".to_string()));
         };
         if let Some(reason) = captured.failure.clone() {
-            return replay_failed(req, started, reason);
+            return fail(Failure::drift(reason));
         }
         match replay_lookup(&captured.entries, req) {
             Ok(entry) => replay_result(req, started, Some(entry)),
-            Err(reason) => replay_failed(req, started, reason),
+            Err(reason) => fail(Failure::drift(reason)),
         }
     }
 }
@@ -486,7 +443,7 @@ impl ReplaySender<'_> {
                 .await
                 .filter(|u| u.starts_with("http"))
             {
-                if let Err(reason) = check_allowed_host(self.flow, &url) {
+                if let Err(reason) = HostPolicy::of(self.flow).check(&url) {
                     failed = Some(format!(
                         "replay stopped after command {}: {}",
                         i + 1,

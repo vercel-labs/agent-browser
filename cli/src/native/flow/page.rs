@@ -45,16 +45,6 @@ pub fn page_fetch_script(req: &PreparedRequest) -> String {
     )
 }
 
-/// The in-page tier runs only on a tab that is already on the flow's site.
-pub fn page_skipped(req: &PreparedRequest, started: Instant, reason: String) -> TierResult {
-    tier_result(
-        req,
-        Tier::Page,
-        started,
-        Err(Failure::new(true, None, reason)),
-    )
-}
-
 pub fn page_result(
     req: &PreparedRequest,
     started: Instant,
@@ -74,7 +64,7 @@ pub fn page_result(
                 "in-page fetch returned no response".to_string(),
             )),
         },
-        Err(e) if req.write => Err(unknown_outcome(format!(
+        Err(e) if req.write => Err(Failure::unknown_outcome(format!(
             "the in-page write may have been sent: {}",
             e
         ))),
@@ -89,9 +79,10 @@ pub fn page_result(
 
 /// The in-page tier needs a tab that is already on the flow's site.
 pub fn tab_on_site(flow: &Flow, current: Option<&str>) -> Result<(), String> {
-    let site = derive_allowed_hosts(&flow.start_url).join(", ");
+    let policy = HostPolicy::of(flow);
+    let site = policy.hosts().join(", ");
     match current {
-        Some(url) if check_allowed_host(flow, url).is_ok() => Ok(()),
+        Some(url) if policy.check(url).is_ok() => Ok(()),
         Some(url) => Err(format!(
             "the active tab ({}) is not on the flow's site ({}); open the site to use the in-page request",
             url, site
@@ -116,7 +107,7 @@ impl Sender for PageSender<'_> {
         let started = Instant::now();
         let tab = self.host.tab_url().await;
         if let Err(reason) = tab_on_site(self.flow, tab.as_deref()) {
-            return page_skipped(req, started, reason);
+            return TierResult::fail(req, Tier::Page, started, Failure::drift(reason));
         }
         let value = self.host.eval(&page_fetch_script(req)).await;
         page_result(req, started, value)

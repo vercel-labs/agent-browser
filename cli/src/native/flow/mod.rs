@@ -10,6 +10,7 @@ use serde_json::{json, Map, Value};
 use super::actions::HarEntry;
 
 mod hint;
+mod hosts;
 mod http;
 #[cfg(test)]
 mod memory;
@@ -21,6 +22,7 @@ mod replay;
 mod send;
 
 pub use hint::*;
+pub use hosts::*;
 pub use http::*;
 pub use model::*;
 pub use outcome::*;
@@ -75,93 +77,6 @@ fn classify_header(name: &str) -> HeaderClass {
     }
 }
 
-/// Registrable part of a host, close enough for first-party checks:
-/// `api.example.com.ar` -> `example.com.ar`, `www.example.org` -> `example.org`.
-pub fn base_domain(host: &str) -> String {
-    let host = host.trim_end_matches('.');
-    if host.parse::<std::net::IpAddr>().is_ok() || host.starts_with('[') {
-        return host.to_string();
-    }
-    // The public suffix list keeps `a.vercel.app` and `b.vercel.app` apart.
-    psl::domain_str(&host.to_ascii_lowercase())
-        .map(String::from)
-        .unwrap_or_else(|| host.to_ascii_lowercase())
-}
-
-/// Hosts a flow may talk to: the base domain of its start URL.
-pub fn derive_allowed_hosts(start_url: &str) -> Vec<String> {
-    host_of(start_url)
-        .map(|h| vec![base_domain(&h)])
-        .unwrap_or_default()
-}
-
-fn host_matches(host: &str, allowed: &str) -> bool {
-    if allowed.parse::<std::net::IpAddr>().is_ok() {
-        return host == allowed;
-    }
-    host == allowed || host.ends_with(&format!(".{}", allowed))
-}
-
-/// Reject a URL outside the hosts a flow was recorded on. The start URL's
-/// base domain is always required; `allowedHosts` in the file can only narrow it.
-pub fn check_allowed_host(flow: &Flow, url: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(url).map_err(|_| format!("'{}' is not a valid URL", url))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(format!("'{}' is not an http(s) URL", url));
-    }
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| format!("'{}' has no host", url))?
-        .to_ascii_lowercase();
-    let base = derive_allowed_hosts(&flow.start_url);
-    let in_base = base.iter().any(|a| host_matches(&host, a));
-    let listed = &flow.allowed_hosts;
-    let in_listed = listed.is_empty() || listed.iter().any(|a| host_matches(&host, a));
-    if in_base && in_listed {
-        Ok(())
-    } else {
-        Err(format!(
-            "{} is outside the hosts this flow may reach ({})",
-            host,
-            if base.is_empty() {
-                "none".to_string()
-            } else {
-                base.join(", ")
-            }
-        ))
-    }
-}
-
-/// A flow origin becomes a directory name, so it must be a plain hostname.
-pub fn validate_origin(origin: &str) -> Result<(), String> {
-    let ok = !origin.is_empty()
-        && origin.len() <= 253
-        && !origin.starts_with('.')
-        && !origin.ends_with('.')
-        && !origin.contains("..")
-        && origin
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
-    if ok {
-        Ok(())
-    } else {
-        Err(format!(
-            "invalid flow origin '{}': expected a hostname",
-            origin
-        ))
-    }
-}
-
-fn host_of(url: &str) -> Option<String> {
-    url::Url::parse(url).ok()?.host_str().map(String::from)
-}
-
-fn is_first_party(url: &str, base: &str) -> bool {
-    host_of(url)
-        .map(|h| h == base || h.ends_with(&format!(".{}", base)))
-        .unwrap_or(false)
-}
-
 fn is_telemetry(url: &str) -> bool {
     let path = url::Url::parse(url)
         .map(|u| u.path().to_ascii_lowercase())
@@ -171,11 +86,11 @@ fn is_telemetry(url: &str) -> bool {
         .any(|m| path == *m || path.starts_with(&format!("{}/", m)) || path.ends_with(m))
 }
 
-fn is_api_entry(e: &HarEntry, base: &str) -> bool {
+fn is_api_entry(e: &HarEntry, policy: &HostPolicy) -> bool {
     matches!(e.resource_type.as_str(), "XHR" | "Fetch")
         && e.mime_type.contains("json")
         && e.status.map(|s| (200..300).contains(&s)).unwrap_or(false)
-        && is_first_party(&e.url, base)
+        && policy.allows_url(&e.url)
         && !is_telemetry(&e.url)
 }
 
@@ -480,7 +395,7 @@ fn decoded_forms(text: &str) -> Vec<String> {
 /// server.
 fn candidates<'a>(
     tagged: &[&'a HarEntry],
-    base: &str,
+    policy: &HostPolicy,
 ) -> Vec<(&'a HarEntry, Value, Option<Value>)> {
     let mut out = Vec::new();
     for e in tagged.iter().copied() {
@@ -491,11 +406,11 @@ fn candidates<'a>(
         else {
             continue;
         };
-        if is_api_entry(e, base) {
+        if is_api_entry(e, policy) {
             if let Ok(parsed) = serde_json::from_str::<Value>(body) {
                 out.push((e, parsed, None));
             }
-        } else if is_document_entry(e, base) {
+        } else if is_document_entry(e, policy) {
             for (spec, parsed) in embedded_json(body) {
                 out.push((e, parsed, Some(spec)));
             }
@@ -504,12 +419,12 @@ fn candidates<'a>(
     out
 }
 
-fn is_document_entry(e: &HarEntry, base: &str) -> bool {
+fn is_document_entry(e: &HarEntry, policy: &HostPolicy) -> bool {
     e.resource_type == "Document"
         && e.method == "GET"
         && e.mime_type.contains("html")
         && e.status.map(|s| (200..300).contains(&s)).unwrap_or(false)
-        && is_first_party(&e.url, base)
+        && policy.allows_url(&e.url)
 }
 
 /// `<script>` blocks whose whole content is a JSON object or array, each with
@@ -598,7 +513,7 @@ pub fn extract_embedded(html: &str, spec: &Value) -> Option<String> {
 /// itself when its HTML embeds the data.
 fn with_page_query_params(
     start: &str,
-    base: &str,
+    policy: &HostPolicy,
     given: &[(String, String)],
     entries: &[HarEntry],
 ) -> Vec<(String, String)> {
@@ -613,8 +528,8 @@ fn with_page_query_params(
         }
         let encoded = urlencoding::encode(&value).into_owned();
         let sent = entries.iter().any(|e| {
-            (is_api_entry(e, base)
-                || (is_document_entry(e, base)
+            (is_api_entry(e, policy)
+                || (is_document_entry(e, policy)
                     && e.response_body
                         .as_deref()
                         .is_some_and(|b| !embedded_json(b).is_empty())))
@@ -649,6 +564,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
         .ok_or("nothing to save: the flow has no `open <url>` command and no page was open")?;
     let host = host_of(&start).ok_or("the flow's start URL has no host")?;
     let base = base_domain(&host);
+    let policy = HostPolicy::from_start(&start);
     // Values typed into ordinary fields are params: the step keeps a
     // placeholder, and a `--param` with the same value names it.
     let mut typed: Vec<(String, String)> = Vec::new();
@@ -695,7 +611,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
             .filter(|(_, v)| v.chars().count() >= 3)
             .cloned(),
     );
-    let given = with_page_query_params(&start, &base, &explicit_and_typed, input.entries);
+    let given = with_page_query_params(&start, &policy, &explicit_and_typed, input.entries);
 
     let mut steps = Vec::new();
     let mut gaps = Vec::new();
@@ -713,7 +629,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
             .collect();
         let mut requests = Vec::new();
         let mut seen = Vec::new();
-        for (e, parsed, extract) in candidates(&tagged, &base) {
+        for (e, parsed, extract) in candidates(&tagged, &policy) {
             if carries_secret(e, &input.recorder.secrets)
                 || input.recorder.unknown_secret_seqs.contains(seq)
             {
@@ -803,7 +719,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
                 "the page asked for a login; this step needs an account, and the flow stops before it"
             } else if tagged.is_empty() {
                 "no network traffic while this command ran"
-            } else if tagged.iter().any(|e| is_first_party(&e.url, &base)) {
+            } else if tagged.iter().any(|e| policy.allows_url(&e.url)) {
                 "first-party traffic was documents or static files, not a JSON API"
             } else {
                 "only third-party traffic"
@@ -863,7 +779,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
         "name": input.name,
         "origin": host,
         "startUrl": start,
-        "allowedHosts": derive_allowed_hosts(&start),
+        "allowedHosts": policy.hosts(),
         "createdAt": input.created_at,
         "createdBy": { "tool": "agent-browser", "version": env!("CARGO_PKG_VERSION") },
         "description": input.description,
@@ -890,7 +806,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
     let mut flow: Flow = serde_json::from_value(flow_json)
         .map_err(|e| format!("the flow could not be built: {}", e))?;
     let consumed = dependencies(&flow, &output);
-    let writes = collect_writes(&input, &base, &given, &har_ids, &consumed);
+    let writes = collect_writes(&input, &policy, &given, &har_ids, &consumed);
     for r in flow.steps.iter_mut().flat_map(|s| s.requests.iter_mut()) {
         r.write = writes.iter().any(|w| w.id == r.id);
     }
@@ -1403,7 +1319,7 @@ pub fn flows_dir() -> PathBuf {
         .join("flows")
 }
 
-fn valid_name(name: &str) -> Result<(), String> {
+pub fn validate_name(name: &str) -> Result<(), String> {
     if name.is_empty()
         || !name
             .chars()
@@ -1417,13 +1333,9 @@ fn valid_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn validate_name(name: &str) -> Result<(), String> {
-    valid_name(name)
-}
-
 pub fn flow_path(origin: &str, name: &str) -> Result<PathBuf, String> {
     validate_origin(origin)?;
-    valid_name(name)?;
+    validate_name(name)?;
     Ok(flows_dir().join(origin).join(format!("{}.json", name)))
 }
 
@@ -1615,7 +1527,7 @@ fn unreadable_flow(name: &str, origin: Option<&str>) -> Option<String> {
 }
 
 pub fn load_flow(name: &str, origin: Option<&str>) -> Result<Flow, String> {
-    valid_name(name)?;
+    validate_name(name)?;
     let mut matches: Vec<StoredFlow> = stored_flows(origin)
         .into_iter()
         .filter(|s| s.flow.name == name)
@@ -1776,7 +1688,7 @@ fn is_click_command(cmd: &Value) -> bool {
 /// mutating segment.
 fn collect_writes(
     input: &SaveInput<'_>,
-    base: &str,
+    policy: &HostPolicy,
     given: &[(String, String)],
     har_ids: &HashMap<String, String>,
     consumed: &[String],
@@ -1800,7 +1712,7 @@ fn collect_writes(
                 .iter()
                 .find(|(_, har)| **har == e.request_id)
                 .map(|(id, _)| id.clone());
-            let first_party = is_first_party(&e.url, base);
+            let first_party = policy.allows_url(&e.url);
             let explicit = is_write(&e.method, e.post_data.as_deref());
             let suspected = !explicit
                 && e.method == "GET"
@@ -1842,23 +1754,22 @@ fn collect_writes(
     writes
 }
 
-/// Ids of the writes a run sends over HTTP or from the page: the ones among
-/// the requests the output needs. Each must be allowed or confirmed first.
-pub fn request_write_ids(flow: &Flow) -> Vec<String> {
+/// The writes a run sends over HTTP or from the page: the ones among the
+/// requests the output needs. Each must be allowed or confirmed first.
+pub fn request_writes(flow: &Flow) -> Vec<&Write> {
     let needed = dependencies(flow, &flow.output);
     flow.writes
         .iter()
         .filter(|w| needed.contains(&w.id))
-        .map(|w| w.id.clone())
         .collect()
 }
 
 /// Writes the command replay would send beyond the ones a run sends itself.
 pub fn replay_only_writes(flow: &Flow) -> Vec<Write> {
-    let own = request_write_ids(flow);
+    let own = request_writes(flow);
     flow.writes
         .iter()
-        .filter(|w| !own.contains(&w.id))
+        .filter(|w| !own.iter().any(|o| o.id == w.id))
         .cloned()
         .collect()
 }
@@ -1910,10 +1821,6 @@ impl AllowWrite {
     pub fn covers(&self, id: &str) -> bool {
         self.all || self.ids.iter().any(|i| i == id)
     }
-}
-
-pub fn write_policy_action(id: &str) -> String {
-    format!("flow_write:{}", id)
 }
 
 /// Check that an id names a write of this flow.
@@ -2491,9 +2398,9 @@ mod tests {
         req.url = "https://api.site.example/graphql".to_string();
         req.body = Some(r#"{"operationName":"positions","variables":{"t":1}}"#.to_string());
         let entries = vec![b, a];
-        assert_eq!(replay_match(&entries, &req).unwrap().request_id, "b");
+        assert_eq!(replay_lookup(&entries, &req).ok().unwrap().request_id, "b");
         req.body = Some(r#"{"operationName":"other"}"#.to_string());
-        assert!(replay_match(&entries, &req).is_none());
+        assert!(replay_lookup(&entries, &req).ok().is_none());
     }
 
     #[test]
@@ -2700,7 +2607,7 @@ mod tests {
         assert_eq!(writes[0]["id"], "s2w1");
         assert!(
             replay_only_writes(&flow_of(flow.clone())).len() == 1
-                && request_write_ids(&flow_of(flow.clone())).is_empty()
+                && write_ids(&flow_of(flow.clone())).is_empty()
         );
     }
 
@@ -2911,8 +2818,10 @@ mod tests {
         let flow = flow_of(
             json!({ "startUrl": "https://www.example.com/shop", "allowedHosts": ["example.com"] }),
         );
-        assert!(check_allowed_host(&flow, "https://api.example.com/x").is_ok());
-        assert!(check_allowed_host(&flow, "https://example.com/x").is_ok());
+        assert!(HostPolicy::of(&flow)
+            .check("https://api.example.com/x")
+            .is_ok());
+        assert!(HostPolicy::of(&flow).check("https://example.com/x").is_ok());
         for bad in [
             "https://evil.com/x",
             "https://example.com.evil.com/x",
@@ -2920,7 +2829,7 @@ mod tests {
             "ftp://example.com/x",
             "not a url",
         ] {
-            assert!(check_allowed_host(&flow, bad).is_err(), "{bad}");
+            assert!(HostPolicy::of(&flow).check(bad).is_err(), "{bad}");
         }
     }
 
@@ -2929,20 +2838,26 @@ mod tests {
         let flow = flow_of(
             json!({ "startUrl": "https://example.com/", "allowedHosts": ["example.com", "evil.com"] }),
         );
-        assert!(check_allowed_host(&flow, "https://evil.com/x").is_err());
+        assert!(HostPolicy::of(&flow).check("https://evil.com/x").is_err());
         let narrow = flow_of(
             json!({ "startUrl": "https://example.com/", "allowedHosts": ["api.example.com"] }),
         );
-        assert!(check_allowed_host(&narrow, "https://www.example.com/x").is_err());
-        assert!(check_allowed_host(&narrow, "https://api.example.com/x").is_ok());
+        assert!(HostPolicy::of(&narrow)
+            .check("https://www.example.com/x")
+            .is_err());
+        assert!(HostPolicy::of(&narrow)
+            .check("https://api.example.com/x")
+            .is_ok());
     }
 
     #[test]
     fn ip_hosts_match_exactly() {
         let flow =
             flow_of(json!({ "startUrl": "http://127.0.0.1:3000/", "allowedHosts": ["127.0.0.1"] }));
-        assert!(check_allowed_host(&flow, "http://127.0.0.1:3000/api").is_ok());
-        assert!(check_allowed_host(&flow, "http://10.0.0.1/api").is_err());
+        assert!(HostPolicy::of(&flow)
+            .check("http://127.0.0.1:3000/api")
+            .is_ok());
+        assert!(HostPolicy::of(&flow).check("http://10.0.0.1/api").is_err());
         assert_eq!(base_domain("127.0.0.1"), "127.0.0.1");
     }
 
@@ -3358,7 +3273,7 @@ mod tests {
                 { "command": {}, "requests": [request("s2r1", "https://a.test/cart", "{\"csrf\":\"{{@s1r1.csrf}}\"}")] }
             ]
         }));
-        assert_eq!(request_write_ids(&flow), vec!["s1r1", "s2r1"]);
+        assert_eq!(write_ids(&flow), vec!["s1r1", "s2r1"]);
         let only_output = flow_of(json!({
             "output": "s2r1", "writes": writes,
             "steps": [
@@ -3366,7 +3281,7 @@ mod tests {
                 { "command": {}, "requests": [request("s2r1", "https://a.test/cart", "{}")] }
             ]
         }));
-        assert_eq!(request_write_ids(&only_output), vec!["s2r1"]);
+        assert_eq!(write_ids(&only_output), vec!["s2r1"]);
         let replay: Vec<String> = replay_only_writes(&only_output)
             .into_iter()
             .map(|w| w.id)
@@ -3506,8 +3421,12 @@ mod tests {
         let flow = flow_of(
             json!({ "startUrl": "https://a.vercel.app/", "allowedHosts": ["a.vercel.app"] }),
         );
-        assert!(check_allowed_host(&flow, "https://api.a.vercel.app/x").is_ok());
-        assert!(check_allowed_host(&flow, "https://b.vercel.app/x").is_err());
+        assert!(HostPolicy::of(&flow)
+            .check("https://api.a.vercel.app/x")
+            .is_ok());
+        assert!(HostPolicy::of(&flow)
+            .check("https://b.vercel.app/x")
+            .is_err());
     }
 
     #[test]
@@ -4328,8 +4247,16 @@ mod tests {
         assert!(replay_lookup(&twice, &want("https://api.site.example/items?page=1")).is_err());
         // An exact URL still wins.
         assert!(replay_lookup(&twice, &want("https://api.site.example/items?page=1&_=2")).is_ok());
-        assert!(replay_match(&entries, &want("https://api.site.example/items?page=1")).is_some());
-        assert!(replay_match(&entries, &want("https://api.site.example/items")).is_none());
+        assert!(
+            replay_lookup(&entries, &want("https://api.site.example/items?page=1"))
+                .ok()
+                .is_some()
+        );
+        assert!(
+            replay_lookup(&entries, &want("https://api.site.example/items"))
+                .ok()
+                .is_none()
+        );
     }
 
     #[test]
@@ -4364,6 +4291,10 @@ mod tests {
         write_flow(&loaded).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn write_ids(flow: &Flow) -> Vec<String> {
+        request_writes(flow).iter().map(|w| w.id.clone()).collect()
     }
 
     fn flow_with_request(tier: Option<&str>, write: bool) -> Flow {

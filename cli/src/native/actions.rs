@@ -2815,11 +2815,7 @@ fn policy_actions_for_command(
         actions.push("navigate".to_string());
     }
     if let Some(flow) = flow.filter(|_| action == "flow_run") {
-        actions.extend(
-            super::flow::request_write_ids(flow)
-                .iter()
-                .map(|id| super::flow::write_policy_action(id)),
-        );
+        actions.extend(super::flow::request_writes(flow).iter().map(|w| w.action()));
     }
     if action == "auth_login" {
         if let Some(provider) = cmd.get("credentialProvider").and_then(|v| v.as_str()) {
@@ -3076,10 +3072,10 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     // The flow is read once per command: policy, confirmation and the run all
     // see the same file.
     let mut run_flow: Option<super::flow::Flow> = if action == "flow_run" {
-        state
-            .preloaded_flow
-            .take()
-            .or_else(|| flow_for_command(cmd))
+        state.preloaded_flow.take().or_else(|| {
+            let name = cmd.get("name")?.as_str()?;
+            super::flow::load_flow(name, cmd.get("origin").and_then(|v| v.as_str())).ok()
+        })
     } else {
         None
     };
@@ -12114,25 +12110,16 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     })
 }
 
-fn flow_for_command(cmd: &Value) -> Option<super::flow::Flow> {
-    let name = cmd.get("name").and_then(|v| v.as_str())?;
-    super::flow::load_flow(name, cmd.get("origin").and_then(|v| v.as_str())).ok()
-}
-
 /// The single write gate: the first write a run sends that `--allow-write`
-/// does not cover and no confirmation has approved, as (id, policy action).
-fn uncovered_flow_write(
-    flow: &super::flow::Flow,
+/// does not cover and no confirmation has approved.
+fn uncovered_flow_write<'a>(
+    flow: &'a super::flow::Flow,
     allow: &super::flow::AllowWrite,
     confirmed: &HashSet<String>,
-) -> Option<(String, String)> {
-    super::flow::request_write_ids(flow)
+) -> Option<&'a super::flow::Write> {
+    super::flow::request_writes(flow)
         .into_iter()
-        .map(|id| {
-            let action = super::flow::write_policy_action(&id);
-            (id, action)
-        })
-        .find(|(id, action)| !allow.covers(id) && !confirmed.contains(action))
+        .find(|w| !allow.covers(&w.id) && !confirmed.contains(&w.action()))
 }
 
 /// The policy action to confirm before the run starts. An id the flow does
@@ -12144,7 +12131,7 @@ fn unconfirmed_flow_write(
 ) -> Option<String> {
     let allow = super::flow::AllowWrite::parse(cmd.get("allowWrite")).ok()?;
     super::flow::check_write_ids(flow, &allow).ok()?;
-    uncovered_flow_write(flow, &allow, &state.confirmed_policy_actions).map(|(_, action)| action)
+    uncovered_flow_write(flow, &allow, &state.confirmed_policy_actions).map(|w| w.action())
 }
 
 async fn handle_flow_run(
@@ -12178,24 +12165,25 @@ async fn handle_flow_run_inner(
     let requests = super::flow::prepare(&flow, &params)?;
     let allow = super::flow::AllowWrite::parse(cmd.get("allowWrite"))?;
     super::flow::check_write_ids(&flow, &allow)?;
-    if let Some((id, _)) = uncovered_flow_write(&flow, &allow, &state.confirmed_policy_actions) {
-        let w = flow.write(&id);
+    if let Some(w) = uncovered_flow_write(&flow, &allow, &state.confirmed_policy_actions) {
         return Err(format!(
             "flow '{}' sends {} {} ({}); rerun with --allow-write {} to send it",
             name,
-            w.map_or("", |w| w.method.as_str()),
-            w.map_or("", |w| w.url.as_str()),
-            w.map_or("write", |w| match w.kind {
+            w.method,
+            w.url,
+            match w.kind {
                 super::flow::WriteKind::Explicit => "explicit",
                 super::flow::WriteKind::Suspected => "suspected",
-            }),
-            id
+            },
+            w.id
         ));
     }
 
     let filter = state.domain_filter.read().await.clone();
+    let hosts = super::flow::HostPolicy::of(&flow);
     for prepared in &requests {
-        super::flow::check_allowed_host(&flow, &prepared.url)
+        hosts
+            .check(&prepared.url)
             .map_err(|e| format!("flow '{}' step {}: {}", name, prepared.step, e))?;
     }
     let client = super::flow::http_client(filter.clone(), &flow)?;
@@ -12208,7 +12196,8 @@ async fn handle_flow_run_inner(
             replay_run: None,
         };
         let check = |req: &super::flow::PreparedRequest| -> Result<(), String> {
-            super::flow::check_allowed_host(&flow, &req.url)
+            hosts
+                .check(&req.url)
                 .map_err(|e| format!("flow '{}' step {}: {}", name, req.step, e))?;
             // Saved destinations follow the session's current domain
             // allowlist, not the one in force when the flow was recorded.
@@ -12425,9 +12414,9 @@ async fn flow_ensure_browser(state: &mut DaemonState) -> Result<(), String> {
 fn replay_write_approved(
     state: &DaemonState,
     allow: &super::flow::AllowWrite,
-    id: &str,
+    write: &super::flow::Write,
 ) -> Result<(), String> {
-    let action = super::flow::write_policy_action(id);
+    let action = write.action();
     let confirmed = state.confirmed_policy_actions.contains(&action);
     if let Some(policy) = state.policy.as_ref() {
         match policy.check(&action) {
@@ -12447,10 +12436,10 @@ fn replay_write_approved(
     {
         return Err("--confirm-actions requires confirmation".to_string());
     }
-    if allow.covers(id) || confirmed {
+    if allow.covers(&write.id) || confirmed {
         Ok(())
     } else {
-        Err(format!("rerun with --allow-write {} to allow it", id))
+        Err(format!("rerun with --allow-write {} to allow it", write.id))
     }
 }
 
@@ -12533,8 +12522,8 @@ impl super::flow::CommandRunner for FlowWiring<'_> {
         }
     }
 
-    fn write_approved(&self, id: &str) -> Result<(), String> {
-        replay_write_approved(self.state, self.allow, id)
+    fn write_approved(&self, write: &super::flow::Write) -> Result<(), String> {
+        replay_write_approved(self.state, self.allow, write)
     }
 }
 
@@ -19727,7 +19716,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
                 "flow_run",
                 false,
                 None,
-                flow_for_command(&run).as_ref()
+                super::super::flow::load_flow("cart", None).ok().as_ref()
             ),
             vec!["flow_run".to_string(), "flow_write:s1r1".to_string()]
         );

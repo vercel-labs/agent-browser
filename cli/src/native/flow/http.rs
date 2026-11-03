@@ -107,7 +107,7 @@ pub async fn run_http(
             })
         }
         // A write that left the machine may have been applied.
-        Err(e) if req.write && !e.is_connect() => Err(unknown_outcome(format!(
+        Err(e) if req.write && !e.is_connect() => Err(Failure::unknown_outcome(format!(
             "the write was sent but no response came back: {}",
             e
         ))),
@@ -122,15 +122,13 @@ pub fn http_client(
     filter: Option<crate::native::network::DomainFilter>,
     flow: &Flow,
 ) -> Result<reqwest::Client, String> {
-    let flow = flow.clone();
+    let hosts = HostPolicy::of(flow);
     let policy = reqwest::redirect::Policy::custom(move |attempt| {
-        let blocked = check_allowed_host(&flow, attempt.url().as_str())
-            .err()
-            .or_else(|| {
-                filter
-                    .as_ref()
-                    .and_then(|f| f.check_url(attempt.url().as_str()).err())
-            });
+        let blocked = hosts.check(attempt.url().as_str()).err().or_else(|| {
+            filter
+                .as_ref()
+                .and_then(|f| f.check_url(attempt.url().as_str()).err())
+        });
         match blocked {
             // The 3xx comes back as the response, so a write that was sent
             // counts as answered.

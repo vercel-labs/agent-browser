@@ -200,3 +200,10 @@ impl Flow {
         self.writes.iter().find(|w| w.id == id)
     }
 }
+
+impl Write {
+    /// The policy action `--action-policy` and `--confirm-actions` see.
+    pub fn action(&self) -> String {
+        format!("flow_write:{}", self.id)
+    }
+}

@@ -25,7 +25,13 @@ pub struct TierResult {
 }
 
 impl TierResult {
-    pub(crate) fn failed(req: &PreparedRequest, tier: Tier, ms: u128, f: Failure) -> TierResult {
+    /// A way of sending that did not produce an answer.
+    pub fn fail(req: &PreparedRequest, tier: Tier, started: Instant, f: Failure) -> TierResult {
+        let ms = started.elapsed().as_millis();
+        TierResult::failed(req, tier, ms, f)
+    }
+
+    fn failed(req: &PreparedRequest, tier: Tier, ms: u128, f: Failure) -> TierResult {
         TierResult {
             id: req.id.clone(),
             step: req.step,
@@ -54,6 +60,27 @@ pub struct Failure {
 }
 
 impl Failure {
+    /// The way failed in a way another way may not: try the next tier.
+    pub fn drift(reason: String) -> Failure {
+        Failure::new(true, None, reason)
+    }
+
+    /// The tier cannot express this run; that says nothing about the site.
+    pub fn unavailable(reason: String) -> Failure {
+        Failure::new(false, None, reason)
+    }
+
+    /// A write whose outcome is not known is never sent again by another tier.
+    pub fn unknown_outcome(reason: String) -> Failure {
+        Failure {
+            status: None,
+            reason,
+            drift: false,
+            shape_changed: false,
+            kind: Some("outcome_unknown"),
+        }
+    }
+
     pub(crate) fn new(drift: bool, status: Option<u16>, reason: String) -> Failure {
         Failure {
             status,
@@ -78,17 +105,6 @@ impl Failure {
 }
 
 /// Challenge pages are HTML; a JSON body that mentions a captcha is data.
-/// A write whose outcome is not known is never sent again by another tier.
-pub(crate) fn unknown_outcome(reason: String) -> Failure {
-    Failure {
-        status: None,
-        reason,
-        drift: false,
-        shape_changed: false,
-        kind: Some("outcome_unknown"),
-    }
-}
-
 pub(crate) fn looks_like_html(body: &str) -> bool {
     let head = body.trim_start();
     head.starts_with('<') && serde_json::from_str::<Value>(body).is_err()
@@ -230,16 +246,6 @@ pub(crate) fn with_retry_after(mut result: TierResult, retry_after: Option<Strin
         result.retry_after = retry_after.filter(|v| !v.trim().is_empty());
     }
     result
-}
-
-/// A reference the run could not fill: the earlier response changed.
-pub fn unresolved(req: &PreparedRequest, reason: String) -> TierResult {
-    tier_result(
-        req,
-        Tier::Http,
-        Instant::now(),
-        Err(Failure::new(true, None, reason)),
-    )
 }
 
 /// The last failed attempt, when every way of sending that request was

@@ -132,7 +132,7 @@ pub trait CommandRunner: Host {
     async fn captured_since(&mut self, mark: usize) -> Vec<HarEntry>;
     async fn end_capture(&mut self);
     /// Whether a write only the replay sends may go out.
-    fn write_approved(&self, id: &str) -> Result<(), String>;
+    fn write_approved(&self, write: &Write) -> Result<(), String>;
 }
 
 /// Send each request through its tiers. `check` runs on every request after
@@ -150,7 +150,12 @@ pub async fn run_requests(
         let req = &match prepared.resolve(&bodies) {
             Ok(r) => r,
             Err(e) => {
-                results.push(unresolved(prepared, e));
+                results.push(TierResult::fail(
+                    prepared,
+                    Tier::Http,
+                    Instant::now(),
+                    Failure::drift(e),
+                ));
                 break;
             }
         };
