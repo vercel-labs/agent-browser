@@ -5568,6 +5568,12 @@ async fn apply_settings_patch(
 
     if was(Key::DefaultTimeout) {
         state.default_timeout_ms = next.default_timeout_ms();
+        // Later commands that omit the flag size their wait from the stored
+        // config, so keep it in step.
+        crate::connection::record_daemon_default_timeout(
+            &state.session_id,
+            next.get(Key::DefaultTimeout).and_then(Value::as_u64),
+        );
     }
     if was(Key::IdleTimeout) {
         state.idle_activity.set_timeout(next.idle_timeout());
@@ -19536,18 +19542,36 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
 
     /// A daemon state built from defaults, holding the env lock with every
     /// AGENT_BROWSER_* variable cleared so no other test's settings leak in.
-    fn isolated_state() -> (EnvGuard<'static>, DaemonState) {
-        let names: Vec<String> = std::env::vars()
+    fn isolated_state() -> (IsolatedEnv, DaemonState) {
+        let mut names: Vec<String> = std::env::vars()
             .map(|(name, _)| name)
             .filter(|name| name.starts_with("AGENT_BROWSER_"))
             .collect();
+        if !names.iter().any(|name| name == "AGENT_BROWSER_SOCKET_DIR") {
+            names.push("AGENT_BROWSER_SOCKET_DIR".to_string());
+        }
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let guard = EnvGuard::new(&refs);
         for name in &refs {
             guard.remove(name);
         }
+        // Session files go to a scratch directory, never the user's.
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
         let state = DaemonState::new();
-        (guard, state)
+        (
+            IsolatedEnv {
+                _guard: guard,
+                _dir: dir,
+            },
+            state,
+        )
+    }
+
+    struct IsolatedEnv {
+        // Restores the environment after the directory is gone.
+        _guard: EnvGuard<'static>,
+        _dir: tempfile::TempDir,
     }
 
     fn patch_with(entries: Vec<(Key, Requested)>) -> Patch {
@@ -20236,5 +20260,24 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             Some(&json!("/tmp/previous"))
         );
         assert!(state.browser.is_none(), "the failed launch is closed");
+    }
+    #[tokio::test]
+    async fn test_a_live_default_timeout_updates_the_stored_config() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        state.session_id = "timeout-sync".to_string();
+        let config = SessionFile::Config.path("timeout-sync");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, r#"{"debug":false,"default_timeout":90000}"#).unwrap();
+
+        let patch = patch_with(vec![set_to(Key::DefaultTimeout, json!(5000))]);
+        apply_settings_patch(&mut state, &patch, false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            crate::connection::running_daemon_default_timeout("timeout-sync"),
+            Some(5000)
+        );
     }
 }

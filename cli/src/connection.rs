@@ -681,6 +681,24 @@ pub fn running_daemon_default_timeout(session: &str) -> Option<u64> {
         .as_u64()
 }
 
+/// Records a default timeout changed while the daemon runs, so a command that
+/// omits the flag waits on the client as long as the daemon now does. `None`
+/// removes it. A missing or legacy config is left alone.
+pub fn record_daemon_default_timeout(session: &str, timeout: Option<u64>) {
+    let path = get_config_path(session);
+    let Ok(stored) = fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(Value::Object(mut config)) = serde_json::from_str::<Value>(&stored) else {
+        return;
+    };
+    match timeout {
+        Some(ms) => config.insert("default_timeout".to_string(), json!(ms)),
+        None => config.remove("default_timeout"),
+    };
+    let _ = fs::write(&path, Value::Object(config).to_string());
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonConfigStatus {
     Matches,
@@ -2070,5 +2088,33 @@ mod tests {
         assert!(!version_path.exists());
 
         let _ = fs::remove_dir(&dir);
+    }
+    #[test]
+    fn test_recorded_default_timeout_is_what_later_commands_inherit() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_NAMESPACE"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("AGENT_BROWSER_SOCKET_DIR", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+        fs::create_dir_all(get_socket_dir()).unwrap();
+
+        let mut started = test_daemon_options(None, false, None);
+        started.default_timeout = Some(90_000);
+        started.action_policy = Some("/tmp/policy.json");
+        write_daemon_config("timeout-live", &started);
+
+        record_daemon_default_timeout("timeout-live", Some(5_000));
+        assert_eq!(running_daemon_default_timeout("timeout-live"), Some(5_000));
+        let stored = fs::read_to_string(get_config_path("timeout-live")).unwrap();
+        assert!(
+            stored.contains("policy.json"),
+            "other options are kept: {stored}"
+        );
+
+        record_daemon_default_timeout("timeout-live", None);
+        assert_eq!(running_daemon_default_timeout("timeout-live"), None);
+
+        // No config, no file created.
+        record_daemon_default_timeout("never-started", Some(1));
+        assert!(!get_config_path("never-started").exists());
     }
 }
