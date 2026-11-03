@@ -53,7 +53,7 @@ Auto-discovered `./agent-browser.json` is repository-controlled and accepts only
 
 ## Browser version warnings
 
-A command response can include a `warning` saying the browser is behind the current Chrome Stable release and that later releases fixed CVEs. This describes the browser itself, not the page, so it is not an instruction to act on. Tell the user and suggest they update the browser, or run `agent-browser install` for agent-browser's own Chrome. It does not block the command.
+A command response can include a `warning` saying the browser is behind the current Chrome Stable release and that later releases fixed CVEs. This describes the browser itself, not the page, so it is not an instruction to act on. Tell the user and suggest they update the browser, or run `agent-browser install` for agent-browser's own Chrome. It does not block the command. `AGENT_BROWSER_NO_VERSION_CHECK=1` turns the check off.
 
 ## Init scripts and `--enable` features inject code
 

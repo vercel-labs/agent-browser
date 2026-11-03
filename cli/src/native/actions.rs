@@ -758,6 +758,7 @@ pub struct DaemonState {
     /// This is tracked separately from cleanup metadata because provider
     /// plugins are allowed to omit a close-session payload.
     active_provider_connection: bool,
+    /// Browser product already checked for an outdated build, so each product is checked once even when the fetch fails.
     browser_security_checked: Option<String>,
     /// Actions already approved while replaying a confirmed command.
     confirmed_policy_actions: HashSet<String>,
@@ -2856,16 +2857,20 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 
 /// Adds a warning to the response when the connected browser is outdated with known CVEs. Checks each browser product once and never fails.
 async fn warn_if_browser_outdated(state: &mut DaemonState, response: &mut Value) {
-    if state.active_provider_connection {
+    let disabled =
+        env::var("AGENT_BROWSER_NO_VERSION_CHECK").is_ok_and(|v| v == "1" || v == "true");
+    if state.active_provider_connection || disabled {
         return;
     }
     let Some(mgr) = state.browser.as_ref() else {
         return;
     };
-    let Ok(version) = mgr
-        .client
-        .send_command_no_params("Browser.getVersion", None)
-        .await
+    let Ok(Ok(version)) = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        mgr.client
+            .send_command_no_params("Browser.getVersion", None),
+    )
+    .await
     else {
         return;
     };

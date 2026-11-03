@@ -27,14 +27,12 @@ pub async fn outdated_warning(product: &str) -> Option<String> {
 }
 
 async fn fetch_feed() -> Option<String> {
-    let client =
-        crate::tls::apply_to_reqwest(reqwest::Client::builder(), &crate::tls::process_options())
-            .ok()?
-            .https_only(true)
-            .timeout(Duration::from_secs(3))
-            .user_agent(format!("agent-browser/{}", env!("CARGO_PKG_VERSION")))
-            .build()
-            .ok()?;
+    let client = reqwest::Client::builder()
+        .https_only(true)
+        .timeout(Duration::from_secs(3))
+        .user_agent(format!("agent-browser/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .ok()?;
     let mut resp = client.get(FEED_URL).send().await.ok()?;
     if !resp.status().is_success() {
         return None;

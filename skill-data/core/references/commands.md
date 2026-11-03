@@ -632,6 +632,7 @@ AGENT_BROWSER_ENABLE="react-devtools"        # Comma-separated built-in init scr
 AGENT_BROWSER_HIDE_SCROLLBARS="false"        # Keep native scrollbars visible in headless Chromium screenshots
 AGENT_BROWSER_WEBGPU="1"                     # Enable the WebGPU launch preset (see references/webgpu.md)
 AGENT_BROWSER_NO_XVFB="1"                    # Disable automatic Xvfb for headed mode on displayless Linux
+AGENT_BROWSER_NO_VERSION_CHECK="1"           # Skip the outdated-Chrome CVE check and its request to Google
 AGENT_BROWSER_PROVIDER="browserbase"         # Browser provider or configured provider plugin
 BROWSER_USE_API_KEY="your-api-key"           # Browser Use Cloud API key
 BROWSER_USE_PROFILE_ID="profile-uuid"        # Optional Browser Use profile UUID
