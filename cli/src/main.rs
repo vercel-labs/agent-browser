@@ -1492,7 +1492,7 @@ fn main() {
     let clean = clean_args(&args);
     tls::configure_process(&flags);
 
-    let options = flags::before_end_of_options(&args);
+    let options = flags::before_end_of_options(&clean);
     let has_help = options.iter().any(|a| a == "--help" || a == "-h");
     let has_version = options.iter().any(|a| a == "--version" || a == "-V");
 
