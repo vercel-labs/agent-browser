@@ -251,7 +251,8 @@ fn read_webmcp(f: &Flags) -> Option<Requested> {
     (f.no_webmcp || f.cli_no_webmcp).then_some(Requested::Set(Value::Bool(!f.no_webmcp)))
 }
 fn read_no_xvfb(f: &Flags) -> Option<Requested> {
-    on(f.no_xvfb)
+    // An explicit off value has to reach a session that was started with it on.
+    (f.no_xvfb || f.no_xvfb_set).then_some(Requested::Set(Value::Bool(f.no_xvfb)))
 }
 fn read_ca_cert(f: &Flags) -> Option<Requested> {
     string(&f.ca_cert)

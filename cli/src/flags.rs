@@ -509,6 +509,8 @@ pub struct Flags {
     /// Env-only (AGENT_BROWSER_NO_XVFB): disable automatic Xvfb for headed
     /// launches on displayless Linux hosts.
     pub no_xvfb: bool,
+    /// AGENT_BROWSER_NO_XVFB is set, to any value, so an off value can be sent.
+    pub no_xvfb_set: bool,
     pub device: Option<String>,
     pub auto_connect: bool,
     pub pin_tab: bool,
@@ -732,6 +734,7 @@ pub fn try_parse_flags(args: &[String]) -> Result<Flags, String> {
         no_webmcp: env_var_is_truthy("AGENT_BROWSER_NO_WEBMCP")
             || config.no_webmcp.unwrap_or(false),
         no_xvfb: env_var_is_truthy("AGENT_BROWSER_NO_XVFB"),
+        no_xvfb_set: env::var_os("AGENT_BROWSER_NO_XVFB").is_some(),
         device: env::var("AGENT_BROWSER_IOS_DEVICE").ok().or(config.device),
         auto_connect: env_var_is_truthy("AGENT_BROWSER_AUTO_CONNECT")
             || config.auto_connect.unwrap_or(false),

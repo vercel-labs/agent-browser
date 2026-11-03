@@ -9,7 +9,7 @@ use std::hash::{Hash, Hasher};
 use serde_json::{json, Value};
 
 use super::patch::{Patch, Requested};
-use super::running::Running;
+use super::running::{Connection, Running};
 use super::spec::{redacted, spec, Effect, Key, SPECS};
 
 /// One setting whose requested value differs from the running one.
@@ -24,6 +24,16 @@ pub struct Change {
 impl Change {
     pub fn effect(&self) -> Effect {
         spec(self.key).effect
+    }
+
+    /// An ignored request as reported to the caller.
+    pub fn to_ignored_json(&self) -> Value {
+        let mut report = self.to_json(false);
+        report["effect"] = json!("ignored");
+        report["reason"] = json!(
+            "applies only to a browser agent-browser launches itself, not to a CDP, auto-connect or provider session"
+        );
+        report
     }
 
     /// The change as reported to the caller. Secrets are redacted. `applied`
@@ -56,6 +66,10 @@ pub struct Plan {
     pub relaunch: bool,
     /// The settings after the plan is applied.
     pub next: Running,
+    /// Requested values that only describe a browser agent-browser launches
+    /// itself, for a session attached to an external browser. They change
+    /// nothing and never relaunch.
+    pub ignored: Vec<Change>,
 }
 
 impl Plan {
@@ -66,6 +80,31 @@ impl Plan {
 
 /// The connection target keys; setting one displaces the others.
 const CONNECTION_KEYS: [Key; 3] = [Key::Cdp, Key::AutoConnect, Key::Provider];
+
+/// Settings that describe a browser agent-browser starts itself. A session
+/// attached to an external browser ignores them, as the launch commands the CLI
+/// used to send never carried them for those sessions.
+fn is_local_only(key: Key) -> bool {
+    matches!(
+        key,
+        Key::AllowFileAccess
+            | Key::Args
+            | Key::Engine
+            | Key::ExecutablePath
+            | Key::Extensions
+            | Key::Headed
+            | Key::HideScrollbars
+            | Key::NoXvfb
+            | Key::Profile
+            | Key::Proxy
+            | Key::ProxyBypass
+            | Key::ProxyUsername
+            | Key::ProxyPassword
+            | Key::StorageState
+            | Key::UserAgent
+            | Key::Webgpu
+    )
+}
 
 /// The value a setting has when nothing sets it, where that is not "absent".
 fn default_value(key: Key) -> Option<Value> {
@@ -98,6 +137,7 @@ impl Running {
     pub fn plan(&self, patch: &Patch) -> Plan {
         let mut next = self.clone();
         let mut changes: Vec<Change> = Vec::new();
+        let mut ignored: Vec<Change> = Vec::new();
 
         for (key, requested) in patch.iter() {
             match requested {
@@ -118,6 +158,14 @@ impl Running {
                     if self.effective(key).as_ref() == Some(value)
                         && !patch.is_changed_in_place(key)
                     {
+                        continue;
+                    }
+                    if is_local_only(key) && next.connection() != Connection::Local {
+                        ignored.push(Change {
+                            key,
+                            requested: requested.clone(),
+                            running: self.get(key).cloned(),
+                        });
                         continue;
                     }
                     changes.push(Change {
@@ -156,6 +204,14 @@ impl Running {
                     if default_value(key).as_ref() == Some(current) {
                         continue;
                     }
+                    if is_local_only(key) && next.connection() != Connection::Local {
+                        ignored.push(Change {
+                            key,
+                            requested: Requested::Default,
+                            running: Some(current.clone()),
+                        });
+                        continue;
+                    }
                     changes.push(Change {
                         key,
                         requested: Requested::Default,
@@ -174,6 +230,7 @@ impl Running {
             changes,
             relaunch,
             next,
+            ignored,
         }
     }
 

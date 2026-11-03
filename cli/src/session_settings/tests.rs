@@ -1213,3 +1213,73 @@ fn a_patch_without_launch_settings_keeps_only_live_ones() {
     assert!(live.get(Key::Profile).is_none());
     assert!(live.get(Key::DefaultTimeout).is_some());
 }
+
+#[test]
+fn local_only_settings_are_ignored_for_external_sessions() {
+    for target in [
+        (Key::Cdp, json!("ws://127.0.0.1:9999/devtools/browser/x")),
+        (Key::Provider, json!("browserbase")),
+        (Key::AutoConnect, json!(true)),
+    ] {
+        let running = running_with(&[target]);
+        let plan = running.plan(&patch_of(&[
+            is(Key::Args, json!(["--x"])),
+            is(Key::Profile, json!("/p")),
+            is(Key::ExecutablePath, json!("/chrome")),
+            is(Key::Extensions, json!(["/e"])),
+            is(Key::Proxy, json!("http://proxy:1")),
+            is(Key::UserAgent, json!("ua")),
+            is(Key::IgnoreHttpsErrors, json!(true)),
+        ]));
+
+        // Only the setting that also applies to an external browser changes.
+        assert_eq!(changed_keys(&plan), vec![Key::IgnoreHttpsErrors]);
+        let ignored: Vec<Key> = plan.ignored.iter().map(|c| c.key).collect();
+        assert_eq!(
+            ignored,
+            vec![
+                Key::Profile,
+                Key::Args,
+                Key::ExecutablePath,
+                Key::Extensions,
+                Key::Proxy,
+                Key::UserAgent
+            ]
+        );
+        assert_eq!(plan.next.get(Key::Args), None);
+        assert!(plan.ignored[0].to_ignored_json()["reason"].is_string());
+
+        let only_local = running.plan(&patch_of(&[is(Key::Args, json!(["--x"]))]));
+        assert!(
+            !only_local.relaunch,
+            "env args never start a new cloud session"
+        );
+        assert!(only_local.is_empty());
+    }
+}
+
+#[test]
+fn local_only_settings_apply_to_a_local_session() {
+    let plan = Running::defaults().plan(&patch_of(&[is(Key::Args, json!(["--x"]))]));
+    assert!(plan.relaunch && plan.ignored.is_empty());
+
+    // A target set by the same patch makes the local-only keys inert.
+    let plan = Running::defaults().plan(&patch_of(&[
+        is(Key::Provider, json!("browserbase")),
+        is(Key::Args, json!(["--x"])),
+    ]));
+    assert_eq!(plan.ignored.len(), 1);
+}
+
+#[test]
+fn no_xvfb_can_be_turned_off() {
+    let mut flags = blank_flags();
+    flags.no_xvfb_set = true;
+    flags.no_xvfb = false;
+    let patch = Patch::from_flags(&flags);
+    assert_eq!(patch.get(Key::NoXvfb), Some(&Requested::Set(json!(false))));
+
+    let running = running_with(&[(Key::NoXvfb, json!(true))]);
+    assert_eq!(changed_keys(&running.plan(&patch)), vec![Key::NoXvfb]);
+    assert!(Patch::from_flags(&blank_flags()).get(Key::NoXvfb).is_none());
+}

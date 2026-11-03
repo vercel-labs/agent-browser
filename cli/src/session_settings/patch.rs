@@ -91,6 +91,11 @@ impl Patch {
         live
     }
 
+    /// Drops the forced relaunch, for a command that follows one that carried it.
+    pub fn clear_relaunch(&mut self) {
+        self.relaunch = false;
+    }
+
     /// Drops a key the patch would otherwise carry.
     pub fn remove(&mut self, key: Key) {
         self.entries.remove(&key);
