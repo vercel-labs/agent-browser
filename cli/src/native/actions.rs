@@ -77,7 +77,7 @@ pub struct PendingConfirmation {
     approved_actions: Vec<String>,
     /// The flow a `flow_run` was checked against, so the confirmed run
     /// executes the same file rather than one read again from disk.
-    flow: Option<Value>,
+    flow: Option<super::flow::Flow>,
 }
 
 #[derive(Debug, Clone)]
@@ -671,7 +671,7 @@ pub struct DaemonState {
     pub policy: Option<ActionPolicy>,
     pub pending_confirmation: Option<PendingConfirmation>,
     /// A flow handed from a confirmation to the re-executed `flow_run`.
-    preloaded_flow: Option<Value>,
+    preloaded_flow: Option<super::flow::Flow>,
     pub har_recording: bool,
     pub har_entries: Vec<HarEntry>,
     /// Commands and request tags captured by `flow start`.
@@ -2805,7 +2805,7 @@ fn policy_actions_for_command(
     action: &str,
     needs_implicit_launch: bool,
     attached: Option<&AttachedTarget>,
-    flow: Option<&Value>,
+    flow: Option<&super::flow::Flow>,
 ) -> Vec<String> {
     let mut actions = vec![action.to_string()];
     // `a11y <url>` performs a real browser navigation before the audit. Keep
@@ -3075,7 +3075,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     let mut lifecycle_relaunched_browser = false;
     // The flow is read once per command: policy, confirmation and the run all
     // see the same file.
-    let mut run_flow: Option<Value> = if action == "flow_run" {
+    let mut run_flow: Option<super::flow::Flow> = if action == "flow_run" {
         state
             .preloaded_flow
             .take()
@@ -12144,17 +12144,14 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     })?;
     let path = super::flow::write_flow(&flow)?;
     state.flow.mark_saved(last);
-    state.flow.saved.push((
-        flow["origin"].as_str().unwrap_or_default().to_string(),
-        name,
-    ));
+    state.flow.saved.push((flow.origin.clone(), name));
     report["path"] = json!(path.to_string_lossy());
     report["from"] = json!(first);
     report["to"] = json!(last);
     Ok(report)
 }
 
-fn flow_for_command(cmd: &Value) -> Option<Value> {
+fn flow_for_command(cmd: &Value) -> Option<super::flow::Flow> {
     let name = cmd.get("name").and_then(|v| v.as_str())?;
     super::flow::load_flow(name, cmd.get("origin").and_then(|v| v.as_str())).ok()
 }
@@ -12162,7 +12159,7 @@ fn flow_for_command(cmd: &Value) -> Option<Value> {
 /// The single write gate: the first write a run sends that `--allow-write`
 /// does not cover and no confirmation has approved, as (id, policy action).
 fn uncovered_flow_write(
-    flow: &Value,
+    flow: &super::flow::Flow,
     allow: &super::flow::AllowWrite,
     confirmed: &HashSet<String>,
 ) -> Option<(String, String)> {
@@ -12177,7 +12174,11 @@ fn uncovered_flow_write(
 
 /// The policy action to confirm before the run starts. An id the flow does
 /// not have is left to the run to report.
-fn unconfirmed_flow_write(cmd: &Value, flow: &Value, state: &DaemonState) -> Option<String> {
+fn unconfirmed_flow_write(
+    cmd: &Value,
+    flow: &super::flow::Flow,
+    state: &DaemonState,
+) -> Option<String> {
     let allow = super::flow::AllowWrite::parse(cmd.get("allowWrite")).ok()?;
     super::flow::check_write_ids(flow, &allow).ok()?;
     uncovered_flow_write(flow, &allow, &state.confirmed_policy_actions).map(|(_, action)| action)
@@ -12186,7 +12187,7 @@ fn unconfirmed_flow_write(cmd: &Value, flow: &Value, state: &DaemonState) -> Opt
 async fn handle_flow_run(
     cmd: &Value,
     state: &mut DaemonState,
-    flow: Option<Value>,
+    flow: Option<super::flow::Flow>,
 ) -> Result<Value, String> {
     // Commands a run sends to the browser are not part of the recording.
     state.flow.set_suspended(true);
@@ -12198,7 +12199,7 @@ async fn handle_flow_run(
 async fn handle_flow_run_inner(
     cmd: &Value,
     state: &mut DaemonState,
-    loaded: Option<Value>,
+    loaded: Option<super::flow::Flow>,
 ) -> Result<Value, String> {
     let started = std::time::Instant::now();
     let name = cmd
@@ -12215,17 +12216,16 @@ async fn handle_flow_run_inner(
     let allow = super::flow::AllowWrite::parse(cmd.get("allowWrite"))?;
     super::flow::check_write_ids(&flow, &allow)?;
     if let Some((id, _)) = uncovered_flow_write(&flow, &allow, &state.confirmed_policy_actions) {
-        let w = flow["writes"]
-            .as_array()
-            .and_then(|ws| ws.iter().find(|w| w["id"] == id.as_str()))
-            .cloned()
-            .unwrap_or_default();
+        let w = flow.write(&id);
         return Err(format!(
             "flow '{}' sends {} {} ({}); rerun with --allow-write {} to send it",
             name,
-            w["method"].as_str().unwrap_or(""),
-            w["url"].as_str().unwrap_or(""),
-            w["kind"].as_str().unwrap_or("write"),
+            w.map_or("", |w| w.method.as_str()),
+            w.map_or("", |w| w.url.as_str()),
+            w.map_or("write", |w| match w.kind {
+                super::flow::WriteKind::Explicit => "explicit",
+                super::flow::WriteKind::Suspected => "suspected",
+            }),
             id
         ));
     }
@@ -12260,7 +12260,7 @@ async fn handle_flow_run_inner(
         }
         let mut done = false;
         for tier in super::flow::tiers_for(&flow, &req.id) {
-            let already_sent = tier != "replay"
+            let already_sent = tier != super::flow::Tier::Replay
                 && super::flow::is_flow_write(&flow, &req.id)
                 && completed.contains(&req.id);
             let result = if already_sent {
@@ -12282,7 +12282,7 @@ async fn handle_flow_run_inner(
                 }
             } else {
                 match tier {
-                    "http" => {
+                    super::flow::Tier::Http => {
                         let cookie = match state.browser.as_ref() {
                             Some(mgr) => match mgr.active_session_id() {
                                 Ok(sid) => cookies::get_cookies(
@@ -12300,7 +12300,7 @@ async fn handle_flow_run_inner(
                         let routed = flow_routed_response(state, &req.url).await;
                         super::flow::run_http(&client, req, cookie.as_deref(), routed).await
                     }
-                    "page" => run_flow_in_page(&flow, req, state).await,
+                    super::flow::Tier::Page => run_flow_in_page(&flow, req, state).await,
                     _ => {
                         let wanted: Vec<&super::flow::PreparedRequest> = requests[index..]
                             .iter()
@@ -12308,7 +12308,7 @@ async fn handle_flow_run_inner(
                                 r.id == req.id
                                     || super::flow::is_flow_write(&flow, &r.id)
                                     || super::flow::tiers_for(&flow, &r.id).first()
-                                        == Some(&"replay")
+                                        == Some(&super::flow::Tier::Replay)
                             })
                             .collect();
                         let result = run_flow_replay(
@@ -12377,7 +12377,7 @@ async fn handle_flow_run_inner(
             kind,
             name,
             stop.step,
-            stop.tier,
+            stop.tier.name(),
             stop.reason.as_deref().unwrap_or("")
         );
         if let Some(wait) = stop.retry_after.as_deref() {
@@ -12402,7 +12402,7 @@ async fn handle_flow_run_inner(
     let shape = super::flow::Shape::from_cmd(cmd);
     if let Some(body) = results
         .iter()
-        .find(|r| r.ok && r.id == flow["output"].as_str().unwrap_or(""))
+        .find(|r| r.ok && r.id == flow.output)
         .and_then(|r| r.body.as_ref())
     {
         let unknown = super::flow::unknown_fields(body, &shape);
@@ -12410,14 +12410,7 @@ async fn handle_flow_run_inner(
             return Err(format!(
                 "no item has field(s) {}. Fields: {}",
                 unknown.join(", "),
-                flow["itemFields"]
-                    .as_array()
-                    .map(|f| f
-                        .iter()
-                        .filter_map(|x| x.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "))
-                    .unwrap_or_default()
+                flow.item_fields.join(", ")
             ));
         }
     }
@@ -12438,7 +12431,7 @@ async fn handle_flow_run_inner(
             let tried = results
                 .iter()
                 .filter(|r| r.step == step)
-                .map(|r| format!("{}: {}", r.tier, r.reason.as_deref().unwrap_or("ok")))
+                .map(|r| format!("{}: {}", r.tier.name(), r.reason.as_deref().unwrap_or("ok")))
                 .collect::<Vec<_>>()
                 .join("; ");
             return Err(format!(
@@ -12446,21 +12439,12 @@ async fn handle_flow_run_inner(
                 name, step, tried
             ));
         }
-        let examples = flow["params"]
-            .as_array()
-            .map(|ps| {
-                ps.iter()
-                    .map(|p| {
-                        format!(
-                            "{}={}",
-                            p["name"].as_str().unwrap_or(""),
-                            p["example"].as_str().unwrap_or("")
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .unwrap_or_default();
+        let examples = flow
+            .params
+            .iter()
+            .map(|p| format!("{}={}", p.name, p.example.as_deref().unwrap_or("")))
+            .collect::<Vec<_>>()
+            .join(" ");
         if failure.and_then(|r| r.status).is_none() {
             return Err(format!(
                 "flow '{}' failed at step {}: {}",
@@ -12607,8 +12591,8 @@ async fn flow_ensure_browser(state: &mut DaemonState) -> Result<(), String> {
 }
 
 /// The in-page tier needs a tab that is already on the flow's site.
-async fn flow_tab_on_site(flow: &Value, state: &DaemonState) -> Result<(), String> {
-    let allowed = super::flow::derive_allowed_hosts(flow["startUrl"].as_str().unwrap_or(""));
+async fn flow_tab_on_site(flow: &super::flow::Flow, state: &DaemonState) -> Result<(), String> {
+    let allowed = super::flow::derive_allowed_hosts(&flow.start_url);
     let current = match state.browser.as_ref() {
         Some(mgr) => mgr.get_url().await.ok(),
         None => None,
@@ -12628,7 +12612,7 @@ async fn flow_tab_on_site(flow: &Value, state: &DaemonState) -> Result<(), Strin
 }
 
 async fn run_flow_in_page(
-    flow: &Value,
+    flow: &super::flow::Flow,
     req: &super::flow::PreparedRequest,
     state: &mut DaemonState,
 ) -> super::flow::TierResult {
@@ -12688,7 +12672,7 @@ struct ReplayRun {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_flow_replay(
-    flow: &Value,
+    flow: &super::flow::Flow,
     params: &[(String, String)],
     req: &super::flow::PreparedRequest,
     allow: &super::flow::AllowWrite,
@@ -12702,17 +12686,14 @@ async fn run_flow_replay(
         // A replay repeats every recorded command, so it also sends the writes
         // no kept request covers; each must be allowed, confirmed and in policy.
         for w in super::flow::replay_only_writes(flow) {
-            let id = w["id"].as_str().unwrap_or("");
+            let id = w.id.as_str();
             if let Err(reason) = replay_write_approved(state, allow, id) {
                 return super::flow::replay_unavailable(
                     req,
                     started,
                     format!(
                         "replaying the recorded commands would also send {} {} ({}): {}",
-                        w["method"].as_str().unwrap_or(""),
-                        w["url"].as_str().unwrap_or(""),
-                        id,
-                        reason
+                        w.method, w.url, id, reason
                     ),
                 );
             }
@@ -12753,7 +12734,7 @@ async fn run_flow_replay(
 /// `Err(Ok(reason))` means the replay cannot run at all, `Err(Err(reason))`
 /// that it could not start.
 async fn capture_flow_replay(
-    flow: &Value,
+    flow: &super::flow::Flow,
     params: &[(String, String)],
     state: &mut DaemonState,
     wanted: &[&super::flow::PreparedRequest],
@@ -19940,7 +19921,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
         guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
         let flow = json!({
-            "version": 2, "name": "edited", "origin": "example.com",
+            "version": 1, "name": "edited", "origin": "example.com",
             "startUrl": "https://example.com/", "allowedHosts": ["example.com"],
             "params": [], "output": "s1r1", "itemFields": [], "verifiedAt": null,
             "steps": [{ "seq": 1, "ok": true, "command": { "action": "navigate" }, "requests": [{
@@ -19949,7 +19930,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
                 "expect": { "status": 200, "mime": "application/json", "signature": {}, "bytes": 2, "itemFields": [], "extract": null }
             }] }]
         });
-        super::super::flow::write_flow(&flow).unwrap();
+        save_flow_json(flow);
         let mut state = DaemonState::new();
         let err = handle_flow_run(&json!({ "name": "edited", "params": {} }), &mut state, None)
             .await
@@ -19963,7 +19944,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     #[tokio::test]
     async fn the_page_tier_needs_a_tab_on_the_flows_site() {
         let state = DaemonState::new();
-        let flow = json!({ "startUrl": "https://example.com/" });
+        let flow = super::super::flow::flow_of(json!({ "startUrl": "https://example.com/" }));
         let err = flow_tab_on_site(&flow, &state).await.unwrap_err();
         assert!(
             err.contains("example.com") && err.contains("open the flow's site"),
@@ -19972,22 +19953,27 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     /// A flow with one POST to a local server that answers `{"ok":true}`.
+    fn save_flow_json(flow: Value) {
+        let flow = super::super::flow::flow_of(flow);
+        super::super::flow::write_flow(&flow).unwrap();
+    }
+
     fn write_flow_fixture(dir: &std::path::Path, port: u16) {
         let url = format!("http://127.0.0.1:{}/api/cart", port);
         let flow = json!({
-            "version": 2, "name": "cart", "origin": "127.0.0.1",
+            "version": 1, "name": "cart", "origin": "127.0.0.1",
             "startUrl": format!("http://127.0.0.1:{}/", port), "allowedHosts": ["127.0.0.1"],
             "params": [], "output": "s1r1", "itemFields": [], "verifiedAt": null,
             "writes": [{ "id": "s1r1", "method": "POST", "url": url, "kind": "explicit", "step": 1 }],
             "steps": [{ "seq": 1, "ok": true, "command": { "action": "click" }, "requests": [{
-                "id": "s1r1", "method": "POST", "url": url, "headers": {}, "body": "{}",
+                "id": "s1r1", "write": true, "method": "POST", "url": url, "headers": {}, "body": "{}",
                 "expect": { "status": 200, "mime": "application/json",
                     "signature": super::super::flow::signature(&json!({ "ok": true })),
                     "bytes": 11, "itemFields": [], "extract": null }
             }] }]
         });
         let _ = dir;
-        super::super::flow::write_flow(&flow).unwrap();
+        save_flow_json(flow);
     }
 
     fn serve_json_once() -> u16 {
@@ -20182,7 +20168,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
         guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
         let flow = json!({
-            "version": 2, "name": "buy", "origin": "127.0.0.1",
+            "version": 1, "name": "buy", "origin": "127.0.0.1",
             "startUrl": "http://127.0.0.1:9/", "allowedHosts": ["127.0.0.1"],
             "params": [], "output": "s2r1", "itemFields": [], "verifiedAt": null,
             "writes": [{ "id": "s1w1", "method": "POST", "url": "http://127.0.0.1:9/buy", "kind": "explicit", "step": 1 }],
@@ -20194,7 +20180,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
                 }] }
             ]
         });
-        super::super::flow::write_flow(&flow).unwrap();
+        save_flow_json(flow);
         let mut state = DaemonState::new();
         state.policy = None;
         state.confirm_actions = None;
@@ -20220,19 +20206,19 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let sig = super::super::flow::signature(&json!({ "ok": true }));
         let expect = json!({ "status": 200, "mime": "application/json", "signature": sig, "bytes": 11, "itemFields": [], "extract": null });
         let flow = json!({
-            "version": 2, "name": "twice", "origin": "127.0.0.1",
+            "version": 1, "name": "twice", "origin": "127.0.0.1",
             "startUrl": format!("{}/", base), "allowedHosts": ["127.0.0.1"],
             "params": [], "output": "s2r1", "itemFields": [], "verifiedAt": null,
             "writes": [{ "id": "s1r1", "method": "POST", "url": format!("{}/api/cart", base), "kind": "explicit", "step": 1 }],
             "steps": [
                 { "seq": 1, "ok": true, "command": { "action": "click", "selector": "#add" }, "requests": [{
-                    "id": "s1r1", "method": "POST", "url": format!("{}/api/cart", base), "headers": {}, "body": "{}", "expect": expect }] },
+                    "id": "s1r1", "write": true, "method": "POST", "url": format!("{}/api/cart", base), "headers": {}, "body": "{}", "expect": expect }] },
                 { "seq": 2, "ok": true, "command": { "action": "click", "selector": "#list" }, "requests": [{
                     "id": "s2r1", "method": "GET", "url": format!("{}/api/items?c={{{{@s1r1.ok}}}}", base), "headers": {}, "body": null,
                     "tier": "replay", "expect": expect }] }
             ]
         });
-        super::super::flow::write_flow(&flow).unwrap();
+        save_flow_json(flow);
         let mut state = DaemonState::new();
         state.policy = None;
         state.confirm_actions = None;
@@ -20255,19 +20241,19 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let base = format!("http://127.0.0.1:{}", port);
         let url = format!("{}/api/cart", base);
         let flow = json!({
-            "version": 2, "name": "rejected", "origin": "127.0.0.1",
+            "version": 1, "name": "rejected", "origin": "127.0.0.1",
             "startUrl": format!("{}/", base), "allowedHosts": ["127.0.0.1"],
             "params": [], "output": "s1r1", "itemFields": [], "verifiedAt": null,
             "writes": [{ "id": "s1r1", "method": "POST", "url": url, "kind": "explicit", "step": 1 }],
             "steps": [
                 // A script command keeps the replay from running a browser.
                 { "seq": 1, "ok": true, "command": { "action": "evaluate", "script": "1" }, "requests": [{
-                    "id": "s1r1", "method": "POST", "url": url, "headers": {}, "body": "{}",
+                    "id": "s1r1", "write": true, "method": "POST", "url": url, "headers": {}, "body": "{}",
                     "expect": { "status": 200, "mime": "application/json", "signature": super::super::flow::signature(&json!({ "ok": true })),
                         "bytes": 11, "itemFields": [], "extract": null, "strippedAuth": true } }] }
             ]
         });
-        super::super::flow::write_flow(&flow).unwrap();
+        save_flow_json(flow);
         let mut state = DaemonState::new();
         state.policy = None;
         state.confirm_actions = None;

@@ -9,7 +9,8 @@ use serde_json::{json, Map, Value};
 
 use super::actions::HarEntry;
 
-pub const FLOW_VERSION: u64 = 2;
+mod model;
+pub use model::*;
 
 /// Values `--capture` accepts.
 pub const CAPTURE_MODES: &[&str] = &["flow"];
@@ -625,7 +626,7 @@ fn host_matches(host: &str, allowed: &str) -> bool {
 
 /// Reject a URL outside the hosts a flow was recorded on. The start URL's
 /// base domain is always required; `allowedHosts` in the file can only narrow it.
-pub fn check_allowed_host(flow: &Value, url: &str) -> Result<(), String> {
+pub fn check_allowed_host(flow: &Flow, url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|_| format!("'{}' is not a valid URL", url))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(format!("'{}' is not an http(s) URL", url));
@@ -634,16 +635,9 @@ pub fn check_allowed_host(flow: &Value, url: &str) -> Result<(), String> {
         .host_str()
         .ok_or_else(|| format!("'{}' has no host", url))?
         .to_ascii_lowercase();
-    let base = derive_allowed_hosts(flow["startUrl"].as_str().unwrap_or(""));
-    let listed: Vec<String> = flow["allowedHosts"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|h| h.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    let base = derive_allowed_hosts(&flow.start_url);
     let in_base = base.iter().any(|a| host_matches(&host, a));
+    let listed = &flow.allowed_hosts;
     let in_listed = listed.is_empty() || listed.iter().any(|a| host_matches(&host, a));
     if in_base && in_listed {
         Ok(())
@@ -1157,7 +1151,7 @@ fn with_page_query_params(
 }
 
 /// Build the flow file and the save report from what was recorded.
-pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
+pub fn build_flow(input: SaveInput<'_>) -> Result<(Flow, Value), String> {
     let start = start_url(input.commands)
         .or_else(|| {
             input
@@ -1386,7 +1380,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
         None => default_output(&steps),
     };
 
-    let mut flow = json!({
+    let flow_json = json!({
         "version": FLOW_VERSION,
         "name": input.name,
         "origin": host,
@@ -1415,21 +1409,23 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
         "steps": steps,
     });
 
+    let mut flow: Flow = serde_json::from_value(flow_json)
+        .map_err(|e| format!("the flow could not be built: {}", e))?;
     let consumed = dependencies(&flow, &output);
     let writes = collect_writes(&input, &base, &given, &har_ids, &consumed);
-    flow["writes"] = json!(writes);
+    for r in flow.steps.iter_mut().flat_map(|s| s.requests.iter_mut()) {
+        r.write = writes.iter().any(|w| w.id == r.id);
+    }
+    flow.writes = writes;
 
-    let requests_report: Vec<Value> = flow["steps"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|s| s["requests"].as_array().cloned().unwrap_or_default())
+    let requests_report: Vec<Value> = flow
+        .requests()
         .map(|r| {
             json!({
-                "id": r["id"],
-                "method": r["method"],
-                "url": r["url"],
-                "bytes": r["expect"]["bytes"],
+                "id": r.id,
+                "method": r.method,
+                "url": r.url,
+                "bytes": r.expect.bytes,
             })
         })
         .collect();
@@ -1447,7 +1443,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
             .cloned()
             .collect::<Vec<_>>(),
         "references": links.references,
-        "writes": flow["writes"],
+        "writes": flow.writes,
         "gaps": gaps,
         "droppedHeaders": dropped_headers,
         "verified": false,
@@ -1697,23 +1693,11 @@ pub fn fill_references(
 }
 
 /// Request ids a request needs answers from, in run order.
-pub fn dependencies(flow: &Value, id: &str) -> Vec<String> {
-    let requests: Vec<&Value> = flow["steps"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|s| s["requests"].as_array().into_iter().flatten())
-        .collect();
+pub fn dependencies(flow: &Flow, id: &str) -> Vec<String> {
     let refs_of = |rid: &str| -> Vec<String> {
-        requests
-            .iter()
-            .find(|r| r["id"] == rid)
+        flow.request(rid)
             .map(|r| {
-                let text = format!(
-                    "{} {}",
-                    r["url"].as_str().unwrap_or(""),
-                    r["body"].as_str().unwrap_or("")
-                );
+                let text = format!("{} {}", r.url, r.body.as_deref().unwrap_or(""));
                 text.match_indices("{{@")
                     .filter_map(|(i, _)| text[i + 3..].split('.').next().map(String::from))
                     .collect()
@@ -1730,11 +1714,9 @@ pub fn dependencies(flow: &Value, id: &str) -> Vec<String> {
         }
         i += 1;
     }
-    requests
-        .iter()
-        .filter_map(|r| r["id"].as_str())
+    flow.requests()
+        .map(|r| r.id.clone())
         .filter(|r| needed.iter().any(|n| n == r))
-        .map(String::from)
         .collect()
 }
 
@@ -2008,10 +1990,8 @@ fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     std::fs::write(path, text)
 }
 
-pub fn write_flow(flow: &Value) -> Result<PathBuf, String> {
-    let origin = flow["origin"].as_str().ok_or("flow has no origin")?;
-    let name = flow["name"].as_str().ok_or("flow has no name")?;
-    let path = flow_path(origin, name)?;
+pub fn write_flow(flow: &Flow) -> Result<PathBuf, String> {
+    let path = flow_path(&flow.origin, &flow.name)?;
     if let Some(parent) = path.parent() {
         create_private_dirs(parent)
             .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
@@ -2022,7 +2002,21 @@ pub fn write_flow(flow: &Value) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-pub fn list_flows(origin: Option<&str>) -> Vec<Value> {
+/// A flow file on disk, with the directory it was found in.
+struct StoredFlow {
+    dir_origin: String,
+    flow: Flow,
+}
+
+impl StoredFlow {
+    /// The directory, the file's origin and its start URL must agree.
+    fn is_consistent(&self) -> bool {
+        self.flow.origin == self.dir_origin
+            && host_of(&self.flow.start_url).as_deref() == Some(self.dir_origin.as_str())
+    }
+}
+
+fn stored_flows(origin: Option<&str>) -> Vec<StoredFlow> {
     let mut out = Vec::new();
     let Ok(origins) = std::fs::read_dir(flows_dir()) else {
         return out;
@@ -2045,111 +2039,138 @@ pub fn list_flows(origin: Option<&str>) -> Vec<Value> {
             let Ok(text) = std::fs::read_to_string(f.path()) else {
                 continue;
             };
-            let Ok(flow) = serde_json::from_str::<Value>(&text) else {
+            let Ok(flow) = serde_json::from_str::<Flow>(&text) else {
                 continue;
             };
-            out.push(json!({
-                "name": flow["name"],
-                "origin": dir_origin,
-                "valid": flow["origin"] == dir_origin.as_str()
-                    && flow["startUrl"].as_str().and_then(host_of).as_deref() == Some(dir_origin.as_str()),
-                "params": flow["params"].as_array().map(|ps| ps.iter().map(|p| p["name"].clone()).collect::<Vec<_>>()).unwrap_or_default(),
-                "examples": flow["params"].as_array().map(|ps| ps.iter().filter_map(|p| Some((p["name"].as_str()?.to_string(), if p["example"].is_string() { p["example"].clone() } else { json!("<value>") }))).collect::<Map<String, Value>>()).unwrap_or_default(),
-                "description": tool_description(&flow),
-                "inputSchema": input_schema(&flow),
-                "paramSources": flow["params"].as_array().map(|ps| ps.iter().filter_map(|p| Some((p["name"].as_str()?.to_string(), json!(format!("{} {}", p["from"]["request"].as_str()?, p["from"]["list"].as_str()?))))).collect::<Map<String, Value>>()).unwrap_or_default(),
-                "itemFields": flow["itemFields"],
-                "recordedOn": flow["startUrl"],
-                "provenance": flow["provenance"],
-                "verifiedAt": flow["verifiedAt"],
-            }));
+            out.push(StoredFlow {
+                dir_origin: dir_origin.clone(),
+                flow,
+            });
         }
     }
     out
 }
 
+/// Saved flows as the summaries `flow list`, the hint and WebMCP show.
+pub fn list_flows(origin: Option<&str>) -> Vec<Value> {
+    stored_flows(origin)
+        .into_iter()
+        .map(|stored| {
+            let flow = &stored.flow;
+            json!({
+                "name": flow.name,
+                "origin": stored.dir_origin,
+                "valid": stored.is_consistent(),
+                "params": flow.params.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
+                "examples": flow.params.iter()
+                    .map(|p| (p.name.clone(), json!(p.example.clone().unwrap_or_else(|| "<value>".to_string()))))
+                    .collect::<Map<String, Value>>(),
+                "description": tool_description(flow),
+                "inputSchema": input_schema(flow),
+                "paramSources": flow.params.iter()
+                    .filter_map(|p| {
+                        let from = p.from.as_ref()?;
+                        Some((p.name.clone(), json!(format!("{} {}", from.request.as_ref()?, from.list.as_ref()?))))
+                    })
+                    .collect::<Map<String, Value>>(),
+                "itemFields": flow.item_fields,
+                "recordedOn": flow.start_url,
+                "provenance": flow.provenance,
+                "verifiedAt": flow.verified_at,
+            })
+        })
+        .collect()
+}
+
 /// A one-line description in the shape of a WebMCP tool's.
-fn tool_description(flow: &Value) -> String {
-    if let Some(text) = flow["description"]
-        .as_str()
-        .filter(|t| !t.trim().is_empty())
-    {
+fn tool_description(flow: &Flow) -> String {
+    if let Some(text) = flow.description.as_deref().filter(|t| !t.trim().is_empty()) {
         return text.chars().take(300).collect();
     }
-    let fields: Vec<&str> = flow["itemFields"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|f| f.as_str())
-        .collect();
-    let mut out = format!(
-        "Replays the task recorded on {}",
-        flow["startUrl"].as_str().unwrap_or("this site")
-    );
-    if !fields.is_empty() {
-        out.push_str(&format!("; returns items with {}", fields.join(", ")));
+    let mut out = format!("Replays the task recorded on {}", flow.start_url);
+    if !flow.item_fields.is_empty() {
+        out.push_str(&format!(
+            "; returns items with {}",
+            flow.item_fields.join(", ")
+        ));
     }
     out
 }
 
 /// The flow's params as a JSON Schema, the same shape WebMCP tools declare.
-/// Every param is optional: a run uses the recorded value when one is missing.
-pub fn input_schema(flow: &Value) -> Value {
+/// A param with a recorded value is optional; a typed one must be passed.
+pub fn input_schema(flow: &Flow) -> Value {
     let mut properties = Map::new();
-    for p in flow["params"].as_array().into_iter().flatten() {
-        let Some(name) = p["name"].as_str() else {
-            continue;
-        };
-        let mut description = match p["example"].as_str() {
+    for p in &flow.params {
+        let mut description = match p.example.as_deref() {
             Some(example) => format!("Recorded value: {}", example),
             None => "Typed during the recording; pass a value".to_string(),
         };
-        if let Some(list) = p["from"]["list"].as_str() {
+        if let Some(list) = p.from.as_ref().and_then(|f| f.list.as_deref()) {
             description.push_str(&format!(". One of the site's {} values", list));
         }
         properties.insert(
-            name.to_string(),
+            p.name.clone(),
             json!({ "type": "string", "description": description }),
         );
     }
     json!({ "type": "object", "properties": properties, "additionalProperties": false })
 }
 
-pub fn load_flow(name: &str, origin: Option<&str>) -> Result<Value, String> {
+/// Why a file named like the flow cannot be read, when one exists.
+fn unreadable_flow(name: &str, origin: Option<&str>) -> Option<String> {
+    let dirs = std::fs::read_dir(flows_dir()).ok()?;
+    for dir in dirs.flatten().filter(|d| d.path().is_dir()) {
+        let host = dir.file_name().to_string_lossy().to_string();
+        if origin.is_some_and(|o| base_domain(o) != base_domain(&host)) {
+            continue;
+        }
+        let path = dir.path().join(format!("{}.json", name));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Err(e) = serde_json::from_str::<Flow>(&text) {
+            return Some(format!("{} is not a valid flow: {}", path.display(), e));
+        }
+    }
+    None
+}
+
+pub fn load_flow(name: &str, origin: Option<&str>) -> Result<Flow, String> {
     valid_name(name)?;
-    let matches: Vec<Value> = list_flows(origin)
+    let mut matches: Vec<StoredFlow> = stored_flows(origin)
         .into_iter()
-        .filter(|f| f["name"] == name)
+        .filter(|s| s.flow.name == name)
         .collect();
-    match matches.as_slice() {
-        [] => Err(format!(
-            "no saved flow named '{}'. Run `flow list` to see saved flows",
-            name
-        )),
-        [one] if one["valid"] != true => Err(format!(
-            "flow '{}' does not match its origin directory {}; re-save it",
-            name,
-            one["origin"].as_str().unwrap_or("")
-        )),
-        [one] => {
-            let path = flow_path(one["origin"].as_str().unwrap_or_default(), name)?;
-            let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            let flow: Value = serde_json::from_str(&text)
-                .map_err(|e| format!("{} is not valid JSON: {}", path.display(), e))?;
-            if flow["version"].as_u64().unwrap_or(1) < FLOW_VERSION {
+    match matches.len() {
+        0 => Err(unreadable_flow(name, origin).unwrap_or_else(|| {
+            format!(
+                "no saved flow named '{}'. Run `flow list` to see saved flows",
+                name
+            )
+        })),
+        1 => {
+            let stored = matches.remove(0);
+            if !stored.is_consistent() {
                 return Err(format!(
-                    "flow '{}' was saved in an older format (version {}); re-save it with `--capture flow` and `flow save`",
-                    name,
-                    flow["version"].as_u64().unwrap_or(1)
+                    "flow '{}' does not match its origin directory {}; re-save it",
+                    name, stored.dir_origin
                 ));
             }
-            Ok(flow)
+            if stored.flow.version != FLOW_VERSION {
+                return Err(format!(
+                    "flow '{}' has unsupported version {}",
+                    name, stored.flow.version
+                ));
+            }
+            Ok(stored.flow)
         }
-        many => Err(format!(
+        _ => Err(format!(
             "flow '{}' exists for several origins ({}); pass --origin",
             name,
-            many.iter()
-                .filter_map(|f| f["origin"].as_str())
+            matches
+                .iter()
+                .map(|m| m.dir_origin.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
         )),
@@ -2168,49 +2189,39 @@ pub struct PreparedRequest {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Option<String>,
-    pub expect: Value,
+    pub expect: Expect,
+    /// A run needs this request allowed before it sends it.
+    pub write: bool,
 }
 
 /// Requests to send for a run: the one the flow answers with, and the ones
 /// whose responses it takes values from.
 pub fn prepare(
-    flow: &Value,
+    flow: &Flow,
     cmd_params: &[(String, String)],
 ) -> Result<Vec<PreparedRequest>, String> {
-    let output = flow["output"].as_str().unwrap_or("").to_string();
-    let needed = dependencies(flow, &output);
+    let needed = dependencies(flow, &flow.output);
     Ok(prepare_all(flow, cmd_params)?
         .into_iter()
-        .filter(|r| output.is_empty() || needed.contains(&r.id))
+        .filter(|r| flow.output.is_empty() || needed.contains(&r.id))
         .collect())
 }
 
 pub fn prepare_all(
-    flow: &Value,
+    flow: &Flow,
     cmd_params: &[(String, String)],
 ) -> Result<Vec<PreparedRequest>, String> {
-    let mut params: HashMap<String, String> = flow["params"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|p| {
-            Some((
-                p["name"].as_str()?.to_string(),
-                p["example"].as_str()?.to_string(),
-            ))
-        })
+    let mut params: HashMap<String, String> = flow
+        .params
+        .iter()
+        .filter_map(|p| Some((p.name.clone(), p.example.clone()?)))
         .collect();
-    let known: Vec<String> = flow["params"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|p| p["name"].as_str().map(String::from))
-        .collect();
+    let known: Vec<String> = flow.params.iter().map(|p| p.name.clone()).collect();
     for (k, v) in cmd_params {
         if !known.contains(k) {
             return Err(format!(
                 "flow '{}' has no param '{}' (params: {})",
-                flow["name"].as_str().unwrap_or(""),
+                flow.name,
                 k,
                 if known.is_empty() {
                     "none".to_string()
@@ -2223,38 +2234,25 @@ pub fn prepare_all(
     }
 
     let mut out = Vec::new();
-    for (index, step) in flow["steps"].as_array().into_iter().flatten().enumerate() {
-        for r in step["requests"].as_array().into_iter().flatten() {
-            let headers = r["headers"]
-                .as_object()
-                .map(|h| {
-                    h.iter()
-                        .filter_map(|(k, v)| {
-                            Some((k.clone(), fill(v.as_str()?, &params, false).ok()?))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+    for (index, step) in flow.steps.iter().enumerate() {
+        for r in &step.requests {
+            let headers = r
+                .headers
+                .iter()
+                .filter_map(|(k, v)| Some((k.clone(), fill(v, &params, false).ok()?)))
+                .collect();
             out.push(PreparedRequest {
-                id: r["id"].as_str().unwrap_or("").to_string(),
+                id: r.id.clone(),
                 step: index + 1,
-                method: r["method"].as_str().unwrap_or("GET").to_string(),
-                url: fill(r["url"].as_str().unwrap_or(""), &params, true)?,
+                method: r.method.clone(),
+                url: fill(&r.url, &params, true)?,
                 headers,
-                body: match r["body"].as_str() {
+                body: match &r.body {
                     Some(b) => Some(map_body(b, &|t| fill(t, &params, false))?),
                     None => None,
                 },
-                expect: {
-                    let mut expect = r["expect"].clone();
-                    if let Some(o) = expect.as_object_mut() {
-                        o.insert(
-                            "write".to_string(),
-                            json!(is_flow_write(flow, r["id"].as_str().unwrap_or(""))),
-                        );
-                    }
-                    expect
-                },
+                expect: r.expect.clone(),
+                write: r.write,
             });
         }
     }
@@ -2304,8 +2302,8 @@ fn collect_writes(
     given: &[(String, String)],
     har_ids: &HashMap<String, String>,
     consumed: &[String],
-) -> Vec<Value> {
-    let mut writes: Vec<Value> = Vec::new();
+) -> Vec<Write> {
+    let mut writes: Vec<Write> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
     for (index, (seq, cmd)) in input.commands.iter().enumerate() {
         let mut extra = 0;
@@ -2350,13 +2348,17 @@ fn collect_writes(
                 extra += 1;
                 format!("s{}w{}", index + 1, extra)
             });
-            writes.push(json!({
-                "id": id,
-                "method": e.method,
-                "url": templatize(&e.url, given, true),
-                "kind": if explicit { "explicit" } else { "suspected" },
-                "step": index + 1,
-            }));
+            writes.push(Write {
+                id,
+                method: e.method.clone(),
+                url: templatize(&e.url, given, true),
+                kind: if explicit {
+                    WriteKind::Explicit
+                } else {
+                    WriteKind::Suspected
+                },
+                step: index + 1,
+            });
         }
     }
     writes
@@ -2364,46 +2366,32 @@ fn collect_writes(
 
 /// Ids of the writes a run sends over HTTP or from the page: the ones among
 /// the requests the output needs. Each must be allowed or confirmed first.
-pub fn request_write_ids(flow: &Value) -> Vec<String> {
-    let needed = dependencies(flow, flow["output"].as_str().unwrap_or(""));
-    flow["writes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|w| w["id"].as_str())
-        .filter(|id| needed.iter().any(|n| n == id))
-        .map(String::from)
+pub fn request_write_ids(flow: &Flow) -> Vec<String> {
+    let needed = dependencies(flow, &flow.output);
+    flow.writes
+        .iter()
+        .filter(|w| needed.contains(&w.id))
+        .map(|w| w.id.clone())
         .collect()
 }
 
 /// Writes the command replay would send beyond the ones a run sends itself.
-pub fn replay_only_writes(flow: &Value) -> Vec<Value> {
+pub fn replay_only_writes(flow: &Flow) -> Vec<Write> {
     let own = request_write_ids(flow);
-    flow["writes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|w| !own.iter().any(|id| w["id"] == id.as_str()))
+    flow.writes
+        .iter()
+        .filter(|w| !own.contains(&w.id))
         .cloned()
         .collect()
 }
 
 /// Ids of every write the recording caused.
-pub fn all_write_ids(flow: &Value) -> Vec<String> {
-    flow["writes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|w| w["id"].as_str().map(String::from))
-        .collect()
+pub fn all_write_ids(flow: &Flow) -> Vec<String> {
+    flow.writes.iter().map(|w| w.id.clone()).collect()
 }
 
-pub fn is_flow_write(flow: &Value, id: &str) -> bool {
-    flow["writes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|w| w["id"] == id)
+pub fn is_flow_write(flow: &Flow, id: &str) -> bool {
+    flow.write(id).is_some()
 }
 
 /// Which writes `--allow-write` covers: `all`, or a list of write ids.
@@ -2451,15 +2439,10 @@ pub fn write_policy_action(id: &str) -> String {
 }
 
 /// Check that an id names a write of this flow.
-pub fn check_write_ids(flow: &Value, allow: &AllowWrite) -> Result<(), String> {
+pub fn check_write_ids(flow: &Flow, allow: &AllowWrite) -> Result<(), String> {
     for id in &allow.ids {
         if !is_flow_write(flow, id) {
-            let known: Vec<&str> = flow["writes"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|w| w["id"].as_str())
-                .collect();
+            let known: Vec<&str> = flow.writes.iter().map(|w| w.id.as_str()).collect();
             return Err(format!(
                 "--allow-write names '{}', which is not a write of this flow. Writes: {}",
                 id,
@@ -2497,8 +2480,6 @@ fn is_graphql_query(body: Option<&str>) -> bool {
         })
 }
 
-pub const TIERS: &[&str] = &["http", "page", "replay"];
-
 pub struct TierResult {
     pub id: String,
     pub step: usize,
@@ -2514,7 +2495,7 @@ pub struct TierResult {
     /// The response matches the recording except that its lists are absent,
     /// which is how many APIs answer a query with no results.
     pub empty: bool,
-    pub tier: &'static str,
+    pub tier: Tier,
     /// The response says the run cannot go on, whatever tier sends it:
     /// `auth_expired`, `rate_limited` or `blocked`.
     pub kind: Option<&'static str>,
@@ -2522,7 +2503,7 @@ pub struct TierResult {
 }
 
 impl TierResult {
-    fn failed(req: &PreparedRequest, tier: &'static str, ms: u128, f: Failure) -> TierResult {
+    fn failed(req: &PreparedRequest, tier: Tier, ms: u128, f: Failure) -> TierResult {
         TierResult {
             id: req.id.clone(),
             step: req.step,
@@ -2653,11 +2634,11 @@ pub fn check_response(
     let parsed: Value = serde_json::from_str(text)
         .map_err(|_| Failure::new(true, Some(status), "response is not JSON".to_string()))?;
     let current = signature(&parsed);
-    if let Err(reason) = signature_matches(&req.expect["signature"], &current) {
+    if let Err(reason) = signature_matches(&req.expect.signature, &current) {
         // A list that only went missing reads as no results; a list that
         // appeared under a new name means the contract moved.
-        if matches_without_lists(&req.expect["signature"], &current)
-            && new_lists(&req.expect["signature"], &current, "").is_empty()
+        if matches_without_lists(&req.expect.signature, &current)
+            && new_lists(&req.expect.signature, &current, "").is_empty()
         {
             return Ok((parsed, true));
         }
@@ -2674,12 +2655,12 @@ pub fn check_response(
 
 pub fn tier_result(
     req: &PreparedRequest,
-    tier: &'static str,
+    tier: Tier,
     started: Instant,
     outcome: Result<(u16, String), Failure>,
 ) -> TierResult {
     let ms = started.elapsed().as_millis();
-    let outcome = match req.expect.get("extract").filter(|x| !x.is_null()) {
+    let outcome = match req.expect.extract.as_ref().filter(|x| !x.is_null()) {
         Some(spec) => outcome.and_then(|(status, text)| match extract_embedded(&text, spec) {
             Some(json) => Ok((status, json)),
             None if (200..300).contains(&status) => Err(Failure::new(
@@ -2713,10 +2694,7 @@ pub fn tier_result(
             // The recording sent credentials a run cannot copy, so a 401 or
             // 403 may only mean this tier lacks them; the next tier sends
             // them from the page.
-            if f.kind == Some("auth_expired")
-                && tier != "replay"
-                && req.expect["strippedAuth"] == true
-            {
+            if f.kind == Some("auth_expired") && tier != Tier::Replay && req.expect.stripped_auth {
                 f.kind = None;
                 f.drift = true;
             }
@@ -2751,14 +2729,14 @@ pub async fn run_http(
         } else {
             Ok((r.status, r.body))
         };
-        return tier_result(req, "http", started, outcome);
+        return tier_result(req, Tier::Http, started, outcome);
     }
     let method = match reqwest::Method::from_bytes(req.method.as_bytes()) {
         Ok(m) => m,
         Err(_) => {
             return tier_result(
                 req,
-                "http",
+                Tier::Http,
                 started,
                 Err(Failure::new(
                     true,
@@ -2812,7 +2790,7 @@ pub async fn run_http(
                     .to_string();
                 return tier_result(
                     req,
-                    "http",
+                    Tier::Http,
                     started,
                     Err(Failure {
                         status: Some(status),
@@ -2828,13 +2806,13 @@ pub async fn run_http(
             })
         }
         // A write that left the machine may have been applied.
-        Err(e) if req.expect["write"] == true && !e.is_connect() => Err(unknown_outcome(format!(
+        Err(e) if req.write && !e.is_connect() => Err(unknown_outcome(format!(
             "the write was sent but no response came back: {}",
             e
         ))),
         Err(e) => Err(Failure::new(false, None, format!("request failed: {}", e))),
     };
-    with_retry_after(tier_result(req, "http", started, outcome), retry_after)
+    with_retry_after(tier_result(req, Tier::Http, started, outcome), retry_after)
 }
 
 fn with_retry_after(mut result: TierResult, retry_after: Option<String>) -> TierResult {
@@ -2862,14 +2840,14 @@ pub fn page_fetch_script(req: &PreparedRequest) -> String {
     });
     // A write must not follow a redirect to another site; the 3xx counts as
     // the site's answer.
-    if req.expect["write"] == true {
+    if req.write {
         init["redirect"] = json!("manual");
     }
     // Cross-origin APIs differ on credentials: some need cookies, some reject
     // a credentialed request outright. Try with, then without.
     // A write is never sent a second time: a thrown fetch may still have
     // reached the server, so it is reported as an unknown outcome instead.
-    let send = if req.expect["write"] == true {
+    let send = if req.write {
         "const r = await fetch(u, { ...i, credentials: 'include' });"
     } else {
         "let r; try { r = await fetch(u, { ...i, credentials: 'include' }); } \
@@ -2887,7 +2865,12 @@ pub fn page_fetch_script(req: &PreparedRequest) -> String {
 
 /// The in-page tier runs only on a tab that is already on the flow's site.
 pub fn page_skipped(req: &PreparedRequest, started: Instant, reason: String) -> TierResult {
-    tier_result(req, "page", started, Err(Failure::new(true, None, reason)))
+    tier_result(
+        req,
+        Tier::Page,
+        started,
+        Err(Failure::new(true, None, reason)),
+    )
 }
 
 pub fn page_result(
@@ -2909,7 +2892,7 @@ pub fn page_result(
                 "in-page fetch returned no response".to_string(),
             )),
         },
-        Err(e) if req.expect["write"] == true => Err(unknown_outcome(format!(
+        Err(e) if req.write => Err(unknown_outcome(format!(
             "the in-page write may have been sent: {}",
             e
         ))),
@@ -2919,62 +2902,49 @@ pub fn page_result(
             format!("in-page fetch failed: {}", e),
         )),
     };
-    with_retry_after(tier_result(req, "page", started, outcome), retry_after)
+    with_retry_after(tier_result(req, Tier::Page, started, outcome), retry_after)
 }
 
 /// Tier 3: the recorded commands with the run's params swapped in. A param
 /// whose recorded value no command contains cannot be replayed: the browser
 /// would answer with the recorded value instead.
-pub fn replay_commands(
-    flow: &Value,
-    cmd_params: &[(String, String)],
-) -> Result<Vec<Value>, String> {
-    let swaps: Vec<(String, String)> = flow["params"]
-        .as_array()
-        .into_iter()
-        .flatten()
+pub fn replay_commands(flow: &Flow, cmd_params: &[(String, String)]) -> Result<Vec<Value>, String> {
+    let given = |name: &str| cmd_params.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+    let swaps: Vec<(String, String)> = flow
+        .params
+        .iter()
         .filter_map(|p| {
-            let name = p["name"].as_str()?;
-            let example = p["example"].as_str()?;
-            let value = cmd_params.iter().find(|(k, _)| k == name)?.1.clone();
+            let example = p.example.as_deref()?;
+            let value = given(&p.name)?.clone();
             (!example.is_empty() && example != value).then(|| (example.to_string(), value))
         })
         .collect();
     // Typed values are stored as `{{name}}` and take the run's value, or the
     // recorded example when the run gives none.
-    let placeholders: Vec<(String, String)> = flow["params"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    let placeholders: Vec<(String, String)> = flow
+        .params
+        .iter()
         .filter_map(|p| {
-            let name = p["name"].as_str()?;
-            let value = cmd_params
-                .iter()
-                .find(|(k, _)| k == name)
-                .map(|(_, v)| v.clone())
-                .or_else(|| p["example"].as_str().map(String::from))?;
-            Some((format!("{{{{{}}}}}", name), value))
+            let value = given(&p.name).cloned().or_else(|| p.example.clone())?;
+            Some((format!("{{{{{}}}}}", p.name), value))
         })
         .collect();
     let recorded = serde_json::to_string(
-        &flow["steps"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|s| s["command"].clone())
+        &flow
+            .steps
+            .iter()
+            .map(|s| s.command.clone())
             .collect::<Vec<_>>(),
     )
     .unwrap_or_default();
-    for p in flow["params"].as_array().into_iter().flatten() {
-        let name = p["name"].as_str().unwrap_or("");
-        let given = cmd_params.iter().any(|(k, _)| k == name);
-        if !given
-            && p["example"].as_str().is_none()
-            && recorded.contains(&format!("{{{{{}}}}}", name))
+    for p in &flow.params {
+        if given(&p.name).is_none()
+            && p.example.is_none()
+            && recorded.contains(&format!("{{{{{}}}}}", p.name))
         {
             return Err(format!(
                 "missing --param {}: the recording did not keep the typed value",
-                name
+                p.name
             ));
         }
     }
@@ -2982,75 +2952,52 @@ pub fn replay_commands(
         recorded.contains(text) || recorded.contains(urlencoding::encode(text).as_ref())
     };
     if let Some((from, _)) = swaps.iter().find(|(from, _)| {
-        let named = placeholders.iter().any(|(ph, _)| {
-            flow["params"].as_array().into_iter().flatten().any(|p| {
-                p["example"].as_str() == Some(from.as_str())
-                    && format!("{{{{{}}}}}", p["name"].as_str().unwrap_or("")) == *ph
-                    && recorded.contains(ph.as_str())
-            })
+        let named = flow.params.iter().any(|p| {
+            p.example.as_deref() == Some(from.as_str())
+                && recorded.contains(&format!("{{{{{}}}}}", p.name))
         });
         !named && !in_commands(from)
     }) {
-        let name = flow["params"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|p| p["example"].as_str() == Some(from.as_str()))
-            .and_then(|p| p["name"].as_str())
+        let name = flow
+            .params
+            .iter()
+            .find(|p| p.example.as_deref() == Some(from.as_str()))
+            .map(|p| p.name.as_str())
             .unwrap_or("?");
         return Err(format!(
             "param '{}' is not in the recorded commands, so a replay would return the recorded value {}",
             name, from
         ));
     }
-    if flow["steps"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|s| s["command"]["redacted"] == true)
-    {
+    if flow.steps.iter().any(|s| s.command["redacted"] == true) {
         return Err(
             "the recording typed a secret, which is not stored, so the commands cannot be replayed"
                 .to_string(),
         );
     }
-    let opens_page = flow["steps"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|s| s["command"]["action"] == "navigate");
+    let opens_page = flow.steps.iter().any(|s| s.command["action"] == "navigate");
     // A flow recorded on an already open page starts from that page.
-    let start = (!opens_page)
-        .then(|| flow["startUrl"].as_str())
-        .flatten()
-        .map(|u| json!({ "action": "navigate", "url": u }));
+    let start = (!opens_page).then(|| json!({ "action": "navigate", "url": flow.start_url }));
     Ok(start
         .into_iter()
-        .chain(
-            flow["steps"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|s| s["ok"] != false)
-                .map(|s| {
-                    let mut cmd = s["command"].clone();
-                    let _ = map_strings(&mut cmd, &|text| {
-                        let mut text = text.to_string();
-                        for (from, to) in &swaps {
-                            text = text.replace(from.as_str(), to);
-                            let (ef, et) = (urlencoding::encode(from), urlencoding::encode(to));
-                            if ef != *from {
-                                text = text.replace(ef.as_ref(), et.as_ref());
-                            }
-                        }
-                        for (ph, value) in &placeholders {
-                            text = text.replace(ph.as_str(), value);
-                        }
-                        Ok(text)
-                    });
-                    cmd
-                }),
-        )
+        .chain(flow.steps.iter().filter(|s| s.ok).map(|s| {
+            let mut cmd = s.command.clone();
+            let _ = map_strings(&mut cmd, &|text| {
+                let mut text = text.to_string();
+                for (from, to) in &swaps {
+                    text = text.replace(from.as_str(), to);
+                    let (ef, et) = (urlencoding::encode(from), urlencoding::encode(to));
+                    if ef != *from {
+                        text = text.replace(ef.as_ref(), et.as_ref());
+                    }
+                }
+                for (ph, value) in &placeholders {
+                    text = text.replace(ph.as_str(), value);
+                }
+                Ok(text)
+            });
+            cmd
+        }))
         .collect())
 }
 
@@ -3098,7 +3045,7 @@ const URL_KEYS: &[&str] = &[
 /// newlines and leading control characters, so a string that parses as an
 /// http(s) URL is host-checked whatever it looks like before parsing.
 fn check_value(
-    flow: &Value,
+    flow: &Flow,
     v: &Value,
     key: Option<&str>,
     scripts: &mut bool,
@@ -3142,7 +3089,7 @@ fn check_value(
 
 /// Check that every command a replay would send is a plain interaction and
 /// every URL in it stays on the flow's site.
-pub fn check_replay_commands(flow: &Value, commands: &[Value]) -> Result<(), String> {
+pub fn check_replay_commands(flow: &Flow, commands: &[Value]) -> Result<(), String> {
     for cmd in commands {
         let action = cmd["action"].as_str().unwrap_or("");
         if !REPLAY_ACTIONS.contains(&action) {
@@ -3253,7 +3200,7 @@ pub fn replay_write_unanswered(
     started: Instant,
     reason: String,
 ) -> TierResult {
-    tier_result(req, "replay", started, Err(unknown_outcome(reason)))
+    tier_result(req, Tier::Replay, started, Err(unknown_outcome(reason)))
 }
 
 pub fn replay_result(
@@ -3289,13 +3236,16 @@ pub fn replay_result(
             .find(|(k, _)| k.eq_ignore_ascii_case("retry-after"))
             .map(|(_, v)| v.clone())
     });
-    with_retry_after(tier_result(req, "replay", started, outcome), retry_after)
+    with_retry_after(
+        tier_result(req, Tier::Replay, started, outcome),
+        retry_after,
+    )
 }
 
 pub fn replay_failed(req: &PreparedRequest, started: Instant, reason: String) -> TierResult {
     tier_result(
         req,
-        "replay",
+        Tier::Replay,
         started,
         Err(Failure::new(true, None, reason)),
     )
@@ -3305,7 +3255,7 @@ pub fn replay_failed(req: &PreparedRequest, started: Instant, reason: String) ->
 pub fn replay_unavailable(req: &PreparedRequest, started: Instant, reason: String) -> TierResult {
     tier_result(
         req,
-        "replay",
+        Tier::Replay,
         started,
         Err(Failure::new(false, None, reason)),
     )
@@ -3315,7 +3265,7 @@ pub fn replay_unavailable(req: &PreparedRequest, started: Instant, reason: Strin
 pub fn unresolved(req: &PreparedRequest, reason: String) -> TierResult {
     tier_result(
         req,
-        "http",
+        Tier::Http,
         Instant::now(),
         Err(Failure::new(true, None, reason)),
     )
@@ -3331,24 +3281,20 @@ pub fn denied_everywhere(results: &[TierResult]) -> Option<&TierResult> {
 }
 
 /// Tiers to try for a request, starting from the one that last worked.
-pub fn tiers_for(flow: &Value, id: &str) -> Vec<&'static str> {
-    let preferred = flow["steps"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|s| s["requests"].as_array().into_iter().flatten())
-        .find(|r| r["id"] == id)
-        .and_then(|r| r["tier"].as_str())
-        .and_then(|t| TIERS.iter().position(|x| *x == t))
+pub fn tiers_for(flow: &Flow, id: &str) -> Vec<Tier> {
+    let preferred = flow
+        .request(id)
+        .and_then(|r| r.tier)
+        .and_then(|t| Tier::ALL.iter().position(|x| *x == t))
         .unwrap_or(0);
-    TIERS[preferred..].to_vec()
+    Tier::ALL[preferred..].to_vec()
 }
 
 /// The direct-HTTP client. Redirects are followed only to hosts the
 /// session's domain filter allows, the same rule browser requests follow.
 pub fn http_client(
     filter: Option<super::network::DomainFilter>,
-    flow: &Value,
+    flow: &Flow,
 ) -> Result<reqwest::Client, String> {
     let flow = flow.clone();
     let policy = reqwest::redirect::Policy::custom(move |attempt| {
@@ -3388,7 +3334,7 @@ pub fn cookie_header(cookies: &[super::cookies::Cookie]) -> String {
 /// The flow is verified only when every request came back with the recorded
 /// shape and no tier saw that shape change.
 pub fn finish_run(
-    flow: &mut Value,
+    flow: &mut Flow,
     attempts: &[TierResult],
     now: &str,
     total_ms: u128,
@@ -3408,32 +3354,24 @@ pub fn finish_run(
     let empty = last.iter().any(|r| r.ok && r.empty);
     if all_ok && shape_changed.is_none() && empty {
     } else if all_ok && shape_changed.is_none() {
-        flow["verifiedAt"] = json!(now);
+        flow.verified_at = Some(now.to_string());
     } else if shape_changed.is_some() || (!all_ok && attempts.iter().any(|r| !r.ok && r.drift)) {
-        flow["verifiedAt"] = Value::Null;
+        flow.verified_at = None;
     }
     // Remember the tier that worked, so the next run starts there.
     for r in last.iter().filter(|r| r.ok) {
-        if let Some(steps) = flow["steps"].as_array_mut() {
-            for req in steps
-                .iter_mut()
-                .flat_map(|s| s["requests"].as_array_mut().into_iter().flatten())
-                .filter(|req| req["id"] == r.id.as_str())
-            {
-                if r.tier == TIERS[0] {
-                    if let Some(o) = req.as_object_mut() {
-                        o.remove("tier");
-                    }
-                } else {
-                    req["tier"] = json!(r.tier);
-                }
-            }
+        for req in flow
+            .steps
+            .iter_mut()
+            .flat_map(|s| s.requests.iter_mut())
+            .filter(|req| req.id == r.id)
+        {
+            req.tier = (r.tier != Tier::Http).then_some(r.tier);
         }
     }
-    let output_id = flow["output"].as_str().unwrap_or("").to_string();
     let output = last
         .iter()
-        .find(|r| r.id == output_id && r.ok)
+        .find(|r| r.id == flow.output && r.ok)
         .and_then(|r| r.body.clone())
         .map(|b| {
             if empty {
@@ -3465,8 +3403,8 @@ pub fn finish_run(
         })
         .collect();
     let mut response = json!({
-        "name": flow["name"],
-        "origin": flow["origin"],
+        "name": flow.name,
+        "origin": flow.origin,
         "ok": all_ok,
         "verified": all_ok && shape_changed.is_none() && !empty,
         "ms": total_ms,
@@ -3482,9 +3420,29 @@ pub fn finish_run(
     response
 }
 
+/// A flow from a partial fixture: the required fields are filled in.
+#[cfg(test)]
+pub(crate) fn flow_of(mut v: Value) -> Flow {
+    let o = v.as_object_mut().unwrap();
+    for (k, d) in [
+        ("version", json!(FLOW_VERSION)),
+        ("name", json!("f")),
+        ("origin", json!("a.test")),
+        ("startUrl", json!("https://a.test/")),
+        ("steps", json!([])),
+    ] {
+        o.entry(k).or_insert(d);
+    }
+    serde_json::from_value(v).unwrap_or_else(|e| panic!("fixture is not a flow: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn build_flow_value(input: SaveInput<'_>) -> Result<(Value, Value), String> {
+        build_flow(input).map(|(f, r)| (serde_json::to_value(&f).unwrap(), r))
+    }
 
     fn entry(id: &str, url: &str, rtype: &str, mime: &str, body: &str) -> HarEntry {
         HarEntry {
@@ -3570,7 +3528,7 @@ mod tests {
             ),
         ];
         let params = vec![("film".to_string(), "Film One".to_string())];
-        let (flow, report) = build_flow(SaveInput {
+        let (flow, report) = build_flow_value(SaveInput {
             name: "showtimes",
             recorder: &rec,
             commands: &rec.commands,
@@ -3593,7 +3551,7 @@ mod tests {
         assert_eq!(flow["output"], "s1r1");
         assert_eq!(flow["verifiedAt"], Value::Null);
         assert_eq!(flow["allowedHosts"], json!(["example.com.ar"]));
-        assert_eq!(flow["version"], 2);
+        assert_eq!(flow["version"], FLOW_VERSION);
         assert!(!serde_json::to_string(&flow).unwrap().contains("secret"));
         assert_eq!(report["gaps"][0]["step"], 2);
         assert_eq!(
@@ -3612,7 +3570,7 @@ mod tests {
             "text/html",
             "<html>",
         )];
-        let err = build_flow(SaveInput {
+        let err = build_flow_value(SaveInput {
             name: "showtimes",
             recorder: &rec,
             commands: &rec.commands,
@@ -3674,12 +3632,12 @@ mod tests {
 
     #[test]
     fn prepare_fills_params_and_rejects_unknown_ones() {
-        let flow = json!({
+        let flow = flow_of(json!({
             "name": "showtimes",
             "params": [{ "name": "film", "example": "Film One" }],
             "output": "s1r1",
             "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://site.example/m?film={{film}}", "headers": {}, "body": null, "expect": {} }] }],
-        });
+        }));
         let reqs = prepare(&flow, &[("film".to_string(), "Film Two".to_string())]).unwrap();
         assert_eq!(reqs[0].url, "https://site.example/m?film=Film%20Two");
         let reqs = prepare(&flow, &[]).unwrap();
@@ -3705,6 +3663,10 @@ mod tests {
         assert!(r.commands[0].1.get("id").is_none());
     }
 
+    fn expect_of(v: Value) -> Expect {
+        serde_json::from_value(v).unwrap()
+    }
+
     fn prepared(id: &str) -> PreparedRequest {
         PreparedRequest {
             id: id.to_string(),
@@ -3717,15 +3679,12 @@ mod tests {
                 ("country".to_string(), "AR".to_string()),
             ],
             body: None,
-            expect: json!({ "signature": signature(&json!({ "data": [{ "id": 1 }] })) }),
+            expect: expect_of(json!({ "signature": signature(&json!({ "data": [{ "id": 1 }] })) })),
+            write: false,
         }
     }
 
-    fn attempt(
-        id: &str,
-        tier: &'static str,
-        outcome: Result<(u16, String), Failure>,
-    ) -> TierResult {
+    fn attempt(id: &str, tier: Tier, outcome: Result<(u16, String), Failure>) -> TierResult {
         tier_result(&prepared(id), tier, Instant::now(), outcome)
     }
 
@@ -3744,19 +3703,19 @@ mod tests {
 
     #[test]
     fn a_tier_that_got_a_page_instead_of_data_falls_back_and_the_flow_stays_verified() {
-        let mut flow = json!({
+        let mut flow = flow_of(json!({
             "name": "f", "origin": "site.example", "output": "s1r1", "verifiedAt": null,
-            "steps": [{ "requests": [{ "id": "s1r1" }] }],
-        });
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }],
+        }));
         let attempts = vec![
             attempt(
                 "s1r1",
-                "http",
+                Tier::Http,
                 Ok((200, "<html>sign in</html>".to_string())),
             ),
             attempt(
                 "s1r1",
-                "page",
+                Tier::Page,
                 Ok((200, r#"{"data":[{"id":1}]}"#.to_string())),
             ),
         ];
@@ -3764,22 +3723,22 @@ mod tests {
         assert_eq!(out["verified"], true);
         assert_eq!(out["steps"][0]["tier"], "page");
         assert_eq!(out["steps"][0]["fellBack"][0]["tier"], "http");
-        assert_eq!(flow["verifiedAt"], "now");
-        assert_eq!(flow["steps"][0]["requests"][0]["tier"], "page");
-        assert_eq!(tiers_for(&flow, "s1r1"), vec!["page", "replay"]);
+        assert_eq!(flow.verified_at.as_deref(), Some("now"));
+        assert_eq!(flow.steps[0].requests[0].tier, Some(Tier::Page));
+        assert_eq!(tiers_for(&flow, "s1r1"), vec![Tier::Page, Tier::Replay]);
     }
 
     #[test]
     fn a_changed_shape_marks_the_flow_unverified_even_if_a_lower_tier_answers() {
-        let mut flow = json!({
+        let mut flow = flow_of(json!({
             "name": "f", "origin": "site.example", "output": "s1r1", "verifiedAt": "before",
-            "steps": [{ "requests": [{ "id": "s1r1" }] }],
-        });
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }],
+        }));
         let attempts = vec![
-            attempt("s1r1", "http", Ok((200, r#"{"items":[]}"#.to_string()))),
+            attempt("s1r1", Tier::Http, Ok((200, r#"{"items":[]}"#.to_string()))),
             attempt(
                 "s1r1",
-                "page",
+                Tier::Page,
                 Ok((200, r#"{"data":[{"id":1}]}"#.to_string())),
             ),
         ];
@@ -3787,19 +3746,19 @@ mod tests {
         assert_eq!(out["ok"], true);
         assert_eq!(out["verified"], false);
         assert_eq!(out["drift"]["tier"], "http");
-        assert_eq!(flow["verifiedAt"], Value::Null);
+        assert_eq!(flow.verified_at, None);
     }
 
     #[test]
     fn a_rejected_input_keeps_the_flow_verified() {
-        let mut flow = json!({
+        let mut flow = flow_of(json!({
             "name": "f", "origin": "site.example", "output": "s1r1", "verifiedAt": "before",
-            "steps": [{ "requests": [{ "id": "s1r1" }] }],
-        });
-        let attempts = vec![attempt("s1r1", "http", Ok((400, "{}".to_string())))];
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }],
+        }));
+        let attempts = vec![attempt("s1r1", Tier::Http, Ok((400, "{}".to_string())))];
         let out = finish_run(&mut flow, &attempts, "now", 1, &Shape::default());
         assert_eq!(out["ok"], false);
-        assert_eq!(flow["verifiedAt"], "before");
+        assert_eq!(flow.verified_at.as_deref(), Some("before"));
     }
 
     #[test]
@@ -3812,20 +3771,20 @@ mod tests {
 
     #[test]
     fn replay_swaps_params_into_commands_and_refuses_missing_ones() {
-        let flow = json!({
+        let flow = flow_of(json!({
             "params": [{ "name": "q", "example": "film one" }],
             "steps": [
                 { "command": { "action": "navigate", "url": "https://site.example/search?q=film%20one" } },
                 { "command": { "action": "fill", "selector": "#q", "value": "film one" } },
             ],
-        });
+        }));
         let cmds = replay_commands(&flow, &[("q".to_string(), "other".to_string())]).unwrap();
         assert_eq!(cmds[0]["url"], "https://site.example/search?q=other");
         assert_eq!(cmds[1]["value"], "other");
-        let hidden = json!({
+        let hidden = flow_of(json!({
             "params": [{ "name": "theater", "example": "401" }],
             "steps": [{ "command": { "action": "navigate", "url": "https://site.example/downtown" } }],
-        });
+        }));
         assert!(
             replay_commands(&hidden, &[("theater".to_string(), "402".to_string())])
                 .unwrap_err()
@@ -3870,7 +3829,7 @@ mod tests {
                 r#"{"seats":[{"row":"A"}]}"#,
             ),
         ];
-        let (flow, report) = build_flow(SaveInput {
+        let (flow, report) = build_flow_value(SaveInput {
             name: "seats",
             recorder: &r,
             commands: &r.commands,
@@ -3892,9 +3851,16 @@ mod tests {
             "data[].theaterId"
         );
         assert_eq!(report["references"][0]["path"], "session.key");
-        assert_eq!(dependencies(&flow, "s1r3"), vec!["s1r2", "s1r3"]);
+        assert_eq!(
+            dependencies(&flow_of(flow.clone()), "s1r3"),
+            vec!["s1r2", "s1r3"]
+        );
 
-        let reqs = prepare(&flow, &[("theaterId".to_string(), "402".to_string())]).unwrap();
+        let reqs = prepare(
+            &flow_of(flow.clone()),
+            &[("theaterId".to_string(), "402".to_string())],
+        )
+        .unwrap();
         assert_eq!(reqs.len(), 2);
         let mut bodies = HashMap::new();
         bodies.insert("s1r2".to_string(), json!({ "session": { "key": "k 2" } }));
@@ -3916,7 +3882,7 @@ mod tests {
             "application/json",
             r#"{"movies":[]}"#,
         )];
-        let (_, report) = build_flow(SaveInput {
+        let (_, report) = build_flow_value(SaveInput {
             name: "showtimes",
             recorder: &rec,
             commands: &rec.commands,
@@ -3936,12 +3902,12 @@ mod tests {
 
     #[test]
     fn input_schema_describes_params_like_a_webmcp_tool() {
-        let flow = json!({
+        let flow = flow_of(json!({
             "params": [
                 { "name": "q", "example": "kettle" },
                 { "name": "storeId", "example": "401", "from": { "request": "s1r1", "list": "stores[].storeId" } },
             ],
-        });
+        }));
         let schema = input_schema(&flow);
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["properties"]["q"]["type"], "string");
@@ -4022,7 +3988,7 @@ mod tests {
         api.method = "POST".to_string();
         api.post_data =
             Some(r#"{"query":"query s { x }","variables":{"keyword":"kettle"}}"#.to_string());
-        let (flow, report) = build_flow(SaveInput {
+        let (flow, report) = build_flow_value(SaveInput {
             name: "search",
             recorder: &r,
             commands: &r.commands,
@@ -4078,7 +4044,9 @@ mod tests {
     #[test]
     fn a_response_without_its_lists_is_empty_not_drift() {
         let req = PreparedRequest {
-            expect: json!({ "signature": signature(&json!({ "payload": { "results": [{ "id": 1 }], "total": 1 } })) }),
+            expect: expect_of(
+                json!({ "signature": signature(&json!({ "payload": { "results": [{ "id": 1 }], "total": 1 } })) }),
+            ),
             ..prepared("s1r1")
         };
         let (_, empty) = check_response(&req, 200, r#"{"payload":{}}"#).unwrap();
@@ -4086,13 +4054,13 @@ mod tests {
         let moved = check_response(&req, 200, r#"{"payload":{"items":[]}}"#).unwrap_err();
         assert!(moved.shape_changed);
 
-        let mut flow = json!({
+        let mut flow = flow_of(json!({
             "name": "f", "origin": "site.example", "output": "s1r1", "verifiedAt": "before",
-            "steps": [{ "requests": [{ "id": "s1r1" }] }],
-        });
+            "steps": [{ "requests": [{ "id": "s1r1", "method": "GET", "url": "https://a.test/x" }] }],
+        }));
         let attempts = vec![tier_result(
             &req,
-            "http",
+            Tier::Http,
             Instant::now(),
             Ok((200, r#"{"payload":{"total":0}}"#.to_string())),
         )];
@@ -4100,12 +4068,12 @@ mod tests {
         assert_eq!(out["ok"], true);
         assert_eq!(out["empty"], true);
         assert_eq!(out["verified"], false);
-        assert_eq!(flow["verifiedAt"], "before");
+        assert_eq!(flow.verified_at.as_deref(), Some("before"));
     }
 
     #[test]
     fn params_with_quotes_keep_json_bodies_and_commands_valid() {
-        let flow = json!({
+        let flow = flow_of(json!({
             "name": "f",
             "params": [{ "name": "q", "example": "kettle" }],
             "output": "s1r1",
@@ -4114,14 +4082,14 @@ mod tests {
                   "requests": [{ "id": "s1r1", "method": "POST", "url": "https://site.example/api",
                     "headers": {}, "body": "{\"query\":\"{{q}}\"}", "expect": {} }] },
             ],
-        });
+        }));
         let value = "a \"quoted\" item\\";
         let reqs = prepare(&flow, &[("q".to_string(), value.to_string())]).unwrap();
         let body: Value = serde_json::from_str(reqs[0].body.as_deref().unwrap()).unwrap();
         assert_eq!(body["query"], value);
         let cmds = replay_commands(&flow, &[("q".to_string(), value.to_string())]).unwrap();
-        assert_eq!(cmds.len(), 1);
-        assert_eq!(cmds[0]["value"], value);
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[1]["value"], value);
     }
 
     #[test]
@@ -4142,11 +4110,11 @@ mod tests {
         );
         assert_eq!(r.commands.len(), 1);
         assert_eq!(r.commands[0].1["value"], REDACTED);
-        let flow = json!({
+        let flow = flow_of(json!({
             "params": [],
             "startUrl": "https://site.example/",
             "steps": [{ "command": r.commands[0].1.clone() }],
-        });
+        }));
         assert!(replay_commands(&flow, &[]).unwrap_err().contains("secret"));
     }
 
@@ -4173,7 +4141,7 @@ mod tests {
             ),
             buy,
         ];
-        let (flow, _) = build_flow(SaveInput {
+        let (flow, _) = build_flow_value(SaveInput {
             name: "f",
             recorder: &r,
             commands: &r.commands,
@@ -4191,7 +4159,10 @@ mod tests {
         assert_eq!(writes[0]["kind"], "explicit");
         assert_eq!(writes[0]["url"], "https://www.example.com.ar/cart?x=1");
         assert_eq!(writes[0]["id"], "s2w1");
-        assert!(replay_only_writes(&flow).len() == 1 && request_write_ids(&flow).is_empty());
+        assert!(
+            replay_only_writes(&flow_of(flow.clone())).len() == 1
+                && request_write_ids(&flow_of(flow.clone())).is_empty()
+        );
     }
 
     #[cfg(unix)]
@@ -4248,7 +4219,7 @@ mod tests {
             "application/json",
             r#"{"name":"a"}"#,
         );
-        let (flow, report) = build_flow(SaveInput {
+        let (flow, report) = build_flow_value(SaveInput {
             name: "login",
             recorder: &r,
             commands: &r.commands,
@@ -4357,7 +4328,7 @@ mod tests {
 
     #[test]
     fn replay_skips_failed_steps() {
-        let flow = json!({
+        let flow = flow_of(json!({
             "params": [],
             "startUrl": "https://a.test/",
             "steps": [
@@ -4365,32 +4336,42 @@ mod tests {
                 { "ok": false, "command": { "action": "click", "selector": "#gone" } },
                 { "ok": true, "command": { "action": "click", "selector": "#go" } }
             ]
-        });
+        }));
         let cmds = replay_commands(&flow, &[]).unwrap();
         assert_eq!(cmds.len(), 2);
         assert_eq!(cmds[1]["selector"], "#go");
     }
 
     #[test]
-    fn a_version_one_flow_asks_to_be_saved_again() {
-        let dir = std::env::temp_dir().join(format!("ab-flow-v1-{}", std::process::id()));
+    fn a_flow_file_with_an_unknown_field_or_version_is_refused() {
+        let dir = std::env::temp_dir().join(format!("ab-flow-schema-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let _guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
-        _guard.set("AGENT_BROWSER_FLOWS_DIR", dir.to_str().unwrap());
-        let mut flow = json!({ "version": 1, "name": "old", "origin": "a.test", "startUrl": "https://a.test/", "steps": [] });
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.to_str().unwrap());
+        let mut flow =
+            flow_of(json!({ "name": "f", "origin": "a.test", "startUrl": "https://a.test/" }));
         write_flow(&flow).unwrap();
-        let err = load_flow("old", None).unwrap_err();
-        assert!(err.contains("re-save"), "{err}");
-        flow["version"] = json!(FLOW_VERSION);
+        assert!(load_flow("f", None).is_ok());
+        let path = dir.join("a.test").join("f.json");
+        let mut text: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        text["surprise"] = json!(true);
+        std::fs::write(&path, serde_json::to_string(&text).unwrap()).unwrap();
+        let err = load_flow("f", None).unwrap_err();
+        assert!(err.contains("surprise"), "{err}");
+        flow.version = FLOW_VERSION + 1;
         write_flow(&flow).unwrap();
-        assert!(load_flow("old", None).is_ok());
+        assert!(load_flow("f", None)
+            .unwrap_err()
+            .contains("unsupported version"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn hosts_outside_the_start_domain_are_rejected() {
-        let flow =
-            json!({ "startUrl": "https://www.example.com/shop", "allowedHosts": ["example.com"] });
+        let flow = flow_of(
+            json!({ "startUrl": "https://www.example.com/shop", "allowedHosts": ["example.com"] }),
+        );
         assert!(check_allowed_host(&flow, "https://api.example.com/x").is_ok());
         assert!(check_allowed_host(&flow, "https://example.com/x").is_ok());
         for bad in [
@@ -4406,17 +4387,21 @@ mod tests {
 
     #[test]
     fn an_edited_allowed_hosts_list_cannot_widen_the_start_domain() {
-        let flow = json!({ "startUrl": "https://example.com/", "allowedHosts": ["example.com", "evil.com"] });
+        let flow = flow_of(
+            json!({ "startUrl": "https://example.com/", "allowedHosts": ["example.com", "evil.com"] }),
+        );
         assert!(check_allowed_host(&flow, "https://evil.com/x").is_err());
-        let narrow =
-            json!({ "startUrl": "https://example.com/", "allowedHosts": ["api.example.com"] });
+        let narrow = flow_of(
+            json!({ "startUrl": "https://example.com/", "allowedHosts": ["api.example.com"] }),
+        );
         assert!(check_allowed_host(&narrow, "https://www.example.com/x").is_err());
         assert!(check_allowed_host(&narrow, "https://api.example.com/x").is_ok());
     }
 
     #[test]
     fn ip_hosts_match_exactly() {
-        let flow = json!({ "startUrl": "http://127.0.0.1:3000/", "allowedHosts": ["127.0.0.1"] });
+        let flow =
+            flow_of(json!({ "startUrl": "http://127.0.0.1:3000/", "allowedHosts": ["127.0.0.1"] }));
         assert!(check_allowed_host(&flow, "http://127.0.0.1:3000/api").is_ok());
         assert!(check_allowed_host(&flow, "http://10.0.0.1/api").is_err());
         assert_eq!(base_domain("127.0.0.1"), "127.0.0.1");
@@ -4432,7 +4417,7 @@ mod tests {
         ] {
             assert!(validate_origin(bad).is_err(), "{bad}");
         }
-        let flow = json!({ "version": 2, "name": "x", "origin": "../escape" });
+        let flow = flow_of(json!({ "version": 2, "name": "x", "origin": "../escape" }));
         assert!(write_flow(&flow)
             .unwrap_err()
             .contains("invalid flow origin"));
@@ -4479,7 +4464,7 @@ mod tests {
         for t in tag {
             r.tag_request(t);
         }
-        build_flow(SaveInput {
+        build_flow_value(SaveInput {
             name: "w",
             recorder: &r,
             commands: &r.commands,
@@ -4552,7 +4537,7 @@ mod tests {
                 r#"{"ok":true}"#,
             ),
         ];
-        let (flow, _) = build_flow(SaveInput {
+        let (flow, _) = build_flow_value(SaveInput {
             name: "n",
             recorder: &r,
             commands: &r.commands,
@@ -4580,7 +4565,8 @@ mod tests {
         assert!(some.covers("s1r2") && some.covers("s3w1") && !some.covers("s1r1"));
         assert!(AllowWrite::parse(Some(&json!(""))).is_err());
         assert!(AllowWrite::parse(Some(&json!(true))).is_err());
-        let flow = json!({ "writes": [{ "id": "s1r2" }] });
+        let flow =
+            flow_of(json!({ "writes": [{ "id": "s1r2", "method": "POST", "kind": "explicit" }] }));
         assert!(check_write_ids(&flow, &some).unwrap_err().contains("s3w1"));
     }
 
@@ -4656,7 +4642,7 @@ mod tests {
         );
         lookup.method = "POST".to_string();
         lookup.post_data = Some(r#"{"email":"ana@example.com"}"#.to_string());
-        let (flow, _) = build_flow(SaveInput {
+        let (flow, _) = build_flow_value(SaveInput {
             name: "t",
             recorder: &r,
             commands: &r.commands,
@@ -4713,7 +4699,7 @@ mod tests {
             r#"{"items":[{"id":1}]}"#,
         )];
         let params = vec![("product".to_string(), "kettle".to_string())];
-        let (flow, _) = build_flow(SaveInput {
+        let (flow, _) = build_flow_value(SaveInput {
             name: "t",
             recorder: &r,
             commands: &r.commands,
@@ -4741,14 +4727,14 @@ mod tests {
 
     #[test]
     fn replay_fills_typed_placeholders_with_the_run_value_or_the_example() {
-        let flow = json!({
+        let flow = flow_of(json!({
             "startUrl": "https://a.test/",
             "params": [{ "name": "email", "example": "ana@example.com", "source": "typed" }],
             "steps": [
                 { "ok": true, "command": { "action": "navigate", "url": "https://a.test/" } },
                 { "ok": true, "command": { "action": "fill", "selector": "#e", "value": "{{email}}" } }
             ]
-        });
+        }));
         let given = replay_commands(
             &flow,
             &[("email".to_string(), "bo@example.com".to_string())],
@@ -4799,7 +4785,7 @@ mod tests {
         let req = prepared("s1r1");
         let limited = tier_result(
             &req,
-            "http",
+            Tier::Http,
             Instant::now(),
             Err(Failure::stop("rate_limited", 429, "x".into())),
         );
@@ -4811,7 +4797,7 @@ mod tests {
         );
         let auth = tier_result(
             &req,
-            "http",
+            Tier::Http,
             Instant::now(),
             Err(Failure::stop("auth_expired", 401, "x".into())),
         );
@@ -4820,34 +4806,38 @@ mod tests {
 
     #[test]
     fn a_run_gates_only_the_writes_its_output_needs() {
-        let flow = json!({
-            "output": "s2r1",
-            "writes": [
-                { "id": "s1r1", "method": "POST", "kind": "explicit" },
-                { "id": "s2r1", "method": "POST", "kind": "explicit" },
-                { "id": "s3w1", "method": "GET", "kind": "suspected" }
-            ],
+        let request = |id: &str, url: &str, body: &str| json!({ "id": id, "method": "POST", "url": url, "body": body, "write": true });
+        let writes = json!([
+            { "id": "s1r1", "method": "POST", "url": "https://a.test/session", "kind": "explicit" },
+            { "id": "s2r1", "method": "POST", "url": "https://a.test/cart", "kind": "explicit" },
+            { "id": "s3w1", "method": "GET", "url": "https://a.test/x", "kind": "suspected" }
+        ]);
+        let flow = flow_of(json!({
+            "output": "s2r1", "writes": writes,
             "steps": [
-                { "requests": [{ "id": "s1r1", "url": "https://a.test/session", "body": null }] },
-                { "requests": [{ "id": "s2r1", "url": "https://a.test/cart", "body": "{\"csrf\":\"{{@s1r1.csrf}}\"}" }] }
+                { "command": {}, "requests": [request("s1r1", "https://a.test/session", "{}")] },
+                { "command": {}, "requests": [request("s2r1", "https://a.test/cart", "{\"csrf\":\"{{@s1r1.csrf}}\"}")] }
             ]
-        });
+        }));
         assert_eq!(request_write_ids(&flow), vec!["s1r1", "s2r1"]);
-        let only_output = json!({ "output": "s2r1", "writes": flow["writes"], "steps": [
-            { "requests": [{ "id": "s1r1", "url": "https://a.test/session", "body": null }] },
-            { "requests": [{ "id": "s2r1", "url": "https://a.test/cart", "body": "{}" }] }
-        ] });
+        let only_output = flow_of(json!({
+            "output": "s2r1", "writes": writes,
+            "steps": [
+                { "command": {}, "requests": [request("s1r1", "https://a.test/session", "{}")] },
+                { "command": {}, "requests": [request("s2r1", "https://a.test/cart", "{}")] }
+            ]
+        }));
         assert_eq!(request_write_ids(&only_output), vec!["s2r1"]);
         let replay: Vec<String> = replay_only_writes(&only_output)
-            .iter()
-            .filter_map(|w| w["id"].as_str().map(String::from))
+            .into_iter()
+            .map(|w| w.id)
             .collect();
         assert_eq!(replay, vec!["s1r1", "s3w1"]);
     }
 
-    fn denied(id: &str, tier: &'static str, status: u16) -> TierResult {
+    fn denied(id: &str, tier: Tier, status: u16) -> TierResult {
         let req = PreparedRequest {
-            expect: json!({ "signature": signature(&json!({})), "strippedAuth": true }),
+            expect: expect_of(json!({ "signature": signature(&json!({})), "strippedAuth": true })),
             ..prepared(id)
         };
         tier_result(
@@ -4860,30 +4850,33 @@ mod tests {
 
     #[test]
     fn a_401_on_a_request_recorded_with_credentials_falls_through() {
-        let http = denied("s1r1", "http", 401);
+        let http = denied("s1r1", Tier::Http, 401);
         assert_eq!(http.kind, None);
         assert!(http.drift);
-        let page = denied("s1r1", "page", 403);
+        let page = denied("s1r1", Tier::Page, 403);
         assert_eq!(page.kind, None);
-        let replay = denied("s1r1", "replay", 401);
+        let replay = denied("s1r1", Tier::Replay, 401);
         assert_eq!(replay.kind, Some("auth_expired"));
         // Without stripped credentials the first 401 still stops the run.
         let req = prepared("s1r1");
         let plain = tier_result(
             &req,
-            "http",
+            Tier::Http,
             Instant::now(),
             Err(Failure::stop("auth_expired", 401, "x".into())),
         );
         assert_eq!(plain.kind, Some("auth_expired"));
         // When no way gets through, the run reports the sign-in problem.
-        let all = vec![denied("s1r1", "http", 401), denied("s1r1", "page", 403)];
+        let all = vec![
+            denied("s1r1", Tier::Http, 401),
+            denied("s1r1", Tier::Page, 403),
+        ];
         assert!(denied_everywhere(&all).is_some());
         let recovered = vec![
-            denied("s1r1", "http", 401),
+            denied("s1r1", Tier::Http, 401),
             attempt(
                 "s1r1",
-                "page",
+                Tier::Page,
                 Ok((200, r#"{"data":[{"id":1}]}"#.to_string())),
             ),
         ];
@@ -4911,7 +4904,7 @@ mod tests {
             ("Authorization".into(), "Bearer abc".into()),
             ("Accept".into(), "*/*".into()),
         ];
-        let (flow, _) = build_flow(SaveInput {
+        let (flow, _) = build_flow_value(SaveInput {
             name: "t",
             recorder: &r,
             commands: &r.commands,
@@ -4942,7 +4935,8 @@ mod tests {
 
     #[test]
     fn replay_runs_only_plain_interactions_on_the_flows_site() {
-        let flow = json!({ "startUrl": "https://example.com/", "allowedHosts": ["example.com"] });
+        let flow =
+            flow_of(json!({ "startUrl": "https://example.com/", "allowedHosts": ["example.com"] }));
         let ok = vec![
             json!({ "action": "navigate", "url": "https://example.com/a" }),
             json!({ "action": "click", "selector": "a[href='https://other.test']" }),
@@ -4970,7 +4964,9 @@ mod tests {
         assert_ne!(base_domain("a.vercel.app"), base_domain("b.vercel.app"));
         assert_eq!(base_domain("api.example.com.ar"), "example.com.ar");
         assert_eq!(base_domain("localhost"), "localhost");
-        let flow = json!({ "startUrl": "https://a.vercel.app/", "allowedHosts": ["a.vercel.app"] });
+        let flow = flow_of(
+            json!({ "startUrl": "https://a.vercel.app/", "allowedHosts": ["a.vercel.app"] }),
+        );
         assert!(check_allowed_host(&flow, "https://api.a.vercel.app/x").is_ok());
         assert!(check_allowed_host(&flow, "https://b.vercel.app/x").is_err());
     }
@@ -4981,7 +4977,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
         guard.set("AGENT_BROWSER_FLOWS_DIR", dir.to_str().unwrap());
-        let good = json!({ "version": 2, "name": "f", "origin": "a.test", "startUrl": "https://a.test/", "steps": [] });
+        let good = flow_of(
+            json!({ "version": 1, "name": "f", "origin": "a.test", "startUrl": "https://a.test/", "steps": [] }),
+        );
         write_flow(&good).unwrap();
         assert!(load_flow("f", None).is_ok());
         // Moved under another origin's directory, or start URL edited.
@@ -4995,7 +4993,7 @@ mod tests {
         );
         std::fs::remove_dir_all(&moved).unwrap();
         let mut edited = good.clone();
-        edited["startUrl"] = json!("https://evil.test/");
+        edited.start_url = "https://evil.test/".to_string();
         std::fs::write(
             dir.join("a.test").join("f.json"),
             serde_json::to_string(&edited).unwrap(),
@@ -5049,7 +5047,7 @@ mod tests {
             "application/json",
             r#"{"items":[{"id":1}]}"#,
         )];
-        let (flow, _) = build_flow(SaveInput {
+        let (flow, _) = build_flow_value(SaveInput {
             name: "t",
             recorder: &r,
             commands: &r.commands,
@@ -5097,11 +5095,11 @@ mod tests {
 
     #[test]
     fn typed_params_are_required_at_run_time_and_listed_without_a_value() {
-        let flow = json!({
+        let flow = flow_of(json!({
             "startUrl": "https://a.test/",
             "params": [{ "name": "email", "source": "typed" }],
             "steps": [{ "ok": true, "command": { "action": "fill", "selector": "#e", "value": "{{email}}" }, "requests": [] }]
-        });
+        }));
         assert!(replay_commands(&flow, &[])
             .unwrap_err()
             .contains("missing --param email"));
@@ -5115,7 +5113,8 @@ mod tests {
 
     #[test]
     fn urls_hidden_by_whatwg_stripping_are_still_host_checked() {
-        let flow = json!({ "startUrl": "https://example.com/", "allowedHosts": ["example.com"] });
+        let flow =
+            flow_of(json!({ "startUrl": "https://example.com/", "allowedHosts": ["example.com"] }));
         for bad in [
             "ht\ttps://evil.com/x",
             "\u{1}https://evil.com/x",
@@ -5141,7 +5140,8 @@ mod tests {
     fn a_write_is_never_retried_by_the_in_page_fetch() {
         let write = PreparedRequest {
             method: "POST".to_string(),
-            expect: json!({ "write": true }),
+            expect: Expect::default(),
+            write: true,
             ..prepared("s1r1")
         };
         let script = page_fetch_script(&write);
@@ -5265,7 +5265,7 @@ mod tests {
             "application/json",
             r#"{"name":"a"}"#,
         );
-        let (flow, _) = build_flow(SaveInput {
+        let (flow, _) = build_flow_value(SaveInput {
             name: "k",
             recorder: &r,
             commands: &r.commands,
@@ -5378,7 +5378,7 @@ mod tests {
             "application/json",
             r#"{"items":[1]}"#,
         );
-        let (flow, report) = build_flow(SaveInput {
+        let (flow, report) = build_flow_value(SaveInput {
             name: "p",
             recorder: &r,
             commands: &r.commands,
@@ -5475,7 +5475,7 @@ mod tests {
             "application/json",
             r#"{"name":"a"}"#,
         );
-        let (flow, _) = build_flow(SaveInput {
+        let (flow, _) = build_flow_value(SaveInput {
             name: "p",
             recorder: &r,
             commands: &r.commands,
@@ -5542,14 +5542,14 @@ mod tests {
     #[test]
     fn comment_3_params_with_quotes_keep_commands_and_bodies_valid() {
         let value = r#"a "quoted" item"#.to_string();
-        let flow = json!({
+        let flow = flow_of(json!({
             "startUrl": "https://a.test/",
             "params": [{ "name": "q", "source": "typed" }],
             "steps": [{ "ok": true, "command": { "action": "fill", "selector": "#q", "value": "{{q}}" },
                 "requests": [{ "id": "s1r1", "method": "POST", "url": "https://a.test/s?q={{q}}",
                     "headers": { "x-q": "{{q}}" }, "body": "{\"q\":\"{{q}}\"}",
                     "expect": { "signature": signature(&json!({})) } }] }]
-        });
+        }));
         let cmds = replay_commands(&flow, &[("q".to_string(), value.clone())]).unwrap();
         assert_eq!(cmds[1]["value"], value.as_str());
         assert!(serde_json::from_str::<Value>(&serde_json::to_string(&cmds[1]).unwrap()).is_ok());
@@ -5612,7 +5612,7 @@ mod tests {
             "application/json",
             r#"{"name":"a"}"#,
         );
-        let (flow, _) = build_flow(SaveInput {
+        let (flow, _) = build_flow_value(SaveInput {
             name: "l",
             recorder: &r,
             commands: &r.commands,
@@ -5718,7 +5718,7 @@ mod tests {
         );
         cart.method = "POST".to_string();
         cart.post_data = Some(r#"{"id":7,"csrf":"a8f3c9d2e1b04f7a"}"#.to_string());
-        let (flow, report) = build_flow(SaveInput {
+        let (flow, report) = build_flow_value(SaveInput {
             name: "c",
             recorder: &r,
             commands: &r.commands,
@@ -5736,7 +5736,10 @@ mod tests {
             "token saved literally: {body}"
         );
         assert!(body.contains("{{@s1r1.csrf}}"), "{body}");
-        assert_eq!(dependencies(&flow, "s2r1"), vec!["s1r1", "s2r1"]);
+        assert_eq!(
+            dependencies(&flow_of(flow.clone()), "s2r1"),
+            vec!["s1r1", "s2r1"]
+        );
         assert!(report["references"]
             .as_array()
             .unwrap()
@@ -5788,5 +5791,39 @@ mod tests {
         assert!(replay_lookup(&twice, &want("https://api.site.example/items?page=1&_=2")).is_ok());
         assert!(replay_match(&entries, &want("https://api.site.example/items?page=1")).is_some());
         assert!(replay_match(&entries, &want("https://api.site.example/items")).is_none());
+    }
+
+    #[test]
+    fn a_saved_flow_reads_and_rewrites_byte_for_byte() {
+        let dir = std::env::temp_dir().join(format!("ab-flow-roundtrip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.to_str().unwrap());
+        let rec = recorder();
+        let entries = vec![entry(
+            "api",
+            "https://api.example.com.ar/movies?film=Film+One",
+            "Fetch",
+            "application/json",
+            r#"{"movies":[{"id":1}]}"#,
+        )];
+        let (flow, _) = build_flow(SaveInput {
+            name: "rt",
+            recorder: &rec,
+            commands: &rec.commands,
+            description: Some("Movies"),
+            entries: &entries,
+            params: &[("film".to_string(), "Film One".to_string())],
+            output: None,
+            created_at: "2026-11-03T00:00:00Z".to_string(),
+            login_wall: false,
+        })
+        .unwrap();
+        let path = write_flow(&flow).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        let loaded = load_flow("rt", None).unwrap();
+        write_flow(&loaded).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
