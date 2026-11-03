@@ -5926,6 +5926,86 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_omits_stdout_only_when_json_parses() {
+        let success = json!({"success": true, "data": {"title": "Successful response"}});
+        let failure = json!({"success": false, "error": "Controlled failure"});
+        let array = json!([{"success": true, "result": "Batch response"}]);
+        let cases = [
+            (
+                success.to_string(),
+                success,
+                Some(0),
+                false,
+                "Successful response",
+                false,
+            ),
+            (
+                failure.to_string(),
+                failure,
+                Some(1),
+                true,
+                "Controlled failure",
+                false,
+            ),
+            (
+                "null".to_string(),
+                Value::Null,
+                Some(0),
+                false,
+                "null",
+                false,
+            ),
+            (
+                array.to_string(),
+                array,
+                Some(0),
+                false,
+                "Batch response",
+                false,
+            ),
+            (
+                " {\"broken\": } ".to_string(),
+                Value::Null,
+                Some(0),
+                false,
+                "{\"broken\": }",
+                true,
+            ),
+            (
+                String::new(),
+                Value::Null,
+                Some(1),
+                true,
+                "diagnostic",
+                true,
+            ),
+        ];
+
+        for (stdout, response, exit_code, is_error, expected_text, keep_stdout) in cases {
+            let stderr = " diagnostic \n".to_string();
+            let result = tool_result_from_run(CliRun {
+                exit_code,
+                stdout: stdout.clone(),
+                stderr: stderr.clone(),
+            });
+            let structured = &result["structuredContent"];
+
+            assert_eq!(structured.get("stdout").is_some(), keep_stdout);
+            if keep_stdout {
+                assert_eq!(structured["stdout"], stdout);
+            }
+            assert_eq!(structured["response"], response);
+            assert_eq!(structured["exitCode"], exit_code);
+            assert_eq!(structured["stderr"], stderr);
+            assert_eq!(result["isError"], is_error);
+            assert!(result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(expected_text));
+        }
+    }
+
+    #[test]
     fn tool_result_formats_webmcp_context_for_each_batch_result() {
         let response = json!([
             {"command": ["open", "https://example.com"], "success": true,
@@ -5972,7 +6052,7 @@ mod tests {
         assert!(!text.contains("\"webmcp\""));
         assert!(!text.contains("inputSchema"));
         assert_eq!(result["structuredContent"]["response"], response);
-        assert_eq!(result["structuredContent"]["stdout"], response.to_string());
+        assert!(result["structuredContent"].get("stdout").is_none());
         assert_eq!(result["isError"], true);
     }
 
