@@ -75,6 +75,9 @@ pub struct PendingConfirmation {
     pub action: String,
     pub cmd: Value,
     approved_actions: Vec<String>,
+    /// The flow a `flow_run` was checked against, so the confirmed run
+    /// executes the same file rather than one read again from disk.
+    flow: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -667,6 +670,8 @@ pub struct DaemonState {
     pub screencasting: bool,
     pub policy: Option<ActionPolicy>,
     pub pending_confirmation: Option<PendingConfirmation>,
+    /// A flow handed from a confirmation to the re-executed `flow_run`.
+    preloaded_flow: Option<Value>,
     pub har_recording: bool,
     pub har_entries: Vec<HarEntry>,
     /// Commands and request tags captured by `flow start`.
@@ -850,6 +855,7 @@ impl DaemonState {
             screencasting: false,
             policy: ActionPolicy::load_if_exists(),
             pending_confirmation: None,
+            preloaded_flow: None,
             har_recording: false,
             har_entries: Vec::new(),
             flow: Default::default(),
@@ -2799,6 +2805,7 @@ fn policy_actions_for_command(
     action: &str,
     needs_implicit_launch: bool,
     attached: Option<&AttachedTarget>,
+    flow: Option<&Value>,
 ) -> Vec<String> {
     let mut actions = vec![action.to_string()];
     // `a11y <url>` performs a real browser navigation before the audit. Keep
@@ -2807,14 +2814,12 @@ fn policy_actions_for_command(
     if action == "a11y" && cmd.get("url").and_then(|v| v.as_str()).is_some() {
         actions.push("navigate".to_string());
     }
-    if action == "flow_run" {
-        if let Some(flow) = flow_for_command(cmd) {
-            actions.extend(
-                super::flow::request_write_ids(&flow)
-                    .iter()
-                    .map(|id| super::flow::write_policy_action(id)),
-            );
-        }
+    if let Some(flow) = flow.filter(|_| action == "flow_run") {
+        actions.extend(
+            super::flow::request_write_ids(flow)
+                .iter()
+                .map(|id| super::flow::write_policy_action(id)),
+        );
     }
     if action == "auth_login" {
         if let Some(provider) = cmd.get("credentialProvider").and_then(|v| v.as_str()) {
@@ -3068,8 +3073,23 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     let mut lifecycle_reused = false;
     let mut lifecycle_launched = false;
     let mut lifecycle_relaunched_browser = false;
-    let policy_actions =
-        policy_actions_for_command(cmd, action, needs_launch, state.attached_target.as_ref());
+    // The flow is read once per command: policy, confirmation and the run all
+    // see the same file.
+    let mut run_flow: Option<Value> = if action == "flow_run" {
+        state
+            .preloaded_flow
+            .take()
+            .or_else(|| flow_for_command(cmd))
+    } else {
+        None
+    };
+    let policy_actions = policy_actions_for_command(
+        cmd,
+        action,
+        needs_launch,
+        state.attached_target.as_ref(),
+        run_flow.as_ref(),
+    );
 
     // Hot-reload and check action policy
     if let Some(ref mut policy) = state.policy {
@@ -3098,6 +3118,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                 action: policy_action.clone(),
                 cmd: cmd.clone(),
                 approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
+                flow: run_flow.clone(),
             });
             return json!({
                 "id": id,
@@ -3123,6 +3144,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
                         action: policy_action.to_string(),
                         cmd: cmd.clone(),
                         approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
+                        flow: run_flow.clone(),
                     });
                     return json!({
                         "id": id,
@@ -3141,11 +3163,15 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     // A write `--allow-write` does not cover needs an explicit confirmation,
     // whatever the policy file and --confirm-actions say.
     if action == "flow_run" {
-        if let Some(policy_action) = unconfirmed_flow_write(cmd, state) {
+        if let Some(policy_action) = run_flow
+            .as_ref()
+            .and_then(|flow| unconfirmed_flow_write(cmd, flow, state))
+        {
             state.pending_confirmation = Some(PendingConfirmation {
                 action: policy_action.clone(),
                 cmd: cmd.clone(),
                 approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
+                flow: run_flow.clone(),
             });
             return json!({
                 "id": id,
@@ -3421,7 +3447,7 @@ async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
         "video_stop" => handle_video_stop(state).await,
         "flow_steps" => handle_flow_steps(cmd, state),
         "flow_save" => handle_flow_save(cmd, state).await,
-        "flow_run" => handle_flow_run(cmd, state).await,
+        "flow_run" => handle_flow_run(cmd, state, run_flow.take()).await,
         "flow_list" => handle_flow_list(cmd),
         "har_start" => handle_har_start(cmd, state).await,
         "har_stop" => handle_har_stop(cmd, state).await,
@@ -12133,57 +12159,75 @@ fn flow_for_command(cmd: &Value) -> Option<Value> {
     super::flow::load_flow(name, cmd.get("origin").and_then(|v| v.as_str())).ok()
 }
 
-/// The first write of the flow that `--allow-write` does not cover and no
-/// confirmation has approved yet, as its policy action.
-fn unconfirmed_flow_write(cmd: &Value, state: &DaemonState) -> Option<String> {
-    let flow = flow_for_command(cmd)?;
-    let allow = super::flow::AllowWrite::parse(cmd.get("allowWrite")).ok()?;
-    // An id the flow does not have is an error for the run to report.
-    super::flow::check_write_ids(&flow, &allow).ok()?;
-    super::flow::request_write_ids(&flow)
+/// The single write gate: the first write a run sends that `--allow-write`
+/// does not cover and no confirmation has approved, as (id, policy action).
+fn uncovered_flow_write(
+    flow: &Value,
+    allow: &super::flow::AllowWrite,
+    confirmed: &HashSet<String>,
+) -> Option<(String, String)> {
+    super::flow::request_write_ids(flow)
         .into_iter()
-        .filter(|id| !allow.covers(id))
-        .map(|id| super::flow::write_policy_action(&id))
-        .find(|action| !state.confirmed_policy_actions.contains(action))
+        .map(|id| {
+            let action = super::flow::write_policy_action(&id);
+            (id, action)
+        })
+        .find(|(id, action)| !allow.covers(id) && !confirmed.contains(action))
 }
 
-async fn handle_flow_run(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+/// The policy action to confirm before the run starts. An id the flow does
+/// not have is left to the run to report.
+fn unconfirmed_flow_write(cmd: &Value, flow: &Value, state: &DaemonState) -> Option<String> {
+    let allow = super::flow::AllowWrite::parse(cmd.get("allowWrite")).ok()?;
+    super::flow::check_write_ids(flow, &allow).ok()?;
+    uncovered_flow_write(flow, &allow, &state.confirmed_policy_actions).map(|(_, action)| action)
+}
+
+async fn handle_flow_run(
+    cmd: &Value,
+    state: &mut DaemonState,
+    flow: Option<Value>,
+) -> Result<Value, String> {
     // Commands a run sends to the browser are not part of the recording.
     state.flow.set_suspended(true);
-    let result = handle_flow_run_inner(cmd, state).await;
+    let result = handle_flow_run_inner(cmd, state, flow).await;
     state.flow.set_suspended(false);
     result
 }
 
-async fn handle_flow_run_inner(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+async fn handle_flow_run_inner(
+    cmd: &Value,
+    state: &mut DaemonState,
+    loaded: Option<Value>,
+) -> Result<Value, String> {
     let started = std::time::Instant::now();
     let name = cmd
         .get("name")
         .and_then(|v| v.as_str())
         .ok_or("flow run requires a name")?;
     let origin = cmd.get("origin").and_then(|v| v.as_str());
-    let mut flow = super::flow::load_flow(name, origin)?;
+    let mut flow = match loaded {
+        Some(flow) => flow,
+        None => super::flow::load_flow(name, origin)?,
+    };
     let params = super::flow::parse_params(cmd)?;
     let requests = super::flow::prepare(&flow, &params)?;
     let allow = super::flow::AllowWrite::parse(cmd.get("allowWrite"))?;
     super::flow::check_write_ids(&flow, &allow)?;
-    for id in super::flow::request_write_ids(&flow) {
-        let action = super::flow::write_policy_action(&id);
-        if !allow.covers(&id) && !state.confirmed_policy_actions.contains(&action) {
-            let w = flow["writes"]
-                .as_array()
-                .and_then(|ws| ws.iter().find(|w| w["id"] == id.as_str()))
-                .cloned()
-                .unwrap_or_default();
-            return Err(format!(
-                "flow '{}' sends {} {} ({}); rerun with --allow-write {} to send it",
-                name,
-                w["method"].as_str().unwrap_or(""),
-                w["url"].as_str().unwrap_or(""),
-                w["kind"].as_str().unwrap_or("write"),
-                id
-            ));
-        }
+    if let Some((id, _)) = uncovered_flow_write(&flow, &allow, &state.confirmed_policy_actions) {
+        let w = flow["writes"]
+            .as_array()
+            .and_then(|ws| ws.iter().find(|w| w["id"] == id.as_str()))
+            .cloned()
+            .unwrap_or_default();
+        return Err(format!(
+            "flow '{}' sends {} {} ({}); rerun with --allow-write {} to send it",
+            name,
+            w["method"].as_str().unwrap_or(""),
+            w["url"].as_str().unwrap_or(""),
+            w["kind"].as_str().unwrap_or("write"),
+            id
+        ));
     }
 
     let filter = state.domain_filter.read().await.clone();
@@ -14520,7 +14564,9 @@ async fn handle_confirm(_cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         &mut state.confirmed_policy_actions,
         approved_actions.into_iter().collect(),
     );
+    state.preloaded_flow = pending.flow.clone();
     let result = Box::pin(execute_command(&pending.cmd, state)).await;
+    state.preloaded_flow = None;
     state.confirmed_policy_actions = previous_confirmed;
 
     Ok(json!({ "confirmed": true, "action": pending.action, "result": result }))
@@ -16716,7 +16762,7 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "navigate", true, None);
+        let actions = policy_actions_for_command(&cmd, "navigate", true, None, None);
 
         assert_eq!(actions[0], "navigate");
         assert!(actions.contains(&"plugin:stealth:launch.mutate".to_string()));
@@ -16739,7 +16785,7 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "navigate", false, None);
+        let actions = policy_actions_for_command(&cmd, "navigate", false, None, None);
 
         assert_eq!(actions, vec!["navigate".to_string()]);
     }
@@ -16757,11 +16803,11 @@ mod tests {
         });
 
         assert_eq!(
-            policy_actions_for_command(&with_url, "a11y", false, None),
+            policy_actions_for_command(&with_url, "a11y", false, None, None),
             vec!["a11y".to_string(), "navigate".to_string()]
         );
         assert_eq!(
-            policy_actions_for_command(&current_page, "a11y", false, None),
+            policy_actions_for_command(&current_page, "a11y", false, None, None),
             vec!["a11y".to_string()]
         );
     }
@@ -16788,7 +16834,7 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "navigate", true, None);
+        let actions = policy_actions_for_command(&cmd, "navigate", true, None, None);
 
         assert!(actions.contains(&"plugin:browserbox:browser.provider".to_string()));
         assert!(!actions.contains(&"plugin:stealth:launch.mutate".to_string()));
@@ -16816,8 +16862,8 @@ mod tests {
             json!({ "action": "navigate", "url": "https://example.com", "plugins": plugins });
 
         for actions in [
-            policy_actions_for_command(&launch, "launch", false, Some(&attached)),
-            policy_actions_for_command(&navigate, "navigate", true, Some(&attached)),
+            policy_actions_for_command(&launch, "launch", false, Some(&attached), None),
+            policy_actions_for_command(&navigate, "navigate", true, Some(&attached), None),
         ] {
             assert!(actions.contains(&"plugin:browserbox:browser.provider".to_string()));
             assert!(!actions.contains(&"plugin:stealth:launch.mutate".to_string()));
@@ -16846,7 +16892,7 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "navigate", true, None);
+        let actions = policy_actions_for_command(&cmd, "navigate", true, None, None);
 
         assert_eq!(actions, vec!["navigate".to_string()]);
     }
@@ -16872,7 +16918,7 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "auth_login", false, None);
+        let actions = policy_actions_for_command(&cmd, "auth_login", false, None, None);
 
         assert_eq!(actions, vec!["auth_login".to_string()]);
     }
@@ -19905,7 +19951,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         });
         super::super::flow::write_flow(&flow).unwrap();
         let mut state = DaemonState::new();
-        let err = handle_flow_run(&json!({ "name": "edited", "params": {} }), &mut state)
+        let err = handle_flow_run(&json!({ "name": "edited", "params": {} }), &mut state, None)
             .await
             .unwrap_err();
         assert!(
@@ -19972,7 +20018,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         write_flow_fixture(dir.path(), serve_json_once());
         let run = json!({ "id": "r1", "action": "flow_run", "name": "cart", "params": {} });
         assert_eq!(
-            policy_actions_for_command(&run, "flow_run", false, None),
+            policy_actions_for_command(
+                &run,
+                "flow_run",
+                false,
+                None,
+                flow_for_command(&run).as_ref()
+            ),
             vec!["flow_run".to_string(), "flow_write:s1r1".to_string()]
         );
 
@@ -20229,6 +20281,33 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         );
         assert!(!error.contains("already sent"), "{error}");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_run_executes_the_flow_that_was_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_FLOWS_DIR"]);
+        guard.set("AGENT_BROWSER_FLOWS_DIR", dir.path().to_str().unwrap());
+        let (port, hits) = serve_counting(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\nconnection: close\r\n\r\n{\"ok\":true}",
+        );
+        write_flow_fixture(dir.path(), port);
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        let run = json!({ "id": "r", "action": "flow_run", "name": "cart", "params": {} });
+        let ask = execute_command(&run, &mut state).await;
+        assert_eq!(ask["data"]["confirmation_required"], true, "{ask}");
+        // The file changes between the check and the confirmation: it now
+        // posts to a second server.
+        let (other, other_hits) = serve_counting(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 11\r\nconnection: close\r\n\r\n{\"ok\":true}",
+        );
+        write_flow_fixture(dir.path(), other);
+        let done = execute_command(&json!({ "id": "c", "action": "confirm" }), &mut state).await;
+        assert_eq!(done["data"]["result"]["data"]["ok"], true, "{done}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(other_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
