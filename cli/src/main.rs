@@ -2346,7 +2346,11 @@ fn read_batch_stdin(flags: &Flags) -> Vec<Vec<String>> {
 
 /// Batch items accept command arguments; pass global flags on the outer invocation.
 fn parse_batch_item(args: &[String], flags: &Flags) -> Result<serde_json::Value, ParseError> {
-    if clean_args(args).as_slice() != args {
+    if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--help" | "-h" | "--version" | "-V"))
+        || clean_args(args).as_slice() != args
+    {
         return Err(ParseError::InvalidValue {
             message: "Pass global flags on the outer batch invocation, not inside a batch item."
                 .to_string(),

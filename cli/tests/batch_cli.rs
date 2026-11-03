@@ -190,6 +190,16 @@ fn batch_rejects_item_global_flags_across_cli_and_mcp() {
             }
         }
     }
+
+    let fixture = Fixture::new();
+    for flag in ["--help", "-h", "--version", "-V"] {
+        let commands = json!([["stream", "status", flag]]);
+        let rows = fixture.run(&["batch", "--json"], &commands.to_string(), 1);
+        assert_eq!(rows.as_array().unwrap().len(), 1, "{flag}: {rows}");
+        assert_identity(&rows[0], &commands[0], 0, false);
+        assert_eq!(rows[0]["success"], false, "{flag}: {rows}");
+        assert_eq!(rows[0]["error"].as_str(), expected_error.as_deref(), "{flag}");
+    }
 }
 
 #[test]
