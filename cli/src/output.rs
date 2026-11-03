@@ -1990,6 +1990,8 @@ agent-browser download - Download a file by clicking an element
 Usage: agent-browser download <selector> <path>
 
 Clicks an element that triggers a download and saves the file to the specified path.
+Only works with a browser agent-browser launched; rejected over --cdp,
+--auto-connect, or a provider because the remote endpoint names the saved file.
 
 Arguments:
   selector             Element to click (CSS selector or @ref)

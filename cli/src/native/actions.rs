@@ -8267,7 +8267,19 @@ async fn wait_for_downloaded_file(path: &std::path::Path) -> bool {
     path.exists()
 }
 
+/// `download`: clicks the selector and saves the resulting file at `path`.
+/// Only a browser this daemon launched may name files on the local filesystem.
 async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    if state
+        .browser
+        .as_ref()
+        .is_some_and(|mgr| mgr.is_cdp_connection())
+    {
+        return Err(
+            "download is not supported over --cdp, --auto-connect, or a provider: the remote endpoint names the saved file, so only a browser agent-browser launched can save to a local path"
+                .to_string(),
+        );
+    }
     let result = download_to_path(cmd, state).await;
     // `download` points the browser at the destination's directory; restore the
     // configured one so later downloads land where `wait --download` expects.
@@ -8408,7 +8420,20 @@ async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     // Rename it to the user-requested filename.
     if let Some(guid) = downloaded_guid {
         let guid_path = download_dir.join(&guid);
+        if guid_path.file_name() != Some(std::ffi::OsStr::new(&guid)) {
+            return Err(format!(
+                "Refusing to move downloaded file: invalid download GUID {:?}",
+                guid
+            ));
+        }
         if wait_for_downloaded_file(&guid_path).await {
+            if !may_move_download(&guid_path, true, Some(download_dir_str)) {
+                return Err(format!(
+                    "Refusing to move {}: it resolves outside {}",
+                    guid_path.display(),
+                    download_dir.display()
+                ));
+            }
             std::fs::rename(&guid_path, &dest)
                 .map_err(|e| format!("Failed to rename downloaded file: {}", e))?;
         } else {
@@ -14477,6 +14502,32 @@ mod tests {
             std::os::unix::fs::symlink(&outside, &link).unwrap();
             assert!(!super::may_move_download(&link, true, downloads));
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Chrome"]
+    async fn e2e_attached_download_fails_before_browser_or_filesystem_changes() {
+        let mut producer = super::BrowserManager::launch(super::LaunchOptions::default(), None)
+            .await
+            .unwrap();
+        let mut state = super::DaemonState::new();
+        state.browser = Some(
+            super::BrowserManager::connect_cdp(producer.get_cdp_url())
+                .await
+                .unwrap(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("new-directory").join("output.bin");
+
+        let error = super::handle_download(
+            &serde_json::json!({ "selector": "#dl", "path": destination }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("--cdp"), "{error}");
+        assert!(!destination.parent().unwrap().exists());
+        let _ = producer.close().await;
     }
 
     async fn start_finished_download(
