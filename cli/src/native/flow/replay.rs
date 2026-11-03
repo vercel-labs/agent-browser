@@ -231,6 +231,8 @@ pub fn replay_lookup<'a>(
     let want_op = operation(req.body.as_deref());
     let same_body = |e: &HarEntry| match &req.body {
         None => true,
+        // A body that still has references to fill cannot be compared yet.
+        Some(b) if b.contains("{{@") => true,
         Some(b) => {
             let same_json = || {
                 let (a, c) = (

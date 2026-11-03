@@ -2129,7 +2129,7 @@ impl DaemonState {
                                         response_body: None,
                                         response_body_base64: false,
                                     });
-                                    self.flow.tag(&request_id);
+                                    self.flow.tag(&request_id, wall_time);
                                 }
                                 if self.request_tracking {
                                     let headers =
@@ -19762,7 +19762,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         let resp =
             execute_command(&json!({ "id": "s", "action": "session_info" }), &mut state).await;
         assert!(resp.get("recorded").is_none(), "{resp}");
-        state.flow.tag("sent-by-the-unrecorded-command");
+        state.flow.tag(
+            "sent-by-the-unrecorded-command",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs_f64(),
+        );
         assert_eq!(state.flow.steps()["steps"][0]["requests"], 0);
     }
 
@@ -20054,7 +20060,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
                 None,
             )
             .unwrap();
-        state.flow.tag("r1");
+        state.flow.tag(
+            "r1",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs_f64(),
+        );
         state
             .flow
             .end(seq, false, Some("https://a.test/".to_string()), None, None);

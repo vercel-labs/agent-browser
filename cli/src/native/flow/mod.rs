@@ -1919,9 +1919,9 @@ mod tests {
             None,
             None,
         );
-        r.tag("doc");
-        r.tag("api");
-        r.tag("ga");
+        r.tag_now("doc");
+        r.tag_now("api");
+        r.tag_now("ga");
         r.begin_command(
             "click",
             &json!({ "id": "2", "action": "click", "selector": "@e4" }),
@@ -2229,7 +2229,7 @@ mod tests {
             None,
         );
         for id in ["theaters", "token", "seats"] {
-            r.tag(id);
+            r.tag_now(id);
         }
         let entries = vec![
             entry(
@@ -2387,7 +2387,7 @@ mod tests {
         let mut r = FlowRecorder::default();
         r.begin_capture(None);
         r.begin_command("navigate", &json!({ "action": "navigate", "url": "https://www.shop.example/l/?keyword=kettle&page=1" }), None, None);
-        r.tag("api");
+        r.tag_now("api");
         let mut api = entry(
             "api",
             "https://www.shop.example/api/v2",
@@ -2519,7 +2519,7 @@ mod tests {
         );
         buy.method = "POST".to_string();
         let mut r = rec;
-        r.tag("buy");
+        r.tag_now("buy");
         let entries = vec![
             entry(
                 "api",
@@ -2590,8 +2590,8 @@ mod tests {
             None,
         );
         assert_eq!(r.commands[1].1["text"], REDACTED);
-        r.tag("login");
-        r.tag("me");
+        r.tag_now("login");
+        r.tag_now("me");
         let mut login = entry(
             "login",
             "https://api.example.com.ar/login",
@@ -2638,7 +2638,7 @@ mod tests {
             None,
             None,
         );
-        r.tag("probe");
+        r.tag_now("probe");
         let mut probe = entry(
             "probe",
             "https://api.example.com.ar/send",
@@ -2757,7 +2757,7 @@ mod tests {
         let mut r = recorded(&[("navigate", true)]);
         r.set_suspended(true);
         assert!(r.begin_command("click", &json!({}), None, None).is_none());
-        r.tag("late");
+        r.tag_now("late");
         assert!(r.request_tags.is_empty());
     }
 
@@ -2857,7 +2857,7 @@ mod tests {
             None,
         );
         for t in tag {
-            r.tag(t);
+            r.tag_now(t);
         }
         build_flow_value(SaveInput {
             name: "w",
@@ -2912,7 +2912,7 @@ mod tests {
             None,
         );
         for t in ["data", "out"] {
-            r.tag(t);
+            r.tag_now(t);
         }
         let entries = vec![
             entry(
@@ -2986,7 +2986,7 @@ mod tests {
             None,
             Some(&traits("email", "username", "email Email address")),
         );
-        r.tag("lookup");
+        r.tag_now("lookup");
         r.begin_command(
             "fill",
             &json!({ "action": "fill", "selector": "@e3", "value": "482913" }),
@@ -3051,7 +3051,7 @@ mod tests {
             None,
             Some(&traits("text", "", "q")),
         );
-        r.tag("search");
+        r.tag_now("search");
         let entries = vec![entry(
             "search",
             "https://api.example.com.ar/s?q=kettle",
@@ -3234,7 +3234,7 @@ mod tests {
             None,
             None,
         );
-        r.tag("api");
+        r.tag_now("api");
         let mut api = entry(
             "api",
             "https://api.example.com.ar/items",
@@ -3358,7 +3358,7 @@ mod tests {
             None,
             Some(&traits("text", "", "q")),
         );
-        r.tag("s");
+        r.tag_now("s");
         let entries = vec![entry(
             "s",
             "https://api.example.com.ar/s?q=ab",
@@ -3472,9 +3472,9 @@ mod tests {
     #[test]
     fn a_command_that_is_not_recorded_stops_tagging_requests_to_the_last_step() {
         let mut r = recorded(&[("navigate", true)]);
-        r.tag("belongs-to-step-1");
+        r.tag_now("belongs-to-step-1");
         r.untag_current();
-        r.tag("from-an-unrecorded-command");
+        r.tag_now("from-an-unrecorded-command");
         assert_eq!(r.request_tags.len(), 1);
         assert!(r.request_tags.contains_key("belongs-to-step-1"));
     }
@@ -3566,8 +3566,8 @@ mod tests {
             None,
             Some(&secret),
         );
-        r.tag("login");
-        r.tag("me");
+        r.tag_now("login");
+        r.tag_now("me");
         let mut login = entry(
             "login",
             "https://api.example.com.ar/login",
@@ -3665,8 +3665,8 @@ mod tests {
             None,
             Some(&secret),
         );
-        r.tag("login");
-        r.tag("me");
+        r.tag_now("login");
+        r.tag_now("me");
         let mut login = entry(
             "login",
             "https://api.example.com.ar/login",
@@ -3689,7 +3689,7 @@ mod tests {
             None,
             None,
         );
-        r.tag("home");
+        r.tag_now("home");
         let home = entry(
             "home",
             "https://api.example.com.ar/home",
@@ -3776,8 +3776,8 @@ mod tests {
             None,
             None,
         );
-        r.tag("login");
-        r.tag("me");
+        r.tag_now("login");
+        r.tag_now("me");
         let mut login = entry(
             "login",
             "https://api.example.com.ar/login",
@@ -3913,8 +3913,8 @@ mod tests {
             None,
             None,
         );
-        r.tag("login");
-        r.tag("me");
+        r.tag_now("login");
+        r.tag_now("me");
         let mut login = entry(
             "login",
             "https://api.example.com.ar/login",
@@ -4013,14 +4013,14 @@ mod tests {
             None,
             None,
         );
-        r.tag("session");
+        r.tag_now("session");
         r.begin_command(
             "click",
             &json!({ "action": "click", "selector": "#add" }),
             None,
             None,
         );
-        r.tag("cart");
+        r.tag_now("cart");
         let session = entry(
             "session",
             "https://api.example.com.ar/api/session",
@@ -4784,5 +4784,50 @@ mod tests {
             RunOutcome::failed(&unreachable, &flow).message("f"),
             "flow 'f' failed at step 1: request failed"
         );
+    }
+
+    #[test]
+    fn a_request_belongs_to_the_command_running_when_it_started() {
+        let mut r = FlowRecorder::default();
+        r.begin_capture(None);
+        let click = json!({ "action": "click", "selector": "#a" });
+        r.begin_command_at(100.0, "click", &click, None, None);
+        r.begin_command_at(101.0, "click", &click, None, None);
+        // Read after the second command began, but started during the first.
+        r.tag("late", 100.5);
+        r.tag("second", 101.5);
+        r.tag("before", 99.0);
+        assert_eq!(r.request_tags.get("late"), Some(&1));
+        assert_eq!(r.request_tags.get("second"), Some(&2));
+        assert_eq!(r.request_tags.get("before"), None);
+        // A command that is not recorded owns the requests that start in it.
+        r.untag_current();
+        r.tag("unrecorded", f64::MAX);
+        assert_eq!(r.request_tags.get("unrecorded"), None);
+    }
+
+    #[test]
+    fn a_body_with_unfilled_references_matches_on_the_request_alone() {
+        let mut sent = entry(
+            "w",
+            "https://api.site.example/cart",
+            "Fetch",
+            "application/json",
+            "{}",
+        );
+        sent.method = "POST".to_string();
+        sent.post_data = Some(r#"{"id":7,"csrf":"tok"}"#.to_string());
+        let want = PreparedRequest {
+            method: "POST".to_string(),
+            url: "https://api.site.example/cart".to_string(),
+            body: Some(r#"{"id":7,"csrf":"{{@s1r1.csrf}}"}"#.to_string()),
+            ..prepared("s2r1")
+        };
+        assert!(replay_lookup(&[sent.clone()], &want).is_ok());
+        let filled = PreparedRequest {
+            body: Some(r#"{"csrf":"other","id":7}"#.to_string()),
+            ..want
+        };
+        assert!(replay_lookup(&[sent], &filled).is_err());
     }
 }

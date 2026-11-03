@@ -59,7 +59,10 @@ pub struct FlowRecorder {
     /// HAR request id to the sequence number of the command that was
     /// running when the request started.
     pub(super) request_tags: HashMap<String, u64>,
-    pub(super) current_seq: Option<u64>,
+    /// When each command began (epoch seconds) and the step it recorded, or
+    /// none for a command that is not recorded. A request belongs to the last
+    /// window that began before it started.
+    windows: Vec<(f64, Option<u64>)>,
     /// A paste whose value is read once the command has finished.
     pub(super) paste_pending: Option<u64>,
     /// Steps that put a value of unknown content into a secret field.
@@ -241,6 +244,9 @@ impl FlowRecorder {
 
     /// Commands run by a replay are not part of the recording.
     pub fn set_suspended(&mut self, suspended: bool) {
+        if suspended && !self.suspended {
+            self.windows.push((now(), None));
+        }
         self.suspended = suspended;
     }
 
@@ -252,6 +258,17 @@ impl FlowRecorder {
 
     pub(super) fn begin_command(
         &mut self,
+        action: &str,
+        cmd: &Value,
+        from_url: Option<String>,
+        traits: Option<&FieldTraits>,
+    ) -> Option<u64> {
+        self.begin_command_at(now(), action, cmd, from_url, traits)
+    }
+
+    pub(super) fn begin_command_at(
+        &mut self,
+        at: f64,
         action: &str,
         cmd: &Value,
         from_url: Option<String>,
@@ -287,7 +304,7 @@ impl FlowRecorder {
                 url: None,
             },
         );
-        self.current_seq = Some(self.next_seq);
+        self.windows.push((at, Some(self.next_seq)));
         self.begun = Some(self.next_seq);
         Some(self.next_seq)
     }
@@ -352,14 +369,25 @@ impl FlowRecorder {
         }
     }
 
-    /// A request started while the current command ran.
-    pub fn tag(&mut self, request_id: &str) {
-        if self.suspended {
-            return;
-        }
-        if let Some(seq) = self.current_seq {
+    /// A request started at `started_at` (epoch seconds). It belongs to the
+    /// command that was running then, not the one running when the event
+    /// was read, so a response that lands late keeps its step.
+    pub fn tag(&mut self, request_id: &str, started_at: f64) {
+        let started_at = if started_at > 0.0 { started_at } else { now() };
+        let seq = self
+            .windows
+            .iter()
+            .rev()
+            .find(|(begin, _)| *begin <= started_at)
+            .and_then(|(_, seq)| *seq);
+        if let Some(seq) = seq {
             self.request_tags.insert(request_id.to_string(), seq);
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn tag_now(&mut self, request_id: &str) {
+        self.tag(request_id, now());
     }
 
     /// The first and last step a save covers. Without `from` the save
@@ -405,7 +433,7 @@ impl FlowRecorder {
     /// A command that is not recorded starts: requests it sends belong to no
     /// step, so a later save does not keep them.
     pub(super) fn untag_current(&mut self) {
-        self.current_seq = None;
+        self.windows.push((now(), None));
         self.reset_keys();
     }
 
@@ -701,4 +729,11 @@ fn stable_command(action: &str, cmd: &Value, refs: &RefMap) -> Value {
         out["value"] = v.clone();
     }
     out
+}
+
+fn now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }

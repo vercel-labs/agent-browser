@@ -15095,6 +15095,59 @@ impl FlowFixture {
     }
 }
 
+/// Clicks that make the fixture page send a request, by the log line it leaves.
+const FLOW_FIXTURE_FIRES: &[(&str, &str)] = &[
+    ("#login", "POST /login"),
+    ("#session", "GET /api/session"),
+    ("#items", "GET /api/items"),
+    ("#gql", "POST /graphql"),
+    ("#add", "POST /api/cart"),
+    ("#cartadd", "GET /cart/remove"),
+];
+
+impl FlowFixture {
+    /// Wait until `done` holds, for as long as a replay waits for a response.
+    async fn wait_until(&self, done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !done() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    /// Run a command; for a click that fires a request, wait until the server
+    /// has it and the browser has read the whole response.
+    async fn run_settled(&self, state: &mut DaemonState, cmd: &Value) -> Value {
+        let needle = (cmd["action"] == "click")
+            .then(|| cmd["selector"].as_str())
+            .flatten()
+            .and_then(|sel| FLOW_FIXTURE_FIRES.iter().find(|(s, _)| *s == sel))
+            .map(|(_, needle)| *needle);
+        let before = needle.map(|n| self.hits(n)).unwrap_or(0);
+        let resp = exec(cmd, state).await;
+        if let Some(needle) = needle {
+            self.wait_until(|| self.hits(needle) > before).await;
+        }
+        settle_responses(state).await;
+        resp
+    }
+}
+
+/// Wait until every request the browser has seen has finished loading.
+async fn settle_responses(state: &mut DaemonState) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let _ = state.drain_cdp_events_background().await;
+        let finished = state
+            .har_entries
+            .iter()
+            .all(|e| e.loading_finished_timestamp.is_some());
+        if finished || std::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
 impl Drop for FlowFixture {
     fn drop(&mut self) {
         for s in &self.servers {
@@ -15367,9 +15420,8 @@ async fn e2e_flow_capture_save_run_and_guards() {
         if let Some(v) = value {
             cmd["value"] = json!(v);
         }
-        let resp = exec(&run(&mut n, cmd), &mut state).await;
+        let resp = fx.run_settled(&mut state, &run(&mut n, cmd)).await;
         assert_success(&resp);
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
     let typed = exec(
         &run(
@@ -15445,13 +15497,13 @@ async fn e2e_flow_capture_save_run_and_guards() {
 
     // A second flow in the same session, from the step after the first save.
     for selector in ["#items", "#gql"] {
-        let resp = exec(
-            &run(&mut n, json!({ "action": "click", "selector": selector })),
-            &mut state,
-        )
-        .await;
+        let resp = fx
+            .run_settled(
+                &mut state,
+                &run(&mut n, json!({ "action": "click", "selector": selector })),
+            )
+            .await;
         assert_success(&resp);
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
     let saved2 = exec(
         &run(&mut n, json!({ "action": "flow_save", "name": "browse" })),
@@ -15597,6 +15649,7 @@ async fn e2e_flow_keeps_vault_and_key_by_key_passwords_out_of_flows() {
         assert_success(&exec(&run(&mut n, cmd), &mut state).await);
     }
     // The vault login fills the password and submits; its requests are not steps.
+    let before = fx.hits("POST /login");
     let login = exec(
         &run(
             &mut n,
@@ -15606,14 +15659,14 @@ async fn e2e_flow_keeps_vault_and_key_by_key_passwords_out_of_flows() {
     )
     .await;
     assert_success(&login);
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    fx.wait_until(|| fx.hits("POST /login") > before).await;
+    settle_responses(&mut state).await;
     // The field still holds the vault password, so this recorded click sends it.
     for cmd in [
         json!({ "action": "click", "selector": "#login" }),
         json!({ "action": "click", "selector": "#items" }),
     ] {
-        assert_success(&exec(&run(&mut n, cmd), &mut state).await);
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
     }
     // A password typed key by key into a password field.
     for cmd in [
@@ -15625,8 +15678,7 @@ async fn e2e_flow_keeps_vault_and_key_by_key_passwords_out_of_flows() {
         json!({ "action": "press", "key": "9" }),
         json!({ "action": "click", "selector": "#login" }),
     ] {
-        assert_success(&exec(&run(&mut n, cmd), &mut state).await);
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
     }
     assert!(fx.hits("key9") >= 1, "the page did send the typed password");
     let saved = exec(
@@ -15677,8 +15729,7 @@ async fn e2e_flow_replay_runs_once_per_run() {
         json!({ "action": "click", "selector": "#items" }),
         json!({ "action": "click", "selector": "#add" }),
     ] {
-        assert_success(&exec(&run(&mut n, cmd), &mut state).await);
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
     }
     let saved = exec(
         &run(&mut n, json!({ "action": "flow_save", "name": "ci" })),
@@ -15773,8 +15824,7 @@ async fn e2e_flow_a_write_the_replay_sent_is_not_sent_again_by_a_later_request()
         json!({ "action": "click", "selector": "#session" }),
         json!({ "action": "click", "selector": "#add" }),
     ] {
-        assert_success(&exec(&run(&mut n, cmd), &mut state).await);
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_success(&fx.run_settled(&mut state, &run(&mut n, cmd)).await);
     }
     let saved = exec(
         &run(&mut n, json!({ "action": "flow_save", "name": "cs" })),
