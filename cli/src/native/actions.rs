@@ -5342,6 +5342,7 @@ struct PendingSettings {
     filter: Option<DomainFilter>,
     ca_cert: Option<EffectiveCaCert>,
     attached: Option<AttachedTarget>,
+    cdp_headers: Option<(String, Vec<(String, String)>)>,
 }
 
 impl SettingsOutcome {
@@ -5410,6 +5411,7 @@ async fn rollback_launch_settings(
     }
     state.effective_ca_cert = pending.ca_cert;
     state.attached_target = pending.attached;
+    state.cdp_headers = pending.cdp_headers;
     outcome.mark_rolled_back(&restored);
 }
 
@@ -5531,6 +5533,7 @@ async fn apply_settings_patch(
             filter: state.domain_filter.read().await.clone(),
             ca_cert: state.effective_ca_cert.clone(),
             attached: state.attached_target.clone(),
+            cdp_headers: state.cdp_headers.clone(),
         })
     } else {
         None
@@ -5570,6 +5573,17 @@ async fn apply_settings_patch(
     }
     if let Some(ca_cert) = ca_cert {
         state.effective_ca_cert = ca_cert;
+    }
+    if was(Key::Cdp) || was(Key::CdpHeaders) {
+        // The requested headers win over any cached for the endpoint, and
+        // clearing them sends none.
+        state.cdp_headers = match (
+            next.get(Key::Cdp).and_then(Value::as_str),
+            cdp_headers_from_settings(&next),
+        ) {
+            (Some(endpoint), Some(headers)) => Some((endpoint.to_string(), headers)),
+            _ => None,
+        };
     }
     if connection_changed {
         state.attached_target = None;
@@ -20131,5 +20145,47 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             assert!(state.browser.is_none(), "the plugin must not run: {resp}");
             assert_eq!(state.settings.get(Key::Provider), None, "{resp}");
         }
+    }
+    #[tokio::test]
+    async fn test_changed_cdp_headers_replace_the_cached_ones_for_the_endpoint() {
+        let (_env, mut state) = isolated_state();
+        state.settings = Running::defaults();
+        let endpoint = "wss://a.example/cdp";
+        let first = patch_with(vec![
+            set_to(Key::Cdp, json!(endpoint)),
+            set_to(Key::CdpHeaders, json!(r#"{"Authorization":"Bearer one"}"#)),
+        ]);
+        apply_settings_patch(&mut state, &first, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            cdp_headers_for(&state, endpoint),
+            Some(vec![(
+                "Authorization".to_string(),
+                "Bearer one".to_string()
+            )])
+        );
+
+        let changed = patch_with(vec![set_to(
+            Key::CdpHeaders,
+            json!(r#"{"Authorization":"Bearer two"}"#),
+        )]);
+        apply_settings_patch(&mut state, &changed, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            cdp_headers_for(&state, endpoint),
+            Some(vec![(
+                "Authorization".to_string(),
+                "Bearer two".to_string()
+            )])
+        );
+
+        let cleared = patch_with(vec![(Key::CdpHeaders, Requested::Default)]);
+        apply_settings_patch(&mut state, &cleared, true)
+            .await
+            .unwrap();
+        assert_eq!(cdp_headers_for(&state, endpoint), None);
+        assert_eq!(state.cdp_headers, None);
     }
 }
