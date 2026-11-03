@@ -165,7 +165,7 @@
       },
       {
         "from": "Navigation, action, and output controls are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. Auto-discovered project config filtering applies by default; see Project config trust.",
-        "to": "Navigation, action, and output controls are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. The browser version check is the exception, because an out-of-date browser undermines every other control here. Auto-discovered project config filtering applies by default; see Project config trust."
+        "to": "Navigation, action, and output controls are opt-in. By default, agent-browser imposes no restrictions on navigation, actions, or output. A browser version check also runs for supported products in headed and headless sessions. See Browser version check for its scope, fallbacks, and exceptions. Auto-discovered project config filtering applies by default; see Project config trust."
       }
     ],
     "/init-scripts": [

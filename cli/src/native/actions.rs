@@ -709,17 +709,13 @@ pub struct DaemonState {
     pub mouse_state: MouseState,
     /// Session-wide pointer behavior, configured by `--input-mode`.
     pub input_mode: String,
-    /// The caller's opt-out for this command, resolved from the command's
-    /// `allowOutdatedBrowser` field and falling back to the daemon's
-    /// spawn-time environment. Reset on every command so one call site cannot
-    /// leave the daemon permanently opted out.
+    /// Browser security settings for the current request.
     pub allow_outdated_browser: bool,
-    /// The daemon's spawn-time opt-out, the fallback for commands that do not
-    /// speak to the setting themselves.
-    pub allow_outdated_env: bool,
+    browser_security_tls: crate::tls::TrustOptions,
+    browser_security_warning: Option<String>,
     /// Blocking preflight verdict for the connected browser, keyed by its CDP
-    /// product string. See `native::preflight`.
-    pub browser_block: Option<(String, String)>,
+    /// product string and Browser.getVersion user agent. See `native::preflight`.
+    pub browser_block: Option<(String, String, String)>,
     /// Tracks the currently open JavaScript dialog (alert/confirm/prompt), if any.
     pub pending_dialog: Option<PendingDialog>,
     /// A `page_wedged` report whose response may not have reached the client,
@@ -874,8 +870,9 @@ impl DaemonState {
             dialog_handler_task: None,
             mouse_state: MouseState::default(),
             input_mode: "instant".to_string(),
-            allow_outdated_browser: crate::browser_security::override_requested(),
-            allow_outdated_env: crate::browser_security::override_requested(),
+            allow_outdated_browser: false,
+            browser_security_tls: crate::tls::TrustOptions::default(),
+            browser_security_warning: None,
             browser_block: None,
             pending_dialog: None,
             undelivered_wedge: None,
@@ -2679,22 +2676,89 @@ async fn close_active_provider_session(state: &mut DaemonState) -> Result<(), St
     Ok(())
 }
 
-/// Adopt a freshly connected browser and gate it before any page work.
+fn record_browser_security_warning(state: &mut DaemonState, warning: Option<String>) {
+    if let Some(warning) = warning {
+        match &mut state.browser_security_warning {
+            Some(existing) if !existing.contains(&warning) => {
+                existing.push('\n');
+                existing.push_str(&warning);
+            }
+            None => state.browser_security_warning = Some(warning),
+            _ => {}
+        }
+    }
+}
+
+async fn run_browser_adoption_gate(
+    state: &mut DaemonState,
+    (product, user_agent): (String, String),
+) -> Result<(), String> {
+    let trust = state.browser_security_tls.clone();
+    let warning = super::preflight::run_product(state, &product, &user_agent, &trust).await?;
+    record_browser_security_warning(state, warning);
+    Ok(())
+}
+
+async fn browser_version(client: &CdpClient) -> (String, String) {
+    let version = client
+        .send_command_no_params("Browser.getVersion", None)
+        .await
+        .unwrap_or_default();
+    let product = version
+        .get("product")
+        .and_then(|product| product.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let user_agent = version
+        .get("userAgent")
+        .and_then(|user_agent| user_agent.as_str())
+        .unwrap_or_default()
+        .to_string();
+    (product, user_agent)
+}
+
+fn adopt_browser_after_gate(state: &mut DaemonState, browser: BrowserManager, launch_hash: u64) {
+    state.browser = Some(browser);
+    state.launch_hash = Some(launch_hash);
+}
+
+/// Adopt a freshly connected browser and gate it before caller-side page work.
 ///
-/// Every launch path (local, `--cdp`, auto-connect, provider) funnels through
-/// here, so the ordering "connect, judge, then restore or script anything" is
-/// defined once. A refused browser is closed so the failure leaves nothing
-/// running behind it.
+/// Rejection closes owned browsers and only disconnects external CDP connections.
 async fn adopt_browser(
     state: &mut DaemonState,
     browser: BrowserManager,
     launch_hash: u64,
 ) -> Result<(), String> {
+    let client = Arc::clone(&browser.client);
     state.browser = Some(browser);
     state.launch_hash = Some(launch_hash);
-    if let Err(message) = super::preflight::run("launch", state).await {
+    if state.allow_outdated_browser || state.is_provider_session() {
+        return Ok(());
+    }
+    let version = browser_version(&client).await;
+    if let Err(message) = run_browser_adoption_gate(state, version).await {
         let _ = close_current_browser(state).await;
         return Err(message);
+    }
+    Ok(())
+}
+
+async fn launch_local_browser_with_gate(
+    state: &mut DaemonState,
+    options: LaunchOptions,
+    engine: Option<&str>,
+    launch_hash: u64,
+) -> Result<(), String> {
+    if engine.unwrap_or("chrome") == "chrome" {
+        let browser = BrowserManager::launch_with_gate(options, engine, |version| {
+            run_browser_adoption_gate(state, version)
+        })
+        .await?;
+        adopt_browser_after_gate(state, browser, launch_hash);
+    } else {
+        let browser = BrowserManager::launch(options, engine).await?;
+        adopt_browser(state, browser, launch_hash).await?;
     }
     Ok(())
 }
@@ -2906,7 +2970,44 @@ fn append_launch_policy_actions(
     }
 }
 
+fn command_for_confirmation(cmd: &Value) -> Value {
+    let mut command = cmd.clone();
+    super::preflight::redact_command_trust(&mut command);
+    command
+}
+
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
+    let action = cmd.get("action").and_then(Value::as_str).unwrap_or("");
+    let id = cmd.get("id").and_then(Value::as_str).unwrap_or("");
+    state.allow_outdated_browser = cmd
+        .get("allowOutdatedBrowser")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    state.browser_security_warning = None;
+    state.browser_security_tls = match super::preflight::trust_from_command(cmd) {
+        Ok(trust) => trust,
+        Err(_) if matches!(action, "close" | "dialog" | "deny") => {
+            crate::tls::TrustOptions::default()
+        }
+        Err(error) => return error_response(id, &error),
+    };
+    let mut response = execute_command_inner(cmd, state).await;
+    if let Some(warning) = state.browser_security_warning.take() {
+        append_warning(&mut response, &warning);
+    }
+    if action == "confirm" {
+        let nested_warning = response
+            .pointer("/data/result/warning")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if let Some(warning) = nested_warning {
+            append_warning(&mut response, &warning);
+        }
+    }
+    response
+}
+
+async fn execute_command_inner(cmd: &Value, state: &mut DaemonState) -> Value {
     let action = cmd.get("action").and_then(|v| v.as_str()).unwrap_or("");
     // Unlike normal auth login, no-navigation mode must never launch a
     // browser or manufacture an about:blank page to satisfy the command.
@@ -2922,13 +3023,6 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         // for this command, including --human and MCP's human argument.
         state.input_mode = mode.to_string();
     }
-    // The browser security gate reads this. Resolve it per command so an
-    // opt-out cannot outlive the command that asked for it, and so an explicit
-    // `false` (or a later command without the field) restores the check.
-    state.allow_outdated_browser = cmd
-        .get("allowOutdatedBrowser")
-        .and_then(Value::as_bool)
-        .unwrap_or(state.allow_outdated_env);
     let id = cmd
         .get("id")
         .and_then(|v| v.as_str())
@@ -2972,6 +3066,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     if let Some(ref server) = state.stream_server {
         let mut broadcast_cmd;
         let has_internal_fields = cmd.get("plugins").is_some()
+            || cmd.get("securityTls").is_some()
+            || cmd.get("tls").is_some()
             || cmd.get("pinTab").is_some()
             || cmd.get("restoreKey").is_some()
             || cmd.get("restoreSave").is_some()
@@ -2989,6 +3085,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 obj.remove("restoreCheckText");
                 obj.remove("restoreCheckFn");
             }
+            super::preflight::redact_command_trust(&mut broadcast_cmd);
             &broadcast_cmd
         } else {
             cmd
@@ -3103,7 +3200,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         if let Some(policy_action) = confirmation_required {
             state.pending_confirmation = Some(PendingConfirmation {
                 action: policy_action.clone(),
-                cmd: cmd.clone(),
+                cmd: command_for_confirmation(cmd),
                 approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
             });
             return json!({
@@ -3128,7 +3225,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 if ca.requires_confirmation(policy_action) {
                     state.pending_confirmation = Some(PendingConfirmation {
                         action: policy_action.to_string(),
-                        cmd: cmd.clone(),
+                        cmd: command_for_confirmation(cmd),
                         approved_actions: state.confirmed_policy_actions.iter().cloned().collect(),
                     });
                     return json!({
@@ -3177,17 +3274,6 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         } else {
             lifecycle_reused = true;
         }
-
-        if !auth_login_no_navigate {
-            if let Some(ref mut mgr) = state.browser {
-                if mgr.page_count() == 0 {
-                    // ensure_page itself skips creation for a pinned tab_gone
-                    // session, so a closed sole tab stays tab_gone instead of
-                    // silently recovering onto a fresh blank page.
-                    let _ = mgr.ensure_page().await;
-                }
-            }
-        }
     }
 
     // Single pre-execution gate: every command that is about to drive the
@@ -3199,9 +3285,19 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     let drives_browser = !skip_launch
         || (action == "read" && read_uses_active_tab(cmd))
         || action == "stream_enable";
-    if drives_browser && state.browser.is_some() {
-        if let Err(e) = super::preflight::run(action, state).await {
-            return error_response(&id, &e);
+    if drives_browser && state.browser.is_some() && !lifecycle_launched {
+        let trust = state.browser_security_tls.clone();
+        match super::preflight::run_with_tls(action, state, &trust).await {
+            Ok(warning) => record_browser_security_warning(state, warning),
+            Err(error) => return error_response(&id, &error),
+        }
+    }
+
+    if !skip_launch && !auth_login_no_navigate {
+        if let Some(ref mut mgr) = state.browser {
+            if mgr.page_count() == 0 {
+                let _ = mgr.ensure_page().await;
+            }
         }
     }
 
@@ -4506,7 +4602,10 @@ async fn auto_launch_inner(
             storage_state,
         })?;
         let headers = cdp_headers_for(state, &cdp).or_else(cdp_headers_from_env);
-        let mgr = BrowserManager::connect_cdp_when_listening(&cdp, headers).await?;
+        let mgr = BrowserManager::connect_cdp_when_listening_with_gate(&cdp, headers, |version| {
+            run_browser_adoption_gate(state, version)
+        })
+        .await?;
         let hash = launch_hash(
             &options,
             &allowed_domains,
@@ -4518,7 +4617,7 @@ async fn auto_launch_inner(
             Some(cdp.as_str()),
         );
         state.reset_input_state();
-        adopt_browser(state, mgr, hash).await?;
+        adopt_browser_after_gate(state, mgr, hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -4554,14 +4653,17 @@ async fn auto_launch_inner(
             None,
         );
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_auto().await?);
+        let browser = BrowserManager::connect_auto_with_gate(|version| {
+            run_browser_adoption_gate(state, version)
+        })
+        .await?;
+        adopt_browser_after_gate(state, browser, hash);
         if !apply_tab_binding_on_attach_or_rollback(state).await? {
             if let Err(e) = open_fresh_tab_for_auto_connect(state).await {
                 let _ = rollback_failed_launch(state).await;
                 return Err(e);
             }
         }
-        state.launch_hash = Some(hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -4680,9 +4782,8 @@ async fn auto_launch_inner(
         options.prepared_nss_home = Some(prepare_nss_home(&ca.bundle)?);
     }
     state.session_setup = SessionSetup::from_launch_options(&options);
-    let mgr = BrowserManager::launch(options, engine.as_deref()).await?;
     state.reset_input_state();
-    adopt_browser(state, mgr, hash).await?;
+    launch_local_browser_with_gate(state, options, engine.as_deref(), hash).await?;
     state.effective_ca_cert = effective_ca_cert;
     state.subscribe_to_browser_events();
     state.start_fetch_handler();
@@ -5337,12 +5438,7 @@ async fn handle_launch_for_target(
 }
 
 async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
-    // Establish first so the gate sees the browser the caller asked for,
-    // including attached and provider connections, then judge it before the
-    // launch is reported as usable.
-    let result = establish_launch(cmd, state).await?;
-    super::preflight::run("launch", state).await?;
-    Ok(result)
+    establish_launch(cmd, state).await
 }
 
 async fn establish_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -5579,6 +5675,11 @@ async fn establish_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value,
             close_current_browser(state).await?;
         }
     } else {
+        if state.browser.is_some() {
+            let trust = state.browser_security_tls.clone();
+            let warning = super::preflight::run_with_tls("launch", state, &trust).await?;
+            record_browser_security_warning(state, warning);
+        }
         load_storage_state(state, &storage_state_owned).await?;
         state.effective_ca_cert = effective_ca_cert;
         return Ok(json!({ "launched": true, "reused": true, "relaunchedBrowser": false }));
@@ -5611,10 +5712,14 @@ async fn establish_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     if let Some(url) = cdp_url {
         state.reset_input_state();
         let headers = cdp_headers_from_command(cmd);
-        state.browser =
-            Some(BrowserManager::connect_cdp_when_listening(url, headers.clone()).await?);
+        state.engine = engine.as_deref().unwrap_or("chrome").to_string();
+        let browser =
+            BrowserManager::connect_cdp_when_listening_with_gate(url, headers.clone(), |version| {
+                run_browser_adoption_gate(state, version)
+            })
+            .await?;
+        adopt_browser_after_gate(state, browser, new_hash);
         state.cdp_headers = headers.map(|headers| (url.to_string(), headers));
-        state.launch_hash = Some(new_hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -5631,11 +5736,15 @@ async fn establish_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     if let Some(port) = cdp_port {
         state.reset_input_state();
         let headers = cdp_headers_from_command(cmd);
-        state.browser = Some(
-            BrowserManager::connect_cdp_when_listening(&port.to_string(), headers.clone()).await?,
-        );
+        state.engine = engine.as_deref().unwrap_or("chrome").to_string();
+        let browser = BrowserManager::connect_cdp_when_listening_with_gate(
+            &port.to_string(),
+            headers.clone(),
+            |version| run_browser_adoption_gate(state, version),
+        )
+        .await?;
+        adopt_browser_after_gate(state, browser, new_hash);
         state.cdp_headers = headers.map(|headers| (port.to_string(), headers));
-        state.launch_hash = Some(new_hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -5651,14 +5760,18 @@ async fn establish_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 
     if auto_connect {
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_auto().await?);
+        state.engine = engine.as_deref().unwrap_or("chrome").to_string();
+        let browser = BrowserManager::connect_auto_with_gate(|version| {
+            run_browser_adoption_gate(state, version)
+        })
+        .await?;
+        adopt_browser_after_gate(state, browser, new_hash);
         if !apply_tab_binding_on_attach_or_rollback(state).await? {
             if let Err(e) = open_fresh_tab_for_auto_connect(state).await {
                 let _ = rollback_failed_launch(state).await;
                 return Err(e);
             }
         }
-        state.launch_hash = Some(new_hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
         state.start_dialog_handler();
@@ -5768,12 +5881,7 @@ async fn establish_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     write_extensions_file_from_paths(&state.session_id, launch_options.extensions.as_deref());
     state.reset_input_state();
     state.session_setup = SessionSetup::from_launch_options(&launch_options);
-    adopt_browser(
-        state,
-        BrowserManager::launch(launch_options, engine.as_deref()).await?,
-        new_hash,
-    )
-    .await?;
+    launch_local_browser_with_gate(state, launch_options, engine.as_deref(), new_hash).await?;
     state.subscribe_to_browser_events();
     state.start_fetch_handler();
     state.start_dialog_handler();
@@ -13626,7 +13734,7 @@ async fn handle_auth_login(cmd: &Value, state: &mut DaemonState) -> Result<Value
 // Confirmation handlers (stub)
 // ---------------------------------------------------------------------------
 
-async fn handle_confirm(_cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+async fn handle_confirm(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let pending = state
         .pending_confirmation
         .take()
@@ -13640,7 +13748,18 @@ async fn handle_confirm(_cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         &mut state.confirmed_policy_actions,
         approved_actions.into_iter().collect(),
     );
-    let result = Box::pin(execute_command(&pending.cmd, state)).await;
+    let mut replay = pending.cmd;
+    if let Some(object) = replay.as_object_mut() {
+        object.insert(
+            "allowOutdatedBrowser".to_string(),
+            json!(state.allow_outdated_browser),
+        );
+        if let Some(trust) = cmd.get("securityTls") {
+            object.insert("securityTls".to_string(), trust.clone());
+            object.insert("tls".to_string(), trust.clone());
+        }
+    }
+    let result = Box::pin(execute_command(&replay, state)).await;
     state.confirmed_policy_actions = previous_confirmed;
 
     Ok(json!({ "confirmed": true, "action": pending.action, "result": result }))
@@ -14867,6 +14986,69 @@ mod tests {
     use std::fs;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn rejected_cdp_gate_precedes_target_setup_and_disconnects_safely() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut methods = Vec::new();
+            while let Some(Ok(message)) = ws.next().await {
+                let text = match message {
+                    Message::Text(text) => text,
+                    Message::Close(_) => break,
+                    _ => continue,
+                };
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let method = request["method"].as_str().unwrap().to_string();
+                methods.push(method.clone());
+                let result = match method.as_str() {
+                    "Browser.getVersion" => json!({
+                        "product": "Chrome/1.0",
+                        "userAgent": "Mozilla/5.0 (X11; Linux x86_64) Chrome/1.0"
+                    }),
+                    _ => json!({}),
+                };
+                let response = json!({ "id": request["id"], "result": result });
+                if ws.send(Message::Text(response.to_string())).await.is_err() {
+                    break;
+                }
+            }
+            methods
+        });
+
+        let result =
+            BrowserManager::connect_cdp_with_gate(&url, None, |(product, user_agent)| async move {
+                assert_eq!(product, "Chrome/1.0");
+                assert!(user_agent.contains("Linux x86_64"));
+                Err("rejected by test gate".to_string())
+            })
+            .await;
+        match result {
+            Err(message) => assert_eq!(message, "rejected by test gate"),
+            Ok(_) => panic!("the injected gate must reject the CDP connection"),
+        }
+
+        let methods = server.await.unwrap();
+        assert_eq!(methods, vec!["Browser.getVersion".to_string()]);
+        for forbidden in [
+            "Target.setDiscoverTargets",
+            "Target.attachToTarget",
+            "Target.createTarget",
+            "Page.addScriptToEvaluateOnNewDocument",
+            "Browser.close",
+        ] {
+            assert!(
+                !methods.iter().any(|method| method == forbidden),
+                "{forbidden} must not be sent before rejection: {methods:?}"
+            );
+        }
+    }
 
     #[tokio::test]
     #[ignore]

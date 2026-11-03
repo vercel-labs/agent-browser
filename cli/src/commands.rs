@@ -374,20 +374,45 @@ pub fn set_allow_outdated_browser(allow: bool) {
     let _ = ALLOW_OUTDATED_BROWSER.set(allow);
 }
 
-/// Attach the opt-out to an outbound command. Absence means "no opinion", and
-/// the daemon falls back to its spawn-time environment.
+/// Attach the resolved browser-security setting to an outbound command.
 pub fn with_browser_security_override(cmd: Value) -> Value {
     stamp_browser_security_override(cmd, ALLOW_OUTDATED_BROWSER.get().copied().unwrap_or(false))
 }
 
 pub(crate) fn stamp_browser_security_override(mut cmd: Value, allow: bool) -> Value {
-    if allow {
-        if let Some(object) = cmd.as_object_mut() {
-            // A command that already speaks for itself keeps its value.
-            object.entry("allowOutdatedBrowser").or_insert(json!(true));
-        }
+    if let Some(object) = cmd.as_object_mut() {
+        object.entry("allowOutdatedBrowser").or_insert(json!(allow));
     }
     cmd
+}
+
+#[cfg(test)]
+mod browser_security_override_tests {
+    use super::stamp_browser_security_override;
+    use serde_json::json;
+
+    #[test]
+    fn stamps_the_resolved_value_when_missing() {
+        for allow in [false, true] {
+            let stamped = stamp_browser_security_override(json!({"action": "navigate"}), allow);
+            assert_eq!(stamped["allowOutdatedBrowser"], json!(allow));
+        }
+    }
+
+    #[test]
+    fn preserves_explicit_values() {
+        let explicit_false = stamp_browser_security_override(
+            json!({"action": "navigate", "allowOutdatedBrowser": false}),
+            true,
+        );
+        let explicit_true = stamp_browser_security_override(
+            json!({"action": "navigate", "allowOutdatedBrowser": true}),
+            false,
+        );
+
+        assert_eq!(explicit_false["allowOutdatedBrowser"], false);
+        assert_eq!(explicit_true["allowOutdatedBrowser"], true);
+    }
 }
 
 pub fn attach_ca_cert_to_launch_command(cmd: &mut Value, flags: &Flags) {

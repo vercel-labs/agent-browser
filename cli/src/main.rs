@@ -78,6 +78,62 @@ fn print_json_error_with_code(message: impl AsRef<str>, code: Option<&str>) {
     print_json_value(value);
 }
 
+fn merge_warning(target: &mut Option<String>, incoming: Option<String>) {
+    if let Some(incoming) = incoming {
+        match target {
+            Some(existing) if existing.as_str() != incoming.as_str() => {
+                existing.push('\n');
+                existing.push_str(&incoming);
+            }
+            None => *target = Some(incoming),
+            _ => {}
+        }
+    }
+}
+
+fn launch_result_error(
+    result: Result<Response, String>,
+    fallback: &str,
+    warning: &mut Option<String>,
+) -> Option<(String, Option<String>)> {
+    match result {
+        Ok(resp) => {
+            merge_warning(warning, resp.warning);
+            if resp.success {
+                None
+            } else {
+                Some((
+                    resp.error.unwrap_or_else(|| fallback.to_string()),
+                    resp.code,
+                ))
+            }
+        }
+        Err(error) => Some((error, None)),
+    }
+}
+
+fn print_launch_error(message: &str, code: Option<&str>, warning: Option<&str>, json_mode: bool) {
+    if json_mode {
+        if warning.is_none() {
+            print_json_error_with_code(message, code);
+            return;
+        }
+        let mut value = json!({"success": false, "error": message});
+        if let Some(code) = code {
+            value["code"] = json!(code);
+        }
+        if let Some(warning) = warning {
+            value["warning"] = json!(warning);
+        }
+        print_json_value(value);
+    } else {
+        eprintln!("{} {}", color::error_indicator(), message);
+        if let Some(warning) = warning {
+            eprintln!("{} {}", color::warning_indicator(), warning);
+        }
+    }
+}
+
 fn print_json_error_with_type(message: impl AsRef<str>, error_type: &str) {
     print_json_value(json!({
         "success": false,
@@ -209,6 +265,53 @@ fn command_is_cdp_url_metadata(cmd: &serde_json::Value) -> bool {
     }
 }
 
+/// Commands that must reach the daemon even when a launch would be refused,
+/// because they are how a caller escapes a session it can no longer drive.
+fn command_is_recovery(command: &serde_json::Value) -> bool {
+    matches!(
+        command.get("action").and_then(|value| value.as_str()),
+        Some("close" | "dialog" | "confirm" | "deny")
+    )
+}
+
+/// Whether this invocation must attach through `--cdp` or `--auto-connect`
+/// before running `command`.
+fn should_send_attach_launch(flags: &Flags, command: &serde_json::Value) -> bool {
+    (flags.auto_connect || flags.cdp.is_some()) && !command_is_recovery(command)
+}
+
+fn command_needs_session_tls(command: &serde_json::Value, flags: &Flags) -> bool {
+    if should_send_attach_launch(flags, command)
+        || should_send_local_launch_config(flags, command)
+        || (flags.provider.is_some() && !command_is_cdp_url_metadata(command))
+    {
+        return true;
+    }
+    match command.get("action").and_then(serde_json::Value::as_str) {
+        Some("batch") => {
+            let commands: Vec<Vec<String>> = if let Some(argv) = command.get("argv") {
+                serde_json::from_value(argv.clone()).unwrap_or_default()
+            } else {
+                command
+                    .get("commands")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(commands::shell_words_split)
+                    .collect()
+            };
+            commands.iter().any(|args| {
+                parse_command(args, flags)
+                    .is_ok_and(|parsed| command_needs_session_tls(&parsed, flags))
+            })
+        }
+        Some("read" | "confirm") => true,
+        Some("dialog" | "har_stop" | "stream_disable" | "stream_status") | None => false,
+        Some(action) => !native::actions::action_is_browserless(action),
+    }
+}
+
 fn build_provider_launch_command(provider: &str, flags: &Flags) -> serde_json::Value {
     let mut launch_cmd = json!({
         "id": gen_id(),
@@ -329,6 +432,7 @@ fn should_send_local_launch_config(flags: &Flags, command: &serde_json::Value) -
         .and_then(|value| value.as_str())
         .is_some_and(native::actions::action_is_browserless);
     !browserless
+        && !command_is_recovery(command)
         && (flags.headed
             || flags.cli_headed
             || flags.executable_path.is_some()
@@ -497,11 +601,12 @@ fn run_interactive_confirmations(
         };
 
         match send_command(confirm_cmd, &flags.session) {
-            Ok(next_resp) => {
+            Ok(mut next_resp) => {
                 if !approved {
                     eprintln!("{} Action denied", color::error_indicator());
                     exit(1);
                 }
+                merge_warning(&mut next_resp.warning, resp.warning.take());
                 resp = next_resp;
             }
             Err(e) => {
@@ -1708,10 +1813,8 @@ fn main() {
     {
         cmd["argv"] = json!(read_batch_stdin(&flags));
     }
-    match cmd.get("action").and_then(|v| v.as_str()) {
-        Some("read") => cmd["tls"] = json!(tls::session_options(&flags, &flags.session)),
-        Some("close") => tls::clear_session(&flags.session),
-        _ => {}
+    if cmd.get("action").and_then(|v| v.as_str()) == Some("close") {
+        tls::clear_session(&flags.session);
     }
     // Handle --password-stdin for auth save
     if cmd.get("action").and_then(|v| v.as_str()) == Some("auth_save") {
@@ -1828,6 +1931,10 @@ fn main() {
         exit(1);
     }
 
+    if command_needs_session_tls(&cmd, &flags) {
+        connection::set_request_tls(tls::session_options(&flags, &flags.session));
+    }
+
     if let Some(ref ca_path) = flags.ca_cert {
         if let Err(msg) = ca_bundle::load(ca_path) {
             if flags.json {
@@ -1908,10 +2015,11 @@ fn main() {
     };
     let _daemon_was_already_running = daemon_result.already_running;
     let daemon_restarted = daemon_result.restarted;
+    let mut launch_warning = None;
 
     // Auto-connect to existing browser. This is sent even when the daemon is
     // already running so launch compatibility stays idempotent.
-    if flags.auto_connect {
+    if flags.auto_connect && should_send_attach_launch(&flags, &cmd) {
         let mut launch_cmd = json!({
             "id": gen_id(),
             "action": "launch",
@@ -1937,22 +2045,14 @@ fn main() {
             launch_cmd["downloadPath"] = json!(dp);
         }
 
-        let err = match send_command(launch_cmd, &flags.session) {
-            Ok(resp) if resp.success => None,
-            Ok(resp) => Some((
-                resp.error
-                    .unwrap_or_else(|| "Auto-connect failed".to_string()),
-                resp.code,
-            )),
-            Err(e) => Some((e.to_string(), None)),
-        };
+        let err = launch_result_error(
+            send_command(launch_cmd, &flags.session),
+            "Auto-connect failed",
+            &mut launch_warning,
+        );
 
         if let Some((msg, code)) = err {
-            if flags.json {
-                print_json_error_with_code(msg, code.as_deref());
-            } else {
-                eprintln!("{} {}", color::error_indicator(), msg);
-            }
+            print_launch_error(&msg, code.as_deref(), launch_warning.as_deref(), flags.json);
             exit(1);
         }
     }
@@ -2053,22 +2153,18 @@ fn main() {
             }
         }
 
-        let err = match send_command(launch_cmd, &flags.session) {
-            Ok(resp) if resp.success => None,
-            Ok(resp) => Some((
-                resp.error
-                    .unwrap_or_else(|| "CDP connection failed".to_string()),
-                resp.code,
-            )),
-            Err(e) => Some((e.to_string(), None)),
+        let err = if should_send_attach_launch(&flags, &cmd) {
+            launch_result_error(
+                send_command(launch_cmd, &flags.session),
+                "CDP connection failed",
+                &mut launch_warning,
+            )
+        } else {
+            None
         };
 
         if let Some((msg, code)) = err {
-            if flags.json {
-                print_json_error_with_code(msg, code.as_deref());
-            } else {
-                eprintln!("{} {}", color::error_indicator(), msg);
-            }
+            print_launch_error(&msg, code.as_deref(), launch_warning.as_deref(), flags.json);
             exit(1);
         }
     }
@@ -2081,22 +2177,14 @@ fn main() {
     {
         let launch_cmd = build_provider_launch_command(provider, &flags);
 
-        let err = match send_command(launch_cmd, &flags.session) {
-            Ok(resp) if resp.success => None,
-            Ok(resp) => Some((
-                resp.error
-                    .unwrap_or_else(|| "Provider connection failed".to_string()),
-                resp.code,
-            )),
-            Err(e) => Some((e.to_string(), None)),
-        };
+        let err = launch_result_error(
+            send_command(launch_cmd, &flags.session),
+            "Provider connection failed",
+            &mut launch_warning,
+        );
 
         if let Some((msg, code)) = err {
-            if flags.json {
-                print_json_error_with_code(msg, code.as_deref());
-            } else {
-                eprintln!("{} {}", color::error_indicator(), msg);
-            }
+            print_launch_error(&msg, code.as_deref(), launch_warning.as_deref(), flags.json);
             exit(1);
         }
     }
@@ -2214,34 +2302,14 @@ fn main() {
         }
         attach_obscura_proxy_bypass(&mut launch_cmd, &flags);
 
-        match send_command(launch_cmd, &flags.session) {
-            Ok(resp) if !resp.success => {
-                // Launch command failed (e.g., invalid state file, profile error)
-                let error_msg = resp
-                    .error
-                    .unwrap_or_else(|| "Browser launch failed".to_string());
-                if flags.json {
-                    print_json_error_with_code(error_msg, resp.code.as_deref());
-                } else {
-                    eprintln!("{} {}", color::error_indicator(), error_msg);
-                }
-                exit(1);
-            }
-            Err(e) => {
-                if flags.json {
-                    print_json_error(e);
-                } else {
-                    eprintln!(
-                        "{} Could not configure browser: {}",
-                        color::error_indicator(),
-                        e
-                    );
-                }
-                exit(1);
-            }
-            Ok(_) => {
-                // Launch succeeded
-            }
+        let err = launch_result_error(
+            send_command(launch_cmd, &flags.session),
+            "Browser launch failed",
+            &mut launch_warning,
+        );
+        if let Some((msg, code)) = err {
+            print_launch_error(&msg, code.as_deref(), launch_warning.as_deref(), flags.json);
+            exit(1);
         }
     }
 
@@ -2262,7 +2330,14 @@ fn main() {
                     .collect::<Vec<Vec<String>>>()
             })
             .or_else(|| serde_json::from_value(cmd.get("argv")?.clone()).ok());
-        run_batch(&flags, &daemon_opts, bail, omit_command, arg_commands);
+        run_batch(
+            &flags,
+            &daemon_opts,
+            bail,
+            omit_command,
+            arg_commands,
+            launch_warning,
+        );
         return;
     }
 
@@ -2270,6 +2345,7 @@ fn main() {
 
     match send_command_with_respawn(cmd.clone(), &flags.session, &daemon_opts) {
         Ok(mut resp) => {
+            merge_warning(&mut resp.warning, launch_warning);
             if daemon_restarted {
                 mark_restarted_background(&mut resp);
             }
@@ -2292,11 +2368,7 @@ fn main() {
             }
         }
         Err(e) => {
-            if flags.json {
-                print_json_error(e);
-            } else {
-                eprintln!("{} {}", color::error_indicator(), e);
-            }
+            print_launch_error(&e, None, launch_warning.as_deref(), flags.json);
             exit(1);
         }
     }
@@ -2362,12 +2434,20 @@ fn run_batch(
     bail: bool,
     omit_command: bool,
     arg_commands: Option<Vec<Vec<String>>>,
+    launch_warning: Option<String>,
 ) {
     let commands: Vec<Vec<String>> = arg_commands.unwrap_or_else(|| read_batch_stdin(flags));
+    if !flags.json {
+        if let Some(warning) = launch_warning.as_deref() {
+            eprintln!("{} {}", color::warning_indicator(), warning);
+        }
+    }
 
     if commands.is_empty() {
         if flags.json {
-            println!("[]");
+            let mut results = Vec::new();
+            merge_batch_warning(&mut results, launch_warning);
+            println!("{}", json!(results));
         }
         return;
     }
@@ -2409,10 +2489,8 @@ fn run_batch(
             }
         };
         attach_input_mode(&mut parsed, flags);
-        match parsed.get("action").and_then(|v| v.as_str()) {
-            Some("read") => parsed["tls"] = json!(tls::session_options(flags, &flags.session)),
-            Some("close") => tls::clear_session(&flags.session),
-            _ => {}
+        if parsed.get("action").and_then(|v| v.as_str()) == Some("close") {
+            tls::clear_session(&flags.session);
         }
 
         let action = parsed
@@ -2481,6 +2559,7 @@ fn run_batch(
     }
 
     if flags.json {
+        merge_batch_warning(&mut results, launch_warning);
         println!(
             "{}",
             serde_json::to_string(&results).unwrap_or_else(|_| "[]".to_string())
@@ -2489,6 +2568,21 @@ fn run_batch(
 
     if had_error {
         exit(1);
+    }
+}
+
+fn merge_batch_warning(results: &mut [serde_json::Value], warning: Option<String>) {
+    if let Some(warning) = warning {
+        if let Some(first) = results.first_mut() {
+            let mut existing = first
+                .get("warning")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            merge_warning(&mut existing, Some(warning));
+            first["warning"] = json!(existing);
+        } else {
+            eprintln!("{} {}", color::warning_indicator(), warning);
+        }
     }
 }
 
@@ -2714,6 +2808,75 @@ mod tests {
     }
 
     #[test]
+    fn session_tls_is_resolved_only_for_requests_that_can_use_it() {
+        let mut flags = neutral_launch_config_flags();
+        flags.use_system_ca = true;
+        flags.cli_use_system_ca = true;
+        for action in ["read", "navigate", "launch", "confirm"] {
+            assert!(command_needs_session_tls(
+                &json!({"action": action}),
+                &flags
+            ));
+        }
+        for action in [
+            "close",
+            "dialog",
+            "auth_show",
+            "credentials_list",
+            "session_info",
+        ] {
+            assert!(!command_needs_session_tls(
+                &json!({"action": action}),
+                &flags
+            ));
+        }
+        assert!(command_needs_session_tls(
+            &json!({"action": "batch", "argv": [["close"], ["read", "https://example.com"]]}),
+            &flags
+        ));
+        assert!(!command_needs_session_tls(
+            &json!({"action": "batch", "argv": [["close"]]}),
+            &flags
+        ));
+        flags.cdp = Some("9222".to_string());
+        assert!(command_needs_session_tls(
+            &json!({"action": "auth_show"}),
+            &flags
+        ));
+    }
+
+    #[test]
+    fn synthesized_launch_warnings_survive_single_and_batch_results() {
+        let mut warning = None;
+        assert!(launch_result_error(
+            Ok(Response {
+                success: true,
+                warning: Some("advisories unavailable".to_string()),
+                ..Default::default()
+            }),
+            "launch failed",
+            &mut warning
+        )
+        .is_none());
+        let mut response = Response {
+            success: true,
+            warning: Some("dialog open".to_string()),
+            ..Default::default()
+        };
+        merge_warning(&mut response.warning, warning.clone());
+        assert_eq!(
+            serde_json::to_value(response).unwrap()["warning"],
+            "dialog open\nadvisories unavailable"
+        );
+        let mut results = vec![json!({"success": true, "warning": "dialog open"})];
+        merge_batch_warning(&mut results, warning);
+        assert_eq!(results[0]["warning"], "dialog open\nadvisories unavailable");
+        let mut empty = Vec::new();
+        merge_batch_warning(&mut empty, Some("advisories unavailable".to_string()));
+        assert!(empty.is_empty());
+    }
+
+    #[test]
     fn test_attach_allowed_domains_to_launch_command() {
         let mut flags = neutral_launch_config_flags();
         flags.allowed_domains = Some(vec!["example.com".to_string(), "*.example.org".to_string()]);
@@ -2897,6 +3060,79 @@ mod tests {
         let mut launch = json!({ "action": "launch" });
         attach_webmcp_launch_option(&mut launch, &flags);
         assert_eq!(launch["webmcp"], false);
+    }
+
+    fn parsed_command(words: &[&str], flags: &Flags) -> serde_json::Value {
+        let args: Vec<String> = words.iter().map(|word| word.to_string()).collect();
+        parse_command(&args, flags).unwrap()
+    }
+
+    #[test]
+    fn test_recovery_commands_skip_synthesized_launches() {
+        let mut flags = neutral_launch_config_flags();
+        flags.auto_connect = true;
+        let recovery = [
+            &["close"][..],
+            &["dialog", "accept"][..],
+            &["dialog", "dismiss"][..],
+            &["dialog", "status"][..],
+            &["confirm", "confirmation-1"][..],
+            &["deny", "confirmation-1"][..],
+        ];
+
+        for words in recovery {
+            assert!(
+                !should_send_attach_launch(&flags, &parsed_command(words, &flags)),
+                "{words:?} must reach the daemon without an --auto-connect launch"
+            );
+        }
+        for words in [&["snapshot"][..], &["get", "cdp-url"][..]] {
+            assert!(
+                should_send_attach_launch(&flags, &parsed_command(words, &flags)),
+                "{words:?} still needs the auto-connect launch"
+            );
+        }
+        assert!(should_send_attach_launch(
+            &flags,
+            &json!({"action": "launch"})
+        ));
+
+        flags.auto_connect = false;
+        flags.cdp = Some("9222".to_string());
+        for words in recovery {
+            assert!(
+                !should_send_attach_launch(&flags, &parsed_command(words, &flags)),
+                "{words:?} must reach the daemon without a --cdp launch"
+            );
+        }
+        assert!(should_send_attach_launch(
+            &flags,
+            &parsed_command(&["snapshot"], &flags)
+        ));
+    }
+
+    #[test]
+    fn test_recovery_commands_skip_local_launch_configuration() {
+        let mut flags = neutral_launch_config_flags();
+        flags.executable_path = Some("/usr/local/bin/chromium".to_string());
+        flags.headed = true;
+
+        for words in [
+            &["close"][..],
+            &["dialog", "accept"][..],
+            &["dialog", "dismiss"][..],
+            &["confirm", "confirmation-1"][..],
+            &["deny", "confirmation-1"][..],
+        ] {
+            assert!(
+                !should_send_local_launch_config(&flags, &parsed_command(words, &flags)),
+                "{words:?} must not send a local launch envelope"
+            );
+        }
+        assert!(should_send_local_launch_config(
+            &flags,
+            &parsed_command(&["snapshot"], &flags)
+        ));
     }
 
     #[test]

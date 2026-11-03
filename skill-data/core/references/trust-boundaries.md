@@ -57,12 +57,25 @@ Auto-discovered `./agent-browser.json` is repository-controlled and accepts only
 
 The hook in particular exposes `window.__REACT_DEVTOOLS_GLOBAL_HOOK__` to every page in the browsing context, including third-party iframes. For production-auditing tasks against sites that handle secrets, consider whether you want that global exposed during the session.
 
-## Browser version and documented CVEs
+## Browser version check
 
-Every command that drives the browser passes one gate before it runs, so a build behind the current stable release is refused before any navigation, snapshot, or input, and the error lists the CVE IDs that build lacks. Do not route around it by inventing a browser path or a provider: run `agent-browser install` and retry. Passing `--allow-outdated-browser` (or `AGENT_BROWSER_ALLOW_OUTDATED_BROWSER=1`) is a decision for the user, because an out-of-date browser can be compromised by any page the session visits, and the opt-out applies to the command that carries it.
+Before page actions, the daemon checks the reported browser product and version in both headed and headless sessions. It recognizes `Chrome/`, `HeadlessChrome/`, `Chromium/`, and `Firefox/` CDP product strings, including products reported by browsers attached through `--cdp` and `--auto-connect`. Provider sessions and unsupported product strings are skipped. This includes Lightpanda and Obscura; provider-backed iOS and Safari sessions are also skipped. A Chrome profile may restore tabs before agent-browser can connect and check the browser version, so a restored page may open before the gate runs.
 
-- The gate covers Chrome and Chromium whatever launched them, including `--cdp` and `--auto-connect` attachments. Provider sessions are skipped because the browser runs on infrastructure the user cannot update, and Lightpanda, Obscura, iOS, and Safari have no published advisory feed. The absence of a warning is not proof that those browsers are current.
-- Advisories are cached for 24 hours in `~/.agent-browser/security-advisories.json`. With no network and no usable cache, the command proceeds. A machine that is blocked keeps working for `close`, `dialog`, `confirm`, and `deny`.
+For Chrome and Chromium, the check uses the browser's reported user agent to select the Linux, macOS, or Windows stable release. It excludes Early Stable releases and uses the lower of the two macOS or Windows architecture versions because the user agent may not identify the architecture reliably. A modified user agent can affect platform detection. A rejection means the reported version is below that platform's comparison threshold; it does not prove that the build has a specific CVE. The warning may list CVEs attributed to later releases, but a rejected browser may have no CVE IDs. Firefox is compared with Mozilla's stable version feed, which does not provide a matching CVE mapping.
+
+The advisory cache is `~/.agent-browser/security-advisories.json`. Entries are refreshed after 24 hours and are not used after 30 days. If a feed is unavailable or its release data is ambiguous, agent-browser warns. A cached verdict up to 30 days old can still be used and may block a browser. With no usable cached verdict, the check fails open and the command proceeds with a warning. An invalid explicit CA certificate returns an error instead of using the fail-open path.
+
+The version feed uses TLS trust options attached to the current daemon request. The shared advisory cache is used only with default trust. Requests using a custom CA or system trust fetch their own advisories. The CLI can retain an explicit CA or system-trust selection for the session and send it again until `close`.
+
+Update an attached browser with its normal updater. `agent-browser install` updates the bundled Chrome for Testing. The CLI override applies only to the invocation that carries it:
+
+```bash
+agent-browser --allow-outdated-browser open https://example.com
+```
+
+This does not change the daemon's setting for later commands. For CLI invocations, `AGENT_BROWSER_ALLOW_OUTDATED_BROWSER=1` or `allowOutdatedBrowser` in `~/.agent-browser/config.json` or a file loaded with `--config` can also set the override. Auto-discovered `./agent-browser.json` ignores `allowOutdatedBrowser`. For MCP, set the environment variable in the server environment or set `allowOutdatedBrowser` in the selected server config. MCP rejects `--allow-outdated-browser` in tool `extraArgs`, so individual tool calls cannot set this override.
+
+A rejected browser still allows `close`, `dialog`, `confirm`, and `deny` so you can leave or recover the session.
 
 ## Network interception and automation artifacts
 

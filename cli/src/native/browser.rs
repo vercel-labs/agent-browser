@@ -635,6 +635,37 @@ impl BrowserManager {
     }
 
     pub async fn launch(options: LaunchOptions, engine: Option<&str>) -> Result<Self, String> {
+        Self::launch_inner(options, engine, false, |_| {
+            std::future::ready(Ok::<(), String>(()))
+        })
+        .await
+    }
+
+    pub(crate) async fn launch_with_gate<F, Fut>(
+        options: LaunchOptions,
+        engine: Option<&str>,
+        gate: F,
+    ) -> Result<Self, String>
+    where
+        F: FnOnce((String, String)) -> Fut + Send,
+        Fut: Future<Output = Result<(), String>> + Send,
+    {
+        if engine.unwrap_or("chrome") != "chrome" {
+            return Self::launch(options, engine).await;
+        }
+        Self::launch_inner(options, engine, true, gate).await
+    }
+
+    async fn launch_inner<F, Fut>(
+        options: LaunchOptions,
+        engine: Option<&str>,
+        gate_enabled: bool,
+        gate: F,
+    ) -> Result<Self, String>
+    where
+        F: FnOnce((String, String)) -> Fut + Send,
+        Fut: Future<Output = Result<(), String>> + Send,
+    {
         let engine = engine.unwrap_or("chrome");
 
         match engine {
@@ -729,6 +760,14 @@ impl BrowserManager {
                 wedge_suspect: None,
                 headless,
             };
+            if gate_enabled {
+                if let Err(error) = Self::run_pre_initialization_gate(&manager.client, gate).await {
+                    let _ = manager
+                        .close_with_timeout(Some(FAILED_INITIALIZATION_CLOSE_TIMEOUT))
+                        .await;
+                    return Err(error);
+                }
+            }
             if let Err(error) = manager.discover_and_attach_targets().await {
                 let _ = manager
                     .close_with_timeout(Some(FAILED_INITIALIZATION_CLOSE_TIMEOUT))
@@ -800,6 +839,32 @@ impl BrowserManager {
         Self::connect_cdp_with_headers(url, headers).await
     }
 
+    pub(crate) async fn connect_cdp_when_listening_with_gate<F, Fut>(
+        url: &str,
+        headers: Option<Vec<(String, String)>>,
+        gate: F,
+    ) -> Result<Self, String>
+    where
+        F: FnOnce((String, String)) -> Fut + Send,
+        Fut: Future<Output = Result<(), String>> + Send,
+    {
+        wait_while_cdp_port_refuses(url, CDP_PORT_WAIT).await;
+        Self::connect_cdp_inner_with_gate(url, headers, gate).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn connect_cdp_with_gate<F, Fut>(
+        url: &str,
+        headers: Option<Vec<(String, String)>>,
+        gate: F,
+    ) -> Result<Self, String>
+    where
+        F: FnOnce((String, String)) -> Fut + Send,
+        Fut: Future<Output = Result<(), String>> + Send,
+    {
+        Self::connect_cdp_inner_with_gate(url, headers, gate).await
+    }
+
     /// Connect to a provider CDP proxy where the WebSocket IS the page session.
     /// Skips browser-level Target.* commands that most proxies don't support.
     pub async fn connect_cdp_direct(url: &str) -> Result<Self, String> {
@@ -818,8 +883,63 @@ impl BrowserManager {
         direct_page: bool,
         headers: Option<Vec<(String, String)>>,
     ) -> Result<Self, String> {
+        let (ws_url, client) = Self::connect_cdp_client(url, headers).await?;
+        Self::initialize_cdp_manager(ws_url, client, direct_page).await
+    }
+
+    async fn connect_cdp_inner_with_gate<F, Fut>(
+        url: &str,
+        headers: Option<Vec<(String, String)>>,
+        gate: F,
+    ) -> Result<Self, String>
+    where
+        F: FnOnce((String, String)) -> Fut + Send,
+        Fut: Future<Output = Result<(), String>> + Send,
+    {
+        let (ws_url, client) = Self::connect_cdp_client(url, headers).await?;
+        if let Err(error) = Self::run_pre_initialization_gate(&client, gate).await {
+            client.close().await;
+            return Err(error);
+        }
+        Self::initialize_cdp_manager(ws_url, client, false).await
+    }
+
+    async fn connect_cdp_client(
+        url: &str,
+        headers: Option<Vec<(String, String)>>,
+    ) -> Result<(String, Arc<CdpClient>), String> {
         let ws_url = resolve_cdp_url(url, headers.as_deref().unwrap_or_default()).await?;
         let client = Arc::new(CdpClient::connect_with_headers(&ws_url, headers).await?);
+        Ok((ws_url, client))
+    }
+
+    async fn run_pre_initialization_gate<F, Fut>(client: &CdpClient, gate: F) -> Result<(), String>
+    where
+        F: FnOnce((String, String)) -> Fut + Send,
+        Fut: Future<Output = Result<(), String>> + Send,
+    {
+        let version = client
+            .send_command_no_params("Browser.getVersion", None)
+            .await
+            .unwrap_or_default();
+        let product = version
+            .get("product")
+            .and_then(|product| product.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let user_agent = version
+            .get("userAgent")
+            .and_then(|user_agent| user_agent.as_str())
+            .unwrap_or_default()
+            .to_string();
+        gate((product, user_agent)).await
+    }
+
+    async fn initialize_cdp_manager(
+        ws_url: String,
+        client: Arc<CdpClient>,
+        direct_page: bool,
+    ) -> Result<Self, String> {
         let mut manager = Self {
             client,
             browser_process: None,
@@ -867,6 +987,15 @@ impl BrowserManager {
     pub async fn connect_auto() -> Result<Self, String> {
         let ws_url = auto_connect_cdp().await?;
         Self::connect_cdp(&ws_url).await
+    }
+
+    pub(crate) async fn connect_auto_with_gate<F, Fut>(gate: F) -> Result<Self, String>
+    where
+        F: FnOnce((String, String)) -> Fut + Send,
+        Fut: Future<Output = Result<(), String>> + Send,
+    {
+        let ws_url = auto_connect_cdp().await?;
+        Self::connect_cdp_inner_with_gate(&ws_url, None, gate).await
     }
 
     async fn discover_and_attach_targets(&mut self) -> Result<(), String> {

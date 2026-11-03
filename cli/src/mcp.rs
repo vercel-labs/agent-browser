@@ -2620,7 +2620,6 @@ const MCP_EXTRA_ARGS_GLOBALS: &[&str] = &[
     "--debug",
     "--hide-scrollbars",
     "--annotate",
-    "--allow-outdated-browser",
     "--pin-tab",
     "--no-pin-tab",
     "-v",
@@ -5440,18 +5439,75 @@ mod tests {
     }
 
     #[test]
-    fn extra_args_forward_the_outdated_browser_override() {
-        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_ALLOW_OUTDATED_BROWSER"]);
+    fn extra_args_cannot_set_outdated_browser_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOW_OUTDATED_BROWSER",
+            "AGENT_BROWSER_CONFIG",
+            "HOME",
+        ]);
         guard.remove("AGENT_BROWSER_ALLOW_OUTDATED_BROWSER");
+        guard.remove("AGENT_BROWSER_CONFIG");
+        guard.set("HOME", dir.path().to_str().unwrap());
 
-        let arguments = json!({ "extraArgs": ["--allow-outdated-browser"] });
-        let args = cli_tool_args(&arguments, vec!["open".to_string()], None).unwrap();
-        assert!(args.iter().any(|arg| arg == "--allow-outdated-browser"));
-        let flags = crate::flags::parse_flags(&args);
+        for extra_args in [
+            vec!["--allow-outdated-browser"],
+            vec!["--allow-outdated-browser", "true"],
+            vec!["--allow-outdated-browser", "false"],
+            vec!["--allow-outdated-browser=true"],
+            vec!["--allow-outdated-browser=false"],
+        ] {
+            if extra_args[0] == "--allow-outdated-browser" {
+                let parser_args = extra_args
+                    .iter()
+                    .map(|arg| arg.to_string())
+                    .collect::<Vec<_>>();
+                let flags = crate::flags::try_parse_flags(&parser_args).unwrap();
+                assert!(flags.cli_allow_outdated_browser, "{:?}", extra_args);
+            }
+
+            let arguments = json!({ "extraArgs": extra_args });
+            let error = cli_tool_args(&arguments, vec!["open".to_string()], None).unwrap_err();
+            assert!(
+                error
+                    .message
+                    .contains("may not set --allow-outdated-browser"),
+                "{:?}: {}",
+                extra_args,
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn operator_outdated_browser_opt_out_remains_trusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        std::fs::write(&config_path, r#"{"allowOutdatedBrowser": true}"#).unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOW_OUTDATED_BROWSER",
+            "AGENT_BROWSER_CONFIG",
+            "HOME",
+        ]);
+        guard.remove("AGENT_BROWSER_ALLOW_OUTDATED_BROWSER");
+        guard.set("AGENT_BROWSER_CONFIG", config_path.to_str().unwrap());
+        guard.set("HOME", dir.path().to_str().unwrap());
+
+        let args = cli_tool_args(&json!({}), vec!["open".to_string()], None).unwrap();
+        let flags = crate::flags::try_parse_flags(&args).unwrap();
         assert!(flags.allow_outdated_browser);
+        assert!(!flags.cli_allow_outdated_browser);
 
-        // Outbound envelopes carry the opt-out, and an envelope that already
-        // states one is left alone.
+        std::fs::write(&config_path, r#"{"allowOutdatedBrowser": false}"#).unwrap();
+        guard.set("AGENT_BROWSER_ALLOW_OUTDATED_BROWSER", "1");
+        let args = cli_tool_args(&json!({}), vec!["open".to_string()], None).unwrap();
+        let flags = crate::flags::try_parse_flags(&args).unwrap();
+        assert!(flags.allow_outdated_browser);
+        assert!(!flags.cli_allow_outdated_browser);
+    }
+
+    #[test]
+    fn browser_security_override_is_stamped_on_outbound_envelopes() {
         let plain = json!({ "action": "navigate", "url": "https://example.com" });
         let sent = crate::commands::stamp_browser_security_override(plain, true);
         assert_eq!(sent["allowOutdatedBrowser"], true);
@@ -5459,7 +5515,7 @@ mod tests {
             json!({ "action": "navigate" }),
             false,
         );
-        assert!(declined.get("allowOutdatedBrowser").is_none());
+        assert_eq!(declined["allowOutdatedBrowser"], false);
         let explicit = crate::commands::stamp_browser_security_override(
             json!({ "action": "navigate", "allowOutdatedBrowser": false }),
             true,
